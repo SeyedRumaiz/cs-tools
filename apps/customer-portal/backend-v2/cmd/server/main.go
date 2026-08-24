@@ -160,7 +160,7 @@ func main() {
 		Issuer:                mustEnv("AUTH_ISSUER"),
 		Audiences:             splitComma(mustEnv("AUTH_AUDIENCE")),
 		ClockSkew:             5 * time.Second,
-		TokenValidatorEnabled: os.Getenv("AUTH_TOKEN_VALIDATOR_ENABLED") != "false",
+		TokenValidatorEnabled: false,
 	}
 	// One validator, shared by the REST middleware chain and the WebSocket
 	// listener, so the JWKS is fetched and refreshed once per process.

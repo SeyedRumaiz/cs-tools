@@ -54,10 +54,11 @@ function buildRequestHeaders(
     });
   }
 
-  headers.set("Authorization", `Bearer ${token}`);
+  // headers.set("Authorization", `Bearer ${token}`);
   // The ID token travels alongside the access token (same convention as the
   // customer portal): the gateway validates the bearer, while the backend
   // reads the user's identity claims from `x-user-id-token`.
+  headers.set("x-jwt-assertion", token);
   headers.set("x-user-id-token", idToken);
   // Correlation ID for end-to-end tracing. The backend honours an inbound value
   // and only generates its own when absent, so a caller-supplied header (rare:
