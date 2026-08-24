@@ -259,6 +259,21 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) http.Handler {
 	mux.HandleFunc("POST /event-publish-failures/search", eventPublishFailureHandler.SearchEventPublishFailures)
 	mux.HandleFunc("POST /event-publish-failures/{id}/resolve", eventPublishFailureHandler.ResolveEventPublishFailure)
 
+	// Register both path orders to prevent 404 route mismatches
+	mux.HandleFunc("GET /projects/{id}/stats/cases", projectStatsHandler.GetProjectCaseStats)
+	mux.HandleFunc("GET /projects/{id}/cases/stats", projectStatsHandler.GetProjectCaseStats)
+
+	// mux.HandleFunc("GET /projects/{id}/stats/cases", func(w http.ResponseWriter, r *http.Request) {
+	// w.Header().Set("Content-Type", "application/json")
+	// w.WriteHeader(http.StatusOK)
+	// w.Write([]byte(`{"totalCases":0,"openCases":0,"closedCases":0}`))
+	// })
+	// mux.HandleFunc("GET /projects/{id}/cases/stats", func(w http.ResponseWriter, r *http.Request) {
+	// 	w.Header().Set("Content-Type", "application/json")
+	// 	w.WriteHeader(http.StatusOK)
+	// 	w.Write([]byte(`{"totalCases":0,"openCases":0,"closedCases":0}`))
+	// })
+
 	if snUserHandler != nil {
 		mux.HandleFunc("GET /users/{id}", snUserHandler.GetUser)
 		mux.HandleFunc("GET /users/me", snUserHandler.GetMe)
@@ -266,6 +281,19 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) http.Handler {
 		mux.HandleFunc("POST /users/search", snUserHandler.SearchUsers)
 	} else {
 		mux.HandleFunc("POST /users/search", userHandler.SearchUsers)
+		// Add GET /users/me fallback for local PostgreSQL mode
+		mux.HandleFunc("GET /users/me", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{
+                "id": "318d9793-9eac-4dae-8145-4cce7d3d4511",
+                "userName": "portal_user",
+                "firstName": "Portal",
+                "lastName": "User",
+                "email": "portal_user@wso2.com",
+                "userType": "internal"
+            }`))
+		})
 	}
 	if snAccountHandler != nil {
 		mux.HandleFunc("GET /accounts/{id}", snAccountHandler.GetAccount)
@@ -294,6 +322,23 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) http.Handler {
 		mux.HandleFunc("GET /projects/{id}/deployments/stats", projectStatsHandler.GetProjectDeploymentStats)
 		mux.HandleFunc("GET /projects/{id}/time-cards/stats", projectStatsHandler.GetProjectTimeCardStats)
 		mux.HandleFunc("GET /projects/{id}/change-requests/stats", projectStatsHandler.GetProjectChangeRequestStats)
+	} else {
+		// Fallbacks for project sub-resources in local PostgreSQL mode
+		mux.HandleFunc("GET /projects/{id}/metadata", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+		})
+		mux.HandleFunc("GET /projects/{id}/filters", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+		})
+		mux.HandleFunc("GET /projects/{id}/features", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+		})
 	}
 	if snProductHandler != nil {
 		mux.HandleFunc("POST /products/search", snProductHandler.SearchProducts)
@@ -430,6 +475,13 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) http.Handler {
 	if globalHandler != nil {
 		mux.HandleFunc("GET /metadata", globalHandler.GetSystemMetadata)
 		mux.HandleFunc("POST /search", globalHandler.GlobalSearch)
+	} else {
+		// Fallback for system metadata in local PostgreSQL mode
+		mux.HandleFunc("GET /metadata", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+		})
 	}
 
 	if escalationHandler != nil {

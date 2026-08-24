@@ -62,7 +62,7 @@ func (h *ProjectStatsHandler) GetProjectFilters(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -86,7 +86,7 @@ func (h *ProjectStatsHandler) GetProjectFeatures(w http.ResponseWriter, r *http.
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -113,7 +113,7 @@ func (h *ProjectStatsHandler) GetProjectDashboardStats(w http.ResponseWriter, r 
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -161,7 +161,7 @@ func (h *ProjectStatsHandler) GetProjectCaseStats(w http.ResponseWriter, r *http
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -185,7 +185,7 @@ func (h *ProjectStatsHandler) GetProjectConversationStats(w http.ResponseWriter,
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -211,7 +211,7 @@ func (h *ProjectStatsHandler) GetProjectSupportStats(w http.ResponseWriter, r *h
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -245,7 +245,7 @@ func (h *ProjectStatsHandler) GetProjectTimeCardStats(w http.ResponseWriter, r *
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -269,7 +269,7 @@ func (h *ProjectStatsHandler) GetProjectChangeRequestStats(w http.ResponseWriter
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -294,7 +294,7 @@ func (h *ProjectStatsHandler) SearchProjectCaseTimeCards(w http.ResponseWriter, 
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -332,7 +332,7 @@ func (h *ProjectStatsHandler) GetProjectUsageStats(w http.ResponseWriter, r *htt
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return

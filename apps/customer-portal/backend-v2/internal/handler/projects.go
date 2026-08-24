@@ -80,7 +80,7 @@ func (h *ProjectHandler) GetProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return

@@ -67,7 +67,7 @@ func (h *ContactHandler) GetProjectContacts(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	projectID := r.PathValue("id")
+	projectID := NormalizeUUID(r.PathValue("id"))
 	if projectID == "" || !uuidRe.MatchString(projectID) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return

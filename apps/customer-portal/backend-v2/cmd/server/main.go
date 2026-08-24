@@ -197,20 +197,26 @@ func main() {
 
 	// GET/PATCH /users/me are only served by entity-service when it runs
 	// with DATA_SOURCE=servicenow — see internal/entity/users.go.
+	// GET/PATCH /users/me are only served by entity-service when it runs
+	// with DATA_SOURCE=servicenow — see internal/entity/users.go.
 	mux.HandleFunc("GET /users/me", userHandler.GetMe)
 	mux.HandleFunc("PATCH /users/me", userHandler.PatchMe)
+
+	// Register both path orders to prevent 404 route mismatches
+	mux.HandleFunc("GET /projects/{id}/stats/cases", projectStatsHandler.GetProjectCaseStats)
+	mux.HandleFunc("GET /projects/{id}/cases/stats", projectStatsHandler.GetProjectCaseStats)
 
 	mux.HandleFunc("POST /projects/search", projectHandler.SearchProjects)
 	mux.HandleFunc("GET /projects/{id}", projectHandler.GetProject)
 	mux.HandleFunc("GET /projects/{id}/filters", projectStatsHandler.GetProjectFilters)
 	mux.HandleFunc("GET /projects/{id}/features", projectStatsHandler.GetProjectFeatures)
 	mux.HandleFunc("GET /projects/{id}/stats", projectStatsHandler.GetProjectDashboardStats)
-	mux.HandleFunc("GET /projects/{id}/stats/cases", projectStatsHandler.GetProjectCaseStats)
 	mux.HandleFunc("GET /projects/{id}/stats/conversations", projectStatsHandler.GetProjectConversationStats)
 	mux.HandleFunc("GET /projects/{id}/stats/support", projectStatsHandler.GetProjectSupportStats)
 	mux.HandleFunc("GET /projects/{id}/stats/time-cards", projectStatsHandler.GetProjectTimeCardStats)
 	mux.HandleFunc("GET /projects/{id}/stats/change-requests", projectStatsHandler.GetProjectChangeRequestStats)
 	mux.HandleFunc("GET /projects/{id}/stats/usage", projectStatsHandler.GetProjectUsageStats)
+
 	mux.HandleFunc("POST /projects/{id}/cases/time-cards/search", projectStatsHandler.SearchProjectCaseTimeCards)
 	mux.HandleFunc("POST /projects/{id}/instances/search", instanceHandler.SearchProjectInstances)
 	mux.HandleFunc("POST /projects/{id}/instances/metrics/search", instanceHandler.SearchProjectInstanceMetrics)

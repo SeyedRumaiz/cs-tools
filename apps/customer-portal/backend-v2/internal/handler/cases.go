@@ -63,7 +63,7 @@ func (h *CaseHandler) SearchCases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	projectID := r.PathValue("id")
+	projectID := NormalizeUUID(r.PathValue("id"))
 	if projectID == "" || !uuidRe.MatchString(projectID) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -98,7 +98,7 @@ func (h *CaseHandler) SearchCaseAttachments(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -131,7 +131,7 @@ func (h *CaseHandler) CreateCaseAttachment(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -166,7 +166,7 @@ func (h *CaseHandler) GetCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -201,9 +201,6 @@ func (h *CaseHandler) CreateCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entityReq := dto.BuildEntityCreateCaseRequest(req)
-	// CreatedBy is server-set from the authenticated caller, never from the
-	// request body (the struct's json:"-" tag means a client-supplied value
-	// would be silently dropped anyway, but set it explicitly for clarity).
 	entityReq.CreatedBy = user.Email
 
 	result, err := h.entity.CreateCase(r.Context(), entityReq)
@@ -213,15 +210,8 @@ func (h *CaseHandler) CreateCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A case raised from a Novera chat marks that conversation Converted so it
-	// stops counting as an active chat. Deliberately after the response is
-	// decided and non-blocking: the case already exists, so a conversion failure
-	// must not turn a successful creation into an error. entity-service does not
-	// do this itself even though the id is forwarded on the create request —
-	// same as the Ballerina backend, which forwards payload.conversationId and
-	// still performs this update explicitly.
-	if req.ConversationID != "" && uuidRe.MatchString(req.ConversationID) {
-		if _, err := h.entity.UpdateConversation(r.Context(), req.ConversationID, entity.UpdateConversationRequest{State: conversationStateConverted}); err != nil {
+	if req.ConversationID != "" && uuidRe.MatchString(NormalizeUUID(req.ConversationID)) {
+		if _, err := h.entity.UpdateConversation(r.Context(), NormalizeUUID(req.ConversationID), entity.UpdateConversationRequest{State: conversationStateConverted}); err != nil {
 			slog.ErrorContext(r.Context(), "entity UpdateConversation failed to mark the source conversation converted", "userID", user.UserID, "conversationID", req.ConversationID, "err", summarizeErr(err))
 		}
 	}
@@ -237,7 +227,7 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -253,8 +243,6 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
 		return
 	}
-	// entity-service requires exactly one of these primary fields per PATCH —
-	// see dto.UpdateCaseRequest's doc comment.
 	primaryFieldsSet := 0
 	for _, set := range []bool{req.StateKey != nil, len(req.WatchList) > 0} {
 		if set {
@@ -284,7 +272,7 @@ func (h *CaseHandler) CreateCaseComment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -323,7 +311,7 @@ func (h *CaseHandler) SearchCaseActivities(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -358,7 +346,7 @@ func (h *CaseHandler) GetCaseFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -382,7 +370,7 @@ func (h *CaseHandler) SubmitCaseFeedback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	id := r.PathValue("id")
+	id := NormalizeUUID(r.PathValue("id"))
 	if id == "" || !uuidRe.MatchString(id) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -410,10 +398,6 @@ func (h *CaseHandler) SubmitCaseFeedback(w http.ResponseWriter, r *http.Request)
 }
 
 // PatchCaseAttachment handles PATCH /cases/{caseId}/attachments/{attachmentId}.
-// referenceId/referenceType are injected server-side (caseId path param,
-// ReferenceTypeCase). Only Name is read from the request body — Description
-// is never wired through here, by design for this route (case attachments
-// don't carry a description).
 func (h *CaseHandler) PatchCaseAttachment(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -421,8 +405,8 @@ func (h *CaseHandler) PatchCaseAttachment(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	caseID := r.PathValue("caseId")
-	attachmentID := r.PathValue("attachmentId")
+	caseID := NormalizeUUID(r.PathValue("caseId"))
+	attachmentID := NormalizeUUID(r.PathValue("attachmentId"))
 	if !uuidRe.MatchString(caseID) || !uuidRe.MatchString(attachmentID) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -438,7 +422,7 @@ func (h *CaseHandler) PatchCaseAttachment(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
 		return
 	}
-	req.Description = nil // this route never forwards description (case attachments don't carry one)
+	req.Description = nil
 
 	entityReq := dto.BuildEntityUpdateAttachmentRequest(req, caseID, entity.ReferenceTypeCase)
 	result, err := h.entity.UpdateAttachment(r.Context(), attachmentID, entityReq)
@@ -459,7 +443,7 @@ func (h *CaseHandler) CreateCaseEscalation(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	caseID := r.PathValue("caseId")
+	caseID := NormalizeUUID(r.PathValue("caseId"))
 	if !uuidRe.MatchString(caseID) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -493,7 +477,6 @@ func (h *CaseHandler) CreateCaseEscalation(w http.ResponseWriter, r *http.Reques
 }
 
 // SearchCaseEscalations handles POST /cases/{caseId}/escalations/search.
-// filters.caseIds is always forced to [caseId] server-side.
 func (h *CaseHandler) SearchCaseEscalations(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -501,7 +484,7 @@ func (h *CaseHandler) SearchCaseEscalations(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	caseID := r.PathValue("caseId")
+	caseID := NormalizeUUID(r.PathValue("caseId"))
 	if !uuidRe.MatchString(caseID) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return

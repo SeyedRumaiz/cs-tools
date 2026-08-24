@@ -56,7 +56,7 @@ func (h *DeploymentHandler) SearchDeployments(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	projectID := r.PathValue("id")
+	projectID := NormalizeUUID(r.PathValue("id"))
 	if projectID == "" || !uuidRe.MatchString(projectID) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
@@ -100,7 +100,7 @@ func (h *DeploymentHandler) CreateDeployment(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	projectID := r.PathValue("id")
+	projectID := NormalizeUUID(r.PathValue("id"))
 	if projectID == "" || !uuidRe.MatchString(projectID) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
