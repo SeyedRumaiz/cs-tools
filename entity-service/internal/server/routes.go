@@ -17,11 +17,13 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/config"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/handler"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
@@ -259,21 +261,6 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) http.Handler {
 	mux.HandleFunc("POST /event-publish-failures/search", eventPublishFailureHandler.SearchEventPublishFailures)
 	mux.HandleFunc("POST /event-publish-failures/{id}/resolve", eventPublishFailureHandler.ResolveEventPublishFailure)
 
-	// Register both path orders to prevent 404 route mismatches
-	mux.HandleFunc("GET /projects/{id}/stats/cases", projectStatsHandler.GetProjectCaseStats)
-	mux.HandleFunc("GET /projects/{id}/cases/stats", projectStatsHandler.GetProjectCaseStats)
-
-	// mux.HandleFunc("GET /projects/{id}/stats/cases", func(w http.ResponseWriter, r *http.Request) {
-	// w.Header().Set("Content-Type", "application/json")
-	// w.WriteHeader(http.StatusOK)
-	// w.Write([]byte(`{"totalCases":0,"openCases":0,"closedCases":0}`))
-	// })
-	// mux.HandleFunc("GET /projects/{id}/cases/stats", func(w http.ResponseWriter, r *http.Request) {
-	// 	w.Header().Set("Content-Type", "application/json")
-	// 	w.WriteHeader(http.StatusOK)
-	// 	w.Write([]byte(`{"totalCases":0,"openCases":0,"closedCases":0}`))
-	// })
-
 	if snUserHandler != nil {
 		mux.HandleFunc("GET /users/{id}", snUserHandler.GetUser)
 		mux.HandleFunc("GET /users/me", snUserHandler.GetMe)
@@ -310,6 +297,17 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) http.Handler {
 	if projectContactHandler != nil {
 		mux.HandleFunc("POST /projects/{id}/contacts/search", projectContactHandler.SearchProjectContacts)
 		mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectContactHandler.GetProjectContact)
+	} else {
+		// Project contacts have no PostgreSQL-backed implementation (ServiceNow
+		// only — see ProjectContactHandler's doc comment). Serve an empty
+		// result instead of leaving the route unregistered, so the
+		// customer-portal contacts panel renders "no contacts" instead of
+		// erroring.
+		mux.HandleFunc("POST /projects/{id}/contacts/search", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(domain.SearchProjectContactsResponse{Contacts: []domain.ProjectContact{}})
+		})
 	}
 	if projectUpdateHandler != nil {
 		mux.HandleFunc("PATCH /projects/{id}", projectUpdateHandler.UpdateProject)
@@ -318,6 +316,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) http.Handler {
 		mux.HandleFunc("GET /projects/{id}/metadata", projectStatsHandler.GetProjectMetadata)
 		mux.HandleFunc("GET /projects/{id}/stats", projectStatsHandler.GetProjectStats)
 		mux.HandleFunc("GET /projects/{id}/cases/stats", projectStatsHandler.GetProjectCaseStats)
+		mux.HandleFunc("GET /projects/{id}/stats/cases", projectStatsHandler.GetProjectCaseStats)
 		mux.HandleFunc("GET /projects/{id}/conversations/stats", projectStatsHandler.GetProjectConversationStats)
 		mux.HandleFunc("GET /projects/{id}/deployments/stats", projectStatsHandler.GetProjectDeploymentStats)
 		mux.HandleFunc("GET /projects/{id}/time-cards/stats", projectStatsHandler.GetProjectTimeCardStats)
@@ -338,6 +337,47 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) http.Handler {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{}`))
+		})
+		// The stats endpoints below have no PostgreSQL-backed implementation —
+		// they're wired only to the ServiceNow-backed projectStatsHandler in
+		// the branch above. Serving zero-valued domain responses here (rather
+		// than leaving these routes unregistered, which previously caused a
+		// nil-pointer panic — see git history) lets the customer-portal
+		// dashboard render "no data yet" instead of failing with a 500.
+		mux.HandleFunc("GET /projects/{id}/stats", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(domain.ProjectStatsResponse{})
+		})
+		mux.HandleFunc("GET /projects/{id}/cases/stats", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(domain.ProjectCaseStatsResponse{})
+		})
+		mux.HandleFunc("GET /projects/{id}/stats/cases", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(domain.ProjectCaseStatsResponse{})
+		})
+		mux.HandleFunc("GET /projects/{id}/conversations/stats", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(domain.ProjectConversationStatsResponse{})
+		})
+		mux.HandleFunc("GET /projects/{id}/deployments/stats", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(domain.ProjectDeploymentStatsResponse{})
+		})
+		mux.HandleFunc("GET /projects/{id}/time-cards/stats", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(domain.ProjectTimeCardStatsResponse{})
+		})
+		mux.HandleFunc("GET /projects/{id}/change-requests/stats", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(domain.ProjectChangeRequestStatsResponse{})
 		})
 	}
 	if snProductHandler != nil {
