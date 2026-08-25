@@ -39,6 +39,7 @@ export default function ChatMessageList({
   isFetchingOlder = false,
   onSolutionWorked,
   onRequestTokenIncrease,
+  onRequestEngineerEscalation,
 }: ChatMessageListProps): JSX.Element {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pendingPrependRef = useRef(false);
@@ -97,6 +98,7 @@ export default function ChatMessageList({
             onFeedbackTag={onFeedbackTag}
             onSolutionWorked={onSolutionWorked}
             onRequestTokenIncrease={onRequestTokenIncrease}
+            onRequestEngineerEscalation={onRequestEngineerEscalation}
           />
         ),
       )}

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -116,6 +117,14 @@ type WebSocketHandler struct {
 	entity  entityCommentCreator
 	auth    wsTokenValidator
 	upgrade websocket.Upgrader
+
+	// connsMu guards conns — the live-engineer-chat feature's registry of
+	// which open browser connection currently owns a given conversation
+	// (see registerConn/unregisterConnAll/PushEvent). Populated/cleared
+	// entirely within HandleWebSocket's own lifecycle; unrelated to ai/
+	// entity/auth/upgrade above, which are immutable after construction.
+	connsMu sync.Mutex
+	conns   map[string]*websocket.Conn
 }
 
 // NewWebSocketHandler creates a WebSocketHandler backed by the given AI chat
@@ -233,7 +242,69 @@ type wsEvent struct {
 	Type           string `json:"type"`
 	Message        string `json:"message,omitempty"`
 	ConversationID string `json:"conversationId,omitempty"`
-	TS             string `json:"ts,omitempty"`
+	// EngineerEmail is set on live-engineer-chat events only
+	// (engineer_assigned/engineer_message/engineer_disconnected — see
+	// handler.ChatEventsHandler) so the customer's browser can show who it
+	// is talking to. Empty for every AI-chat event (thinking_start/token/
+	// final/etc).
+	EngineerEmail string `json:"engineerEmail,omitempty"`
+	TS            string `json:"ts,omitempty"`
+}
+
+// registerConn records that conversationID's live-engineer-chat events
+// should be delivered to conn — called from handleMessage as soon as a
+// conversationId is seen on this connection (see that method). Overwriting
+// an existing entry is expected, not a bug: the frontend's
+// useChatWebSocket.connect(sessionId) reuses one open connection for the
+// project's lifetime (see this file's own package doc comment reference in
+// NoveraChatPage.tsx), so every message on a given conversation re-registers
+// the same conn — a cheap no-op in the common case.
+func (h *WebSocketHandler) registerConn(conversationID string, conn *websocket.Conn) {
+	h.connsMu.Lock()
+	defer h.connsMu.Unlock()
+	if h.conns == nil {
+		h.conns = make(map[string]*websocket.Conn)
+	}
+	h.conns[conversationID] = conn
+}
+
+// unregisterConnAll removes every conversationID currently mapped to conn.
+// Called once from HandleWebSocket's own deferred cleanup rather than
+// threading a per-connection "which conversationIDs did I register" set
+// through handleMessage — conns is small (open chat sessions on this
+// replica, not a global table), so the linear scan here is cheap.
+func (h *WebSocketHandler) unregisterConnAll(conn *websocket.Conn) {
+	h.connsMu.Lock()
+	defer h.connsMu.Unlock()
+	for id, c := range h.conns {
+		if c == conn {
+			delete(h.conns, id)
+		}
+	}
+}
+
+// PushEvent delivers evt into conversationID's currently-registered
+// connection, if any is open on this replica. Returns false — not an error,
+// just "nothing to deliver to right now" — when no connection is
+// registered or the write itself fails (e.g. the browser tab just closed);
+// callers (see handler.ChatEventsHandler) treat both as best-effort and log
+// rather than fail their own caller-facing response over it.
+//
+// Known limitation, shared with the rest of this live-engineer-chat feature
+// (see csm-portal/backend's internal/handler/chat.go doc comment): conns is
+// per-replica, in-memory only. A multi-replica deployment where the
+// customer's WebSocket landed on a different pod than the one that receives
+// this push would silently fail to deliver — there is no cross-replica fan-
+// out here, matching this feature's other accepted simplifications at the
+// project's current scale.
+func (h *WebSocketHandler) PushEvent(conversationID string, evt wsEvent) bool {
+	h.connsMu.Lock()
+	conn := h.conns[conversationID]
+	h.connsMu.Unlock()
+	if conn == nil {
+		return false
+	}
+	return writeWSJSON(conn, evt) == nil
 }
 
 // HandleWebSocket handles GET /ws?sessionId={projectId}. The query parameter
@@ -311,6 +382,10 @@ func (h *WebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer conn.Close()
+	// Live-engineer-chat: drop every conversationId this connection ever
+	// registered for (see registerConn/unregisterConnAll) once it closes,
+	// so PushEvent never writes to a dead connection.
+	defer h.unregisterConnAll(conn)
 
 	// The server's ReadTimeout/WriteTimeout (see cmd/server/main.go) can leave
 	// deadlines on the connection Hijack handed off for this upgrade; clear
@@ -342,6 +417,16 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, conn *websocket.Co
 	trimmed := strings.TrimSpace(strings.ToLower(string(data)))
 	var parsed map[string]any
 	_ = json.Unmarshal(data, &parsed)
+
+	// Live-engineer-chat: whichever conversation this message names becomes
+	// (or stays) the one PushEvent delivers into on this connection — see
+	// registerConn. Done unconditionally, before the ping/side-channel/main
+	// dispatch below, since all three message kinds carry a conversationId
+	// and any of them arriving is equally good evidence this connection is
+	// live for that conversation right now.
+	if convID, _ := parsed["conversationId"].(string); convID != "" && uuidRe.MatchString(convID) {
+		h.registerConn(convID, conn)
+	}
 
 	isPing := trimmed == "ping"
 	if !isPing {

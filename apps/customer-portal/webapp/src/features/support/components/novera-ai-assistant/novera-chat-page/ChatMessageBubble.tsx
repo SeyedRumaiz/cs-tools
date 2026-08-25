@@ -150,9 +150,14 @@ export default function ChatMessageBubble({
   onThumbsDown,
   onFeedbackTag,
   onRequestTokenIncrease,
+  onRequestEngineerEscalation,
 }: ChatMessageBubbleProps): JSX.Element {
   const isUser = message.sender === ChatSender.USER;
   const isCurrentUserMessage = isUser && (message.isCurrentUser ?? true);
+  // A live-engineer-chat message shares the bot bubble layout (sender stays
+  // ChatSender.BOT) but is rendered under the engineer's own identity — see
+  // the avatar/name swap below — instead of Novera's.
+  const isHumanMessage = !isUser && !!message.isHumanMessage;
 
   /**
    * Errors caused by AI usage/credit/token limits get a specific, customer-safe
@@ -183,6 +188,20 @@ export default function ChatMessageBubble({
     !message.isStreaming &&
     ((message.isError && isUsageLimitError) ||
       (!message.isError && isTokenLimitNotice));
+
+  /**
+   * "Talk to a live engineer" appears under a completed Novera reply — never
+   * on a human engineer's own message, an error, or a still-streaming/
+   * thinking one. feedbackMessageId is used the same way showFeedbackRow
+   * uses it below: as the signal that this is a stable, finished answer
+   * rather than an in-progress one.
+   */
+  const showEscalateCta =
+    !!onRequestEngineerEscalation &&
+    !isHumanMessage &&
+    !message.isError &&
+    !message.isStreaming &&
+    !!message.feedbackMessageId;
 
   /** Until the final assistant message, hide thumbs and timestamp only (header stays). */
   const hideFeedbackRow =
@@ -349,19 +368,27 @@ export default function ChatMessageBubble({
             width: 32,
             height: 32,
             borderRadius: "50%",
-            background: "linear-gradient(135deg, #EA580C 0%, #F97316 100%)",
+            background: isHumanMessage
+              ? "linear-gradient(135deg, #15803D 0%, #22C55E 100%)"
+              : "linear-gradient(135deg, #EA580C 0%, #F97316 100%)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             flexShrink: 0,
           }}
         >
-          <Bot size={16} color="white" />
+          {isHumanMessage ? (
+            <User size={16} color="white" />
+          ) : (
+            <Bot size={16} color="white" />
+          )}
         </Box>
         <Stack spacing={0.75} sx={{ minWidth: 0, flex: 1 }}>
           <Stack direction="row" alignItems="center" sx={{ gap: 1 }}>
             <Typography variant="body2" color="text.primary" fontWeight={500}>
-              {NOVERA_DISPLAY_NAME}
+              {isHumanMessage
+                ? message.engineerName || "Support engineer"
+                : NOVERA_DISPLAY_NAME}
             </Typography>
             {!hideFeedbackRow && (
               <Typography variant="caption" color="text.secondary">
@@ -564,6 +591,20 @@ export default function ChatMessageBubble({
                 sx={{ textTransform: "none" }}
               >
                 Request a token limit increase
+              </Button>
+            </Box>
+          )}
+
+          {showEscalateCta && (
+            <Box sx={{ mt: 1 }}>
+              <Button
+                size="small"
+                variant="outlined"
+                color="primary"
+                onClick={onRequestEngineerEscalation}
+                sx={{ textTransform: "none" }}
+              >
+                Talk to a live engineer
               </Button>
             </Box>
           )}

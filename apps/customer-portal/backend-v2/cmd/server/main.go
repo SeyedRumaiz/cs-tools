@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/aichatagent"
+	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/csmchat"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/entity"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/handler"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/middleware"
@@ -196,6 +197,22 @@ func main() {
 	timeCardHandler := handler.NewTimeCardHandler(entityClient)
 	aiChatHandler := handler.NewAIChatHandler(aiChatAgentClient, entityClient)
 	webSocketHandler := handler.NewWebSocketHandler(aiChatAgentWsClient, entityClient, tokenValidator, nil)
+
+	// Live-engineer-chat escalation feature — see internal/handler/chat.go
+	// and csm-portal/backend's own internal/handler/chat.go for the full
+	// design (case creation happens here, in this backend, because only it
+	// has the deployment/deployed-product context a case requires).
+	// internalChatToken authenticates both directions of service-to-service
+	// traffic this feature needs with csm-portal/backend; both backends
+	// must be configured with the same value.
+	internalChatToken := os.Getenv("INTERNAL_CHAT_TOKEN")
+	csmChatClient := csmchat.NewClient(csmchat.Config{
+		// csm-portal/backend's INTERNAL_CHAT_PORT listener.
+		BaseURL:       envOrDefault("CSM_PORTAL_INTERNAL_BASE_URL", "http://localhost:9095"),
+		InternalToken: internalChatToken,
+	})
+	chatEscalationHandler := handler.NewChatEscalationHandler(entityClient, csmChatClient)
+	chatEventsHandler := handler.NewChatEventsHandler(webSocketHandler)
 	productConsumptionHandler := handler.NewProductConsumptionHandler(productConsumptionClient, entityClient)
 	globalHandler := handler.NewGlobalHandler(entityClient)
 	instanceHandler := handler.NewInstanceHandler(entityClient)
@@ -355,6 +372,10 @@ func main() {
 	mux.HandleFunc("POST /projects/{projectId}/conversations/{conversationId}/messages", aiChatHandler.SendConversationMessage)
 	mux.HandleFunc("GET /projects/{id}/conversations/{conversationId}/summary", aiChatHandler.GetConversationSummary)
 
+	// Live-engineer-chat escalation (see internal/handler/chat.go).
+	mux.HandleFunc("POST /projects/{id}/support/chat/escalate", chatEscalationHandler.HandleEscalate)
+	mux.HandleFunc("POST /projects/{id}/support/chat/{conversationId}/message", chatEscalationHandler.HandleSendMessage)
+
 	// The product-consumption service is a separate service (not
 	// entity-service) — see internal/productconsumption's package doc comment.
 	mux.HandleFunc("POST /projects/{projectId}/deployments/{deploymentId}/license", productConsumptionHandler.GetDeploymentLicense)
@@ -414,6 +435,15 @@ func main() {
 	// .choreo/component.yaml.
 	wsMux := http.NewServeMux()
 	wsMux.HandleFunc("GET /ws", webSocketHandler.HandleWebSocket)
+	// POST /internal/chat-events is not browser-facing — it is csm-portal/
+	// backend pushing a live-engineer-chat event into this connection's
+	// already-open WebSocket (see handler.ChatEventsHandler). It lives on
+	// this listener because, like GET /ws, it cannot go through the normal
+	// Auth middleware (no customer x-jwt-assertion to present); it is
+	// instead wrapped individually below with middleware.InternalToken,
+	// since wsSrv's shared handler chain (built further down) applies to
+	// every route on wsMux uniformly and GET /ws must stay un-gated by it.
+	wsMux.Handle("POST /internal/chat-events", middleware.InternalToken(internalChatToken)(http.HandlerFunc(chatEventsHandler.Handle)))
 
 	wsAddr := ":" + mustPort("WS_PORT", "8081")
 	// ctx here covers only the listen operation itself (address resolution and
