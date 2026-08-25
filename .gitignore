@@ -28,3 +28,10 @@ replay_pid*
 target
 Config.toml
 .env
+
+# .clineignore
+.env
+.env.*
+*.pem
+*.key
+secrets/

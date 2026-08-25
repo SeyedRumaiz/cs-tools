@@ -137,18 +137,30 @@ func main() {
 
 	// The project-contact onboarding service (contact/membership management)
 	// is a separate microservice (not entity-service, not SCIM),
-	// authenticating as the same shared OAuth2 app.
-	userManagementCfg := usermanagement.Config{
-		BaseURL:      mustURL("USER_MANAGEMENT_BASE_URL", "http", "https"),
-		TokenURL:     oauth2TokenURL,
-		ClientID:     oauth2ClientID,
-		ClientSecret: oauth2ClientSecret,
-		Scopes:       splitComma(os.Getenv("USER_MANAGEMENT_SCOPES")),
-	}
-	userManagementClient, err := usermanagement.NewClient(userManagementCfg)
-	if err != nil {
-		slog.Error("failed to construct user-management client", "err", err)
-		os.Exit(1)
+	// authenticating as the same shared OAuth2 app. It's a real external
+	// service keyed on a project's Salesforce ID, so it has no knowledge of
+	// projects seeded directly into local Postgres. Set
+	// USER_MANAGEMENT_LOCAL_MOCK=true to swap in a no-op client instead of
+	// calling out to it — local development only, never set in
+	// staging/prod.
+	var contactHandler *handler.ContactHandler
+	if os.Getenv("USER_MANAGEMENT_LOCAL_MOCK") == "true" {
+		slog.Warn("USER_MANAGEMENT_LOCAL_MOCK=true: project contacts are mocked (empty list, writes disabled)")
+		contactHandler = handler.NewContactHandler(entityClient, handler.NewMockContactsClient())
+	} else {
+		userManagementCfg := usermanagement.Config{
+			BaseURL:      mustURL("USER_MANAGEMENT_BASE_URL", "http", "https"),
+			TokenURL:     oauth2TokenURL,
+			ClientID:     oauth2ClientID,
+			ClientSecret: oauth2ClientSecret,
+			Scopes:       splitComma(os.Getenv("USER_MANAGEMENT_SCOPES")),
+		}
+		userManagementClient, err := usermanagement.NewClient(userManagementCfg)
+		if err != nil {
+			slog.Error("failed to construct user-management client", "err", err)
+			os.Exit(1)
+		}
+		contactHandler = handler.NewContactHandler(entityClient, userManagementClient)
 	}
 
 	// adminRole is the role string (from entity.GetUserMeResponse.Roles) that
@@ -188,7 +200,6 @@ func main() {
 	globalHandler := handler.NewGlobalHandler(entityClient)
 	instanceHandler := handler.NewInstanceHandler(entityClient)
 	registryHandler := handler.NewRegistryHandler(entityClient, registryClient, adminRole)
-	contactHandler := handler.NewContactHandler(entityClient, userManagementClient)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
