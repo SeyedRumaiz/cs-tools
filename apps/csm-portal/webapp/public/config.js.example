@@ -21,6 +21,13 @@ window.config = {
   // detail pages open a live connection instead.
   // CSM_PORTAL_STREAM_BASE_URL: "<your-stream-base-url>",
 
+  // Base URL for the live-engineer-chat alert stream — csm-portal-backend's
+  // dedicated CHAT_STREAM_PORT listener (default :9094). Unlike
+  // CSM_PORTAL_STREAM_BASE_URL this listener runs unconditionally on the
+  // backend; set this to see live customer escalations without a page
+  // refresh.
+  // CSM_PORTAL_CHAT_STREAM_BASE_URL: "<your-chat-stream-base-url>",
+
   // Default Oxygen UI theme. One of: "acrylicOrange", "acrylicPurple",
   // "choreo", "classic", "highContrast". Users can override this at runtime via
   // the header theme dropdown (the choice is persisted per browser).

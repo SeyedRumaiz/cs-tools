@@ -139,6 +139,17 @@ window.config = {
   //   false – feature hidden. Ratings already stored are unaffected.
   CUSTOMER_PORTAL_NOVERA_FEEDBACK_ENABLED: false,
 
+  // ── Novera live engineer escalation ─────────────────────────────────────────
+  //
+  // CUSTOMER_PORTAL_NOVERA_LIVE_ESCALATION_ENABLED  (optional — default: false)
+  //   true  – shows a "Talk to a live engineer" CTA under Novera replies,
+  //           which escalates the conversation to a case and alerts
+  //           connected engineers in csm-portal (requires csm-portal/backend
+  //           and customer-portal/backend-v2 to both be configured with a
+  //           matching INTERNAL_CHAT_TOKEN — see each backend's .env).
+  //   false – feature hidden.
+  CUSTOMER_PORTAL_NOVERA_LIVE_ESCALATION_ENABLED: false,
+
   // ── Top banners ─────────────────────────────────────────────────────────────
   //
   // CUSTOMER_PORTAL_TOP_BANNERS  (optional — default: [])

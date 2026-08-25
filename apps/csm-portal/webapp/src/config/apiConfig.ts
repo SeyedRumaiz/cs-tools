@@ -33,14 +33,26 @@ if (!BACKEND_BASE_URL) {
 // manual-refresh/staleTime polling) when it's unset.
 export const STREAM_BASE_URL = window.config?.CSM_PORTAL_STREAM_BASE_URL;
 
+// Base URL for the live-engineer-chat alert stream (a separate Choreo REST
+// endpoint backed by csm-portal-backend's dedicated CHAT_STREAM_PORT
+// listener, default :9094 — see that backend's cmd/server/main.go and
+// internal/handler/chat_stream.go). That listener is always on server-side,
+// but this key stays optional client-side too: useChatAlertsStream no-ops
+// without it, the same shape as STREAM_BASE_URL above, so an environment
+// that hasn't rolled the feature's Choreo endpoint out yet still boots.
+export const CHAT_STREAM_BASE_URL =
+  window.config?.CSM_PORTAL_CHAT_STREAM_BASE_URL;
+
 // Interface for the API configuration.
 interface ApiConfig {
   backendUrl: string;
   streamUrl?: string;
+  chatStreamUrl?: string;
 }
 
 // Configuration for the API service.
 export const apiConfig: ApiConfig = {
   backendUrl: BACKEND_BASE_URL,
   streamUrl: STREAM_BASE_URL,
+  chatStreamUrl: CHAT_STREAM_BASE_URL,
 };

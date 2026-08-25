@@ -29,6 +29,16 @@ declare global {
        * Optional — see apiConfig.ts's STREAM_BASE_URL.
        */
       CSM_PORTAL_STREAM_BASE_URL?: string;
+      /**
+       * Base URL for the live-engineer-chat alert stream (csm-portal-backend's
+       * dedicated CHAT_STREAM_PORT listener, default :9094 — see that
+       * backend's cmd/server/main.go). Unlike CSM_PORTAL_STREAM_BASE_URL this
+       * listener is always on, but the key stays optional here so an
+       * environment that hasn't rolled the feature out yet doesn't have to
+       * set it — useChatAlertsStream no-ops without it, same as
+       * useCaseActivityStream does for CSM_PORTAL_STREAM_BASE_URL.
+       */
+      CSM_PORTAL_CHAT_STREAM_BASE_URL?: string;
       CSM_PORTAL_THEME: string;
       CSM_PORTAL_LOG_LEVEL: string;
       /**
