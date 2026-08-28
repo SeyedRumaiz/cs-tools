@@ -6,8 +6,8 @@ BEGIN;
 -- ============================================================================
 INSERT INTO users (id, user_name, first_name, last_name, email, phone, timezone, user_type)
 VALUES 
-  ('usr-00000000-0000-0000-0000-000000000001', 'john.doe', 'John', 'Doe', 'john.doe@example.com', '+1234567890', 'UTC', 'customer'),
-  ('usr-00000000-0000-0000-0000-000000000002', 'csm.engineer', 'Alice', 'Smith', 'alice.smith@wso2.com', '+1987654321', 'UTC', 'internal')
+  ('10000000-0000-0000-0000-000000000001', 'john.doe2', 'John', 'Doe', 'john.doe2@example.com', '+1234567890', 'UTC', 'customer'),
+  ('20000000-0000-0000-0000-000000000002', 'csm.engineer2', 'Alice', 'Smith', 'alice.smith2@wso2.com', '+1987654321', 'UTC', 'internal')
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================
@@ -16,7 +16,7 @@ ON CONFLICT (id) DO NOTHING;
 -- ============================================================================
 INSERT INTO accounts (id, sf_id, name, tier, region, activation_date, owner_id, technical_owner_id, agent_enabled, kb_references_enabled)
 VALUES 
-  ('acc-00000000-0000-0000-0000-000000000001', 'SF-ACC-001', 'Acme Corporation', 'enterprise', 'NA-EAST', NOW(), 'usr-00000000-0000-0000-0000-000000000002', 'usr-00000000-0000-0000-0000-000000000002', true, true)
+  ('30000000-0000-0000-0000-000000000001', 'SF-ACC-002', 'Acme Corporation', 'enterprise', 'NA-EAST', NOW(), '20000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000002', true, true)
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================
@@ -25,7 +25,7 @@ ON CONFLICT (id) DO NOTHING;
 -- ============================================================================
 INSERT INTO projects (id, account_id, sf_id, name, key, subscription_type, closure_status, start_date, end_date)
 VALUES 
-  ('prj-00000000-0000-0000-0000-000000000001', 'acc-00000000-0000-0000-0000-000000000001', 'SF-PRJ-001', 'Acme Cloud Integration', 'ACME-CLOUD', 'managed_cloud_subscription', 'open', CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '335 days')
+  ('40000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001', 'SF-PRJ-002', 'Acme Cloud Integration', 'ACME-CLOUD-2', 'managed_cloud_subscription', 'open', CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '335 days')
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================
@@ -52,7 +52,7 @@ ON CONFLICT (id) DO NOTHING;
 -- ============================================================================
 INSERT INTO deployments (id, project_id, name, type, description, created_by)
 VALUES 
-  ('33333333-3333-3333-3333-333333333333', 'prj-00000000-0000-0000-0000-000000000001', 'Production Gateway Cluster', 'primary_production', 'Main API Production deployment', 'usr-00000000-0000-0000-0000-000000000002')
+  ('33333333-3333-3333-3333-333333333333', '40000000-0000-0000-0000-000000000001', 'Production Gateway Cluster', 'primary_production', 'Main API Production deployment', '20000000-0000-0000-0000-000000000002')
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================
@@ -76,8 +76,8 @@ INSERT INTO cases (
 )
 VALUES (
   '55555555-5555-5555-5555-555555555555',
-  'usr-00000000-0000-0000-0000-000000000001',
-  'prj-00000000-0000-0000-0000-000000000001',
+  '10000000-0000-0000-0000-000000000001',
+  '40000000-0000-0000-0000-000000000001',
   '33333333-3333-3333-3333-333333333333',
   '44444444-4444-4444-4444-444444444444',
   'case',
@@ -86,7 +86,7 @@ VALUES (
   'high',
   'performance_degradation',
   'open',
-  'usr-00000000-0000-0000-0000-000000000002'
+  '20000000-0000-0000-0000-000000000002'
 )
 ON CONFLICT (id) DO NOTHING;
 
@@ -97,7 +97,7 @@ ON CONFLICT (id) DO NOTHING;
 -- ============================================================================
 INSERT INTO case_comments (id, case_id, type, content, created_by)
 VALUES 
-  ('66666666-6666-6666-6666-666666666666', '55555555-5555-5555-5555-555555555555', 'comment', 'Investigating thread dump logs provided.', 'usr-00000000-0000-0000-0000-000000000002')
+  ('66666666-6666-6666-6666-666666666666', '55555555-5555-5555-5555-555555555555', 'comment', 'Investigating thread dump logs provided.', '20000000-0000-0000-0000-000000000002')
 ON CONFLICT (id) DO NOTHING;
 
 COMMIT;

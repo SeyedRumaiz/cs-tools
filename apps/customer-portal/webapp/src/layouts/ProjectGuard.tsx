@@ -16,12 +16,17 @@
 
 import { type JSX, useEffect } from "react";
 import { Box, LinearProgress } from "@wso2/oxygen-ui";
-import { Outlet, useParams } from "react-router";
+import { Outlet, useNavigate, useParams } from "react-router";
 import useGetProjectDetails from "@api/useGetProjectDetails";
 import ApiErrorState from "@components/error/ApiErrorState";
 import ProjectSuspendedNoticePage from "@/components/access-control/ProjectSuspendedNoticePage";
 import { useErrorPageContext } from "@context/error-page/ErrorPageContext";
 import { ProjectClosureState } from "@/types/permission";
+import { isNotFoundError } from "@utils/ApiError";
+import {
+  clearLastSelectedProject,
+  getLastSelectedProjectId,
+} from "@features/settings/utils/settingsStorage";
 
 /**
  * ProjectGuard wraps all routes under `projects/:projectId`.
@@ -35,6 +40,7 @@ import { ProjectClosureState } from "@/types/permission";
  */
 function ProjectGuardContent(): JSX.Element {
   const { projectId } = useParams<{ projectId: string }>();
+  const navigate = useNavigate();
   const { setIsErrorPageDisplayed, setIsProjectSuspended } =
     useErrorPageContext();
 
@@ -49,6 +55,26 @@ function ProjectGuardContent(): JSX.Element {
   useEffect(() => {
     setIsErrorPageDisplayed(isErrorPageDisplayed);
   }, [isErrorPageDisplayed, setIsErrorPageDisplayed]);
+
+  // A 404 here almost always means the project ID came from a stale
+  // client-side cache (AuthGuard's "last selected project" redirect, or a
+  // stale deep-link) rather than a live pick from the project list — the
+  // project was deleted, or (as in local dev) the backing database was
+  // reset/reseeded since the ID was cached. Left alone, AuthGuard would keep
+  // bouncing the user straight back to this same dead project on every
+  // future visit to "/". Clearing the cache and returning to the project
+  // hub breaks that loop and lets a fresh, valid project list load instead.
+  useEffect(() => {
+    if (
+      hasError &&
+      isNotFoundError(error) &&
+      projectId &&
+      getLastSelectedProjectId() === projectId
+    ) {
+      clearLastSelectedProject();
+      navigate("/", { replace: true });
+    }
+  }, [hasError, error, projectId, navigate]);
 
   useEffect(() => {
     setIsProjectSuspended(isProjectSuspended);
