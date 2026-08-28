@@ -30,6 +30,7 @@ import { useChatAlertsStream } from "@features/csm-chat/api/useChatAlertsStream"
 import { useAcceptChatSession } from "@features/csm-chat/api/useAcceptChatSession";
 import { useSendChatMessage } from "@features/csm-chat/api/useSendChatMessage";
 import { useCompleteChatSession } from "@features/csm-chat/api/useCompleteChatSession";
+import { useDeclineChatSession } from "@features/csm-chat/api/useDeclineChatSession";
 import type { ChatAlertEvent } from "@features/csm-chat/types/chatAlerts";
 
 type PendingAlert = {
@@ -83,6 +84,7 @@ export default function EngineerAlertNotification(): JSX.Element | null {
   const acceptMutation = useAcceptChatSession();
   const sendMutation = useSendChatMessage();
   const completeMutation = useCompleteChatSession();
+  const declineMutation = useDeclineChatSession();
 
   const handleAlert = useCallback(
     (event: ChatAlertEvent) => {
@@ -172,9 +174,27 @@ export default function EngineerAlertNotification(): JSX.Element | null {
     }
   }, [pending, acceptMutation]);
 
-  const handleDismiss = useCallback((): void => {
+  // Unlike handleComplete (clears immediately, decline is best-effort after),
+  // this awaits the decline call BEFORE clearing: escalations are now routed
+  // to exactly one engineer, so dismissing without telling the routing
+  // service would otherwise strand the customer with nobody else ever
+  // seeing their request (see useDeclineChatSession's own doc comment). The
+  // widget still clears locally even if the call fails — no worse than
+  // today's un-routed dismiss.
+  const handleDismiss = useCallback(async (): Promise<void> => {
+    const current = pending;
+    if (current) {
+      try {
+        await declineMutation.mutateAsync({
+          caseId: current.caseId,
+          conversationId: current.conversationId,
+        });
+      } catch {
+        // Best-effort — still clear locally below either way.
+      }
+    }
     setPending(null);
-  }, []);
+  }, [pending, declineMutation]);
 
   const handleSend = useCallback(async (): Promise<void> => {
     const text = messageDraft.trim();
@@ -247,8 +267,8 @@ export default function EngineerAlertNotification(): JSX.Element | null {
             <IconButton
               size="small"
               aria-label="Dismiss"
-              onClick={handleDismiss}
-              disabled={acceptMutation.isPending}
+              onClick={() => void handleDismiss()}
+              disabled={acceptMutation.isPending || declineMutation.isPending}
             >
               <Typography component="span" sx={{ fontSize: "1rem", lineHeight: 1 }}>
                 &times;
@@ -293,8 +313,8 @@ export default function EngineerAlertNotification(): JSX.Element | null {
             <Button
               variant="text"
               size="small"
-              onClick={handleDismiss}
-              disabled={acceptMutation.isPending}
+              onClick={() => void handleDismiss()}
+              disabled={acceptMutation.isPending || declineMutation.isPending}
               sx={{ textTransform: "none" }}
             >
               Dismiss

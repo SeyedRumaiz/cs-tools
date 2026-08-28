@@ -672,6 +672,26 @@ export default function NoveraChatPage(): JSX.Element {
         // WebSocketHandler.PushEvent) — no second socket. See
         // handleEscalateToEngineer/sendViaHumanChat below for the outbound
         // half of this feature.
+        // "queued" arrives when the routing service had no available
+        // engineer at escalation time (see csm-portal/backend's
+        // HandleEscalate) — a simple informational bot message, no state
+        // change: isEscalating stays true until engineer_assigned (or the
+        // escalation error path) actually resolves it.
+        case "queued": {
+          const text = String(
+            event.message ?? "You're in the queue. An engineer will be with you shortly.",
+          );
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `queued-${Date.now()}`,
+              text,
+              sender: ChatSender.BOT,
+              timestamp: new Date(),
+            },
+          ]);
+          break;
+        }
         case "engineer_assigned": {
           const engineer = String(
             event.engineerEmail ?? "a support engineer",

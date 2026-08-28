@@ -41,6 +41,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/eventpublisher"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/handler"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/routingclient"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/scim"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/stream"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/updates"
@@ -139,7 +140,19 @@ func main() {
 		BaseURL:       envOrDefault("CUSTOMER_PORTAL_INTERNAL_BASE_URL", "http://localhost:8082"),
 		InternalToken: internalChatToken,
 	})
-	chatHandler := handler.NewChatHandler(customerEntityClient, engineerHub, chatNotifyClient)
+	// routingClient calls the standalone chat-routing-service (see
+	// internal/routingclient and apps/chat-routing-service/backend) that
+	// decides which available engineer, if any, an escalation is routed
+	// to. Like internalChatToken above, ROUTING_SERVICE_TOKEN is read with
+	// plain os.Getenv rather than mustEnv: an empty token always fails
+	// that service's own InternalToken check rather than silently
+	// disabling auth, and HandleEscalate already degrades to broadcasting
+	// if this client's calls error, so a missing token fails safe.
+	routingClient := routingclient.NewClient(routingclient.Config{
+		BaseURL:       envOrDefault("ROUTING_SERVICE_BASE_URL", "http://localhost:9096"),
+		InternalToken: os.Getenv("ROUTING_SERVICE_TOKEN"),
+	})
+	chatHandler := handler.NewChatHandler(customerEntityClient, engineerHub, chatNotifyClient, routingClient)
 
 	dashboardHandler := handler.NewDashboardHandler(customerEntityClient)
 	accountHandler := handler.NewAccountHandler(customerEntityClient)
@@ -281,6 +294,9 @@ func main() {
 	mux.HandleFunc("POST /chat/sessions/{id}/accept", chatHandler.HandleAcceptSession)
 	mux.HandleFunc("POST /chat/sessions/{id}/messages", chatHandler.HandleEngineerMessage)
 	mux.HandleFunc("POST /chat/sessions/{id}/complete", chatHandler.HandleCompleteSession)
+	mux.HandleFunc("POST /chat/sessions/{id}/decline", chatHandler.HandleDeclineSession)
+	mux.HandleFunc("POST /engineers/me/status", chatHandler.HandleSetPresence)
+	mux.HandleFunc("GET /engineers/me/status", chatHandler.HandleGetPresence)
 
 	// Built once and reused on both listeners below: Auth() does a real JWKS
 	// fetch (when TokenValidatorEnabled), so calling it a second time would

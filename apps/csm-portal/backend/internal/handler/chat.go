@@ -35,17 +35,25 @@
 //     escalate call already knows both (it just created the case), and
 //     every subsequent engineer-side call carries the conversationId the
 //     original SSE alert included.
-//   - Engineer presence has no heartbeat/presence table either: "is an
-//     engineer online" is derived purely from who currently has
-//     GET /chat/alerts/stream open (see chat_stream.go) — a known,
-//     accepted simplification at this project's current maturity.
+//   - Engineer presence for "is anyone connected at all" still has no
+//     heartbeat/presence table — that's still derived from who has
+//     GET /chat/alerts/stream open (see chat_stream.go). What an engineer's
+//     dropdown shows (Available/Busy/Offline), though, is now real state,
+//     owned by the standalone chat-routing-service (see
+//     internal/routingclient) rather than inferred.
 //
-// Two directions of live delivery, deliberately asymmetric:
+// Delivery of a routed event to a specific engineer, and the broadcast
+// fallback:
 //
-//   - Customer → engineers: relayed over Server-Sent Events to every
-//     connected engineer (see chat_stream.go / hub, key engineersHubKey).
-//     Any engineer might pick up any escalation, so this fans out rather
-//     than targeting one recipient.
+//   - Customer → engineers: an escalation is routed to exactly one engineer
+//     by the routing service (internal/routingclient.Client.Escalate) and
+//     delivered over that engineer's own SSE subscription key (see
+//     engineerHubKey, chat_stream.go). If the routing service is down or
+//     errors, HandleEscalate falls back to the pre-routing behavior —
+//     publishing on the shared broadcastHubKey every connected engineer's
+//     stream also subscribes to (see StreamEngineerAlerts's dual
+//     registration) — so a routing-service outage doesn't strand the
+//     customer with nobody ever seeing their request.
 //   - Engineer → customer: relayed by pushing into customer-portal/
 //     backend-v2's already-open per-conversation WebSocket (see
 //     internal/chatnotify), because that connection already exists for the
@@ -55,23 +63,33 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/routingclient"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/stream"
 )
 
-// engineersHubKey is the single stream.BroadcastHub subscription key every
-// connected engineer's alert stream registers under (see
-// StreamEngineerAlerts). There is deliberately no per-case/per-conversation
-// key: any connected engineer may pick up any escalation, so every chat
-// event this feature produces fans out to all of them, and the browser
-// filters by conversationId/caseId once a specific engineer has accepted a
-// specific session.
-const engineersHubKey = "engineers"
+// broadcastHubKey is the stream.BroadcastHub subscription key every
+// connected engineer's alert stream registers under IN ADDITION TO its own
+// per-engineer key (see engineerHubKey, StreamEngineerAlerts's dual
+// registration). It now serves only two purposes: the escalate fallback
+// path when the routing service is unreachable (see HandleEscalate), and
+// HandleCustomerMessage's mid-session relay, which is still broadcast to
+// every connected engineer rather than targeted (an accepted scope decision
+// for this prototype phase — see this file's package doc comment).
+const broadcastHubKey = "engineers"
+
+// engineerHubKey returns the stream.BroadcastHub subscription key a
+// specific engineer's alert stream registers under for targeted delivery —
+// e.g. an escalation the routing service assigned to exactly this engineer.
+func engineerHubKey(email string) string {
+	return "engineer:" + email
+}
 
 // maxChatBodyBytes caps request bodies on the chat endpoints below —
 // generous for a short escalation/chat-message payload while still bounding
@@ -97,11 +115,23 @@ type chatEventPusher interface {
 	PushEvent(ctx context.Context, payload []byte) error
 }
 
+// routingService abstracts internal/routingclient.Client so tests can fake
+// the chat-routing-service calls. Signatures match that client's own
+// methods exactly, so *routingclient.Client satisfies this with no adapter.
+type routingService interface {
+	Escalate(ctx context.Context, ci routingclient.CaseInfo) (routingclient.EscalateResult, error)
+	SetPresence(ctx context.Context, email string, status routingclient.Status) (routingclient.PresenceResult, error)
+	Completed(ctx context.Context, email string) (routingclient.CompletedResult, error)
+	Decline(ctx context.Context, email, caseID string) (routingclient.DeclineResult, error)
+	GetPresence(ctx context.Context, email string) (routingclient.Status, error)
+}
+
 // ChatHandler implements the live-engineer-chat escalation endpoints.
 type ChatHandler struct {
-	entity entityChatClient
-	hub    *stream.BroadcastHub
-	notify chatEventPusher
+	entity  entityChatClient
+	hub     *stream.BroadcastHub
+	notify  chatEventPusher
+	routing routingService
 }
 
 // NewChatHandler creates a ChatHandler. hub must be non-nil — unlike
@@ -109,9 +139,11 @@ type ChatHandler struct {
 // hub this feature uses is unconditional (see cmd/server/main.go): live
 // engineer chat has no offline fallback, so there is no meaningful
 // "hub == nil, degrade gracefully" mode to support here the way
-// StreamCaseActivities has.
-func NewChatHandler(entity entityChatClient, hub *stream.BroadcastHub, notify chatEventPusher) *ChatHandler {
-	return &ChatHandler{entity: entity, hub: hub, notify: notify}
+// StreamCaseActivities has. routing must also be non-nil: unlike notify
+// (whose failures are all best-effort), HandleEscalate's fallback path
+// still needs a routing client to have attempted and failed, not a nil one.
+func NewChatHandler(entity entityChatClient, hub *stream.BroadcastHub, notify chatEventPusher, routing routingService) *ChatHandler {
+	return &ChatHandler{entity: entity, hub: hub, notify: notify, routing: routing}
 }
 
 // chatEvent is the single JSON envelope used for every event this feature
@@ -131,18 +163,32 @@ type chatEvent struct {
 	Timestamp      string `json:"timestamp"`
 }
 
-// publishToEngineers marshals evt and fans it out to every open
-// GET /chat/alerts/stream connection. Best-effort by construction —
-// stream.BroadcastHub.Publish never blocks and silently drops for a
-// subscriber whose buffer is full (see that type's doc comment) — so this
-// never fails a caller-facing request.
-func (h *ChatHandler) publishToEngineers(evt chatEvent) {
+// publish marshals evt and publishes it on the given hub key. Best-effort
+// by construction — stream.BroadcastHub.Publish never blocks and silently
+// drops for a subscriber whose buffer is full (see that type's doc
+// comment) — so this never fails a caller-facing request.
+func (h *ChatHandler) publish(key string, evt chatEvent) {
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		slog.Error("chat: failed to encode engineer event", "type", evt.Type, "err", err)
 		return
 	}
-	h.hub.Publish(engineersHubKey, string(payload))
+	h.hub.Publish(key, string(payload))
+}
+
+// publishToEngineers fans evt out to every open GET /chat/alerts/stream
+// connection via the shared broadcastHubKey. See that constant's doc
+// comment for the two remaining cases this is used for.
+func (h *ChatHandler) publishToEngineers(evt chatEvent) {
+	h.publish(broadcastHubKey, evt)
+}
+
+// publishToEngineer delivers evt only to the named engineer's own SSE
+// subscription (see engineerHubKey) — used for every routing-service-backed
+// delivery: a fresh routed escalation, a queue-drain assignment on
+// presence/session-completion, or a reassignment after a decline.
+func (h *ChatHandler) publishToEngineer(email string, evt chatEvent) {
+	h.publish(engineerHubKey(email), evt)
 }
 
 // notifyBackendV2 pushes evt to customer-portal/backend-v2's
@@ -185,6 +231,25 @@ func readChatBody(w http.ResponseWriter, r *http.Request) (body []byte, ok bool)
 	return body, true
 }
 
+// assignedCaseEvent builds the customer_escalation-shaped chatEvent used to
+// deliver ci to whichever engineer the routing service just assigned it
+// to — shared by HandleEscalate, HandleSetPresence, HandleCompleteSession,
+// and HandleDeclineSession, since a fresh escalation and a queue-drain/
+// reassignment all look identical to the receiving engineer's browser.
+func assignedCaseEvent(ci routingclient.CaseInfo) chatEvent {
+	return chatEvent{
+		Type:           "customer_escalation",
+		CaseID:         ci.CaseID,
+		ConversationID: ci.ConversationID,
+		ProjectID:      ci.ProjectID,
+		Subject:        ci.Subject,
+		CustomerEmail:  ci.CustomerEmail,
+		CustomerName:   ci.CustomerName,
+		Message:        ci.Message,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
 // escalateRequest is the body customer-portal/backend-v2 sends to
 // POST /internal/chat/escalate. CustomerName is a display label only — it is
 // never used for authorization or attribution in a durable record (the case
@@ -207,9 +272,9 @@ type escalateRequest struct {
 // once it has already created the case against entity-service directly
 // (backend-v2 owns case creation for this flow because only it has the
 // deployment/deployed-product context a case requires — see that backend's
-// own escalation handler's doc comment). This handler's only job is to fan
-// the escalation out to connected engineers; it does not call entity-service
-// at all.
+// own escalation handler's doc comment). This handler's only job is to ask
+// the routing service which engineer (if any) should get this case, and
+// deliver it accordingly; it does not call entity-service at all.
 func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 	body, ok := readChatBody(w, r)
 	if !ok {
@@ -228,8 +293,7 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 
 	slog.InfoContext(r.Context(), "chat escalation received", "caseId", req.CaseID, "conversationId", req.ConversationID)
 
-	h.publishToEngineers(chatEvent{
-		Type:           "customer_escalation",
+	ci := routingclient.CaseInfo{
 		CaseID:         req.CaseID,
 		ConversationID: req.ConversationID,
 		ProjectID:      req.ProjectID,
@@ -237,10 +301,34 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 		CustomerEmail:  req.CustomerEmail,
 		CustomerName:   req.CustomerName,
 		Message:        req.Message,
-		Timestamp:      time.Now().UTC().Format(time.RFC3339),
-	})
+	}
 
-	writeJSON(w, http.StatusAccepted, []byte(`{"message":"escalation broadcast to available engineers"}`))
+	result, err := h.routing.Escalate(r.Context(), ci)
+	if err != nil {
+		// Routing service unreachable/erroring: fall back to broadcasting
+		// to every connected engineer so this brand-new service being down
+		// does not strand the customer (see the package doc comment and
+		// StreamEngineerAlerts's dual registration).
+		slog.ErrorContext(r.Context(), "chat: routing service escalate failed, falling back to broadcast", "caseId", req.CaseID, "err", err)
+		h.publishToEngineers(assignedCaseEvent(ci))
+		writeJSON(w, http.StatusAccepted, []byte(`{"message":"escalation broadcast to available engineers"}`))
+		return
+	}
+
+	switch {
+	case result.EngineerEmail != "":
+		h.publishToEngineer(result.EngineerEmail, assignedCaseEvent(ci))
+	case result.Queued:
+		h.notifyBackendV2(r.Context(), chatEvent{
+			Type:           "queued",
+			CaseID:         req.CaseID,
+			ConversationID: req.ConversationID,
+			Message:        fmt.Sprintf("You're #%d in the queue. An engineer will be with you shortly.", result.Position),
+			Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+
+	writeJSON(w, http.StatusAccepted, []byte(`{"message":"escalation routed"}`))
 }
 
 // customerMessageRequest is the body backend-v2 sends to
@@ -255,8 +343,12 @@ type customerMessageRequest struct {
 // HandleCustomerMessage handles POST /internal/chat/customer-message. Also
 // internal-listener-only (see HandleEscalate). Persists the customer's
 // message as a case comment — the entity-service write of record for this
-// feature (see the package doc comment) — then fans it out to connected
-// engineers over SSE so whichever one accepted the session sees it live.
+// feature (see the package doc comment) — then fans it out over the shared
+// broadcastHubKey so whichever engineer accepted the session sees it live.
+// Deliberately still broadcast rather than targeted at the accepting
+// engineer specifically (this handler has no record of who that is — see
+// the package doc comment on why there is no server-side session table);
+// an accepted scope decision for this prototype phase.
 func (h *ChatHandler) HandleCustomerMessage(w http.ResponseWriter, r *http.Request) {
 	body, ok := readChatBody(w, r)
 	if !ok {
@@ -309,6 +401,10 @@ type sessionActionRequest struct {
 // /cases/{id} + assigneeEmail path csm-portal's case detail page already
 // uses (see cases.go's PatchCase / entity's assigneeEmail field) — there is
 // no separate "chat session" record; the case IS the session's record.
+// Unchanged by the routing-service work: the routing service already
+// reserved this engineer's capacity at assignment time (see HandleEscalate/
+// HandleSetPresence/HandleCompleteSession), so accepting stays a plain
+// entity-service PATCH with no routing call of its own.
 func (h *ChatHandler) HandleAcceptSession(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -468,5 +564,147 @@ func (h *ChatHandler) HandleCompleteSession(w http.ResponseWriter, r *http.Reque
 		Timestamp:      now,
 	})
 
+	// Best-effort: release this engineer's routing-service capacity and, if
+	// that immediately drained the waiting queue, deliver the next case to
+	// them the same way a fresh escalation would arrive. A failure here is
+	// logged, not surfaced to the caller — the session has already ended
+	// successfully from the engineer's point of view, matching this
+	// handler's existing best-effort treatment of notifyBackendV2 above.
+	if result, err := h.routing.Completed(r.Context(), user.Email); err != nil {
+		slog.ErrorContext(r.Context(), "chat: routing service completed failed", "userID", user.UserID, "err", err)
+	} else if result.AssignedCase != nil {
+		h.publishToEngineer(user.Email, assignedCaseEvent(*result.AssignedCase))
+	}
+
 	writeJSON(w, http.StatusOK, []byte(`{"message":"session ended"}`))
+}
+
+// setPresenceRequest is the body an engineer's browser sends for
+// POST /engineers/me/status.
+type setPresenceRequest struct {
+	Status string `json:"status"`
+}
+
+// HandleSetPresence handles POST /engineers/me/status — browser-facing,
+// behind Auth. Applies the authenticated engineer's requested presence
+// change via the routing service (see internal/routingclient and that
+// service's router.Router.SetPresence for the full state machine this can
+// trigger, including an immediate queue-drain assignment back to this same
+// engineer). A routing-service failure here is surfaced as 502, not
+// best-effort-logged like most of this file's other Handle* methods:
+// unlike a chat message or a completion notice, the engineer needs to know
+// their requested status change did not actually take effect.
+func (h *ChatHandler) HandleSetPresence(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	body, ok := readChatBody(w, r)
+	if !ok {
+		return
+	}
+	var req setPresenceRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+	status := routingclient.Status(req.Status)
+	switch status {
+	case routingclient.StatusAvailable, routingclient.StatusBusy, routingclient.StatusOffline:
+		// valid
+	default:
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	result, err := h.routing.SetPresence(r.Context(), user.Email, status)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "chat: routing service set presence failed", "userID", user.UserID, "err", err)
+		writeError(w, http.StatusBadGateway, "Failed to update your status. Please try again.")
+		return
+	}
+
+	if result.AssignedCase != nil {
+		h.publishToEngineer(user.Email, assignedCaseEvent(*result.AssignedCase))
+	}
+
+	writeJSONValue(w, http.StatusOK, result)
+}
+
+// HandleGetPresence handles GET /engineers/me/status — browser-facing,
+// behind Auth. Lets the status dropdown initialize correctly on load/reload
+// instead of assuming a default itself — the routing service's own default
+// for an engineer it has never seen (OFFLINE — see router.Router.
+// GetPresence) is exposed here rather than hardcoded a second time in the
+// browser.
+func (h *ChatHandler) HandleGetPresence(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	status, err := h.routing.GetPresence(r.Context(), user.Email)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "chat: routing service get presence failed", "userID", user.UserID, "err", err)
+		writeError(w, http.StatusBadGateway, "Failed to load your status. Please try again.")
+		return
+	}
+
+	writeJSONValue(w, http.StatusOK, map[string]routingclient.Status{"status": status})
+}
+
+// declineSessionRequest is the body an engineer's browser sends for
+// POST /chat/sessions/{id}/decline.
+type declineSessionRequest struct {
+	ConversationID string `json:"conversationId"`
+}
+
+// HandleDeclineSession handles POST /chat/sessions/{id}/decline —
+// browser-facing, behind Auth. {id} is the case ID. Unlike Accept/Complete,
+// this endpoint exists purely because of the routing service: once
+// escalations are routed to exactly one engineer instead of broadcast to
+// all of them, an engineer dismissing an alert before accepting it must
+// explicitly hand the case back, or it would otherwise strand the customer
+// with nobody ever seeing their request again — see
+// internal/routingclient.Client.Decline and chat-routing-service's own
+// router.Router.Decline doc comment for the full reassign-or-requeue
+// behavior this triggers.
+func (h *ChatHandler) HandleDeclineSession(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	caseID := r.PathValue("id")
+	if caseID == "" || !uuidRe.MatchString(caseID) {
+		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
+		return
+	}
+
+	body, ok := readChatBody(w, r)
+	if !ok {
+		return
+	}
+	var req declineSessionRequest
+	if err := json.Unmarshal(body, &req); err != nil || req.ConversationID == "" {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	result, err := h.routing.Decline(r.Context(), user.Email, caseID)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "chat: routing service decline failed", "userID", user.UserID, "caseID", caseID, "err", err)
+		writeError(w, http.StatusBadGateway, "Failed to decline the chat session. Please try again.")
+		return
+	}
+
+	if result.ReassignedTo != "" && result.AssignedCase != nil {
+		h.publishToEngineer(result.ReassignedTo, assignedCaseEvent(*result.AssignedCase))
+	}
+
+	writeJSON(w, http.StatusOK, []byte(`{"message":"session declined"}`))
 }

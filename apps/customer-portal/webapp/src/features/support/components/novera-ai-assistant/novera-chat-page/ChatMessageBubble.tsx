@@ -27,7 +27,13 @@ import {
   alpha,
   useTheme,
 } from "@wso2/oxygen-ui";
-import { Bot, ThumbsDown, ThumbsUp, User } from "@wso2/oxygen-ui-icons-react";
+import {
+  Bot,
+  Headset,
+  ThumbsDown,
+  ThumbsUp,
+  User,
+} from "@wso2/oxygen-ui-icons-react";
 import { type JSX, useEffect, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -494,6 +500,24 @@ export default function ChatMessageBubble({
             )}
           </Box>
 
+          {showEscalateCta && (
+            <Box sx={{ mt: 1 }}>
+              <Tooltip title="Escalate to engineer">
+                <IconButton
+                  size="small"
+                  color="primary"
+                  aria-label="Escalate to engineer"
+                  onClick={onRequestEngineerEscalation}
+                  sx={(t) => ({
+                    border: `1px solid ${alpha(t.palette.primary.main, 0.5)}`,
+                  })}
+                >
+                  <Headset size={16} />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
+
           {showFeedbackRow && (
             <Stack
               direction="row"
@@ -591,20 +615,6 @@ export default function ChatMessageBubble({
                 sx={{ textTransform: "none" }}
               >
                 Request a token limit increase
-              </Button>
-            </Box>
-          )}
-
-          {showEscalateCta && (
-            <Box sx={{ mt: 1 }}>
-              <Button
-                size="small"
-                variant="outlined"
-                color="primary"
-                onClick={onRequestEngineerEscalation}
-                sx={{ textTransform: "none" }}
-              >
-                Talk to a live engineer
               </Button>
             </Box>
           )}

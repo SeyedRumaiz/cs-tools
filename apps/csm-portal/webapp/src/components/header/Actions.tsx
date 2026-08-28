@@ -24,6 +24,7 @@ import type { JSX } from "react";
 import { useAsgardeo } from "@asgardeo/react";
 import UserProfile from "@components/header/UserProfile";
 import ThemeSelect from "@components/header/ThemeSelect";
+import EngineerStatusMenu from "@components/header/EngineerStatusMenu";
 import RecentViewsButton from "@features/csm-recent/components/RecentViewsButton";
 import PinThisPageButton from "@features/csm-recent/components/PinThisPageButton";
 
@@ -32,6 +33,7 @@ export default function Actions(): JSX.Element {
 
   return (
     <HeaderUI.Actions>
+      {isSignedIn && <EngineerStatusMenu />}
       <ThemeSelect />
       <ColorSchemeToggle />
       {isSignedIn && <PinThisPageButton />}
