@@ -30,7 +30,7 @@ import (
 // proxies that would otherwise time out an idle response.
 const engineerAlertStreamHeartbeat = 15 * time.Second
 
-// StreamEngineerAlerts handles GET /api/v1/chat/alerts/stream: a long-lived
+// StreamEngineerAlerts handles GET /chat/alerts/stream: a long-lived
 // Server-Sent Events connection that emits every live-chat event this
 // backend publishes for the shared engineersHubKey channel (see chat.go) —
 // a new customer escalation, another engineer accepting/completing a

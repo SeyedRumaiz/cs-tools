@@ -275,10 +275,12 @@ func main() {
 	mux.HandleFunc("GET /problems/{id}", problemHandler.GetProblem)
 	mux.HandleFunc("POST /problems/search", problemHandler.SearchProblems)
 
-	// Live-engineer-chat escalation (see internal/handler/chat.go).
-	mux.HandleFunc("POST /api/v1/chat/sessions/{id}/accept", chatHandler.HandleAcceptSession)
-	mux.HandleFunc("POST /api/v1/chat/sessions/{id}/messages", chatHandler.HandleEngineerMessage)
-	mux.HandleFunc("POST /api/v1/chat/sessions/{id}/complete", chatHandler.HandleCompleteSession)
+	// Live-engineer-chat escalation (see internal/handler/chat.go). No
+	// "/api/v1" prefix, matching every other route on this mux (/cases,
+	// /dashboards, /users/me, ...) — none of them use one.
+	mux.HandleFunc("POST /chat/sessions/{id}/accept", chatHandler.HandleAcceptSession)
+	mux.HandleFunc("POST /chat/sessions/{id}/messages", chatHandler.HandleEngineerMessage)
+	mux.HandleFunc("POST /chat/sessions/{id}/complete", chatHandler.HandleCompleteSession)
 
 	// Built once and reused on both listeners below: Auth() does a real JWKS
 	// fetch (when TokenValidatorEnabled), so calling it a second time would
@@ -371,12 +373,13 @@ func main() {
 		}
 	}
 
-	// Live-engineer-chat alert stream (GET /api/v1/chat/alerts/stream) needs
-	// the same "no WriteTimeout/IdleTimeout" treatment as the case-activity
-	// stream above, but — unlike that one — is always started: it has no
-	// Event-Hub-gated fallback (see engineerHub's construction above).
+	// Live-engineer-chat alert stream (GET /chat/alerts/stream — no "/api/v1"
+	// prefix, see the route registrations above) needs the same "no
+	// WriteTimeout/IdleTimeout" treatment as the case-activity stream above,
+	// but — unlike that one — is always started: it has no Event-Hub-gated
+	// fallback (see engineerHub's construction above).
 	chatStreamMux := http.NewServeMux()
-	chatStreamMux.HandleFunc("GET /api/v1/chat/alerts/stream", chatHandler.StreamEngineerAlerts)
+	chatStreamMux.HandleFunc("GET /chat/alerts/stream", chatHandler.StreamEngineerAlerts)
 
 	chatStreamAddr := ":" + mustPort("CHAT_STREAM_PORT", "9094")
 	chatStreamLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", chatStreamAddr)

@@ -37,7 +37,7 @@
 //     original SSE alert included.
 //   - Engineer presence has no heartbeat/presence table either: "is an
 //     engineer online" is derived purely from who currently has
-//     GET /api/v1/chat/alerts/stream open (see chat_stream.go) — a known,
+//     GET /chat/alerts/stream open (see chat_stream.go) — a known,
 //     accepted simplification at this project's current maturity.
 //
 // Two directions of live delivery, deliberately asymmetric:
@@ -132,7 +132,7 @@ type chatEvent struct {
 }
 
 // publishToEngineers marshals evt and fans it out to every open
-// GET /api/v1/chat/alerts/stream connection. Best-effort by construction —
+// GET /chat/alerts/stream connection. Best-effort by construction —
 // stream.BroadcastHub.Publish never blocks and silently drops for a
 // subscriber whose buffer is full (see that type's doc comment) — so this
 // never fails a caller-facing request.
@@ -303,7 +303,7 @@ type sessionActionRequest struct {
 	ConversationID string `json:"conversationId"`
 }
 
-// HandleAcceptSession handles POST /api/v1/chat/sessions/{id}/accept —
+// HandleAcceptSession handles POST /chat/sessions/{id}/accept —
 // browser-facing, behind the normal Auth middleware. {id} is the case ID.
 // Assigns the case to the authenticated engineer via the same PATCH
 // /cases/{id} + assigneeEmail path csm-portal's case detail page already
@@ -369,7 +369,7 @@ type engineerMessageRequest struct {
 	Message        string `json:"message"`
 }
 
-// HandleEngineerMessage handles POST /api/v1/chat/sessions/{id}/messages —
+// HandleEngineerMessage handles POST /chat/sessions/{id}/messages —
 // browser-facing, behind Auth. {id} is the case ID. Persists the engineer's
 // reply as a case comment (the same write CreateCaseComment already makes
 // for every other case comment — see cases.go), then relays it to the
@@ -421,7 +421,7 @@ func (h *ChatHandler) HandleEngineerMessage(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusCreated, []byte(`{"message":"sent"}`))
 }
 
-// HandleCompleteSession handles POST /api/v1/chat/sessions/{id}/complete —
+// HandleCompleteSession handles POST /chat/sessions/{id}/complete —
 // browser-facing, behind Auth. {id} is the case ID. Ends the live session:
 // notifies other engineers (so a stale "accepted" alert clears) and the
 // customer's browser (so it drops back to AI-only chat). Deliberately does

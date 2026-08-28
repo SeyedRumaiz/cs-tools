@@ -21,6 +21,7 @@ import { useLocation, useNavigate } from "react-router";
 import AppLayout from "@layouts/AppLayout";
 import { POST_LOGIN_REDIRECT_KEY } from "@layouts/postLoginRedirect";
 import { CurrentUserProvider } from "@context/current-user/CurrentUserContext";
+import EngineerAlertNotification from "@features/csm-chat/components/EngineerAlertNotification";
 
 /**
  * AuthGuard renders AppLayout (header/footer) so loading state is visible
@@ -75,6 +76,12 @@ export default function AuthGuard(): JSX.Element {
       }}
     >
       <CurrentUserProvider>
+        {/* App-wide floating widget for the live-engineer-chat escalation
+            feature — see EngineerAlertNotification's own doc comment. Mounted
+            here (not inside AppLayout) so it survives route changes without
+            remounting, the same reasoning IdleTimeoutProvider's
+            SessionWarningDialog already follows one level up. */}
+        <EngineerAlertNotification />
         <AppLayout />
       </CurrentUserProvider>
     </ProtectedRoute>
