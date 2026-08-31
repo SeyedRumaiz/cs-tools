@@ -73,9 +73,18 @@ type EscalateResult struct {
 	Position int `json:"position,omitempty"`
 }
 
-// Escalate assigns c to the longest-idle AVAILABLE engineer if one exists
-// (marking that engineer BUSY with c as their current case), or appends it
-// to the waiting queue otherwise.
+// Escalate assigns c to an engineer using this priority, or appends it to
+// the waiting queue if nobody qualifies:
+//
+//  1. The engineer c.CustomerEmail was most recently assigned to (see
+//     customer_engineer_assignments / assignCaseToEngineer), if that
+//     engineer is AVAILABLE and idle right now. A BUSY or OFFLINE sticky
+//     engineer is skipped entirely -- this is a "reconnect them if
+//     possible" preference, not a guarantee, so the customer never waits
+//     on one specific person when someone else is free.
+//  2. Otherwise, whichever AVAILABLE engineer has been assigned the fewest
+//     chats today, ties broken by who has been AVAILABLE the longest (see
+//     popAvailableEngineer).
 func (r *Router) Escalate(ctx context.Context, c CaseInfo) (EscalateResult, error) {
 	caseInfoJSON, err := json.Marshal(c)
 	if err != nil {
@@ -84,7 +93,7 @@ func (r *Router) Escalate(ctx context.Context, c CaseInfo) (EscalateResult, erro
 
 	var result EscalateResult
 	err = r.withTx(ctx, func(tx pgx.Tx) error {
-		email, ok, err := popAvailableEngineer(ctx, tx, "")
+		email, ok, err := stickyOrLeastBusyEngineer(ctx, tx, c.CustomerEmail)
 		if err != nil {
 			return err
 		}
@@ -325,10 +334,13 @@ type DeclineResult struct {
 // Decline handles an engineer dismissing a case they were just assigned
 // (before accepting it). Treats the decline like Completed for the
 // declining engineer (same pending_offline handling), then tries to hand
-// caseID to a different available engineer immediately; if none are free,
-// pushes it back onto the FRONT of the queue -- the customer already waited
-// once, so they should not end up behind newer arrivals. A no-op (zero
-// DeclineResult) if email has no row, or isn't currently holding caseID.
+// caseID to whichever other AVAILABLE engineer has handled the fewest
+// chats today (same fallback ranking Escalate uses, excluding the
+// decliner -- this does not re-check that customer's sticky engineer);
+// if none are free, pushes it back onto the FRONT of the queue -- the
+// customer already waited once, so they should not end up behind newer
+// arrivals. A no-op (zero DeclineResult) if email has no row, or isn't
+// currently holding caseID.
 func (r *Router) Decline(ctx context.Context, email, caseID string) (DeclineResult, error) {
 	var result DeclineResult
 	err := r.withTx(ctx, func(tx pgx.Tx) error {
@@ -430,6 +442,10 @@ type DebugEngineer struct {
 	Status         Status    `json:"status"`
 	PendingOffline bool      `json:"pendingOffline"`
 	CurrentCase    *CaseInfo `json:"currentCase,omitempty"`
+	// ChatsToday is 0 if the engineer hasn't been assigned a case yet today
+	// (see assignCaseToEngineer's lazy per-day reset) even if a stale
+	// nonzero count from a previous day is still sitting in the row.
+	ChatsToday int `json:"chatsToday"`
 }
 
 // DebugState is the full dump GET /route/debug/state returns.
@@ -465,7 +481,8 @@ func (r *Router) DebugState(ctx context.Context) (DebugState, error) {
 
 func (r *Router) debugEngineers(ctx context.Context) ([]DebugEngineer, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT email, status, pending_offline, current_case
+		SELECT email, status, pending_offline, current_case,
+		       CASE WHEN chats_today_date = CURRENT_DATE THEN chats_today ELSE 0 END
 		FROM engineers ORDER BY email
 	`)
 	if err != nil {
@@ -480,8 +497,9 @@ func (r *Router) debugEngineers(ctx context.Context) ([]DebugEngineer, error) {
 			status         Status
 			pendingOffline bool
 			currentCase    []byte
+			chatsToday     int
 		)
-		if err := rows.Scan(&email, &status, &pendingOffline, &currentCase); err != nil {
+		if err := rows.Scan(&email, &status, &pendingOffline, &currentCase, &chatsToday); err != nil {
 			return nil, fmt.Errorf("debug state: scan engineer: %w", err)
 		}
 		var cc *CaseInfo
@@ -494,6 +512,7 @@ func (r *Router) debugEngineers(ctx context.Context) ([]DebugEngineer, error) {
 		}
 		engineers = append(engineers, DebugEngineer{
 			Email: email, Status: status, PendingOffline: pendingOffline, CurrentCase: cc,
+			ChatsToday: chatsToday,
 		})
 	}
 	return engineers, rows.Err()
@@ -503,7 +522,9 @@ func (r *Router) debugAvailable(ctx context.Context) ([]string, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT email FROM engineers
 		WHERE status = 'AVAILABLE' AND current_case_id IS NULL
-		ORDER BY available_since ASC
+		ORDER BY
+			CASE WHEN chats_today_date = CURRENT_DATE THEN chats_today ELSE 0 END ASC,
+			available_since ASC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("debug state: query available: %w", err)
@@ -545,6 +566,72 @@ func (r *Router) debugQueue(ctx context.Context) ([]CaseInfo, error) {
 	return queue, rows.Err()
 }
 
+// stickyOrLeastBusyEngineer implements Escalate's assignment priority: try
+// customerEmail's sticky engineer first (skipped entirely if customerEmail
+// is empty, or that engineer isn't AVAILABLE and idle right now), then fall
+// back to popAvailableEngineer's least-busy-today ranking. ok=false means
+// neither found anyone -- Escalate should queue the case instead.
+func stickyOrLeastBusyEngineer(ctx context.Context, tx pgx.Tx, customerEmail string) (string, bool, error) {
+	if customerEmail != "" {
+		sticky, found, err := stickyEngineerFor(ctx, tx, customerEmail)
+		if err != nil {
+			return "", false, err
+		}
+		if found {
+			available, err := lockEngineerIfAvailable(ctx, tx, sticky)
+			if err != nil {
+				return "", false, err
+			}
+			if available {
+				return sticky, true, nil
+			}
+		}
+	}
+	return popAvailableEngineer(ctx, tx, "")
+}
+
+// stickyEngineerFor returns the engineer customerEmail was most recently
+// assigned to, if any (see assignCaseToEngineer, which records this on
+// every assignment -- sticky match, load-balanced fallback, or a Decline
+// reassignment all count).
+func stickyEngineerFor(ctx context.Context, tx pgx.Tx, customerEmail string) (string, bool, error) {
+	var email string
+	err := tx.QueryRow(ctx, `
+		SELECT engineer_email FROM customer_engineer_assignments WHERE customer_email = $1
+	`, customerEmail).Scan(&email)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("look up sticky engineer: %w", err)
+	default:
+		return email, true, nil
+	}
+}
+
+// lockEngineerIfAvailable locks email's row FOR UPDATE (if it exists) and
+// reports whether they're AVAILABLE and idle right now. BUSY, OFFLINE, and
+// "no row at all" (this service has never heard from them) all report
+// false -- per this feature's design, a sticky engineer who can't take the
+// case immediately is treated the same as no sticky engineer at all.
+func lockEngineerIfAvailable(ctx context.Context, tx pgx.Tx, email string) (bool, error) {
+	var (
+		status        Status
+		currentCaseID *string
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT status, current_case_id FROM engineers WHERE email = $1 FOR UPDATE
+	`, email).Scan(&status, &currentCaseID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("lock sticky engineer: %w", err)
+	default:
+		return status == StatusAvailable && currentCaseID == nil, nil
+	}
+}
+
 // engineerRow is the subset of an engineers row SetPresence needs, locked
 // FOR UPDATE for the rest of its transaction.
 type engineerRow struct {
@@ -571,15 +658,20 @@ func ensureAndLockEngineer(ctx context.Context, tx pgx.Tx, email string) (engine
 	return row, nil
 }
 
-// popAvailableEngineer locks and returns the longest-idle AVAILABLE, idle
-// engineer other than exclude (pass "" to exclude no one), or ok=false if
-// none are free. FOR UPDATE SKIP LOCKED lets concurrent callers each grab a
-// different engineer instead of blocking on each other.
+// popAvailableEngineer locks and returns an AVAILABLE, idle engineer other
+// than exclude (pass "" to exclude no one): whichever has been assigned the
+// fewest chats today, ties broken by who has been AVAILABLE the longest --
+// or ok=false if none are free. FOR UPDATE SKIP LOCKED lets concurrent
+// callers each grab a different engineer instead of blocking on each
+// other. Used as Escalate's (via stickyOrLeastBusyEngineer) and Decline's
+// fallback once a sticky/self match isn't usable.
 func popAvailableEngineer(ctx context.Context, tx pgx.Tx, exclude string) (email string, ok bool, err error) {
 	err = tx.QueryRow(ctx, `
 		SELECT email FROM engineers
 		WHERE status = 'AVAILABLE' AND current_case_id IS NULL AND email != $1
-		ORDER BY available_since ASC
+		ORDER BY
+			CASE WHEN chats_today_date = CURRENT_DATE THEN chats_today ELSE 0 END ASC,
+			available_since ASC
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED
 	`, exclude).Scan(&email)
@@ -593,15 +685,34 @@ func popAvailableEngineer(ctx context.Context, tx pgx.Tx, exclude string) (email
 	}
 }
 
-// assignCaseToEngineer marks email BUSY with c as their current case.
+// assignCaseToEngineer marks email BUSY with c as their current case,
+// bumps their daily chat count by one (resetting it first if the last
+// increment wasn't today -- see migrations/000003), and, when
+// c.CustomerEmail is set, records this customer as now belonging to email
+// for the next time they escalate (see stickyEngineerFor /
+// stickyOrLeastBusyEngineer).
 func assignCaseToEngineer(ctx context.Context, tx pgx.Tx, email string, c CaseInfo, caseInfoJSON []byte) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE engineers
 		SET status = 'BUSY', current_case_id = $1, current_case = $2::jsonb,
-		    available_since = NULL, updated_at = now()
+		    available_since = NULL,
+		    chats_today = CASE WHEN chats_today_date = CURRENT_DATE THEN chats_today + 1 ELSE 1 END,
+		    chats_today_date = CURRENT_DATE,
+		    updated_at = now()
 		WHERE email = $3
 	`, c.CaseID, caseInfoJSON, email); err != nil {
 		return fmt.Errorf("assign case to engineer: %w", err)
+	}
+
+	if c.CustomerEmail != "" {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO customer_engineer_assignments (customer_email, engineer_email, updated_at)
+			VALUES ($1, $2, now())
+			ON CONFLICT (customer_email) DO UPDATE
+			SET engineer_email = excluded.engineer_email, updated_at = now()
+		`, c.CustomerEmail, email); err != nil {
+			return fmt.Errorf("record sticky assignment: %w", err)
+		}
 	}
 	return nil
 }

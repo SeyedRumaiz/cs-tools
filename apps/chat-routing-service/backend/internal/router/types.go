@@ -16,18 +16,23 @@
 
 // Package router implements the engineer-availability/queue state machine
 // for the live-engineer-chat routing feature: engineers are AVAILABLE,
-// BUSY, or OFFLINE; an escalation is assigned to an available engineer
-// immediately or queued FIFO if none are free; a completed session drains
-// the queue. See Router's own doc comment for the full state machine.
+// BUSY, or OFFLINE. An escalation is assigned by priority -- first to the
+// engineer that customer was most recently assigned to, if that engineer
+// is free right now, otherwise to whichever AVAILABLE engineer has taken
+// the fewest chats today (ties broken by who's been AVAILABLE longest) --
+// or queued FIFO if nobody qualifies; a completed session drains the
+// queue. See Router.Escalate's own doc comment for the full priority order
+// and Router's for the rest of the state machine.
 //
 // Backed by PostgreSQL (see this service's migrations/ and internal/db) --
-// engineer presence and the escalation queue survive a restart and, since
-// every state transition is a transaction against a shared database rather
-// than an in-process mutex, this is also safe for multiple replicas of this
-// service to run against the same database concurrently. The one limitation
-// that predates this and remains: no timeout/reassignment if an assigned
-// engineer never accepts or goes unreachable -- that stays a prototype gap,
-// unrelated to where the state lives.
+// engineer presence, the per-customer sticky-engineer record, and the
+// escalation queue all survive a restart and, since every state transition
+// is a transaction against a shared database rather than an in-process
+// mutex, this is also safe for multiple replicas of this service to run
+// against the same database concurrently. The one limitation that predates
+// this and remains: no timeout/reassignment if an assigned engineer never
+// accepts or goes unreachable -- that stays a prototype gap, unrelated to
+// where the state lives.
 package router
 
 // Status is an engineer's current availability.
