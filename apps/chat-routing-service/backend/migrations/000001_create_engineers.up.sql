@@ -1,14 +1,22 @@
+-- This service shares its Postgres database with entity-service (same
+-- server, same database, e.g. "db") but keeps its own tables in a
+-- dedicated schema so the two services' migration histories and table
+-- namespaces never collide -- see this service's README for how the
+-- connection's search_path is set to resolve unqualified table names
+-- (engineers, escalation_queue, ...) into this schema automatically.
+CREATE SCHEMA IF NOT EXISTS chat_routing;
+
 -- Engineer live-chat routing presence: Available/Busy/Offline, plus the
 -- case they're currently handling (if any). One row per engineer email,
 -- created on first presence update (see chat-routing-service's
 -- internal/router package) -- an engineer this table has never seen a
 -- presence update from simply has no row, and the application layer
 -- defaults that to OFFLINE (see Router.GetPresence).
-CREATE TYPE engineer_status AS ENUM ('AVAILABLE', 'BUSY', 'OFFLINE');
+CREATE TYPE chat_routing.engineer_status AS ENUM ('AVAILABLE', 'BUSY', 'OFFLINE');
 
-CREATE TABLE engineers (
+CREATE TABLE chat_routing.engineers (
   email            TEXT PRIMARY KEY,
-  status           engineer_status NOT NULL DEFAULT 'OFFLINE',
+  status           chat_routing.engineer_status NOT NULL DEFAULT 'OFFLINE',
 
   -- Set when a mid-session engineer requests OFFLINE: the transition is
   -- deferred until their current session ends (see Router.Completed).
@@ -39,5 +47,5 @@ CREATE TABLE engineers (
 -- Assignment's "pick the longest-idle available engineer" query
 -- (Router.Escalate / Router.Decline's reassignment path).
 CREATE INDEX idx_engineers_available_since
-  ON engineers (available_since)
+  ON chat_routing.engineers (available_since)
   WHERE status = 'AVAILABLE' AND current_case_id IS NULL;

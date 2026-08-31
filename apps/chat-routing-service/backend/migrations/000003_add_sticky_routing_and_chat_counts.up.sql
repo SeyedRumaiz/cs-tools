@@ -5,7 +5,7 @@
 -- engineer isn't AVAILABLE right now (or there's no prior assignment)
 -- falls back to whichever AVAILABLE engineer has taken the fewest chats
 -- today -- ties still broken by available_since, exactly as before.
-ALTER TABLE engineers
+ALTER TABLE chat_routing.engineers
   ADD COLUMN chats_today       INTEGER NOT NULL DEFAULT 0,
 
   -- The calendar day chats_today was last incremented on. Compared against
@@ -23,11 +23,11 @@ ALTER TABLE engineers
 -- actually ended up talking to." Read (and, if that engineer isn't
 -- currently AVAILABLE and idle, ignored in favor of the fallback ranking)
 -- at the top of every Router.Escalate call.
-CREATE TABLE customer_engineer_assignments (
+CREATE TABLE chat_routing.customer_engineer_assignments (
   customer_email  TEXT PRIMARY KEY,
-  engineer_email  TEXT NOT NULL REFERENCES engineers (email),
+  engineer_email  TEXT NOT NULL REFERENCES chat_routing.engineers (email),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_customer_engineer_assignments_engineer
-  ON customer_engineer_assignments (engineer_email);
+  ON chat_routing.customer_engineer_assignments (engineer_email);

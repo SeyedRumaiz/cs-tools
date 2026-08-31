@@ -14,11 +14,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package config loads this service's own PostgreSQL connection settings
-// from the environment. Deliberately separate from entity-service's own
-// internal/config (which this package's field names and DSN construction
-// otherwise mirror for consistency) -- this service owns its own database,
-// per the "standalone service" design covered in this feature's plan doc.
+// Package config loads this service's PostgreSQL connection settings from
+// the environment. Field names and DSN construction otherwise mirror
+// entity-service's own internal/config for consistency, since DBConfig
+// typically points at that very same database (DB_HOST/DB_PORT/DB_NAME
+// matching entity-service's own values) -- this service's tables live in
+// their own Postgres schema (see Schema and migrations/) rather than a
+// separate database, so the two services' migration histories and table
+// namespaces never collide even though they now share one database.
 package config
 
 import (
@@ -27,8 +30,20 @@ import (
 	"os"
 )
 
-// DBConfig holds the PostgreSQL connection settings for this service's own
-// database (engineer presence + escalation queue -- see migrations/).
+// Schema is the Postgres schema this service's tables live in (see
+// migrations/, which schema-qualifies every CREATE). internal/db.NewPool
+// sets it as every new connection's search_path (via pgxpool's
+// AfterConnect, not a DSN parameter -- a bare "search_path" query
+// parameter is rejected by libpq/pgx's URI parser, and the documented
+// "options=-c ..." workaround needs char-for-char correct percent-encoding
+// that isn't worth the risk here) so every unqualified table name in
+// internal/router's queries (engineers, escalation_queue, ...) resolves
+// here automatically, without schema-qualifying each query by hand.
+const Schema = "chat_routing"
+
+// DBConfig holds the PostgreSQL connection settings this service uses --
+// ordinarily the same database entity-service connects to (see Schema
+// above for how the two stay out of each other's way there).
 type DBConfig struct {
 	Host     string
 	Port     string
@@ -75,7 +90,8 @@ func (c DBConfig) Validate() error {
 }
 
 // DSN constructs a PostgreSQL connection string from c, mirroring
-// entity-service's internal/config.Config.DSN.
+// entity-service's internal/config.Config.DSN. Does not set search_path --
+// see internal/db.NewPool for how Schema is applied instead.
 func (c DBConfig) DSN() string {
 	u := &url.URL{
 		Scheme: "postgres",

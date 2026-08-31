@@ -1,1 +1,1 @@
-DROP TABLE IF EXISTS escalation_queue;
+DROP TABLE IF EXISTS chat_routing.escalation_queue;

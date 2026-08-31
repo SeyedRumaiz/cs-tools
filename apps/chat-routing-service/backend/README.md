@@ -36,12 +36,12 @@ flowchart TB
         F["internal/router.Router<br/>Escalate · SetPresence · Completed · Decline · GetPresence"]
     end
 
-    subgraph PG["Persistence"]
-        G[("chat_routing DB<br/>engineers · customer_engineer_assignments<br/>escalation_queue")]
+    subgraph PG["Persistence — one Postgres database, two schemas"]
+        G[("schema chat_routing<br/>engineers · customer_engineer_assignments<br/>escalation_queue")]
+        I[("schema public<br/>cases table")]
     end
 
     H["entity-service :8081<br/>case / conversation CRUD — unrelated, unchanged"]
-    I[("entity-service's own DB<br/>cases table")]
 
     A -->|"1 · click escalate icon"| C
     C -->|"2 · relay, internal token"| D
@@ -135,8 +135,8 @@ queue — the customer already waited once.
 
 ## Data model
 
-Three tables, in their own database (`chat_routing`), separate from
-`entity-service`'s database and its flat `cases` table:
+Three tables, in their own schema, separate from `entity-service`'s flat
+`cases` table:
 
 | Table | Holds | Ordering / lookup |
 |---|---|---|
@@ -151,6 +151,18 @@ never queries *into* that blob by any field other than `caseId`, and it
 means `csm-portal/backend` can add a field without a migration here.
 `customer_engineer_assignments.customer_email` is a real column precisely
 because it *is* queried on — sticky routing depends on it.
+
+**These three tables live in their own `chat_routing` Postgres schema,
+inside the *same database* `entity-service` uses** (not a separate
+database) — see `internal/config.Schema` and every migration file, which
+schema-qualifies its `CREATE`s. `internal/db.NewPool` sets each new
+connection's `search_path` to `chat_routing` via pgxpool's `AfterConnect`
+hook, so every query in `internal/router` can still use plain unqualified
+table names (`engineers`, not `chat_routing.engineers`) — the schema
+resolution happens once per connection, not once per query. A bare
+`search_path` DSN query parameter doesn't work for this (libpq/pgx's URI
+parser rejects it outright), which is why it's done this way instead of in
+the connection string.
 
 See `migrations/000001_create_engineers.up.sql`,
 `migrations/000002_create_escalation_queue.up.sql`, and
@@ -187,8 +199,8 @@ Loaded from the environment (a `.env` file is read first if present — see
 |---|---|
 | `ROUTING_SERVICE_PORT` | bare port number, default `9096` |
 | `ROUTING_SERVICE_TOKEN` | shared secret; must match `csm-portal/backend`'s value |
-| `DB_HOST`, `DB_PORT` | this service's own Postgres server, default `localhost:5432` |
-| `DB_USER`, `DB_PASSWORD`, `DB_NAME` | credentials and database name — use a **dedicated** database (e.g. `chat_routing`), even if it's the same Postgres server `entity-service` already uses |
+| `DB_HOST`, `DB_PORT`, `DB_NAME` | **point these at the same database `entity-service` uses** — this service's tables live in their own Postgres schema (see [Data model](#data-model)), not a separate database, so there's nothing dedicated to stand up here |
+| `DB_USER`, `DB_PASSWORD` | credentials for that database — reusing `entity-service`'s own user is fine for local dev; a narrower-scoped role needs the grants noted in [Running locally](#running-locally) |
 | `DB_SSLMODE` | default `disable` (local dev) |
 
 Note: "today" for the daily chat count is `CURRENT_DATE` as the database
@@ -197,20 +209,32 @@ that server's local midnight, not the customer's or engineer's.
 
 ## Running locally
 
-```bash
-# one-time: create this service's own database
-psql -U <db-user> -h localhost -c "CREATE DATABASE chat_routing;"
+No `CREATE DATABASE` step — this service reuses `entity-service`'s
+database, which already exists if you've set that service up. Two things
+to get right when applying migrations here for the first time:
 
-# apply migrations (golang-migrate CLI)
+```bash
+# 1. If DB_USER isn't already an owner/superuser on that database, grant it
+#    just enough to create and use the chat_routing schema (CREATE SCHEMA
+#    itself only needs CREATE privilege on the database, which a plain
+#    CREATEDB-less role won't have by default):
+psql -U <admin-user> -h localhost -d <entity-service-db-name> -c \
+  "GRANT CREATE ON DATABASE <entity-service-db-name> TO <db-user>;"
+
+# 2. Apply migrations with a DISTINCT migrations-tracking table name --
+#    golang-migrate's default "schema_migrations" table would otherwise
+#    collide with entity-service's own migration history in the same
+#    database (both start numbering from 000001):
 migrate -path migrations \
-  -database "postgres://<db-user>:<db-password>@localhost:5432/chat_routing?sslmode=disable" up
+  -database "postgres://<db-user>:<db-password>@localhost:5432/<entity-service-db-name>?sslmode=disable&x-migrations-table=chat_routing_schema_migrations" \
+  up
 
 # run
 go run ./cmd/server
 ```
 
-`GET /route/debug/state` on a fresh database should show empty `engineers`,
-`available`, and `queue`.
+`GET /route/debug/state` on a freshly migrated database should show empty
+`engineers`, `available`, and `queue`.
 
 ## Resilience & known limitations
 
@@ -223,6 +247,14 @@ go run ./cmd/server
 - **No timeout or reassignment** if an assigned engineer never accepts the
   session or goes unreachable — a prototype gap that predates and is
   unrelated to persistence.
+- **One database, not two.** This service originally had its own separate
+  `chat_routing` database on the same Postgres server as `entity-service`.
+  It now shares `entity-service`'s actual database instead, isolated at the
+  schema level (`chat_routing` vs `public`) rather than the database level
+  — one less database to create, back up, and reason about, at the cost of
+  the two services' data no longer failing independently of each other
+  (a `entity-service`-database incident, e.g. a bad migration or a restore,
+  now affects this service's state too).
 - **Sticky routing is a preference, not a lock.** If a customer's last
   engineer left the company or their email changes, the stale sticky row
   simply never matches `AVAILABLE` and every future escalation from that

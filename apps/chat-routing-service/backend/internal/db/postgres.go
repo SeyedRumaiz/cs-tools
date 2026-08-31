@@ -14,8 +14,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package db manages the PostgreSQL connection pool for the chat routing
-// service's own database (engineer presence + escalation queue).
+// Package db manages the PostgreSQL connection pool this service uses for
+// engineer presence, sticky routing, and the escalation queue -- ordinarily
+// the same physical database entity-service connects to, kept separate at
+// the schema level instead (see internal/config.Schema and migrations/).
 package db
 
 import (
@@ -23,7 +25,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/backend/internal/config"
 )
 
 const (
@@ -36,7 +41,13 @@ const (
 // NewPool creates a pgxpool connection pool for the given DSN, pings the
 // database to confirm connectivity, and returns the pool ready for use.
 // The caller is responsible for calling pool.Close on shutdown. Mirrors
-// entity-service's internal/db.NewPool, with smaller pool bounds.
+// entity-service's internal/db.NewPool, with smaller pool bounds and one
+// addition: every new physical connection has its search_path set to
+// config.Schema (AfterConnect runs once per new connection, not once per
+// pool.Acquire, so this is cheap) -- verified directly against a real
+// Postgres 16 instance while building this, since a bare "search_path"
+// DSN query parameter is rejected outright by libpq/pgx's URI parser and
+// isn't a safe alternative.
 func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -47,6 +58,10 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	cfg.MinConns = poolMinConns
 	cfg.MaxConnLifetime = poolMaxConnLifetime
 	cfg.MaxConnIdleTime = poolMaxConnIdleTime
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SET search_path TO "+pgx.Identifier{config.Schema}.Sanitize())
+		return err
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
