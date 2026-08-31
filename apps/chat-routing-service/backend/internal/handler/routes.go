@@ -22,6 +22,7 @@ package handler
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/backend/internal/router"
@@ -49,6 +50,15 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"message": msg})
+}
+
+// writeStorageError logs the underlying Postgres/pool error (never sent to
+// the caller) and responds 502 — the routing service's own state store is
+// unavailable, matching how csm-portal/backend already treats a routing
+// service failure (see internal/handler/chat.go's HandleSetPresence).
+func writeStorageError(w http.ResponseWriter, route string, err error) {
+	slog.Error("routing store error", "route", route, "err", err)
+	writeError(w, http.StatusBadGateway, "Routing state store is unavailable.")
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -92,7 +102,7 @@ func (h *RoutingHandler) Escalate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := h.router.Escalate(router.CaseInfo{
+	result, err := h.router.Escalate(r.Context(), router.CaseInfo{
 		CaseID:         req.CaseID,
 		ConversationID: req.ConversationID,
 		ProjectID:      req.ProjectID,
@@ -101,6 +111,10 @@ func (h *RoutingHandler) Escalate(w http.ResponseWriter, r *http.Request) {
 		CustomerName:   req.CustomerName,
 		Message:        req.Message,
 	})
+	if err != nil {
+		writeStorageError(w, "escalate", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -121,7 +135,11 @@ func (h *RoutingHandler) SetPresence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := h.router.SetPresence(req.Email, router.Status(req.Status))
+	result, err := h.router.SetPresence(r.Context(), req.Email, router.Status(req.Status))
+	if err != nil {
+		writeStorageError(w, "presence", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -141,7 +159,11 @@ func (h *RoutingHandler) Completed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := h.router.Completed(req.Email)
+	result, err := h.router.Completed(r.Context(), req.Email)
+	if err != nil {
+		writeStorageError(w, "completed", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -162,7 +184,11 @@ func (h *RoutingHandler) Decline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := h.router.Decline(req.Email, req.CaseID)
+	result, err := h.router.Decline(r.Context(), req.Email, req.CaseID)
+	if err != nil {
+		writeStorageError(w, "decline", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -173,11 +199,21 @@ func (h *RoutingHandler) GetPresence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "email is required.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]router.Status{"status": h.router.GetPresence(email)})
+	status, err := h.router.GetPresence(r.Context(), email)
+	if err != nil {
+		writeStorageError(w, "presence:get", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]router.Status{"status": status})
 }
 
 // DebugState handles GET /route/debug/state — see router.DebugState's own
 // doc comment on why this exists.
 func (h *RoutingHandler) DebugState(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.router.DebugState())
+	state, err := h.router.DebugState(r.Context())
+	if err != nil {
+		writeStorageError(w, "debug/state", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
 }

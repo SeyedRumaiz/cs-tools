@@ -14,17 +14,20 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package router implements the in-memory engineer-availability/queue state
-// machine for the live-engineer-chat routing prototype: engineers are
-// AVAILABLE, BUSY, or OFFLINE; an escalation is assigned to an available
-// engineer immediately or queued FIFO if none are free; a completed session
-// drains the queue. See Router's own doc comment for the full state machine.
+// Package router implements the engineer-availability/queue state machine
+// for the live-engineer-chat routing feature: engineers are AVAILABLE,
+// BUSY, or OFFLINE; an escalation is assigned to an available engineer
+// immediately or queued FIFO if none are free; a completed session drains
+// the queue. See Router's own doc comment for the full state machine.
 //
-// Deliberately in-memory only and single-process — this is a prototype, not
-// a durable service. State is lost on restart, and there is no multi-replica
-// coordination (matching the same accepted limitation customer-portal/
-// backend-v2's per-conversation WebSocket registry already documents for
-// this feature).
+// Backed by PostgreSQL (see this service's migrations/ and internal/db) --
+// engineer presence and the escalation queue survive a restart and, since
+// every state transition is a transaction against a shared database rather
+// than an in-process mutex, this is also safe for multiple replicas of this
+// service to run against the same database concurrently. The one limitation
+// that predates this and remains: no timeout/reassignment if an assigned
+// engineer never accepts or goes unreachable -- that stays a prototype gap,
+// unrelated to where the state lives.
 package router
 
 // Status is an engineer's current availability.
@@ -38,9 +41,13 @@ const (
 
 // CaseInfo is everything csm-portal/backend needs to reconstruct the
 // customer_escalation chatEvent it publishes to whichever engineer this
-// case ends up assigned to (see that backend's internal/handler/chat.go) —
+// case ends up assigned to (see that backend's internal/handler/chat.go) --
 // carried through Escalate/queueing/Decline verbatim, this service never
-// interprets these fields itself.
+// interprets these fields itself. Persisted as a JSONB blob (see
+// migrations/000001_create_engineers.up.sql and
+// 000002_create_escalation_queue.up.sql) rather than normalized columns --
+// this service never queries by any field other than CaseID, and a blob
+// keeps it a one-file change if csm-portal/backend ever adds a field.
 type CaseInfo struct {
 	CaseID         string `json:"caseId"`
 	ConversationID string `json:"conversationId"`

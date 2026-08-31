@@ -195,20 +195,6 @@ export default function ChatMessageBubble({
     ((message.isError && isUsageLimitError) ||
       (!message.isError && isTokenLimitNotice));
 
-  /**
-   * "Talk to a live engineer" appears under a completed Novera reply — never
-   * on a human engineer's own message, an error, or a still-streaming/
-   * thinking one. feedbackMessageId is used the same way showFeedbackRow
-   * uses it below: as the signal that this is a stable, finished answer
-   * rather than an in-progress one.
-   */
-  const showEscalateCta =
-    !!onRequestEngineerEscalation &&
-    !isHumanMessage &&
-    !message.isError &&
-    !message.isStreaming &&
-    !!message.feedbackMessageId;
-
   /** Until the final assistant message, hide thumbs and timestamp only (header stays). */
   const hideFeedbackRow =
     !message.isError &&
@@ -218,6 +204,24 @@ export default function ChatMessageBubble({
 
   /** Faded frame wraps analyzing, live thinking steps, and streamed tokens. */
   const showThinkingStreamFrame = hideFeedbackRow;
+
+  /**
+   * "Talk to a live engineer" appears under every settled Novera message —
+   * the canned greeting, a normal answer, and an error bubble alike — so a
+   * customer always has a way to reach a human, including exactly the
+   * moment Novera can't help. Hidden only while a reply is still being
+   * produced (hideFeedbackRow's streaming/thinking/analyzing-placeholder
+   * check, which leaves errors alone the same way showFeedbackRow does) and
+   * on a human engineer's own message, since that conversation is already
+   * escalated. Unlike showFeedbackRow, this does NOT require
+   * feedbackMessageId — feedback rates a specific AI answer, but escalation
+   * is available even when there was never a completed answer to rate.
+   */
+  const showEscalateCta =
+    !!onRequestEngineerEscalation &&
+    message.sender === ChatSender.BOT &&
+    !isHumanMessage &&
+    !hideFeedbackRow;
 
   /**
    * Show 👍/👎 on a completed assistant answer that carries a stable

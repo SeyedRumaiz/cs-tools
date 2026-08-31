@@ -21,30 +21,65 @@
 // capacity, FIFO waiting queue) and csm-portal/backend's
 // internal/routingclient for the caller side.
 //
-// In-memory only, single-process — an accepted prototype limitation, not an
-// oversight (see internal/router's package doc comment).
+// State (engineer presence + escalation queue) is persisted in this
+// service's own PostgreSQL database — see migrations/ and internal/db —
+// so, unlike the original in-memory prototype, restarting this process no
+// longer loses in-flight routing state, and a future multi-replica
+// deployment would share state correctly. Still single-process only for
+// now: no leader election or cross-replica coordination beyond what
+// Postgres's own row locking already gives each request.
 package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
+	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/backend/internal/config"
+	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/backend/internal/db"
 	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/backend/internal/handler"
 	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/backend/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/backend/internal/router"
 )
+
+// dbConnectTimeout bounds how long startup waits for the initial pool
+// connection + ping before giving up — a hung/unreachable database should
+// fail fast at startup, not hang the process indefinitely.
+const dbConnectTimeout = 10 * time.Second
+
+// shutdownTimeout bounds graceful shutdown, mirroring entity-service's
+// cmd/api/main.go.
+const shutdownTimeout = 10 * time.Second
 
 func main() {
 	loadDotEnv(".env")
 
 	token := mustEnv("ROUTING_SERVICE_TOKEN")
 
-	r := router.NewRouter()
+	dbCfg := config.LoadDB()
+	if err := dbCfg.Validate(); err != nil {
+		slog.Error("invalid database configuration", "err", err)
+		os.Exit(1)
+	}
+
+	connectCtx, connectCancel := context.WithTimeout(context.Background(), dbConnectTimeout)
+	pool, err := db.NewPool(connectCtx, dbCfg.DSN())
+	connectCancel()
+	if err != nil {
+		slog.Error("connect to database", "err", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	r := router.NewRouter(pool)
 	h := handler.NewRoutingHandler(r)
 
 	mux := http.NewServeMux()
@@ -70,11 +105,28 @@ func main() {
 	))
 
 	addr := ":" + mustPort("ROUTING_SERVICE_PORT", "9096")
-	slog.Info("Chat Routing Service started", "addr", addr)
-	if err := http.ListenAndServe(addr, topMux); err != nil { // #nosec G114 -- local prototype service, no external exposure
-		slog.Error("server exited", "err", err)
+	srv := &http.Server{Addr: addr, Handler: topMux}
+
+	go func() {
+		slog.Info("Chat Routing Service started", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) { // #nosec G114 -- local prototype service, no external exposure
+			slog.Error("server error", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("graceful shutdown failed", "err", err)
 		os.Exit(1)
 	}
+	slog.Info("server stopped")
 }
 
 func mustEnv(key string) string {

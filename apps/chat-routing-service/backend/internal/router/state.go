@@ -16,68 +16,51 @@
 
 package router
 
-import "sync"
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 
-// engineerState is one engineer's live availability record.
-//
-//   - CurrentCase != nil means the engineer is mid-session — capacity is a
-//     single dedicated session per engineer, so no engineer can ever have
-//     more than one.
-//   - PendingOffline is only ever meaningful while CurrentCase != nil: it
-//     records that the engineer asked to go OFFLINE while busy, deferring
-//     the actual transition to when Completed(email) is called (see its
-//     doc comment) rather than changing Status immediately.
-type engineerState struct {
-	Email          string
-	Status         Status
-	PendingOffline bool
-	CurrentCase    *CaseInfo
-}
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
 
-// Router is the engineer-availability/queue state machine. Safe for
-// concurrent use — every exported method takes the same mutex for its
-// entire duration, matching the "small critical section, no held locks
-// across I/O" shape of stream.BroadcastHub in csm-portal/backend (this
-// service never does I/O inside the lock).
+// Router is the engineer-availability/queue state machine, backed by this
+// service's own PostgreSQL database (see migrations/). Every exported
+// method runs as a single transaction, matching the "one state transition,
+// one atomic unit" shape the original in-memory prototype's single mutex
+// gave for free -- see each method's own doc comment for what it does
+// inside that transaction.
 type Router struct {
-	mu        sync.Mutex
-	engineers map[string]*engineerState
-	// available is a FIFO of emails currently AVAILABLE with CurrentCase
-	// == nil: assignment pops the head, becoming available appends to the
-	// tail. This is round-robin by construction — least-recently-available
-	// goes first — without needing a separate index/pointer that would
-	// have to be kept in sync as engineers join and leave dynamically.
-	available []string
-	// queue is a FIFO of not-yet-assigned escalations, oldest first.
-	// Decline pushes back onto the FRONT (see Decline) since that customer
-	// already waited once.
-	queue []CaseInfo
+	db *pgxpool.Pool
 }
 
-// NewRouter constructs an empty Router — no engineers, no queue.
-func NewRouter() *Router {
-	return &Router{engineers: make(map[string]*engineerState)}
+// NewRouter constructs a Router backed by db. Does not itself run
+// migrations -- see migrations/ and this service's README for how to apply
+// them; db.Ping has already been called by internal/db.NewPool by the time
+// this is constructed (see cmd/server/main.go).
+func NewRouter(db *pgxpool.Pool) *Router {
+	return &Router{db: db}
 }
 
-func (r *Router) getOrCreate(email string) *engineerState {
-	e, ok := r.engineers[email]
-	if !ok {
-		e = &engineerState{Email: email, Status: StatusOffline}
-		r.engineers[email] = e
+// withTx runs fn inside a transaction, committing on success and rolling
+// back (a no-op if fn already committed nothing) on any error, including a
+// panic recovered elsewhere up the stack.
+func (r *Router) withTx(ctx context.Context, fn func(pgx.Tx) error) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("router: begin transaction: %w", err)
 	}
-	return e
-}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 
-// removeFromAvailable is idempotent — a no-op if email isn't present.
-// Called before every append to r.available so an engineer can never appear
-// in it twice (e.g. a duplicate "AVAILABLE" presence call in a row).
-func (r *Router) removeFromAvailable(email string) {
-	for i, e := range r.available {
-		if e == email {
-			r.available = append(r.available[:i], r.available[i+1:]...)
-			return
-		}
+	if err := fn(tx); err != nil {
+		return err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("router: commit transaction: %w", err)
+	}
+	return nil
 }
 
 // EscalateResult is Escalate's outcome: exactly one of EngineerEmail (set)
@@ -90,31 +73,46 @@ type EscalateResult struct {
 	Position int `json:"position,omitempty"`
 }
 
-// Escalate assigns c to the head of the available-engineer FIFO if one
-// exists (marking that engineer BUSY with c as their CurrentCase), or
-// appends it to the waiting queue otherwise.
-func (r *Router) Escalate(c CaseInfo) EscalateResult {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if len(r.available) > 0 {
-		email := r.available[0]
-		r.available = r.available[1:]
-		e := r.engineers[email]
-		e.Status = StatusBusy
-		caseCopy := c
-		e.CurrentCase = &caseCopy
-		return EscalateResult{EngineerEmail: email}
+// Escalate assigns c to the longest-idle AVAILABLE engineer if one exists
+// (marking that engineer BUSY with c as their current case), or appends it
+// to the waiting queue otherwise.
+func (r *Router) Escalate(ctx context.Context, c CaseInfo) (EscalateResult, error) {
+	caseInfoJSON, err := json.Marshal(c)
+	if err != nil {
+		return EscalateResult{}, fmt.Errorf("router: marshal case info: %w", err)
 	}
 
-	r.queue = append(r.queue, c)
-	return EscalateResult{Queued: true, Position: len(r.queue)}
+	var result EscalateResult
+	err = r.withTx(ctx, func(tx pgx.Tx) error {
+		email, ok, err := popAvailableEngineer(ctx, tx, "")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			position, err := enqueueCase(ctx, tx, c, caseInfoJSON, false)
+			if err != nil {
+				return err
+			}
+			result = EscalateResult{Queued: true, Position: position}
+			return nil
+		}
+
+		if err := assignCaseToEngineer(ctx, tx, email, c, caseInfoJSON); err != nil {
+			return err
+		}
+		result = EscalateResult{EngineerEmail: email}
+		return nil
+	})
+	if err != nil {
+		return EscalateResult{}, err
+	}
+	return result, nil
 }
 
 // PresenceResult is SetPresence's outcome.
 type PresenceResult struct {
 	Applied bool `json:"applied"`
-	// PendingOffline echoes the engineer's resulting PendingOffline flag —
+	// PendingOffline echoes the engineer's resulting PendingOffline flag --
 	// meaningful only when they were mid-session at the time of the call.
 	PendingOffline bool `json:"pendingOffline,omitempty"`
 	// AssignedCase is set when this presence change immediately drained the
@@ -123,109 +121,191 @@ type PresenceResult struct {
 	AssignedCase *CaseInfo `json:"assignedCase,omitempty"`
 }
 
-// SetPresence applies an engineer's requested status change.
+// SetPresence applies an engineer's requested status change, creating their
+// row (defaulting to OFFLINE) on first contact if this is the first time
+// this service has heard from them.
 //
-// Mid-session (CurrentCase != nil): capacity is a single dedicated session,
-// so the session itself is never affected here. The only thing a request
-// can change is PendingOffline — requesting OFFLINE sets it (the engineer
-// will be removed once Completed(email) is called instead of rejoining the
-// pool); requesting AVAILABLE or BUSY clears it (the engineer changed their
-// mind about leaving).
+// Mid-session (current_case_id IS NOT NULL): capacity is a single dedicated
+// session, so the session itself is never affected here. The only thing a
+// request can change is pending_offline -- requesting OFFLINE sets it (the
+// engineer will be removed once Completed(email) is called instead of
+// rejoining the pool); requesting AVAILABLE or BUSY clears it (the engineer
+// changed their mind about leaving).
 //
-// Idle (CurrentCase == nil): AVAILABLE joins the tail of the available FIFO
-// and, if the queue is non-empty, immediately pops and assigns the head
-// (the engineer goes straight to BUSY with that case, still counted as
-// "applied" rather than a separate step the caller has to notice). BUSY is
-// a manual "do not disturb" — leaves/stays out of the available pool with
-// no case. OFFLINE also leaves/stays out of the pool.
-func (r *Router) SetPresence(email string, want Status) PresenceResult {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	e := r.getOrCreate(email)
-
-	if e.CurrentCase != nil {
-		e.PendingOffline = want == StatusOffline
-		return PresenceResult{Applied: true, PendingOffline: e.PendingOffline}
-	}
-
-	switch want {
-	case StatusAvailable:
-		e.Status = StatusAvailable
-		e.PendingOffline = false
-		r.removeFromAvailable(email)
-		if len(r.queue) > 0 {
-			next := r.queue[0]
-			r.queue = r.queue[1:]
-			e.Status = StatusBusy
-			nextCopy := next
-			e.CurrentCase = &nextCopy
-			return PresenceResult{Applied: true, AssignedCase: &nextCopy}
+// Idle: AVAILABLE joins the pool (available_since = now()) and, if the
+// queue is non-empty, immediately pops and assigns the head (the engineer
+// goes straight to BUSY with that case, still counted as "applied" rather
+// than a separate step the caller has to notice). BUSY is a manual "do not
+// disturb" -- leaves/stays out of the pool with no case. OFFLINE also
+// leaves/stays out of the pool.
+func (r *Router) SetPresence(ctx context.Context, email string, want Status) (PresenceResult, error) {
+	var result PresenceResult
+	err := r.withTx(ctx, func(tx pgx.Tx) error {
+		row, err := ensureAndLockEngineer(ctx, tx, email)
+		if err != nil {
+			return err
 		}
-		r.available = append(r.available, email)
-		return PresenceResult{Applied: true}
-	case StatusBusy:
-		e.Status = StatusBusy
-		e.PendingOffline = false
-		r.removeFromAvailable(email)
-		return PresenceResult{Applied: true}
-	case StatusOffline:
-		e.Status = StatusOffline
-		e.PendingOffline = false
-		r.removeFromAvailable(email)
-		return PresenceResult{Applied: true}
-	default:
-		return PresenceResult{Applied: false}
+
+		if row.CurrentCaseID != nil {
+			pendingOffline := want == StatusOffline
+			if _, err := tx.Exec(ctx, `
+				UPDATE engineers SET pending_offline = $1, updated_at = now()
+				WHERE email = $2
+			`, pendingOffline, email); err != nil {
+				return fmt.Errorf("update pending_offline: %w", err)
+			}
+			result = PresenceResult{Applied: true, PendingOffline: pendingOffline}
+			return nil
+		}
+
+		switch want {
+		case StatusAvailable:
+			if _, err := tx.Exec(ctx, `
+				UPDATE engineers
+				SET status = 'AVAILABLE', pending_offline = false,
+				    available_since = now(), updated_at = now()
+				WHERE email = $1
+			`, email); err != nil {
+				return fmt.Errorf("set available: %w", err)
+			}
+
+			c, ok, err := popQueueHead(ctx, tx)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				result = PresenceResult{Applied: true}
+				return nil
+			}
+
+			caseInfoJSON, err := json.Marshal(c)
+			if err != nil {
+				return fmt.Errorf("marshal queued case: %w", err)
+			}
+			if err := assignCaseToEngineer(ctx, tx, email, c, caseInfoJSON); err != nil {
+				return err
+			}
+			assigned := c
+			result = PresenceResult{Applied: true, AssignedCase: &assigned}
+			return nil
+
+		case StatusBusy:
+			if _, err := tx.Exec(ctx, `
+				UPDATE engineers
+				SET status = 'BUSY', pending_offline = false,
+				    available_since = NULL, updated_at = now()
+				WHERE email = $1
+			`, email); err != nil {
+				return fmt.Errorf("set busy: %w", err)
+			}
+			result = PresenceResult{Applied: true}
+			return nil
+
+		case StatusOffline:
+			if _, err := tx.Exec(ctx, `
+				UPDATE engineers
+				SET status = 'OFFLINE', pending_offline = false,
+				    available_since = NULL, updated_at = now()
+				WHERE email = $1
+			`, email); err != nil {
+				return fmt.Errorf("set offline: %w", err)
+			}
+			result = PresenceResult{Applied: true}
+			return nil
+
+		default:
+			result = PresenceResult{Applied: false}
+			return nil
+		}
+	})
+	if err != nil {
+		return PresenceResult{}, err
 	}
+	return result, nil
 }
 
 // CompletedResult is Completed's outcome.
 type CompletedResult struct {
 	// Removed is true when the engineer had requested OFFLINE while
-	// mid-session (PendingOffline) — they are now fully OFFLINE and did
+	// mid-session (pending_offline) -- they are now fully OFFLINE and did
 	// NOT rejoin the available pool or receive a queued case. This is the
 	// "removed after the current session completes" requirement.
 	Removed bool `json:"removed,omitempty"`
 	// Rejoined is true when the engineer went back to AVAILABLE (the
-	// non-Removed path) — possibly immediately BUSY again if AssignedCase
+	// non-Removed path) -- possibly immediately BUSY again if AssignedCase
 	// is also set.
 	Rejoined     bool      `json:"rejoined,omitempty"`
 	AssignedCase *CaseInfo `json:"assignedCase,omitempty"`
 }
 
-// Completed clears the engineer's CurrentCase (the session they just ended)
-// and either removes them entirely (if they'd asked to go OFFLINE while
-// busy) or returns them to AVAILABLE — immediately assigning the next
-// queued case to them, if any, exactly like SetPresence's own
-// queue-drain-on-AVAILABLE behavior.
-func (r *Router) Completed(email string) CompletedResult {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// Completed clears the engineer's current case (the session they just
+// ended) and either removes them entirely (if they'd asked to go OFFLINE
+// while busy) or returns them to AVAILABLE -- immediately assigning the
+// next queued case to them, if any, exactly like SetPresence's own
+// queue-drain-on-AVAILABLE behavior. A no-op (zero CompletedResult) if
+// email has no row at all.
+func (r *Router) Completed(ctx context.Context, email string) (CompletedResult, error) {
+	var result CompletedResult
+	err := r.withTx(ctx, func(tx pgx.Tx) error {
+		var pendingOffline bool
+		err := tx.QueryRow(ctx, `
+			SELECT pending_offline FROM engineers WHERE email = $1 FOR UPDATE
+		`, email).Scan(&pendingOffline)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			result = CompletedResult{}
+			return nil
+		case err != nil:
+			return fmt.Errorf("lock engineer: %w", err)
+		}
 
-	e, ok := r.engineers[email]
-	if !ok {
-		return CompletedResult{}
-	}
-	e.CurrentCase = nil
+		if pendingOffline {
+			if _, err := tx.Exec(ctx, `
+				UPDATE engineers
+				SET status = 'OFFLINE', pending_offline = false,
+				    current_case_id = NULL, current_case = NULL,
+				    available_since = NULL, updated_at = now()
+				WHERE email = $1
+			`, email); err != nil {
+				return fmt.Errorf("clear session (removed): %w", err)
+			}
+			result = CompletedResult{Removed: true}
+			return nil
+		}
 
-	if e.PendingOffline {
-		e.Status = StatusOffline
-		e.PendingOffline = false
-		return CompletedResult{Removed: true}
-	}
+		if _, err := tx.Exec(ctx, `
+			UPDATE engineers
+			SET status = 'AVAILABLE', current_case_id = NULL, current_case = NULL,
+			    available_since = now(), updated_at = now()
+			WHERE email = $1
+		`, email); err != nil {
+			return fmt.Errorf("clear session (rejoin): %w", err)
+		}
 
-	e.Status = StatusAvailable
-	r.removeFromAvailable(email) // defensive; should not already be present
-	if len(r.queue) > 0 {
-		next := r.queue[0]
-		r.queue = r.queue[1:]
-		e.Status = StatusBusy
-		nextCopy := next
-		e.CurrentCase = &nextCopy
-		return CompletedResult{Rejoined: true, AssignedCase: &nextCopy}
+		c, ok, err := popQueueHead(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			result = CompletedResult{Rejoined: true}
+			return nil
+		}
+
+		caseInfoJSON, err := json.Marshal(c)
+		if err != nil {
+			return fmt.Errorf("marshal queued case: %w", err)
+		}
+		if err := assignCaseToEngineer(ctx, tx, email, c, caseInfoJSON); err != nil {
+			return err
+		}
+		assigned := c
+		result = CompletedResult{Rejoined: true, AssignedCase: &assigned}
+		return nil
+	})
+	if err != nil {
+		return CompletedResult{}, err
 	}
-	r.available = append(r.available, email)
-	return CompletedResult{Rejoined: true}
+	return result, nil
 }
 
 // DeclineResult is Decline's outcome: exactly one of ReassignedTo (set,
@@ -243,62 +323,105 @@ type DeclineResult struct {
 }
 
 // Decline handles an engineer dismissing a case they were just assigned
-// (before accepting it). Necessary because escalations are now routed to
-// exactly one engineer rather than broadcast to all of them (see this
-// service's package doc comment and csm-portal/backend's chat.go) — an
-// unhandled dismiss would otherwise strand the customer with nobody ever
-// seeing their request again.
-//
-// Treats the decline like Completed for the declining engineer (same
-// PendingOffline handling), then tries to hand caseID to a different
-// available engineer immediately; if none are free, pushes it back onto the
-// FRONT of the queue — the customer already waited once, so they should not
-// end up behind newer arrivals.
-func (r *Router) Decline(email, caseID string) DeclineResult {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	e, ok := r.engineers[email]
-	if !ok || e.CurrentCase == nil || e.CurrentCase.CaseID != caseID {
-		return DeclineResult{}
-	}
-	declined := *e.CurrentCase
-	e.CurrentCase = nil
-
-	if e.PendingOffline {
-		e.Status = StatusOffline
-		e.PendingOffline = false
-	} else {
-		e.Status = StatusAvailable
-		r.removeFromAvailable(email)
-		r.available = append(r.available, email)
-	}
-
-	for i, candidate := range r.available {
-		if candidate == email {
-			continue
+// (before accepting it). Treats the decline like Completed for the
+// declining engineer (same pending_offline handling), then tries to hand
+// caseID to a different available engineer immediately; if none are free,
+// pushes it back onto the FRONT of the queue -- the customer already waited
+// once, so they should not end up behind newer arrivals. A no-op (zero
+// DeclineResult) if email has no row, or isn't currently holding caseID.
+func (r *Router) Decline(ctx context.Context, email, caseID string) (DeclineResult, error) {
+	var result DeclineResult
+	err := r.withTx(ctx, func(tx pgx.Tx) error {
+		var (
+			currentCaseID  *string
+			currentCase    []byte
+			pendingOffline bool
+		)
+		err := tx.QueryRow(ctx, `
+			SELECT current_case_id, current_case, pending_offline
+			FROM engineers WHERE email = $1 FOR UPDATE
+		`, email).Scan(&currentCaseID, &currentCase, &pendingOffline)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			result = DeclineResult{}
+			return nil
+		case err != nil:
+			return fmt.Errorf("lock engineer: %w", err)
 		}
-		r.available = append(r.available[:i], r.available[i+1:]...)
-		ce := r.engineers[candidate]
-		ce.Status = StatusBusy
-		declinedCopy := declined
-		ce.CurrentCase = &declinedCopy
-		return DeclineResult{ReassignedTo: candidate, AssignedCase: &declinedCopy}
-	}
+		if currentCaseID == nil || *currentCaseID != caseID {
+			result = DeclineResult{}
+			return nil
+		}
 
-	r.queue = append([]CaseInfo{declined}, r.queue...)
-	return DeclineResult{Requeued: true}
+		var declined CaseInfo
+		if err := json.Unmarshal(currentCase, &declined); err != nil {
+			return fmt.Errorf("decode current case: %w", err)
+		}
+
+		if pendingOffline {
+			if _, err := tx.Exec(ctx, `
+				UPDATE engineers
+				SET status = 'OFFLINE', pending_offline = false,
+				    current_case_id = NULL, current_case = NULL,
+				    available_since = NULL, updated_at = now()
+				WHERE email = $1
+			`, email); err != nil {
+				return fmt.Errorf("clear declined session (offline): %w", err)
+			}
+		} else {
+			if _, err := tx.Exec(ctx, `
+				UPDATE engineers
+				SET status = 'AVAILABLE', current_case_id = NULL, current_case = NULL,
+				    available_since = now(), updated_at = now()
+				WHERE email = $1
+			`, email); err != nil {
+				return fmt.Errorf("clear declined session (available): %w", err)
+			}
+		}
+
+		declinedJSON, err := json.Marshal(declined)
+		if err != nil {
+			return fmt.Errorf("marshal declined case: %w", err)
+		}
+
+		candidate, ok, err := popAvailableEngineer(ctx, tx, email)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if err := assignCaseToEngineer(ctx, tx, candidate, declined, declinedJSON); err != nil {
+				return err
+			}
+			assigned := declined
+			result = DeclineResult{ReassignedTo: candidate, AssignedCase: &assigned}
+			return nil
+		}
+
+		if _, err := enqueueCase(ctx, tx, declined, declinedJSON, true); err != nil {
+			return err
+		}
+		result = DeclineResult{Requeued: true}
+		return nil
+	})
+	if err != nil {
+		return DeclineResult{}, err
+	}
+	return result, nil
 }
 
 // GetPresence returns email's current status, defaulting to OFFLINE for an
-// engineer this Router has never seen a presence update from.
-func (r *Router) GetPresence(email string) Status {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if e, ok := r.engineers[email]; ok {
-		return e.Status
+// engineer this database has never seen a presence update from.
+func (r *Router) GetPresence(ctx context.Context, email string) (Status, error) {
+	var status Status
+	err := r.db.QueryRow(ctx, `SELECT status FROM engineers WHERE email = $1`, email).Scan(&status)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return StatusOffline, nil
+	case err != nil:
+		return "", fmt.Errorf("router: get presence: %w", err)
+	default:
+		return status, nil
 	}
-	return StatusOffline
 }
 
 // DebugEngineer is one engineer's row in DebugState's dump.
@@ -309,8 +432,8 @@ type DebugEngineer struct {
 	CurrentCase    *CaseInfo `json:"currentCase,omitempty"`
 }
 
-// DebugState is the full in-memory dump GET /route/debug/state returns.
-// Verification-only — no real caller (csm-portal/backend or otherwise)
+// DebugState is the full dump GET /route/debug/state returns.
+// Verification-only -- no real caller (csm-portal/backend or otherwise)
 // depends on this endpoint; it exists purely so the end-to-end test plan
 // can assert on internal state directly instead of inferring it from SSE
 // side effects alone.
@@ -320,22 +443,228 @@ type DebugState struct {
 	Queue     []CaseInfo      `json:"queue"`
 }
 
-// DebugState snapshots the current registry, available FIFO, and queue.
-func (r *Router) DebugState() DebugState {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	ds := DebugState{
-		Available: append([]string{}, r.available...),
-		Queue:     append([]CaseInfo{}, r.queue...),
+// DebugState snapshots the current engineer registry, available pool, and
+// queue. Three separate read-only queries rather than one transaction --
+// this is a debug/test endpoint, not a state transition, so a slightly
+// stale cross-query view is an acceptable tradeoff for not holding locks.
+func (r *Router) DebugState(ctx context.Context) (DebugState, error) {
+	engineers, err := r.debugEngineers(ctx)
+	if err != nil {
+		return DebugState{}, err
 	}
-	for _, e := range r.engineers {
-		ds.Engineers = append(ds.Engineers, DebugEngineer{
-			Email:          e.Email,
-			Status:         e.Status,
-			PendingOffline: e.PendingOffline,
-			CurrentCase:    e.CurrentCase,
+	available, err := r.debugAvailable(ctx)
+	if err != nil {
+		return DebugState{}, err
+	}
+	queue, err := r.debugQueue(ctx)
+	if err != nil {
+		return DebugState{}, err
+	}
+	return DebugState{Engineers: engineers, Available: available, Queue: queue}, nil
+}
+
+func (r *Router) debugEngineers(ctx context.Context) ([]DebugEngineer, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT email, status, pending_offline, current_case
+		FROM engineers ORDER BY email
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("debug state: query engineers: %w", err)
+	}
+	defer rows.Close()
+
+	engineers := []DebugEngineer{}
+	for rows.Next() {
+		var (
+			email          string
+			status         Status
+			pendingOffline bool
+			currentCase    []byte
+		)
+		if err := rows.Scan(&email, &status, &pendingOffline, &currentCase); err != nil {
+			return nil, fmt.Errorf("debug state: scan engineer: %w", err)
+		}
+		var cc *CaseInfo
+		if currentCase != nil {
+			var c CaseInfo
+			if err := json.Unmarshal(currentCase, &c); err != nil {
+				return nil, fmt.Errorf("debug state: decode current case: %w", err)
+			}
+			cc = &c
+		}
+		engineers = append(engineers, DebugEngineer{
+			Email: email, Status: status, PendingOffline: pendingOffline, CurrentCase: cc,
 		})
 	}
-	return ds
+	return engineers, rows.Err()
+}
+
+func (r *Router) debugAvailable(ctx context.Context) ([]string, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT email FROM engineers
+		WHERE status = 'AVAILABLE' AND current_case_id IS NULL
+		ORDER BY available_since ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("debug state: query available: %w", err)
+	}
+	defer rows.Close()
+
+	available := []string{}
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			return nil, fmt.Errorf("debug state: scan available: %w", err)
+		}
+		available = append(available, email)
+	}
+	return available, rows.Err()
+}
+
+func (r *Router) debugQueue(ctx context.Context) ([]CaseInfo, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT case_info FROM escalation_queue ORDER BY order_key ASC, id ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("debug state: query queue: %w", err)
+	}
+	defer rows.Close()
+
+	queue := []CaseInfo{}
+	for rows.Next() {
+		var caseInfoJSON []byte
+		if err := rows.Scan(&caseInfoJSON); err != nil {
+			return nil, fmt.Errorf("debug state: scan queue row: %w", err)
+		}
+		var c CaseInfo
+		if err := json.Unmarshal(caseInfoJSON, &c); err != nil {
+			return nil, fmt.Errorf("debug state: decode queued case: %w", err)
+		}
+		queue = append(queue, c)
+	}
+	return queue, rows.Err()
+}
+
+// engineerRow is the subset of an engineers row SetPresence needs, locked
+// FOR UPDATE for the rest of its transaction.
+type engineerRow struct {
+	CurrentCaseID *string
+}
+
+// ensureAndLockEngineer makes sure email has a row (defaulting to OFFLINE,
+// exactly like the original in-memory Router's getOrCreate), then locks and
+// returns it FOR UPDATE for the rest of tx.
+func ensureAndLockEngineer(ctx context.Context, tx pgx.Tx, email string) (engineerRow, error) {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO engineers (email) VALUES ($1)
+		ON CONFLICT (email) DO NOTHING
+	`, email); err != nil {
+		return engineerRow{}, fmt.Errorf("ensure engineer row: %w", err)
+	}
+
+	var row engineerRow
+	if err := tx.QueryRow(ctx, `
+		SELECT current_case_id FROM engineers WHERE email = $1 FOR UPDATE
+	`, email).Scan(&row.CurrentCaseID); err != nil {
+		return engineerRow{}, fmt.Errorf("lock engineer row: %w", err)
+	}
+	return row, nil
+}
+
+// popAvailableEngineer locks and returns the longest-idle AVAILABLE, idle
+// engineer other than exclude (pass "" to exclude no one), or ok=false if
+// none are free. FOR UPDATE SKIP LOCKED lets concurrent callers each grab a
+// different engineer instead of blocking on each other.
+func popAvailableEngineer(ctx context.Context, tx pgx.Tx, exclude string) (email string, ok bool, err error) {
+	err = tx.QueryRow(ctx, `
+		SELECT email FROM engineers
+		WHERE status = 'AVAILABLE' AND current_case_id IS NULL AND email != $1
+		ORDER BY available_since ASC
+		LIMIT 1
+		FOR UPDATE SKIP LOCKED
+	`, exclude).Scan(&email)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("pop available engineer: %w", err)
+	default:
+		return email, true, nil
+	}
+}
+
+// assignCaseToEngineer marks email BUSY with c as their current case.
+func assignCaseToEngineer(ctx context.Context, tx pgx.Tx, email string, c CaseInfo, caseInfoJSON []byte) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE engineers
+		SET status = 'BUSY', current_case_id = $1, current_case = $2::jsonb,
+		    available_since = NULL, updated_at = now()
+		WHERE email = $3
+	`, c.CaseID, caseInfoJSON, email); err != nil {
+		return fmt.Errorf("assign case to engineer: %w", err)
+	}
+	return nil
+}
+
+// popQueueHead removes and returns the oldest queued case (by order_key,
+// then id to break ties), or ok=false if the queue is empty. FOR UPDATE
+// SKIP LOCKED inside the subquery, same job-queue idiom as
+// popAvailableEngineer.
+func popQueueHead(ctx context.Context, tx pgx.Tx) (CaseInfo, bool, error) {
+	var caseInfoJSON []byte
+	err := tx.QueryRow(ctx, `
+		DELETE FROM escalation_queue
+		WHERE id = (
+			SELECT id FROM escalation_queue
+			ORDER BY order_key ASC, id ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING case_info
+	`).Scan(&caseInfoJSON)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return CaseInfo{}, false, nil
+	case err != nil:
+		return CaseInfo{}, false, fmt.Errorf("pop queue head: %w", err)
+	}
+
+	var c CaseInfo
+	if err := json.Unmarshal(caseInfoJSON, &c); err != nil {
+		return CaseInfo{}, false, fmt.Errorf("decode queued case: %w", err)
+	}
+	return c, true, nil
+}
+
+// enqueueCase appends c to the end of the queue (front=false) or re-queues
+// it at the front (front=true, used by Decline -- that customer already
+// waited once). Table-locked for the duration of the order_key computation
+// so two concurrent enqueues can't compute the same key.
+func enqueueCase(ctx context.Context, tx pgx.Tx, c CaseInfo, caseInfoJSON []byte, front bool) (position int, err error) {
+	if _, err := tx.Exec(ctx, "LOCK TABLE escalation_queue IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+		return 0, fmt.Errorf("lock escalation_queue: %w", err)
+	}
+
+	orderExpr := "COALESCE(MAX(order_key), 0) + 1"
+	if front {
+		orderExpr = "COALESCE(MIN(order_key), 0) - 1"
+	}
+	var orderKey int64
+	if err := tx.QueryRow(ctx, "SELECT "+orderExpr+" FROM escalation_queue").Scan(&orderKey); err != nil {
+		return 0, fmt.Errorf("compute order key: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO escalation_queue (order_key, case_id, case_info)
+		VALUES ($1, $2, $3::jsonb)
+	`, orderKey, c.CaseID, caseInfoJSON); err != nil {
+		return 0, fmt.Errorf("insert queue row: %w", err)
+	}
+
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM escalation_queue WHERE order_key <= $1
+	`, orderKey).Scan(&position); err != nil {
+		return 0, fmt.Errorf("compute queue position: %w", err)
+	}
+	return position, nil
 }
