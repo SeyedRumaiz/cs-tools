@@ -192,13 +192,18 @@ func (c *Client) Escalate(ctx context.Context, ci CaseInfo) (EscalateResult, err
 
 // SetPresence calls POST /route/presence, applying an engineer's requested
 // status change (see router.Router.SetPresence's doc comment for the full
-// state machine this triggers).
-func (c *Client) SetPresence(ctx context.Context, email string, status Status) (PresenceResult, error) {
+// state machine this triggers). engineerID is the IdP's stable per-account
+// "userid" claim (middleware.UserInfo.UserID) -- the routing service only
+// uses it the first time it sees email, to populate that new row's
+// engineer_id primary key; it's ignored (not an error) on every later call
+// for an already-known email.
+func (c *Client) SetPresence(ctx context.Context, email, engineerID string, status Status) (PresenceResult, error) {
 	var out PresenceResult
 	body := struct {
-		Email  string `json:"email"`
-		Status Status `json:"status"`
-	}{Email: email, Status: status}
+		Email      string `json:"email"`
+		EngineerID string `json:"engineerId"`
+		Status     Status `json:"status"`
+	}{Email: email, EngineerID: engineerID, Status: status}
 	err := c.do(ctx, http.MethodPost, "/route/presence", body, &out)
 	return out, err
 }

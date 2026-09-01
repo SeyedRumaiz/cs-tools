@@ -118,10 +118,16 @@ func (h *RoutingHandler) Escalate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// presenceRequest is the body for POST /route/presence.
+// presenceRequest is the body for POST /route/presence. EngineerID is the
+// IdP's stable per-account "userid" claim (see internal/router.Router.
+// SetPresence and migrations/000004) -- required so a first-time presence
+// update can create the engineer's row; ignored (not an error) once that
+// row already exists, since engineer_id never changes for an established
+// email.
 type presenceRequest struct {
-	Email  string `json:"email"`
-	Status string `json:"status"`
+	Email      string `json:"email"`
+	EngineerID string `json:"engineerId"`
+	Status     string `json:"status"`
 }
 
 // SetPresence handles POST /route/presence.
@@ -130,12 +136,12 @@ func (h *RoutingHandler) SetPresence(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	if req.Email == "" || !isValidStatus(req.Status) {
-		writeError(w, http.StatusBadRequest, "email and a valid status (AVAILABLE|BUSY|OFFLINE) are required.")
+	if req.Email == "" || req.EngineerID == "" || !isValidStatus(req.Status) {
+		writeError(w, http.StatusBadRequest, "email, engineerId, and a valid status (AVAILABLE|BUSY|OFFLINE) are required.")
 		return
 	}
 
-	result, err := h.router.SetPresence(r.Context(), req.Email, router.Status(req.Status))
+	result, err := h.router.SetPresence(r.Context(), req.Email, req.EngineerID, router.Status(req.Status))
 	if err != nil {
 		writeStorageError(w, "presence", err)
 		return

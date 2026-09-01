@@ -132,7 +132,11 @@ type PresenceResult struct {
 
 // SetPresence applies an engineer's requested status change, creating their
 // row (defaulting to OFFLINE) on first contact if this is the first time
-// this service has heard from them.
+// this service has heard from them. engineerID is the IdP's stable
+// per-account "userid" claim (see migrations/000004 and
+// csm-portal/backend's internal/middleware.UserInfo.UserID) -- only used
+// (and required) the first time this email is seen, to populate the row's
+// primary key; an existing row's engineer_id is left untouched.
 //
 // Mid-session (current_case_id IS NOT NULL): capacity is a single dedicated
 // session, so the session itself is never affected here. The only thing a
@@ -147,10 +151,10 @@ type PresenceResult struct {
 // than a separate step the caller has to notice). BUSY is a manual "do not
 // disturb" -- leaves/stays out of the pool with no case. OFFLINE also
 // leaves/stays out of the pool.
-func (r *Router) SetPresence(ctx context.Context, email string, want Status) (PresenceResult, error) {
+func (r *Router) SetPresence(ctx context.Context, email, engineerID string, want Status) (PresenceResult, error) {
 	var result PresenceResult
 	err := r.withTx(ctx, func(tx pgx.Tx) error {
-		row, err := ensureAndLockEngineer(ctx, tx, email)
+		row, err := ensureAndLockEngineer(ctx, tx, email, engineerID)
 		if err != nil {
 			return err
 		}
@@ -442,9 +446,10 @@ type DebugEngineer struct {
 	Status         Status    `json:"status"`
 	PendingOffline bool      `json:"pendingOffline"`
 	CurrentCase    *CaseInfo `json:"currentCase,omitempty"`
-	// ChatsToday is 0 if the engineer hasn't been assigned a case yet today
-	// (see assignCaseToEngineer's lazy per-day reset) even if a stale
-	// nonzero count from a previous day is still sitting in the row.
+	// ChatsToday is a live COUNT(*) over assignment_log for today (see
+	// migrations/000005) -- 0 if the engineer hasn't been assigned a case
+	// yet today, computed fresh on every call rather than read from a
+	// stored column.
 	ChatsToday int `json:"chatsToday"`
 }
 
@@ -481,9 +486,16 @@ func (r *Router) DebugState(ctx context.Context) (DebugState, error) {
 
 func (r *Router) debugEngineers(ctx context.Context) ([]DebugEngineer, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT email, status, pending_offline, current_case,
-		       CASE WHEN chats_today_date = CURRENT_DATE THEN chats_today ELSE 0 END
-		FROM engineers ORDER BY email
+		SELECT e.email, e.status, e.pending_offline, e.current_case,
+		       COALESCE(t.today_count, 0)
+		FROM engineers e
+		LEFT JOIN (
+			SELECT email, COUNT(*) AS today_count
+			FROM assignment_log
+			WHERE assigned_at >= CURRENT_DATE AND assigned_at < CURRENT_DATE + 1
+			GROUP BY email
+		) t ON t.email = e.email
+		ORDER BY e.email
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("debug state: query engineers: %w", err)
@@ -520,11 +532,16 @@ func (r *Router) debugEngineers(ctx context.Context) ([]DebugEngineer, error) {
 
 func (r *Router) debugAvailable(ctx context.Context) ([]string, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT email FROM engineers
-		WHERE status = 'AVAILABLE' AND current_case_id IS NULL
-		ORDER BY
-			CASE WHEN chats_today_date = CURRENT_DATE THEN chats_today ELSE 0 END ASC,
-			available_since ASC
+		SELECT e.email
+		FROM engineers e
+		LEFT JOIN (
+			SELECT email, COUNT(*) AS today_count
+			FROM assignment_log
+			WHERE assigned_at >= CURRENT_DATE AND assigned_at < CURRENT_DATE + 1
+			GROUP BY email
+		) t ON t.email = e.email
+		WHERE e.status = 'AVAILABLE' AND e.current_case_id IS NULL
+		ORDER BY COALESCE(t.today_count, 0) ASC, e.available_since ASC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("debug state: query available: %w", err)
@@ -640,12 +657,15 @@ type engineerRow struct {
 
 // ensureAndLockEngineer makes sure email has a row (defaulting to OFFLINE,
 // exactly like the original in-memory Router's getOrCreate), then locks and
-// returns it FOR UPDATE for the rest of tx.
-func ensureAndLockEngineer(ctx context.Context, tx pgx.Tx, email string) (engineerRow, error) {
+// returns it FOR UPDATE for the rest of tx. engineerID only takes effect on
+// the INSERT that creates the row -- ON CONFLICT (email) DO NOTHING means a
+// second call with a different engineerID for the same email is silently
+// ignored rather than changing an established identity.
+func ensureAndLockEngineer(ctx context.Context, tx pgx.Tx, email, engineerID string) (engineerRow, error) {
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO engineers (email) VALUES ($1)
+		INSERT INTO engineers (email, engineer_id) VALUES ($1, $2)
 		ON CONFLICT (email) DO NOTHING
-	`, email); err != nil {
+	`, email, engineerID); err != nil {
 		return engineerRow{}, fmt.Errorf("ensure engineer row: %w", err)
 	}
 
@@ -660,20 +680,29 @@ func ensureAndLockEngineer(ctx context.Context, tx pgx.Tx, email string) (engine
 
 // popAvailableEngineer locks and returns an AVAILABLE, idle engineer other
 // than exclude (pass "" to exclude no one): whichever has been assigned the
-// fewest chats today, ties broken by who has been AVAILABLE the longest --
-// or ok=false if none are free. FOR UPDATE SKIP LOCKED lets concurrent
-// callers each grab a different engineer instead of blocking on each
-// other. Used as Escalate's (via stickyOrLeastBusyEngineer) and Decline's
-// fallback once a sticky/self match isn't usable.
+// fewest chats today (via a dynamic COUNT(*) over assignment_log -- see
+// migrations/000005 -- rather than a stored counter), ties broken by who
+// has been AVAILABLE the longest -- or ok=false if none are free. FOR
+// UPDATE OF e SKIP LOCKED (scoped to the engineers side of the join, since
+// the count comes from an aggregate subquery that isn't itself lockable)
+// lets concurrent callers each grab a different engineer instead of
+// blocking on each other. Used as Escalate's (via
+// stickyOrLeastBusyEngineer) and Decline's fallback once a sticky/self
+// match isn't usable.
 func popAvailableEngineer(ctx context.Context, tx pgx.Tx, exclude string) (email string, ok bool, err error) {
 	err = tx.QueryRow(ctx, `
-		SELECT email FROM engineers
-		WHERE status = 'AVAILABLE' AND current_case_id IS NULL AND email != $1
-		ORDER BY
-			CASE WHEN chats_today_date = CURRENT_DATE THEN chats_today ELSE 0 END ASC,
-			available_since ASC
+		SELECT e.email
+		FROM engineers e
+		LEFT JOIN (
+			SELECT email, COUNT(*) AS today_count
+			FROM assignment_log
+			WHERE assigned_at >= CURRENT_DATE AND assigned_at < CURRENT_DATE + 1
+			GROUP BY email
+		) t ON t.email = e.email
+		WHERE e.status = 'AVAILABLE' AND e.current_case_id IS NULL AND e.email != $1
+		ORDER BY COALESCE(t.today_count, 0) ASC, e.available_since ASC
 		LIMIT 1
-		FOR UPDATE SKIP LOCKED
+		FOR UPDATE OF e SKIP LOCKED
 	`, exclude).Scan(&email)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -686,22 +715,26 @@ func popAvailableEngineer(ctx context.Context, tx pgx.Tx, exclude string) (email
 }
 
 // assignCaseToEngineer marks email BUSY with c as their current case,
-// bumps their daily chat count by one (resetting it first if the last
-// increment wasn't today -- see migrations/000003), and, when
-// c.CustomerEmail is set, records this customer as now belonging to email
-// for the next time they escalate (see stickyEngineerFor /
+// records the assignment in assignment_log (see migrations/000005 -- the
+// source popAvailableEngineer/debugEngineers/debugAvailable COUNT(*) over
+// to rank by "chats today" dynamically, rather than a stored counter), and,
+// when c.CustomerEmail is set, records this customer as now belonging to
+// email for the next time they escalate (see stickyEngineerFor /
 // stickyOrLeastBusyEngineer).
 func assignCaseToEngineer(ctx context.Context, tx pgx.Tx, email string, c CaseInfo, caseInfoJSON []byte) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE engineers
 		SET status = 'BUSY', current_case_id = $1, current_case = $2::jsonb,
-		    available_since = NULL,
-		    chats_today = CASE WHEN chats_today_date = CURRENT_DATE THEN chats_today + 1 ELSE 1 END,
-		    chats_today_date = CURRENT_DATE,
-		    updated_at = now()
+		    available_since = NULL, updated_at = now()
 		WHERE email = $3
 	`, c.CaseID, caseInfoJSON, email); err != nil {
 		return fmt.Errorf("assign case to engineer: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO assignment_log (email, case_id) VALUES ($1, $2)
+	`, email, c.CaseID); err != nil {
+		return fmt.Errorf("record assignment: %w", err)
 	}
 
 	if c.CustomerEmail != "" {

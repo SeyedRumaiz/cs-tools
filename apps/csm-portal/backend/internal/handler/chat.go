@@ -120,7 +120,7 @@ type chatEventPusher interface {
 // methods exactly, so *routingclient.Client satisfies this with no adapter.
 type routingService interface {
 	Escalate(ctx context.Context, ci routingclient.CaseInfo) (routingclient.EscalateResult, error)
-	SetPresence(ctx context.Context, email string, status routingclient.Status) (routingclient.PresenceResult, error)
+	SetPresence(ctx context.Context, email, engineerID string, status routingclient.Status) (routingclient.PresenceResult, error)
 	Completed(ctx context.Context, email string) (routingclient.CompletedResult, error)
 	Decline(ctx context.Context, email, caseID string) (routingclient.DeclineResult, error)
 	GetPresence(ctx context.Context, email string) (routingclient.Status, error)
@@ -619,7 +619,7 @@ func (h *ChatHandler) HandleSetPresence(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	result, err := h.routing.SetPresence(r.Context(), user.Email, status)
+	result, err := h.routing.SetPresence(r.Context(), user.Email, user.UserID, status)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "chat: routing service set presence failed", "userID", user.UserID, "err", err)
 		writeError(w, http.StatusBadGateway, "Failed to update your status. Please try again.")

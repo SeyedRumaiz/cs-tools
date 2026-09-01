@@ -99,18 +99,18 @@ next tier only when the previous one comes up empty:
 | Priority | Rule | Notes |
 |---|---|---|
 | 1 · Sticky | The engineer this customer was **most recently assigned to**, if that engineer is `AVAILABLE` and idle right now. | Looked up from `customer_engineer_assignments`. A `BUSY` or fully `OFFLINE` sticky engineer is skipped entirely — this reconnects a returning customer to a familiar face *when possible*, it never makes them wait on one specific person. |
-| 2 · Least busy | Whichever `AVAILABLE` engineer has been assigned the **fewest chats today**. | "Today" is a lazy, per-row reset (`chats_today_date = CURRENT_DATE`) rather than a scheduled midnight job — a stale count from a previous day is simply treated as `0` the next time anyone looks. |
+| 2 · Least busy | Whichever `AVAILABLE` engineer has been assigned the **fewest chats today**. | Computed live with `COUNT(*)` over `assignment_log` for `assigned_at` in `[CURRENT_DATE, CURRENT_DATE + 1)` — not a stored counter, so there's no lazy-reset bookkeeping to get wrong; an engineer with zero rows today is simply `0`. |
 | 3 · Tie-break | Among engineers tied on chats today, whoever has been `AVAILABLE` the **longest** (`available_since` ascending). | This is the same "came online first" ordering the original FIFO design used for everyone — now it only kicks in on a tie. |
 | 4 · Queue | If no engineer is `AVAILABLE` at all, the case joins `escalation_queue` (FIFO tail). | Unaffected by the above — once an engineer frees up, they take the queue head directly (see `SetPresence` / `Completed` below); sticky/least-busy ranking isn't re-applied to queued cases. |
 
 Every successful assignment — sticky match, least-busy pick, a queue drain,
 or a `Decline` reassignment — updates that customer's sticky-engineer
-record and bumps the assigned engineer's daily count (`Router.
+record and appends a row to `assignment_log` (`Router.
 assignCaseToEngineer` does both in the same transaction as the assignment
-itself, so they can never drift out of sync with reality). `Decline`'s own
-reassignment step reuses tier 2/3 (least-busy, tie-broken by online time)
-excluding the declining engineer — it does not re-check the customer's
-sticky engineer.
+itself, so they can never drift out of sync with reality — see
+[Data model](#data-model)). `Decline`'s own reassignment step reuses tier
+2/3 (least-busy, tie-broken by online time) excluding the declining
+engineer — it does not re-check the customer's sticky engineer.
 
 ## Presence state machine
 
@@ -135,14 +135,27 @@ queue — the customer already waited once.
 
 ## Data model
 
-Three tables, in their own schema, separate from `entity-service`'s flat
+Four tables, in their own schema, separate from `entity-service`'s flat
 `cases` table:
 
 | Table | Holds | Ordering / lookup |
 |---|---|---|
-| `engineers` | `status`, `pending_offline`, `current_case_id` / `current_case` (JSONB), `available_since`, `chats_today`, `chats_today_date` | `available_since` — oldest-idle-first (tier-3 tie-break); `chats_today` (lazily reset per `chats_today_date`) — least-busy-first (tier 2) |
+| `engineers` | `engineer_id` (PK), `email` (unique), `status`, `pending_offline`, `current_case_id` / `current_case` (JSONB), `available_since` | `available_since` — oldest-idle-first (tier-3 tie-break) |
+| `assignment_log` | one append-only row per assignment: `email`, `case_id`, `assigned_at` | `(email, assigned_at)` index — `COUNT(*)` per engineer over today's rows drives least-busy-first (tier 2); also doubles as a free audit trail of every assignment ever made |
 | `customer_engineer_assignments` | one row per customer: `customer_email` → `engineer_email` last assigned | keyed on `customer_email` — the tier-1 sticky lookup |
 | `escalation_queue` | waiting cases (`case_id`, `case_info` JSONB) | `order_key` — appended at the tail; a decline re-inserts at the head |
+
+**`engineers` is keyed by `engineer_id`, not `email`.** `engineer_id` is the
+IdP's stable per-account `userid` claim (`csm-portal/backend`'s
+`middleware.UserInfo.UserID`) — durable even if an engineer's email
+changes. `email` stays a required, unique column and is still what every
+existing HTTP route and this table's own FKs (`customer_engineer_
+assignments`, `assignment_log`) reference — the entire API surface is
+unaffected by the PK swap except `POST /route/presence`, the one route
+that can create a new row, which now also requires `engineerId` in its
+body (see [HTTP surface](#http-surface)). On an already-known email,
+`engineerId` is accepted but ignored — an established row's identity
+never changes. See `migrations/000004_engineer_id_primary_key.up.sql`.
 
 `case_info` / `current_case` are stored as JSONB blobs (`router.CaseInfo` —
 `caseId`, `conversationId`, `projectId`, `subject`, `customerEmail`,
@@ -165,9 +178,13 @@ parser rejects it outright), which is why it's done this way instead of in
 the connection string.
 
 See `migrations/000001_create_engineers.up.sql`,
-`migrations/000002_create_escalation_queue.up.sql`, and
-`migrations/000003_add_sticky_routing_and_chat_counts.up.sql` for the exact
-schema, including the check constraints that keep
+`migrations/000002_create_escalation_queue.up.sql`,
+`migrations/000003_add_sticky_routing_and_chat_counts.up.sql`,
+`migrations/000004_engineer_id_primary_key.up.sql` (the `email` → `engineer_id`
+PK swap described above), and
+`migrations/000005_dynamic_chat_counts.up.sql` (drops the old
+`chats_today`/`chats_today_date` columns in favor of `assignment_log`) for
+the exact schema, including the check constraints that keep
 `current_case_id`/`current_case` consistent and `available_since`
 meaningful only while truly idle-and-free.
 
@@ -180,7 +197,7 @@ All routes below `/route/*` require the `X-Routing-Service-Token` header
 | Method | Path | Body / params | Response |
 |---|---|---|---|
 | `POST` | `/route/escalate` | `CaseInfo` fields | `{engineerEmail}` or `{queued:true, position:N}` |
-| `POST` | `/route/presence` | `{email, status}` | `{applied, pendingOffline?, assignedCase?}` |
+| `POST` | `/route/presence` | `{email, engineerId, status}` | `{applied, pendingOffline?, assignedCase?}` |
 | `POST` | `/route/completed` | `{email}` | `{removed, rejoined, assignedCase?}` |
 | `POST` | `/route/decline` | `{email, caseId}` | `{reassignedTo?, requeued?}` |
 | `GET` | `/route/presence/{email}` | — | `{status}` (defaults to `OFFLINE` for an unseen engineer) |
@@ -203,9 +220,9 @@ Loaded from the environment (a `.env` file is read first if present — see
 | `DB_USER`, `DB_PASSWORD` | credentials for that database — reusing `entity-service`'s own user is fine for local dev; a narrower-scoped role needs the grants noted in [Running locally](#running-locally) |
 | `DB_SSLMODE` | default `disable` (local dev) |
 
-Note: "today" for the daily chat count is `CURRENT_DATE` as the database
-server sees it — if that server isn't in UTC, the daily reset happens at
-that server's local midnight, not the customer's or engineer's.
+Note: "today" for `assignment_log`'s live chat count is `CURRENT_DATE` as
+the database server sees it — if that server isn't in UTC, the day boundary
+falls at that server's local midnight, not the customer's or engineer's.
 
 ## Running locally
 
