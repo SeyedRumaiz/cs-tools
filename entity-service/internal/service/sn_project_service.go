@@ -337,9 +337,10 @@ func (s *snProjectService) fetchProjectsPage(ctx context.Context, req domain.Sea
 		if err != nil {
 			return nil, 0, fmt.Errorf("sn projects: parse createdOn %q: %w", p.CreatedOn, err)
 		}
-		subType, err := snTypeNameToSubscriptionType(p.Type.Name)
-		if err != nil {
-			return nil, 0, fmt.Errorf("sn projects: project %q: %w", p.ID, err)
+		subType, knownType := snTypeNameToSubscriptionType(p.Type.Name)
+		if !knownType {
+			slog.WarnContext(ctx, "sn projects: unrecognized subscription type from ServiceNow",
+				"projectID", p.ID, "typeName", p.Type.Name)
 		}
 		var startDate *time.Time
 		if p.StartDate != nil && *p.StartDate != "" {
@@ -503,9 +504,10 @@ func (s *snProjectService) GetProjectByID(ctx context.Context, id string) (domai
 		return domain.ProjectDetailsView{}, err
 	}
 
-	subType, err := snTypeNameToSubscriptionType(sn.Type.Name)
-	if err != nil {
-		return domain.ProjectDetailsView{}, fmt.Errorf("sn projects: project %q: %w", sn.ID, err)
+	subType, knownType := snTypeNameToSubscriptionType(sn.Type.Name)
+	if !knownType {
+		slog.WarnContext(ctx, "sn projects: unrecognized subscription type from ServiceNow",
+			"projectID", sn.ID, "typeName", sn.Type.Name)
 	}
 
 	activationDate, err := optionalSNProjectDate("account activationDate", sn.Account.ActivationDate)
@@ -756,15 +758,26 @@ var validSubscriptionTypes = map[domain.SubscriptionType]struct{}{
 	domain.SubscriptionTypeProfessionalServices:     {},
 }
 
-// snTypeNameToSubscriptionType converts a SN project type name (e.g. "Cloud Support")
-// to the domain SubscriptionType enum (e.g. "cloud_support"). Returns an error
-// if the converted value is not a known enum value.
-func snTypeNameToSubscriptionType(name string) (domain.SubscriptionType, error) {
+// snTypeNameToSubscriptionType converts a SN project type name (e.g. "Cloud
+// Support") to the domain SubscriptionType enum (e.g. "cloud_support").
+//
+// Never fails: an unrecognized name (blank, a legacy/typo'd label, or a type
+// ServiceNow has added since validSubscriptionTypes was last updated) still
+// returns a best-effort derived value instead of erroring. This used to
+// return an error, which every caller propagated straight up as an opaque
+// 500 -- harmless while the only callers were single-project lookups, but
+// fetchEligibleProjectIDs (SearchProjectsByProductVersion's mandatory
+// audience-exclusion check) now calls this once per project across the
+// *entire* platform with no scoping filter at all, so a single project
+// anywhere with an unrecognized type took down every caller's product-
+// version audience resolution -- reported live as "Couldn't resolve the
+// audience. Try again." The second return value reports whether the name
+// matched a known enum member, so a caller that wants to know can log the
+// mismatch without failing the request; every current caller here does.
+func snTypeNameToSubscriptionType(name string) (domain.SubscriptionType, bool) {
 	st := domain.SubscriptionType(strings.ToLower(strings.ReplaceAll(name, " ", "_")))
-	if _, ok := validSubscriptionTypes[st]; !ok {
-		return "", fmt.Errorf("unknown subscription type %q from ServiceNow", name)
-	}
-	return st, nil
+	_, known := validSubscriptionTypes[st]
+	return st, known
 }
 
 // snContactSearchPayload is the Choreo POST /{resource}/{id}/contacts/search request
