@@ -195,7 +195,7 @@ func (s *snProjectService) SearchProjects(ctx context.Context, req domain.Search
 
 	token := middleware.UserIDTokenFromContext(ctx)
 
-	if len(req.ExcludeClosureStates) == 0 && len(req.ExcludeSubscriptionTypes) == 0 {
+	if len(req.ExcludeClosureStates) == 0 && len(req.ExcludeSubscriptionTypes) == 0 && len(req.ExcludeProjectKeys) == 0 {
 		views, total, err := s.fetchProjectsPage(ctx, req, accountSysid, token, req.Pagination.Limit, req.Pagination.Offset)
 		if err != nil {
 			return domain.SearchProjectsResponse{}, err
@@ -264,6 +264,10 @@ func (s *snProjectService) fetchAllProjectsFiltered(ctx context.Context, req dom
 	for _, v := range req.ExcludeSubscriptionTypes {
 		excludeType[v] = struct{}{}
 	}
+	excludeKey := make(map[string]struct{}, len(req.ExcludeProjectKeys))
+	for _, v := range req.ExcludeProjectKeys {
+		excludeKey[v] = struct{}{}
+	}
 
 	var filtered []domain.ProjectView
 	offset := 0
@@ -279,6 +283,9 @@ func (s *snProjectService) fetchAllProjectsFiltered(ctx context.Context, req dom
 				}
 			}
 			if _, excluded := excludeType[v.SubscriptionType]; excluded {
+				continue
+			}
+			if _, excluded := excludeKey[v.Key]; excluded {
 				continue
 			}
 			filtered = append(filtered, v)
@@ -740,6 +747,16 @@ func validateProjectSearchFilters(req domain.SearchProjectsRequest) error {
 	for _, t := range req.ExcludeSubscriptionTypes {
 		if _, ok := validSubscriptionTypes[t]; !ok {
 			return &apierror.ValidationError{Msg: "excludeSubscriptionTypes contains invalid value: " + string(t)}
+		}
+	}
+	for _, k := range req.ExcludeProjectKeys {
+		// Unlike ExcludeClosureStates/ExcludeSubscriptionTypes, project keys
+		// have no fixed enum to validate against — only reject the one input
+		// shape that could never be a real key and would otherwise silently
+		// match nothing (or, if a project's own Key were ever empty, match
+		// every such project).
+		if strings.TrimSpace(k) == "" {
+			return &apierror.ValidationError{Msg: "excludeProjectKeys must not contain empty values"}
 		}
 	}
 	return nil

@@ -577,6 +577,14 @@ type SearchProjectsRequest struct {
 	// (ServiceNow data source only; the Postgres data source rejects a
 	// non-empty value).
 	ExcludeSubscriptionTypes []SubscriptionType `json:"excludeSubscriptionTypes,omitempty"`
+	// ExcludeProjectKeys filters out projects whose Key (see ProjectView.Key)
+	// is any of the given values, e.g. ["APEXIA", "VERIDIAN"] — a caller-
+	// supplied denylist by project key, unrelated to closure state or
+	// subscription type. Same "no upstream filter, applied in Go" caveat as
+	// ExcludeClosureStates (ServiceNow data source only; the Postgres data
+	// source rejects a non-empty value). Matching is exact and case-sensitive
+	// (project keys are opaque identifiers, not display text).
+	ExcludeProjectKeys []string `json:"excludeProjectKeys,omitempty"`
 }
 
 // ProjectSearchAccountRef is the account reference embedded in a project
