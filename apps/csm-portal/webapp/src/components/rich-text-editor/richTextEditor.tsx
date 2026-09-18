@@ -385,3 +385,46 @@ export function stripWhitespaceStyleFromHtml(html: string): string {
 
   return dom.body.innerHTML;
 }
+
+/**
+ * Strips every presentational bit `@lexical/table`'s own `TableCellNode`/
+ * `TableNode.exportDOM()` unconditionally bakes into a table on export: a
+ * fixed per-cell `style="width: …px"` (its own `COLUMN_WIDTH` constant, 75,
+ * whenever a cell carries no explicit width of its own -- true for every
+ * table this editor produces, since nothing here exposes a column-resize
+ * control), plus `border`/`vertical-align`/`text-align`/header
+ * `background-color`, and the `<colgroup>`'s own `<col style="width:...">`
+ * entries (a second, independent width constraint on top of the per-cell
+ * one). Left in, that inline styling always wins over every consumer's own
+ * table CSS (inline beats a stylesheet rule short of `!important`), so a
+ * table submitted from this editor renders as a cramped, heavily-wrapped
+ * ~75px-per-column grid everywhere else it's displayed -- the CSM portal's
+ * own read view, the separate customer portal -- no matter how wide its
+ * actual content is. This has to run at generation time, on the HTML that
+ * actually gets submitted, because none of those other renderers can be
+ * patched from here -- the live composing view's own CSS override
+ * (`Editor.tsx`'s `!important` rule) only reaches this one screen.
+ */
+export function stripLexicalTableStylingFromHtml(html: string): string {
+  if (!html.includes("<table")) return html;
+
+  const dom = new DOMParser().parseFromString(html, "text/html");
+  const body = dom.body;
+  if (!body) return html;
+
+  let changed = false;
+  for (const colgroup of Array.from(body.querySelectorAll("table > colgroup"))) {
+    colgroup.remove();
+    changed = true;
+  }
+  for (const el of Array.from(
+    body.querySelectorAll<HTMLElement>("table, table th, table td"),
+  )) {
+    if (el.hasAttribute("style")) {
+      el.removeAttribute("style");
+      changed = true;
+    }
+  }
+
+  return changed ? body.innerHTML : html;
+}
