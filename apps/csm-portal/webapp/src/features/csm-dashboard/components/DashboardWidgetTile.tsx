@@ -402,19 +402,18 @@ function DashboardWidgetTile({
   // slice) — skip this one's own network call rather than wasting it, but
   // still call the hook unconditionally (rules of hooks; a widget's shape
   // never changes across this component's lifetime).
-  const { data, isLoading: isWidgetDataLoading, isError } = useWidgetData(
+  const { data, isLoading: isWidgetDataLoading, isError } = useWidgetData({
     widgetId,
     resourceType,
     filters,
     shape,
     listLimit,
-    0,
-    shape !== "pie" && shape !== "bar" && isVisible,
+    enabled: shape !== "pie" && shape !== "bar" && isVisible,
     selectedTeamCreGroupId,
     selectedTeamSreGroupId,
     sortBy,
     currentUserId,
-  );
+  });
   const sliceData = useWidgetPieData(
     widgetId,
     resourceType,

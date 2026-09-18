@@ -21,6 +21,7 @@ import {
   WidgetFetchQueueDroppedError,
   __resetWidgetFetchConcurrencyForTests,
   shouldRetryWidgetFetch,
+  widgetFetchQueueDepth,
   withWidgetFetchSlot,
 } from "@features/csm-dashboard/utils/widgetFetchConcurrency";
 
@@ -356,5 +357,34 @@ describe("shouldRetryWidgetFetch", () => {
     expect(shouldRetryWidgetFetch(0, notFound, true)).toBe(false);
     expect(shouldRetryWidgetFetch(0, serverError, true)).toBe(false);
     expect(shouldRetryWidgetFetch(0, genericFailure, true)).toBe(false);
+  });
+});
+
+describe("widgetFetchQueueDepth", () => {
+  afterEach(() => {
+    __resetWidgetFetchConcurrencyForTests();
+  });
+
+  it("is 0 when nothing is in flight", () => {
+    expect(widgetFetchQueueDepth()).toBe(0);
+  });
+
+  it("counts the running fetch plus every fetch still waiting for a slot", async () => {
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+
+    // One running (holds the single slot) + two queued behind it.
+    const active = withWidgetFetchSlot(() => activeGate, TEAM_A);
+    const queuedOne = withWidgetFetchSlot(async () => {}, TEAM_A);
+    const queuedTwo = withWidgetFetchSlot(async () => {}, TEAM_A);
+
+    await Promise.resolve();
+    expect(widgetFetchQueueDepth()).toBe(3);
+
+    releaseActive();
+    await Promise.all([active, queuedOne, queuedTwo]);
+    expect(widgetFetchQueueDepth()).toBe(0);
   });
 });
