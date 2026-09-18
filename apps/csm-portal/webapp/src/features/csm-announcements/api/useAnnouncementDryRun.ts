@@ -95,9 +95,15 @@ export function useAnnouncementDryRun({
   // A dry-run confirmation is scoped to the content it was actually run
   // against — clear it once the draft changes so the "view dry run" link
   // never implies it reflects content the requester has since edited.
+  // tagLabels counts as "content" too: e.g. toggling the security checkbox
+  // after running a dry run changes which labels a real send would attach,
+  // so a stale confirmation from before the toggle must not linger as if it
+  // still reflected the current label set. Callers pass a memoized array
+  // (see CreateCustomerAnnouncementForm's dryRunTagLabels), so this doesn't
+  // re-run on every render.
   useEffect(() => {
     setDryRunResult(null);
-  }, [subject, description]);
+  }, [subject, description, tagLabels]);
 
   const canRunDryRun = useMemo(
     () =>
@@ -137,10 +143,28 @@ export function useAnnouncementDryRun({
       // Best-effort: the dry-run case already exists even if a tag fails to
       // attach, so a tag failure here doesn't block reporting success — same
       // "the case is the source of truth, not the tag" reasoning as the real
-      // send path.
-      await Promise.allSettled(
+      // send path. Unlike the real send path, though, a dry run's entire
+      // purpose is to let the sender verify labels/formatting before the
+      // real thing — silently dropping a label here without saying so would
+      // let a dry run report "succeeded" while the exact thing it exists to
+      // check (does the label actually attach) quietly didn't happen. So
+      // this still reports success (the case is real and viewable either
+      // way), but surfaces which label(s) failed, mirroring the real send
+      // path's own "create succeeded, but the label couldn't be attached —
+      // add it manually" message.
+      const tagResults = await Promise.allSettled(
         tagLabels.map((label) => addTag.mutateAsync({ caseId: created.id, label })),
       );
+      const failedLabels = tagLabels.filter((_, i) => tagResults[i].status === "rejected");
+      if (failedLabels.length > 0) {
+        showError(
+          `The dry-run case was created, but the label${
+            failedLabels.length === 1 ? "" : "s"
+          } ${failedLabels.join(", ")} couldn't be attached — add ${
+            failedLabels.length === 1 ? "it" : "them"
+          } manually before trusting this preview.`,
+        );
+      }
 
       setDryRunResult({
         caseId: created.id,

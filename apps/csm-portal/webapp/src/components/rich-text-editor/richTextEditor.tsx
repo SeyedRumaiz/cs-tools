@@ -387,6 +387,50 @@ export function stripWhitespaceStyleFromHtml(html: string): string {
 }
 
 /**
+ * The exact presentational properties `@lexical/table`'s own `TableCellNode`/
+ * `TableNode.exportDOM()` unconditionally bake into every cell on export --
+ * see `stripLexicalTableStylingFromHtml`'s own doc comment. Removed by
+ * property name, not by clearing the whole `style` attribute, so a
+ * declaration the *user* typed by hand in HTML-source mode (e.g. `color:
+ * red` on one cell) survives a source-mode round trip instead of being
+ * wiped out alongside Lexical's own junk.
+ */
+const LEXICAL_TABLE_CELL_STYLE_PROPERTIES = new Set([
+  "width",
+  "border",
+  "vertical-align",
+  "text-align",
+  "background-color",
+]);
+
+/**
+ * Removes exactly the declarations in
+ * {@link LEXICAL_TABLE_CELL_STYLE_PROPERTIES} from a raw `style` attribute
+ * string, keeping every other declaration untouched -- including one whose
+ * property CSSOM would otherwise expand a shorthand like `border` into
+ * (`border-width`/`border-style`/`border-color`/`border-top`/etc). Operating
+ * on the attribute's own text instead of `element.style` deliberately
+ * sidesteps that expansion: jsdom (and some browsers) normalize `border: 1px
+ * solid black` into its longhand components -- or, once those longhands are
+ * themselves removed, into yet another equivalent grouping (`border-top`/
+ * `border-right`/...) -- on the very first read of `element.style`, so
+ * chasing it one property at a time via `removeProperty` never converges.
+ * Matching the literal property name Lexical's own `exportDOM` writes,
+ * before any such normalization happens, avoids the whole problem.
+ */
+function stripLexicalStyleDeclarations(styleAttr: string): string {
+  return styleAttr
+    .split(";")
+    .map((decl) => decl.trim())
+    .filter((decl) => {
+      if (!decl) return false;
+      const propName = decl.slice(0, decl.indexOf(":")).trim().toLowerCase();
+      return !LEXICAL_TABLE_CELL_STYLE_PROPERTIES.has(propName);
+    })
+    .join("; ");
+}
+
+/**
  * Strips every presentational bit `@lexical/table`'s own `TableCellNode`/
  * `TableNode.exportDOM()` unconditionally bakes into a table on export: a
  * fixed per-cell `style="width: …px"` (its own `COLUMN_WIDTH` constant, 75,
@@ -404,6 +448,14 @@ export function stripWhitespaceStyleFromHtml(html: string): string {
  * actually gets submitted, because none of those other renderers can be
  * patched from here -- the live composing view's own CSS override
  * (`Editor.tsx`'s `!important` rule) only reaches this one screen.
+ *
+ * Removes only the specific properties in
+ * {@link LEXICAL_TABLE_CELL_STYLE_PROPERTIES} above, not the whole `style`
+ * attribute -- a table typed by hand in HTML-source mode can carry its own
+ * deliberate styling (e.g. a highlighted cell's `background-color`, though
+ * that particular property collides with Lexical's own header shading; a
+ * safer example is `color`), which must survive toggling back to rich mode
+ * and re-exporting, not just Lexical's own injected defaults.
  */
 export function stripLexicalTableStylingFromHtml(html: string): string {
   if (!html.includes("<table")) return html;
@@ -420,9 +472,15 @@ export function stripLexicalTableStylingFromHtml(html: string): string {
   for (const el of Array.from(
     body.querySelectorAll<HTMLElement>("table, table th, table td"),
   )) {
-    if (el.hasAttribute("style")) {
+    const styleAttr = el.getAttribute("style");
+    if (!styleAttr) continue;
+    const kept = stripLexicalStyleDeclarations(styleAttr);
+    if (kept === styleAttr) continue;
+    changed = true;
+    if (kept) {
+      el.setAttribute("style", kept);
+    } else {
       el.removeAttribute("style");
-      changed = true;
     }
   }
 

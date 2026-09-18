@@ -62,7 +62,16 @@ export function useResolveProductVersionAudience(
       const collected: ResolvedAudienceProject[] = [];
       let offset = 0;
 
-      for (let page = 0; page < MAX_AUDIENCE_PAGES; page++) {
+      for (let page = 0; ; page++) {
+        // Fail loudly rather than truncate — same reasoning as
+        // useResolveAnnouncementAudience's own paged loop: silently
+        // returning `collected` here would report an incomplete EOL
+        // audience as the complete, definitive one.
+        if (page === MAX_AUDIENCE_PAGES) {
+          throw new Error(
+            `Too many matching projects to resolve the audience safely (exceeded ${MAX_AUDIENCE_PAGES} pages of ${PAGE_LIMIT}).`,
+          );
+        }
         const res = await api.post<
           BeProjectsByProductVersionSearchPayload,
           BeProjectsByProductVersionSearchResponse

@@ -94,7 +94,19 @@ export function useResolveAnnouncementAudience(
       const collected: ResolvedAudienceProject[] = [];
       let offset = 0;
 
-      for (let page = 0; page < MAX_AUDIENCE_PAGES; page++) {
+      for (let page = 0; ; page++) {
+        // Fail loudly rather than truncate: silently returning `collected`
+        // here would report an incomplete list as the complete, definitive
+        // audience (the caller derives `total` directly from its length) —
+        // an announcement could then under-count real recipients with no
+        // indication anything was cut off. Mirrors the same bound-and-throw
+        // convention the entity service's own paged-exclude-filter loop
+        // uses (see sn_project_service.go's fetchAllProjectsFiltered).
+        if (page === MAX_AUDIENCE_PAGES) {
+          throw new Error(
+            `Too many matching projects to resolve the audience safely (exceeded ${MAX_AUDIENCE_PAGES} pages of ${AUDIENCE_PAGE_LIMIT}) — narrow the exclusion filters and try again.`,
+          );
+        }
         const res = await api.post<BeProjectSearchPayload, BeProjectSearchResponse>(
           "/announcements/audience/search",
           {

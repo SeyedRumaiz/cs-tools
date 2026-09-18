@@ -16,9 +16,17 @@
 
 import type { ResolvedAudienceProject } from "@features/csm-announcements/api/useResolveAnnouncementAudience";
 
-/** Wraps a field in double quotes and escapes any embedded quote, per RFC 4180. */
+/**
+ * Wraps a field in double quotes and escapes any embedded quote, per RFC
+ * 4180. Also neutralizes a leading formula-trigger character (`=`, `+`,
+ * `-`, `@`, tab, CR, or LF) by prefixing a single quote — project/account
+ * names here come from ServiceNow data this app doesn't control, and CSV
+ * quoting alone doesn't stop Excel/Sheets from treating a cell starting
+ * with one of those as a formula when this export is opened (CWE-1236).
+ */
 function csvField(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`;
+  const neutralized = /^[=+\-@\t\r\n]/.test(value) ? `'${value}` : value;
+  return `"${neutralized.replace(/"/g, '""')}"`;
 }
 
 /** Builds the resolved-audience CSV as a plain string, for both download and tests. */

@@ -201,4 +201,17 @@ describe("stripLexicalTableStylingFromHtml", () => {
 
     expect(out).toBe(html);
   });
+
+  it("preserves a source-authored style declaration outside Lexical's own set", () => {
+    const html =
+      '<table><tbody><tr>' +
+      '<td style="border: 1px solid black; width: 75px; color: red;">Flagged</td>' +
+      "</tr></tbody></table>";
+
+    const out = stripLexicalTableStylingFromHtml(html);
+
+    expect(out).toContain('style="color: red"');
+    expect(out).not.toContain("border");
+    expect(out).not.toContain("width");
+  });
 });

@@ -48,4 +48,23 @@ describe("buildAudienceCsv", () => {
     const csv = buildAudienceCsv([]);
     expect(csv).toBe('"Project key","Project name","Account"');
   });
+
+  it.each(["=SUM(A1)", "+1+1", "-1+1", "@SUM(A1)", "\tSUM", "\rSUM", "\nSUM"])(
+    "neutralizes a formula-trigger prefix (%j) so a spreadsheet app doesn't evaluate it",
+    (dangerous) => {
+      const csv = buildAudienceCsv([
+        { id: "1", key: dangerous, name: "Project One", accountName: "Acme" },
+      ]);
+      const row = csv.split("\r\n")[1];
+      // Quoted and prefixed with a leading single quote, not the raw formula-triggering value.
+      expect(row).toBe(`"'${dangerous}","Project One","Acme"`);
+    },
+  );
+
+  it("does not alter a value that merely contains, but doesn't start with, a formula-trigger character", () => {
+    const csv = buildAudienceCsv([
+      { id: "1", key: "WSO2-1", name: "Project = Alpha", accountName: "Acme" },
+    ]);
+    expect(csv.split("\r\n")[1]).toBe('"WSO2-1","Project = Alpha","Acme"');
+  });
 });

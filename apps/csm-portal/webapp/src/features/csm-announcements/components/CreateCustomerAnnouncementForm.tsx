@@ -38,6 +38,10 @@ import AudienceScopeControls, {
   type AnnouncementAudienceScope,
 } from "@features/csm-announcements/components/AudienceScopeControls";
 import ResolvedAudienceList from "@features/csm-announcements/components/ResolvedAudienceList";
+import {
+  ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
+  settleWithConcurrencyLimit,
+} from "@features/csm-announcements/utils/settleWithConcurrencyLimit";
 import { useNavTransition } from "@hooks/useNavTransition";
 
 /**
@@ -151,10 +155,24 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     () =>
       targetProjectIds.length > 0 &&
       !(scope === "all" && resolvedAudience.isLoading) &&
+      // TanStack Query can retain a previous successful fetch's `data` after
+      // a later refetch fails (isLoading goes back to false, but the stale
+      // list is still sitting there) — without this check, targetProjectIds
+      // would still look populated and a resolution failure could let the
+      // sender submit against an audience that's actually out of date.
+      !(scope === "all" && resolvedAudience.isError) &&
       subject.trim().length > 0 &&
       !isEmptyHtml(description) &&
       !submitting,
-    [targetProjectIds, scope, resolvedAudience.isLoading, subject, description, submitting],
+    [
+      targetProjectIds,
+      scope,
+      resolvedAudience.isLoading,
+      resolvedAudience.isError,
+      subject,
+      description,
+      submitting,
+    ],
   );
 
   const handleSubmit = async (): Promise<void> => {
@@ -167,8 +185,10 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
     // reported (or retried) as a failed create — just as a narrower, secondary
     // problem to fix on an otherwise-successful case.
     const failedTagProjectIds: string[] = [];
-    const results = await Promise.allSettled(
-      targetProjectIds.map(async (projectId) => {
+    const results = await settleWithConcurrencyLimit(
+      targetProjectIds,
+      ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
+      async (projectId) => {
         const created = await postCase.mutateAsync({
           type: "announcement",
           projectId,
@@ -186,7 +206,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
           }
         }
         return created;
-      }),
+      },
     );
     setSubmitting(false);
 

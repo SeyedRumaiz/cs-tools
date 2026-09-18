@@ -131,4 +131,31 @@ describe("useResolveAnnouncementAudience", () => {
     expect(postMock).toHaveBeenCalledTimes(1);
     expect(result.current.total).toBe(0);
   });
+
+  it("errors rather than silently reporting a truncated audience when the safety bound is hit", async () => {
+    // hasMore stays true forever, so the loop always exhausts
+    // MAX_AUDIENCE_PAGES (100) before the upstream match set ever ends.
+    postMock.mockImplementation((_url: string, body: { pagination: { offset: number } }) =>
+      Promise.resolve({
+        projects: [project(`p${body.pagination.offset}`)],
+        total: 1_000_000,
+        limit: 50,
+        offset: body.pagination.offset,
+        hasMore: true,
+      }),
+    );
+
+    const { result } = renderHook(
+      () =>
+        useResolveAnnouncementAudience(true, {
+          excludeClosureStates: [],
+          excludeSubscriptionTypes: [],
+        }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.isError).toBe(true);
+    expect(result.current.total).toBe(0);
+  });
 });

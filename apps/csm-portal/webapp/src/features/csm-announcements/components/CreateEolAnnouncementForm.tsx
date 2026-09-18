@@ -35,6 +35,10 @@ import { useAnnouncementDryRun, DRY_RUN_TAG_LABEL } from "@features/csm-announce
 import { useResolveProductVersionAudience } from "@features/csm-announcements/api/useResolveProductVersionAudience";
 import AnnouncementDryRunCard from "@features/csm-announcements/components/AnnouncementDryRunCard";
 import ResolvedAudienceList from "@features/csm-announcements/components/ResolvedAudienceList";
+import {
+  ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
+  settleWithConcurrencyLimit,
+} from "@features/csm-announcements/utils/settleWithConcurrencyLimit";
 import { usePostCsmCase } from "@features/csm-cases/api/usePostCsmCase";
 import { useSearchProducts } from "@features/csm-projects/api/useSearchProducts";
 import { useSearchProductVersions } from "@features/csm-projects/api/useSearchProductVersions";
@@ -114,6 +118,12 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
       !!productId &&
       !!productVersionId &&
       !resolvedAudience.isLoading &&
+      // TanStack Query can retain a previous successful fetch's data after a
+      // later refetch fails, so `total` alone can't distinguish "resolved,
+      // zero recipients" from "resolution just failed but is still showing
+      // yesterday's count" — see the customer-announcement form's own
+      // canSubmit for the identical reasoning.
+      !resolvedAudience.isError &&
       resolvedAudience.total > 0 &&
       subject.trim().length > 0 &&
       !isEmptyHtml(description) &&
@@ -122,6 +132,7 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
       productId,
       productVersionId,
       resolvedAudience.isLoading,
+      resolvedAudience.isError,
       resolvedAudience.total,
       subject,
       description,
@@ -135,15 +146,16 @@ export default function CreateEolAnnouncementForm(): JSX.Element {
 
     const trimmedSubject = subject.trim();
     const targetProjectIds = resolvedAudience.projects.map((p) => p.id);
-    const results = await Promise.allSettled(
-      targetProjectIds.map((projectId) =>
+    const results = await settleWithConcurrencyLimit(
+      targetProjectIds,
+      ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
+      (projectId) =>
         postCase.mutateAsync({
           type: "announcement",
           projectId,
           subject: trimmedSubject,
           description,
         }),
-      ),
     );
     setSubmitting(false);
 
