@@ -159,6 +159,9 @@ func TestSNProjectService_SearchProjects_ExcludesByProjectKey(t *testing.T) {
 	if resp.Total != 2 {
 		t.Fatalf("Total = %d, want 2", resp.Total)
 	}
+	if len(resp.Projects) != 2 {
+		t.Fatalf("got %d projects, want 2: %+v", len(resp.Projects), resp.Projects)
+	}
 	gotKeys := []string{resp.Projects[0].Key, resp.Projects[1].Key}
 	if gotKeys[0] != "KEEP1" || gotKeys[1] != "APEXIA2" {
 		t.Errorf("kept projects = %v, want [KEEP1 APEXIA2]", gotKeys)
