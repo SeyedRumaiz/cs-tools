@@ -9473,6 +9473,30 @@ components:
         searchQuery:
           type: string
           description: Searches across name, projectKey, and subscriptionType (case-insensitive); max 200 characters
+        excludeClosureStates:
+          type: array
+          items:
+            type: string
+            enum:
+              - Open
+              - Suspended
+              - Restricted
+          description: Excludes projects whose overall closure state matches any of these values.
+        excludeSubscriptionTypes:
+          type: array
+          items:
+            type: string
+            enum:
+              - development_support
+              - managed_cloud_subscription
+              - evaluation_subscription
+              - subscription
+              - cloud_evaluation_support
+              - internal
+              - platformer_subscription
+              - cloud_support
+              - professional_services
+          description: Excludes projects whose subscriptionType matches any of these values.
 
     ProjectSearchResponse:
       type: object

@@ -115,8 +115,13 @@ func TestSearchCustomerAnnouncementAudience(t *testing.T) {
 		if err := json.Unmarshal(capturedBody, &forwarded); err != nil {
 			t.Fatalf("upstream body is not valid JSON: %v", err)
 		}
-		if v, ok := forwarded["excludeProjectKeys"]; ok && v != nil {
-			t.Errorf("excludeProjectKeys = %v, want empty/null when nothing is configured", v)
+		v, ok := forwarded["excludeProjectKeys"]
+		if !ok {
+			t.Fatalf("excludeProjectKeys missing from forwarded body, want []")
+		}
+		arr, ok := v.([]any)
+		if !ok || len(arr) != 0 {
+			t.Errorf("excludeProjectKeys = %v, want an explicit empty array", v)
 		}
 	})
 

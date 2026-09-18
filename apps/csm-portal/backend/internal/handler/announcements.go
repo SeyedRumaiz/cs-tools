@@ -92,6 +92,9 @@ func injectExcludeProjectKeys(body []byte, excludedProjectKeys []string) ([]byte
 	if m == nil {
 		m = make(map[string]json.RawMessage)
 	}
+	if excludedProjectKeys == nil {
+		excludedProjectKeys = []string{}
+	}
 	keys, err := json.Marshal(excludedProjectKeys)
 	if err != nil {
 		return nil, err
