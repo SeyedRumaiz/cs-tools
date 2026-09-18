@@ -57,6 +57,17 @@ func TestSNProjectService_SearchProjects_RejectsInvalidExcludeFilters(t *testing
 			t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
 		}
 	})
+
+	t.Run("excludeProjectKeys", func(t *testing.T) {
+		_, err := svc.SearchProjects(contextWithUserIDToken("token"), domain.SearchProjectsRequest{
+			Pagination:         domain.Pagination{Limit: 10},
+			ExcludeProjectKeys: []string{""},
+		})
+		var ve *apierror.ValidationError
+		if !asValidationError(err, &ve) {
+			t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+		}
+	})
 }
 
 // snTestProject builds a minimal ServiceNow project-search row for the tests
@@ -115,6 +126,45 @@ func TestSNProjectService_SearchProjects_ExcludesByClosureStateAndSubscriptionTy
 	}
 	if resp.HasMore {
 		t.Errorf("HasMore = true, want false (only 2 of 2 filtered results fit the limit 10)")
+	}
+}
+
+// TestSNProjectService_SearchProjects_ExcludesByProjectKey verifies that
+// ExcludeProjectKeys drops matching projects on its own (no closure-state or
+// subscription-type filter needed to trigger the filtered path), and that
+// matching is exact (a key that merely contains an excluded key as a
+// substring is kept).
+func TestSNProjectService_SearchProjects_ExcludesByProjectKey(t *testing.T) {
+	client := newTestSNClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"projects": []map[string]any{
+				snTestProject("11111111111111111111111111111111", "Keep", "KEEP1", "Subscription", "Open"),
+				snTestProject("22222222222222222222222222222222", "Drop — Apexia", "APEXIA", "Subscription", "Open"),
+				snTestProject("33333333333333333333333333333333", "Drop — Veridian", "VERIDIAN", "Subscription", "Open"),
+				snTestProject("44444444444444444444444444444444", "Keep — not an exact match", "APEXIA2", "Subscription", "Open"),
+			},
+			"totalRecords": 4, "offset": 0, "limit": 100,
+		})
+	}))
+
+	svc := NewServiceNowProjectService(client, nil)
+	resp, err := svc.SearchProjects(contextWithUserIDToken("token"), domain.SearchProjectsRequest{
+		Pagination:         domain.Pagination{Limit: 10, Offset: 0},
+		ExcludeProjectKeys: []string{"APEXIA", "VERIDIAN"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Total != 2 {
+		t.Fatalf("Total = %d, want 2", resp.Total)
+	}
+	if len(resp.Projects) != 2 {
+		t.Fatalf("got %d projects, want 2: %+v", len(resp.Projects), resp.Projects)
+	}
+	gotKeys := []string{resp.Projects[0].Key, resp.Projects[1].Key}
+	if gotKeys[0] != "KEEP1" || gotKeys[1] != "APEXIA2" {
+		t.Errorf("kept projects = %v, want [KEEP1 APEXIA2]", gotKeys)
 	}
 }
 

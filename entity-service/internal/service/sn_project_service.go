@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -195,7 +196,7 @@ func (s *snProjectService) SearchProjects(ctx context.Context, req domain.Search
 
 	token := middleware.UserIDTokenFromContext(ctx)
 
-	if len(req.ExcludeClosureStates) == 0 && len(req.ExcludeSubscriptionTypes) == 0 {
+	if len(req.ExcludeClosureStates) == 0 && len(req.ExcludeSubscriptionTypes) == 0 && len(req.ExcludeProjectKeys) == 0 {
 		views, total, err := s.fetchProjectsPage(ctx, req, accountSysid, token, req.Pagination.Limit, req.Pagination.Offset)
 		if err != nil {
 			return domain.SearchProjectsResponse{}, err
@@ -210,10 +211,10 @@ func (s *snProjectService) SearchProjects(ctx context.Context, req domain.Search
 	}
 
 	// ServiceNow's projects/search endpoint has no filter parameter for
-	// excluding a set of closure states or subscription types (unlike
-	// ClosureStatus's own single-value include filter above), so this pages
-	// through every match with a bounded loop, filters in Go, then applies the
-	// caller's requested offset/limit over the filtered result.
+	// excluding a set of closure states, subscription types, or project keys
+	// (unlike ClosureStatus's own single-value include filter above), so this
+	// pages through every match with a bounded loop, filters in Go, then
+	// applies the caller's requested offset/limit over the filtered result.
 	filtered, err := s.fetchAllProjectsFiltered(ctx, req, accountSysid, token)
 	if err != nil {
 		return domain.SearchProjectsResponse{}, err
@@ -253,8 +254,8 @@ const snExcludeFilterPageSize = maxLimit
 
 // fetchAllProjectsFiltered pages through every ServiceNow match for req
 // (ignoring req.Pagination — the caller applies that to the returned slice)
-// and returns the subset that matches neither ExcludeClosureStates nor
-// ExcludeSubscriptionTypes.
+// and returns the subset that matches none of ExcludeClosureStates,
+// ExcludeSubscriptionTypes, or ExcludeProjectKeys.
 func (s *snProjectService) fetchAllProjectsFiltered(ctx context.Context, req domain.SearchProjectsRequest, accountSysid, token string) ([]domain.ProjectView, error) {
 	excludeClosure := make(map[string]struct{}, len(req.ExcludeClosureStates))
 	for _, v := range req.ExcludeClosureStates {
@@ -263,6 +264,10 @@ func (s *snProjectService) fetchAllProjectsFiltered(ctx context.Context, req dom
 	excludeType := make(map[domain.SubscriptionType]struct{}, len(req.ExcludeSubscriptionTypes))
 	for _, v := range req.ExcludeSubscriptionTypes {
 		excludeType[v] = struct{}{}
+	}
+	excludeKey := make(map[string]struct{}, len(req.ExcludeProjectKeys))
+	for _, v := range req.ExcludeProjectKeys {
+		excludeKey[v] = struct{}{}
 	}
 
 	var filtered []domain.ProjectView
@@ -281,6 +286,9 @@ func (s *snProjectService) fetchAllProjectsFiltered(ctx context.Context, req dom
 			if _, excluded := excludeType[v.SubscriptionType]; excluded {
 				continue
 			}
+			if _, excluded := excludeKey[v.Key]; excluded {
+				continue
+			}
 			filtered = append(filtered, v)
 		}
 		offset += len(views)
@@ -295,7 +303,7 @@ func (s *snProjectService) fetchAllProjectsFiltered(ctx context.Context, req dom
 	// resolving an announcement audience could under-count real recipients
 	// and never know. Fail loudly instead of guessing.
 	return nil, &apierror.ServiceUnavailableError{Msg: fmt.Sprintf(
-		"too many matching projects to apply excludeClosureStates/excludeSubscriptionTypes safely (exceeded %d upstream pages of %d) — narrow the search with an additional filter",
+		"too many matching projects to apply excludeClosureStates/excludeSubscriptionTypes/excludeProjectKeys safely (exceeded %d upstream pages of %d) — narrow the search with an additional filter",
 		maxExcludeFilterPages, snExcludeFilterPageSize,
 	)}
 }
@@ -740,6 +748,26 @@ func validateProjectSearchFilters(req domain.SearchProjectsRequest) error {
 	for _, t := range req.ExcludeSubscriptionTypes {
 		if _, ok := validSubscriptionTypes[t]; !ok {
 			return &apierror.ValidationError{Msg: "excludeSubscriptionTypes contains invalid value: " + string(t)}
+		}
+	}
+	for _, k := range req.ExcludeProjectKeys {
+		// Unlike ExcludeClosureStates/ExcludeSubscriptionTypes, project keys
+		// have no fixed enum to validate against — only reject the input
+		// shapes that could never be a real key and would otherwise silently
+		// match nothing: empty (or, if a project's own Key were ever empty,
+		// match every such project), and leading/trailing whitespace (the
+		// exclusion check below matches the raw value exactly against a
+		// project's own Key, so " APEXIA " would never match the real
+		// "APEXIA" -- silently leaving that project eligible instead of
+		// excluded, exactly the misconfiguration this endpoint exists to
+		// prevent). Rejecting loudly here, rather than trimming and
+		// accepting it, surfaces a bad CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS
+		// entry at request time instead of as a silent no-op exclusion.
+		if strings.TrimSpace(k) == "" {
+			return &apierror.ValidationError{Msg: "excludeProjectKeys must not contain empty values"}
+		}
+		if k != strings.TrimSpace(k) {
+			return &apierror.ValidationError{Msg: "excludeProjectKeys must not contain leading or trailing whitespace: " + strconv.Quote(k)}
 		}
 	}
 	return nil

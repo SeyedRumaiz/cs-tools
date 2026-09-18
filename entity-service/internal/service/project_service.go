@@ -42,9 +42,9 @@ func (s *projectService) SearchProjects(ctx context.Context, req domain.SearchPr
 	if err := validateSearchQuery(req.SearchQuery); err != nil {
 		return domain.SearchProjectsResponse{}, err
 	}
-	if len(req.ExcludeClosureStates) > 0 || len(req.ExcludeSubscriptionTypes) > 0 {
+	if len(req.ExcludeClosureStates) > 0 || len(req.ExcludeSubscriptionTypes) > 0 || len(req.ExcludeProjectKeys) > 0 {
 		return domain.SearchProjectsResponse{}, &apierror.ValidationError{
-			Msg: "excludeClosureStates and excludeSubscriptionTypes are only supported for the ServiceNow data source",
+			Msg: "excludeClosureStates, excludeSubscriptionTypes, and excludeProjectKeys are only supported for the ServiceNow data source",
 		}
 	}
 

@@ -6749,6 +6749,15 @@ components:
           description: >-
             Excludes projects whose subscription type is any of the given values.
             ServiceNow data source only; rejected on the Postgres data source.
+        excludeProjectKeys:
+          type: array
+          items:
+            type: string
+          description: >-
+            Excludes projects whose Key is any of the given values (exact,
+            case-sensitive match). Unrelated to closure state or subscription
+            type. ServiceNow data source only; rejected on the Postgres data
+            source.
 
     ProjectAccountRef:
       type: object
