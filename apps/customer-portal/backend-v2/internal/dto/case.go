@@ -752,10 +752,15 @@ func MapSearchCaseActivities(r entity.SearchCaseActivitiesResponse) SearchCaseAc
 			// name preserves the portal's existing output rather than quietly
 			// switching it to an email; CommentBubble falls back to createdBy
 			// when createdByFullName is empty, so both must resolve the same way.
-			CreatedBy:          userRefDisplayName(a.CreatedBy),
+			//
+			// userRefDisplayNameOrSystem (not the plain userRefDisplayName used
+			// elsewhere) so an automation/integration-authored activity — no
+			// resolvable name or email — renders as "system" instead of an empty
+			// string indistinguishable from a genuinely unknown author.
+			CreatedBy:          userRefDisplayNameOrSystem(a.CreatedBy),
 			CreatedByFirstName: a.CreatedByFirstName,
 			CreatedByLastName:  a.CreatedByLastName,
-			CreatedByFullName:  userRefDisplayName(a.CreatedBy),
+			CreatedByFullName:  userRefDisplayNameOrSystem(a.CreatedBy),
 			CommentType:        commentType,
 			FileName:           a.FileName,
 			ContentType:        a.ContentType,
