@@ -123,11 +123,15 @@ func TestMapSearchCaseActivities_AutomationAuthorRendersAsSystem(t *testing.T) {
 			{ID: "a2", Type: "comment", Content: "auto-update 2", CreatedBy: &entity.UserReference{}},
 			// A real person still resolves normally and is unaffected.
 			{ID: "a3", Type: "comment", Content: "hi", CreatedBy: &entity.UserReference{Email: "jane.doe@example.com", Name: "Jane Doe"}},
+			// Resolved to a real account (email present) but with no name to
+			// display: a person, not an automation actor, even though we
+			// cannot label them — must stay empty, not "system".
+			{ID: "a4", Type: "comment", Content: "email only", CreatedBy: &entity.UserReference{Email: "a@example.com"}},
 		},
-		Total: 3,
+		Total: 4,
 	})
-	if len(out.Activities) != 3 {
-		t.Fatalf("mapped %d activities, want 3", len(out.Activities))
+	if len(out.Activities) != 4 {
+		t.Fatalf("mapped %d activities, want 4", len(out.Activities))
 	}
 	for _, a := range out.Activities[:2] {
 		if a.CreatedBy != systemAuthorLabel {
@@ -139,6 +143,12 @@ func TestMapSearchCaseActivities_AutomationAuthorRendersAsSystem(t *testing.T) {
 	}
 	if out.Activities[2].CreatedBy != "Jane Doe" {
 		t.Errorf("human author: createdBy = %q, want the display name", out.Activities[2].CreatedBy)
+	}
+	if out.Activities[3].CreatedBy != "" {
+		t.Errorf("email-only author: createdBy = %q, want empty rather than \"system\"", out.Activities[3].CreatedBy)
+	}
+	if out.Activities[3].CreatedByFullName != "" {
+		t.Errorf("email-only author: createdByFullName = %q, want empty rather than \"system\"", out.Activities[3].CreatedByFullName)
 	}
 }
 
