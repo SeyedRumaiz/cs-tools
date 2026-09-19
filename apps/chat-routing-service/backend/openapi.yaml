@@ -1,0 +1,851 @@
+openapi: 3.0.1
+info:
+  title: Chat Routing Service API
+  version: 1.0.0
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  description: >-
+    Decides which engineer (if any) picks up a live-engineer-chat escalation,
+    and persists engineer presence and the FIFO waiting queue. See this
+    service's README.md for the full state machine, assignment-priority
+    rules, and data model — this spec documents only the wire contract.
+
+
+    Engineers are identified throughout this API by their IdP `userid` claim
+    (`userId` on every request/response below), not their email. There is no
+    per-customer "sticky" routing preference — every escalation is routed
+    purely by current availability and load.
+
+
+    Every route under `/route/*` is server-to-server only, authenticated with
+    a static shared secret in the `X-Routing-Service-Token` header (see the
+    `RoutingServiceToken` security scheme below). This API has no concept of
+    an end user or a browser session — callers are expected to be trusted
+    backends, never a frontend. `GET /health` is the only unauthenticated
+    route, for local liveness checks.
+
+
+    `POST /route/workitem`, `POST /route/workitem/{caseId}/info`,
+    `POST /route/comment`, and `GET /route/debug/workitem/{caseId}` are a
+    LOCAL STAND-IN for message/work-item persistence, built ahead of
+    entity-service's own generic work-item schema landing (see
+    `internal/router/workitem.go`). They are expected to be replaced once
+    that schema exists — a new consumer should treat them as unstable and
+    confirm with the service owner before depending on them. `GET
+    /route/debug/state` and `GET /route/debug/workitem/{caseId}` are
+    verification/debugging aids, not meant for production traffic.
+servers:
+  - url: "{server}:{port}"
+    variables:
+      server:
+        default: http://localhost
+      port:
+        default: "9096"
+security:
+  - RoutingServiceToken: []
+tags:
+  - name: routing
+    description: Engineer presence, escalation routing, and the waiting queue.
+  - name: stand-in
+    description: >-
+      Temporary local stand-in for message/work-item persistence — see the
+      description above. Not the long-term shape of this data.
+  - name: debug
+    description: Verification-only endpoints. Do not build production logic on these.
+paths:
+  /health:
+    get:
+      tags: [routing]
+      summary: Liveness check.
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+
+  /route/escalate:
+    post:
+      tags: [routing]
+      summary: >-
+        Route a new escalation to an engineer, or enqueue it if nobody is
+        available. See README.md "Assignment priority" for the full
+        least-busy-then-queue ordering.
+      operationId: escalate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EscalateRequest'
+      responses:
+        "200":
+          description: >-
+            Either an engineer was assigned (engineerId set) or the case
+            was queued (queued + position set) — never both.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EscalateResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/presence:
+    post:
+      tags: [routing]
+      summary: >-
+        Set an engineer's manual chat_status: AVAILABLE, BUSY (a
+        do-not-disturb toggle that keeps whatever cases the engineer already
+        holds but stops new ones routing to them), or OFFLINE. All three are
+        accepted directly — there is no derived status here; "pending" is a
+        per-case fact reported via GetPresence's cases[].pending, not a
+        top-level status. Mid-session, OFFLINE takes effect immediately on
+        chat_status; any case the engineer already holds is untouched until
+        it's separately resolved via accept, decline, completion, or a
+        timeout.
+      operationId: setPresence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PresenceRequest'
+      responses:
+        "200":
+          description: >-
+            assignedCases is set when transitioning to AVAILABLE immediately
+            drained one or more cases off the waiting queue (up to this
+            engineer's own capacity) — unlike completed/decline/a timeout,
+            which each free and backfill at most one slot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresenceResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/completed:
+    post:
+      tags: [routing]
+      summary: >-
+        Signal that one specific case an engineer was holding has ended.
+        Frees that case's capacity slot and, if the engineer's chat_status
+        is AVAILABLE with spare capacity, immediately claims the next queued
+        case for them. Does not touch chat_status — an engineer can still be
+        holding other concurrent cases, so ending one is never grounds to
+        change their overall presence.
+      operationId: completed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompletedRequest'
+      responses:
+        "200":
+          description: >-
+            A no-op call (caseId wasn't an open case held by this engineer)
+            returns 200 with ended omitted — this endpoint does not error on
+            a stale/duplicate call, by design (idempotent).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletedResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/decline:
+    post:
+      tags: [routing]
+      summary: >-
+        Release an engineer's reservation on a case they were assigned but
+        won't take. Reassigns to the next-best available engineer (same
+        least-busy ranking as escalate, excluding the decliner) or pushes
+        the case back onto the FRONT of the queue if nobody's free.
+      operationId: decline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeclineRequest'
+      responses:
+        "200":
+          description: >-
+            A stale caseId (already moved on) is a no-op 200, not an error —
+            reassignedTo/requeued both omitted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeclineResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/accept:
+    post:
+      tags: [routing]
+      summary: >-
+        Confirm an engineer is accepting the specific case they were
+        assigned (that conversation's own state: OPEN -> ACTIVE). Does not
+        touch chat_status. Re-checks against the database rather than
+        trusting the caller's own state, so a stale/duplicate/already-moved
+        accept comes back applied:false instead of silently succeeding.
+      operationId: accept
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptRequest'
+      responses:
+        "200":
+          description: applied is false when the accept is stale — see the AcceptResponse schema.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/sweep-timeouts:
+    post:
+      tags: [routing]
+      summary: >-
+        Run two maintenance sweeps in one call. First, reassign or requeue
+        any case whose assigned engineer has been PENDING (assigned, not yet
+        accepted) past this service's own configured
+        PENDING_TIMEOUT_SECONDS — the timed-out engineer's chat_status is
+        left untouched; only that specific case is affected, so any other
+        concurrent case they hold is unaffected. Second, give up on any case
+        that has sat WAITING_FOR_ENGINEER (never assigned to anyone at all)
+        past QUEUE_ABANDON_SECONDS, ending its session outright. Meant to be
+        polled periodically by a caller that owns delivering the results
+        somewhere (csm-portal/backend does this every
+        ENGINEER_TIMEOUT_SWEEP_INTERVAL_SECONDS) — this service does not
+        push anything on its own. Safe to call as often as you like; a
+        sweep with nothing to do returns empty arrays.
+      operationId: sweepTimeouts
+      responses:
+        "200":
+          description: One entry per case affected by either sweep this call (either array may be empty).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SweepTimeoutsResponse'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/presence/{userId}:
+    get:
+      tags: [routing]
+      summary: >-
+        Look up an engineer's chat_status, concurrent-chat capacity and
+        current load, and every case they're currently holding (pending or
+        accepted alike) — lets a caller's UI rehydrate lost local state
+        (e.g. after a browser refresh) from server-side truth.
+      operationId: getPresence
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: The IdP's stable per-account userid claim.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Defaults to chatStatus OFFLINE with no cases for an unseen engineer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresenceDetailResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/capacity:
+    patch:
+      tags: [routing]
+      summary: >-
+        Set an engineer's own configurable concurrent-chat capacity (1-20,
+        default 1 on first contact). Never disturbs a case the engineer
+        already holds — lowering the limit below their current active count
+        only stops new work from routing to them until they fall back
+        under it.
+      operationId: setCapacity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CapacityRequest'
+      responses:
+        "200":
+          description: Capacity updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapacityResponse'
+        "400":
+          description: Missing userId, or maxConcurrentChats outside 1-20.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/workitem:
+    post:
+      tags: [stand-in]
+      summary: >-
+        LOCAL STAND-IN. Create the work-item/chat-conversation record for a
+        new escalation, regardless of routing outcome. Expected to be
+        replaced by a real entity-service work-item schema.
+      operationId: createWorkItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkItemRequest'
+      responses:
+        "201":
+          description: The stand-in work_item/chat_conversation rows were created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created:
+                    type: boolean
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/workitem/{caseId}/info:
+    post:
+      tags: [stand-in]
+      summary: >-
+        LOCAL STAND-IN. Return caseId's originally-submitted CaseInfo
+        (subject, customer email/name, message, projectId) exactly as
+        POST /route/workitem stored it, so a caller converting a chat into
+        a real case doesn't have to have the browser resend data this
+        service already has. POST rather than GET only to match this
+        package's other server-to-server routes; it has no body.
+      operationId: getCaseInfo
+      parameters:
+        - name: caseId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The case's originally-submitted CaseInfo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseInfo'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          description: No chat_conversation row exists for this caseId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/convert-to-case:
+    post:
+      tags: [routing]
+      summary: >-
+        End caseId's chat session by converting it into a real case:
+        records entityCaseId against the conversation (state ->
+        CONVERTED_CASE), frees its capacity slot, and backfills the queue
+        exactly like a normal completion. userId must be the engineer
+        currently holding caseId in an accepted (ACTIVE) session — the
+        entity-service case itself must already exist by the time this is
+        called; this endpoint only records the conversion, it does not
+        create the case.
+      operationId: convertToCase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConvertToCaseRequest'
+      responses:
+        "200":
+          description: >-
+            assignedCase is set only when ending this session immediately
+            backfilled a freed slot from the waiting queue.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConvertToCaseResponse'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          description: No chat_conversation row exists for this caseId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: >-
+            caseId is not an ACTIVE conversation held by userId, or it has
+            already been converted to a case or otherwise ended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/comment:
+    post:
+      tags: [stand-in]
+      summary: >-
+        LOCAL STAND-IN. Persist one chat message (either direction) against
+        an existing work item. Expected to be replaced by a real
+        entity-service comment schema.
+      operationId: addComment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommentRequest'
+      responses:
+        "201":
+          description: The message was persisted as a comment row.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added:
+                    type: boolean
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+  /route/debug/workitem/{caseId}:
+    get:
+      tags: [debug]
+      summary: Dump the stand-in work_item/chat_conversation/comment rows for one case. Verification only.
+      operationId: debugWorkItem
+      parameters:
+        - name: caseId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Shape mirrors the stand-in tables directly; not a stable contract.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "404":
+          description: No work item exists for that caseId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /route/debug/state:
+    get:
+      tags: [debug]
+      summary: Full dump of engineers (with today's chat count) and the chat queue. Verification only.
+      operationId: debugState
+      responses:
+        "200":
+          description: cs_engineer_status rows (with today's live chat count and every case held) and the current chat_queue contents.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "502":
+          $ref: '#/components/responses/StorageUnavailable'
+
+components:
+  securitySchemes:
+    RoutingServiceToken:
+      type: apiKey
+      in: header
+      name: X-Routing-Service-Token
+      description: >-
+        Static shared secret. Must equal this service's own
+        ROUTING_SERVICE_TOKEN. Never construct or forward this value in
+        browser-facing code — see README.md's security notes.
+
+  responses:
+    Unauthorized:
+      description: >-
+        Missing or incorrect X-Routing-Service-Token header (see the
+        RoutingServiceToken security scheme).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    BadRequest:
+      description: Missing/invalid required field(s).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    StorageUnavailable:
+      description: >-
+        The routing service's Postgres store is unreachable. The underlying
+        error is logged server-side and never included in the response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    Status:
+      type: string
+      enum: [AVAILABLE, BUSY, OFFLINE]
+      description: >-
+        An engineer's manual chat_status — a plain three-way toggle that all
+        three values can be requested directly via POST /route/presence,
+        independent of how many cases the engineer is actually holding.
+        There is no PENDING here: "pending" describes one conversation, not
+        an engineer, and is reported per-case via CaseStatus.pending.
+
+    CaseInfo:
+      type: object
+      description: >-
+        Opaque as far as this service is concerned — carried through
+        verbatim and handed back to the caller on assignment/queue events.
+      required: [caseId, conversationId]
+      properties:
+        caseId:
+          type: string
+        conversationId:
+          type: string
+        projectId:
+          type: string
+        subject:
+          type: string
+        customerEmail:
+          type: string
+        customerName:
+          type: string
+        message:
+          type: string
+
+    CaseStatus:
+      description: >-
+        One case an engineer currently holds, as reported by
+        GetPresence/DebugState — CaseInfo plus whether it's still awaiting
+        Accept.
+      allOf:
+        - $ref: '#/components/schemas/CaseInfo'
+        - type: object
+          required: [pending, assignedAt]
+          properties:
+            pending:
+              type: boolean
+              description: True until POST /route/accept confirms this specific case.
+            assignedAt:
+              type: string
+              format: date-time
+              description: >-
+                When this case was assigned to this engineer (not when it
+                was created) — the countdown to the timeout sweep runs from
+                here.
+
+    EscalateRequest:
+      $ref: '#/components/schemas/CaseInfo'
+
+    EscalateResponse:
+      type: object
+      properties:
+        engineerId:
+          type: string
+          description: >-
+            The IdP userid claim of the engineer who was assigned. Set only
+            when a specific engineer was assigned.
+        queued:
+          type: boolean
+          description: Set when nobody was available and the case was enqueued instead.
+        position:
+          type: integer
+          description: 1-based queue position. Only meaningful when queued is true.
+
+    PresenceRequest:
+      type: object
+      required: [userId, status]
+      properties:
+        userId:
+          type: string
+          description: >-
+            The IdP's stable per-account userid claim — this table's
+            primary key, so nothing else is needed to create the engineer's
+            row on first contact.
+        status:
+          type: string
+          enum: [AVAILABLE, BUSY, OFFLINE]
+          description: All three of the Status schema's values are accepted here.
+
+    PresenceResponse:
+      type: object
+      properties:
+        applied:
+          type: boolean
+        assignedCases:
+          type: array
+          items:
+            $ref: '#/components/schemas/CaseInfo'
+          description: >-
+            Set when transitioning to AVAILABLE immediately drained one or
+            more cases off the waiting queue, up to this engineer's own
+            capacity.
+
+    CompletedRequest:
+      type: object
+      required: [userId, caseId]
+      properties:
+        userId:
+          type: string
+          description: The IdP's stable per-account userid claim.
+        caseId:
+          type: string
+          description: Which of the engineer's (possibly several concurrent) cases just ended.
+
+    CompletedResponse:
+      type: object
+      properties:
+        ended:
+          type: boolean
+          description: >-
+            True when caseId was actually an open (not already-ended)
+            conversation assigned to userId — false is a no-op, guarding
+            against a duplicate call for a session that already ended.
+        assignedCase:
+          $ref: '#/components/schemas/CaseInfo'
+
+    DeclineRequest:
+      type: object
+      required: [userId, caseId]
+      properties:
+        userId:
+          type: string
+          description: The IdP's stable per-account userid claim.
+        caseId:
+          type: string
+
+    DeclineResponse:
+      type: object
+      properties:
+        reassignedTo:
+          type: string
+          description: Set to the newly assigned engineer's userId when another available engineer was found.
+        requeued:
+          type: boolean
+          description: Set when nobody was available and the case went back to the front of the queue.
+        assignedCase:
+          $ref: '#/components/schemas/CaseInfo'
+
+    AcceptRequest:
+      type: object
+      required: [userId, caseId]
+      properties:
+        userId:
+          type: string
+          description: The IdP's stable per-account userid claim.
+        caseId:
+          type: string
+
+    AcceptResponse:
+      type: object
+      properties:
+        applied:
+          type: boolean
+          description: False means the accept was stale — the case was already declined/reassigned/requeued out from under this engineer, or they never held it.
+
+    TimeoutResult:
+      type: object
+      description: >-
+        One case's outcome from the PENDING-timeout sweep -- exactly one of
+        reassignedTo (with assignedCase) or requeued applies. The engineer
+        named in userId is not taken offline; any other concurrent case they
+        hold is unaffected.
+      properties:
+        userId:
+          type: string
+          description: The IdP's stable per-account userid claim.
+        caseId:
+          type: string
+        reassignedTo:
+          type: string
+          description: Set to the newly assigned engineer's userId when another available engineer was found.
+        requeued:
+          type: boolean
+          description: Set when nobody was available and the case went back to the front of the queue.
+        assignedCase:
+          $ref: '#/components/schemas/CaseInfo'
+
+    AbandonedResult:
+      type: object
+      description: >-
+        One case the queue-abandonment sweep gave up on: it sat
+        WAITING_FOR_ENGINEER (never assigned to anyone at all) past
+        QUEUE_ABANDON_SECONDS. Its session is ended outright — distinct from
+        TimeoutResult, which covers a case that WAS assigned to a specific
+        engineer and never confirmed.
+      properties:
+        caseId:
+          type: string
+        conversationId:
+          type: string
+
+    SweepTimeoutsResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimeoutResult'
+        abandoned:
+          type: array
+          items:
+            $ref: '#/components/schemas/AbandonedResult'
+
+    PresenceDetailResponse:
+      type: object
+      properties:
+        chatStatus:
+          $ref: '#/components/schemas/Status'
+        activeChats:
+          type: integer
+          description: How many cases this engineer currently holds (pending or accepted).
+        maxConcurrentChats:
+          type: integer
+          description: This engineer's own configurable capacity (default 1).
+        atCapacity:
+          type: boolean
+          description: True when activeChats has reached maxConcurrentChats.
+        cases:
+          type: array
+          items:
+            $ref: '#/components/schemas/CaseStatus'
+          description: Every case this engineer currently holds, pending or accepted alike.
+        pendingTimeoutSeconds:
+          type: integer
+          description: This service's configured PENDING_TIMEOUT_SECONDS -- always present, not per-engineer state.
+
+    CapacityRequest:
+      type: object
+      required: [userId, maxConcurrentChats]
+      properties:
+        userId:
+          type: string
+          description: The IdP's stable per-account userid claim.
+        maxConcurrentChats:
+          type: integer
+          minimum: 1
+          maximum: 20
+
+    CapacityResponse:
+      type: object
+      properties:
+        applied:
+          type: boolean
+
+    ConvertToCaseRequest:
+      type: object
+      required: [userId, caseId, entityCaseId]
+      properties:
+        userId:
+          type: string
+          description: The IdP's stable per-account userid claim. Must currently hold caseId in an accepted (ACTIVE) session.
+        caseId:
+          type: string
+        entityCaseId:
+          type: string
+          description: The real entity-service case ID the caller already created before calling this endpoint.
+
+    ConvertToCaseResponse:
+      type: object
+      properties:
+        assignedCase:
+          $ref: '#/components/schemas/CaseInfo'
+
+    WorkItemRequest:
+      description: >-
+        Same body shape as EscalateRequest -- POST /route/workitem and
+        POST /route/escalate are both handled by the shared caseInfoRequest
+        struct server-side -- but with different required fields: creating
+        a work item only needs caseId, customerEmail, and subject up front.
+      allOf:
+        - $ref: '#/components/schemas/CaseInfo'
+        - type: object
+          required: [caseId, customerEmail, subject]
+
+    CommentRequest:
+      type: object
+      required: [caseId, authorEmail, content]
+      properties:
+        caseId:
+          type: string
+        authorEmail:
+          type: string
+          format: email
+        content:
+          type: string

@@ -1,0 +1,28 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- Drops pending_offline -- it shouldn't be a stored column at all. An
+-- engineer's OFFLINE request now takes effect on chat_status immediately
+-- (see SetPresence in internal/router/state.go), instead of being deferred
+-- until their session ends.
+--
+-- That alone would break SweepExpiredPending, which only looked at
+-- chat_status = 'BUSY' to find an unconfirmed case to reassign. It now also
+-- matches chat_status = 'OFFLINE' rows with an unconfirmed case
+-- (current_case_id IS NOT NULL AND accepted_at IS NULL), and Router.Accept's
+-- own gate (isStuckPending, replacing isPendingAccept) was widened the same
+-- way, so an engineer can still confirm a case after going OFFLINE.
+ALTER TABLE chat_routing.cs_engineer_status DROP COLUMN pending_offline;
