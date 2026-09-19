@@ -107,6 +107,41 @@ func TestMapSearchComments_HandlesAnUnresolvedAuthor(t *testing.T) {
 	}
 }
 
+// TestMapSearchCaseActivities_AutomationAuthorRendersAsSystem is the regression
+// guard for an automation/integration-authored case comment (e.g. an unattended
+// workflow posting on a case) rendering as "" instead of a usable author. An
+// empty createdBy is indistinguishable from a genuinely unknown author, so
+// downstream consumers showed "Unknown" for what should read as "System" — the
+// literal string the previous entity-service contract sent for the same case.
+func TestMapSearchCaseActivities_AutomationAuthorRendersAsSystem(t *testing.T) {
+	out := MapSearchCaseActivities(entity.SearchCaseActivitiesResponse{
+		Activity: []entity.CaseActivity{
+			// No resolvable identity at all: the shape an automation-authored
+			// comment arrives in.
+			{ID: "a1", Type: "comment", Content: "auto-update", CreatedBy: nil},
+			// Present but empty on every field — same "nobody real" case as nil.
+			{ID: "a2", Type: "comment", Content: "auto-update 2", CreatedBy: &entity.UserReference{}},
+			// A real person still resolves normally and is unaffected.
+			{ID: "a3", Type: "comment", Content: "hi", CreatedBy: &entity.UserReference{Email: "jane.doe@example.com", Name: "Jane Doe"}},
+		},
+		Total: 3,
+	})
+	if len(out.Activities) != 3 {
+		t.Fatalf("mapped %d activities, want 3", len(out.Activities))
+	}
+	for _, a := range out.Activities[:2] {
+		if a.CreatedBy != systemAuthorLabel {
+			t.Errorf("%s: createdBy = %q, want %q", a.ID, a.CreatedBy, systemAuthorLabel)
+		}
+		if a.CreatedByFullName != systemAuthorLabel {
+			t.Errorf("%s: createdByFullName = %q, want %q", a.ID, a.CreatedByFullName, systemAuthorLabel)
+		}
+	}
+	if out.Activities[2].CreatedBy != "Jane Doe" {
+		t.Errorf("human author: createdBy = %q, want the display name", out.Activities[2].CreatedBy)
+	}
+}
+
 // TestMapCommentCreate_UsesTheAuthorName covers the create path, which mapped the
 // same removed FullName field.
 func TestMapCommentCreate_UsesTheAuthorName(t *testing.T) {
