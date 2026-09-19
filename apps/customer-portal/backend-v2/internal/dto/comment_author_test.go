@@ -127,13 +127,21 @@ func TestMapSearchCaseActivities_AutomationAuthorRendersAsSystem(t *testing.T) {
 			// display: a person, not an automation actor, even though we
 			// cannot label them — must stay empty, not "system".
 			{ID: "a4", Type: "comment", Content: "email only", CreatedBy: &entity.UserReference{Email: "a@example.com"}},
+			// The automation account: the upstream data source has no real user
+			// record to resolve it against, so it reuses the raw "system"
+			// literal in the email slot, with whatever display name it also
+			// carries for that account.
+			{ID: "a5", Type: "comment", Content: "auto-update 3", CreatedBy: &entity.UserReference{Email: "system", Name: "System"}},
+			// Same automation account, but with the name slot blank — must still
+			// render as "system", not empty.
+			{ID: "a6", Type: "comment", Content: "auto-update 4", CreatedBy: &entity.UserReference{Email: "system", Name: ""}},
 		},
-		Total: 4,
+		Total: 6,
 	})
-	if len(out.Activities) != 4 {
-		t.Fatalf("mapped %d activities, want 4", len(out.Activities))
+	if len(out.Activities) != 6 {
+		t.Fatalf("mapped %d activities, want 6", len(out.Activities))
 	}
-	for _, a := range out.Activities[:2] {
+	for _, a := range []CaseActivity{out.Activities[0], out.Activities[1], out.Activities[4], out.Activities[5]} {
 		if a.CreatedBy != systemAuthorLabel {
 			t.Errorf("%s: createdBy = %q, want %q", a.ID, a.CreatedBy, systemAuthorLabel)
 		}
