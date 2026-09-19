@@ -1246,6 +1246,9 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 		State              *string `json:"state"`
 		WorkState          *string `json:"workState"`
 		AutocloseHoldUntil *string `json:"autocloseHoldUntil"`
+		BestCaseFixEta     *string `json:"bestCaseFixEta"`
+		MostLikelyFixEta   *string `json:"mostLikelyFixEta"`
+		WorstCaseFixEta    *string `json:"worstCaseFixEta"`
 	}
 	patchErr := json.Unmarshal(body, &patch)
 	if patchErr == nil && (patch.State != nil || patch.WorkState != nil) {
@@ -1306,6 +1309,32 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
+	// A fix-ETA update has no trail of its own on the case unless the caller also
+	// sets addPublicComment, which posts a separate customer-visible comment
+	// entirely inside the entity service. Record an internal work note here too,
+	// independent of that flag, so CS engineers can see from the case's own
+	// history that a fix-ETA change happened at all. Sourced from the PATCH
+	// response (the values the entity service actually committed), not the
+	// request, since that's the correct source of truth regardless of backing
+	// data source. Best-effort and fire-and-forget, same reasoning as the
+	// autoclose-hold note above: the PATCH already succeeded, so this secondary
+	// write must not delay the response or fail the request if it errors, and
+	// context.WithoutCancel keeps the request-scoped values the entity client
+	// needs while detaching from the request's own cancellation.
+	if patchErr == nil && (patch.BestCaseFixEta != nil || patch.MostLikelyFixEta != nil || patch.WorstCaseFixEta != nil) {
+		fieldsPatched := fixEtaFieldsPatched{
+			best:       patch.BestCaseFixEta != nil,
+			mostLikely: patch.MostLikelyFixEta != nil,
+			worst:      patch.WorstCaseFixEta != nil,
+		}
+		detached := context.WithoutCancel(r.Context())
+		go func() {
+			ctx, cancel := context.WithTimeout(detached, 15*time.Second)
+			defer cancel()
+			h.recordFixEtaWorkNote(ctx, user, caseID, result, fieldsPatched)
+		}()
+	}
+
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -1343,6 +1372,67 @@ func (h *CaseHandler) recordAutocloseHoldWorkNote(ctx context.Context, user *mid
 
 	if _, err := h.entity.CreateCaseComment(ctx, caseID, body); err != nil {
 		slog.WarnContext(ctx, "failed to record autoclose hold work note", "userID", user.UserID, "caseID", caseID, "err", err)
+	}
+}
+
+// fixEtaFieldsPatched records which of the three fix-ETA fields were present
+// on the incoming PATCH request, so recordFixEtaWorkNote can mention only
+// fields that were actually part of this PATCH — the PATCH response's "case"
+// object generally carries the full case, including fix-ETA values untouched
+// by this request, so gating on the response alone would misattribute them.
+type fixEtaFieldsPatched struct {
+	best       bool
+	mostLikely bool
+	worst      bool
+}
+
+// recordFixEtaWorkNote adds an internal work note documenting a fix-ETA
+// update, giving CS engineers a trail of the change on the case itself even
+// when the caller didn't also request a customer-visible comment. Only
+// fields present on the incoming request (fieldsPatched) are mentioned, but
+// their values are read from the PATCH response rather than the request body
+// so the note reflects what was actually committed upstream. Best-effort:
+// failures are logged, never surfaced to the caller, since the primary PATCH
+// already succeeded by the time this runs.
+func (h *CaseHandler) recordFixEtaWorkNote(ctx context.Context, user *middleware.UserInfo, caseID string, result []byte, fieldsPatched fixEtaFieldsPatched) {
+	var response struct {
+		Case struct {
+			BestCaseFixEta   string `json:"bestCaseFixEta"`
+			MostLikelyFixEta string `json:"mostLikelyFixEta"`
+			WorstCaseFixEta  string `json:"worstCaseFixEta"`
+		} `json:"case"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		slog.ErrorContext(ctx, "failed to parse PATCH response for fix ETA work note", "userID", user.UserID, "caseID", caseID, "err", err)
+		return
+	}
+
+	var parts []string
+	if fieldsPatched.best {
+		parts = append(parts, "Best case: "+response.Case.BestCaseFixEta)
+	}
+	if fieldsPatched.mostLikely {
+		parts = append(parts, "Most likely: "+response.Case.MostLikelyFixEta)
+	}
+	if fieldsPatched.worst {
+		parts = append(parts, "Worst case: "+response.Case.WorstCaseFixEta)
+	}
+	if len(parts) == 0 {
+		return
+	}
+	note := "Fix ETA updated — " + strings.Join(parts, ", ")
+
+	body, err := json.Marshal(map[string]string{
+		"type":    "work_note",
+		"content": note,
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to build fix ETA work note body", "userID", user.UserID, "caseID", caseID, "err", err)
+		return
+	}
+
+	if _, err := h.entity.CreateCaseComment(ctx, caseID, body); err != nil {
+		slog.WarnContext(ctx, "failed to record fix ETA work note", "userID", user.UserID, "caseID", caseID, "err", err)
 	}
 }
 
