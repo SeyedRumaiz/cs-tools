@@ -30,9 +30,12 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/sdk-go/routingclient"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/chatnotify"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/dashboard"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/directory"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/entity"
@@ -42,6 +45,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/notifications"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/scim"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/sftpgo"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/stream"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/updates"
 )
 
@@ -78,6 +82,26 @@ func main() {
 	customerEntityClient := entity.NewCustomerEntityClient(customerEntityCfg)
 
 	caseHandler := handler.NewCaseHandler(customerEntityClient)
+
+	// Live-engineer-chat escalation feature (Novera chat "Talk to a live
+	// engineer" button). engineerHub fans SSE alerts out to connected
+	// engineers (StreamEngineerAlerts); chatNotifyClient/routingClient are
+	// this backend's two outbound integrations (customer-portal/backend-v2's
+	// internal listener, and the standalone chat-routing-service). See
+	// .env.example for the corresponding env vars.
+	engineerHub := stream.NewBroadcastHub()
+	internalChatToken := os.Getenv("INTERNAL_CHAT_TOKEN")
+	chatNotifyClient := chatnotify.NewClient(chatnotify.Config{
+		BaseURL:       envOrDefault("CUSTOMER_PORTAL_INTERNAL_BASE_URL", "http://localhost:8082"),
+		InternalToken: internalChatToken,
+	})
+	routingClient := routingclient.NewClient(routingclient.Config{
+		BaseURL:       envOrDefault("ROUTING_SERVICE_BASE_URL", "http://localhost:9096"),
+		InternalToken: os.Getenv("ROUTING_SERVICE_TOKEN"),
+	})
+	chatHandler := handler.NewChatHandler(customerEntityClient, engineerHub, chatNotifyClient, routingClient)
+	engineerTimeoutSweepInterval := envDurationSeconds("ENGINEER_TIMEOUT_SWEEP_INTERVAL_SECONDS", 15)
+
 	dashboardHandler := handler.NewDashboardHandler()
 	metadataHandler := handler.NewMetadataHandler()
 	accountHandler := handler.NewAccountHandler(customerEntityClient)
@@ -298,6 +322,16 @@ func main() {
 	// Called manually today; not yet wired into real incident/case creation.
 	mux.HandleFunc("POST /notifications/google-chat/alerts", notificationHandler.PostGoogleChatAlert)
 
+	// Live-engineer-chat: engineer-facing session lifecycle + presence.
+	mux.HandleFunc("POST /chat/sessions/{id}/accept", chatHandler.HandleAcceptSession)
+	mux.HandleFunc("POST /chat/sessions/{id}/messages", chatHandler.HandleEngineerMessage)
+	mux.HandleFunc("POST /chat/sessions/{id}/complete", chatHandler.HandleCompleteSession)
+	mux.HandleFunc("POST /chat/sessions/{id}/decline", chatHandler.HandleDeclineSession)
+	mux.HandleFunc("POST /chat/sessions/{id}/convert-to-case", chatHandler.HandleConvertToCase)
+	mux.HandleFunc("POST /engineers/me/status", chatHandler.HandleSetPresence)
+	mux.HandleFunc("GET /engineers/me/status", chatHandler.HandleGetPresence)
+	mux.HandleFunc("PATCH /engineers/me/capacity", chatHandler.HandleSetMaxConcurrentChats)
+
 	// Built once and reused on both listeners below: Auth() does a real JWKS
 	// fetch (when TokenValidatorEnabled), so calling it a second time would
 	// duplicate that startup network round-trip and double the chance of a
@@ -307,6 +341,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	go chatHandler.StartTimeoutSweeper(ctx, engineerTimeoutSweepInterval)
 
 	addr := ":" + mustPort("PORT", "8080")
 
@@ -350,15 +386,102 @@ func main() {
 	}()
 	slog.Info("CSM Portal Backend started", "addr", addr)
 
+	// Live-engineer-chat: two more always-on listeners, separate from the
+	// main API above.
+	//   - chatStreamSrv (CHAT_STREAM_PORT): SSE stream engineers subscribe to
+	//     for live escalation alerts, behind the same authMiddleware chain as
+	//     the main API. WriteTimeout/IdleTimeout are left at zero: unlike the
+	//     main API's short-lived requests, this connection is meant to stay
+	//     open indefinitely.
+	//   - internalChatSrv (INTERNAL_CHAT_PORT): service-to-service receiver
+	//     for customer-portal/backend-v2's escalate/customer-message calls,
+	//     gated by middleware.InternalToken instead of user auth (there is no
+	//     customer JWT on these calls).
+	chatStreamMux := http.NewServeMux()
+	chatStreamMux.HandleFunc("GET /chat/alerts/stream", chatHandler.StreamEngineerAlerts)
+	chatStreamAddr := ":" + mustPort("CHAT_STREAM_PORT", "9094")
+	chatStreamLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", chatStreamAddr)
+	if err != nil {
+		slog.Error("failed to bind", "addr", chatStreamAddr, "err", err)
+		os.Exit(1)
+	}
+	chatStreamSrv := &http.Server{
+		Handler: middleware.SecurityHeaders(
+			middleware.CORS(splitComma(os.Getenv("STREAM_CORS_ALLOWED_ORIGINS")))(
+				middleware.CorrelationID(authMiddleware(middleware.Logger(chatStreamMux))),
+			),
+		),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       0,
+	}
+
+	internalChatMux := http.NewServeMux()
+	internalChatMux.HandleFunc("POST /internal/chat/escalate", chatHandler.HandleEscalate)
+	internalChatMux.HandleFunc("POST /internal/chat/customer-message", chatHandler.HandleCustomerMessage)
+	internalChatAddr := ":" + mustPort("INTERNAL_CHAT_PORT", "9095")
+	internalChatLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", internalChatAddr)
+	if err != nil {
+		slog.Error("failed to bind", "addr", internalChatAddr, "err", err)
+		os.Exit(1)
+	}
+	internalChatSrv := &http.Server{
+		Handler: middleware.SecurityHeaders(
+			middleware.CorrelationID(
+				middleware.InternalToken(internalChatToken)(middleware.Logger(internalChatMux)),
+			),
+		),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		if err := chatStreamSrv.Serve(chatStreamLn); err != nil && err != http.ErrServerClosed {
+			slog.Error("chat alert stream server exited", "err", err)
+			os.Exit(1)
+		}
+	}()
+	slog.Info("engineer chat alert stream server started", "addr", chatStreamLn.Addr().String())
+
+	go func() {
+		if err := internalChatSrv.Serve(internalChatLn); err != nil && err != http.ErrServerClosed {
+			slog.Error("internal chat server exited", "err", err)
+			os.Exit(1)
+		}
+	}()
+	slog.Info("internal chat server started", "addr", internalChatLn.Addr().String())
+
 	<-ctx.Done()
 	stop()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	var srvErr error
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		srvErr = err
+	var wg sync.WaitGroup
+	var chatStreamErr, internalChatErr, srvErr error
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		chatStreamErr = chatStreamSrv.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		defer wg.Done()
+		internalChatErr = internalChatSrv.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		defer wg.Done()
+		srvErr = srv.Shutdown(shutdownCtx)
+	}()
+	wg.Wait()
+
+	if chatStreamErr != nil {
+		slog.Error("chat alert stream server graceful shutdown failed", "err", chatStreamErr)
+	}
+	if internalChatErr != nil {
+		slog.Error("internal chat server graceful shutdown failed", "err", internalChatErr)
 	}
 	if srvErr != nil {
 		slog.Error("graceful shutdown failed", "err", srvErr)
@@ -667,6 +790,20 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envDurationSeconds returns the given environment variable (or defSeconds
+// if unset) as a time.Duration, interpreting the value as a plain whole
+// number of seconds (e.g. "15", not "15s"). Exits the process if set to
+// something else, matching mustPort's fail-fast-at-startup style.
+func envDurationSeconds(key string, defSeconds int) time.Duration {
+	v := envOrDefault(key, strconv.Itoa(defSeconds))
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs <= 0 {
+		slog.Error("environment variable must be a positive whole number of seconds", "key", key, "value", v)
+		os.Exit(1)
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // mustPort returns the value of the given environment variable (or def if

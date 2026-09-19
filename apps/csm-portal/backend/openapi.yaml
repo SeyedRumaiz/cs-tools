@@ -6381,6 +6381,367 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
 
+  /chat/sessions/{id}/accept:
+    post:
+      summary: >-
+        Accept a live-engineer-chat session assigned to the authenticated
+        engineer. Confirms the accept with the routing service first (that
+        specific conversation's own state: OPEN -> ACTIVE) -- a 409 means
+        the alert was declined, reassigned, or already accepted elsewhere
+        in the meantime.
+      operationId: acceptChatSession
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: The case ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatConversationIdPayload'
+      responses:
+        "200":
+          description: Session accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatMessageAckResponse'
+        "400":
+          description: Bad request (invalid UUID, or missing conversationId).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "409":
+          description: This chat request is no longer available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: The routing service could not confirm the accept.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /chat/sessions/{id}/messages:
+    post:
+      summary: >-
+        Send an engineer's reply in an accepted live-engineer-chat session.
+        Relayed to the customer's already-open WebSocket.
+      operationId: postChatSessionMessage
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: The case ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatEngineerMessagePayload'
+      responses:
+        "201":
+          description: Message sent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatMessageAckResponse'
+        "400":
+          description: Bad request (invalid UUID, or missing conversationId/message).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /chat/sessions/{id}/complete:
+    post:
+      summary: >-
+        End a live-engineer-chat session the authenticated engineer is
+        holding. Does not change the underlying case's state -- ending a
+        live chat is not the same as resolving/closing the case. If ending
+        it frees a capacity slot that immediately claims the next queued
+        case, that new case is delivered separately over this engineer's
+        SSE stream.
+      operationId: completeChatSession
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: The case ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatConversationIdPayload'
+      responses:
+        "200":
+          description: Session ended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatMessageAckResponse'
+        "400":
+          description: Bad request (invalid UUID, or missing conversationId).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /chat/sessions/{id}/decline:
+    post:
+      summary: >-
+        Decline a live-engineer-chat session assigned to the authenticated
+        engineer before accepting it. The routing service reassigns it to
+        the next-best available engineer or pushes it back to the front of
+        the waiting queue.
+      operationId: declineChatSession
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: The case ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatConversationIdPayload'
+      responses:
+        "200":
+          description: Session declined.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatMessageAckResponse'
+        "400":
+          description: Bad request (invalid UUID, or missing conversationId).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: The routing service could not process the decline.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /chat/sessions/{id}/convert-to-case:
+    post:
+      summary: >-
+        Convert a live-engineer-chat session the authenticated engineer is
+        holding into a real case: fetches the chat's stored details,
+        creates the case, then ends the chat session. Fails the whole
+        request if any step fails, rather than leaving a partially
+        converted chat (a case created but not recorded, or vice versa).
+        No request body -- the routing service already has everything
+        needed from the original escalation.
+      operationId: convertChatSessionToCase
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: The case ID.
+      responses:
+        "200":
+          description: The chat was converted; entityCaseId is the new case's ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatConvertToCaseResponse'
+        "400":
+          description: Bad request (invalid UUID).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: >-
+            The case lookup, case creation, or the routing service's
+            conversion step failed. If a case was already created before
+            the failure, its ID is included in the error message so it can
+            be found manually.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /engineers/me/status:
+    post:
+      summary: >-
+        Set the authenticated engineer's manual chat status: AVAILABLE,
+        BUSY (a do-not-disturb toggle that keeps whatever chats they
+        already hold but stops new ones routing to them), or OFFLINE.
+        Transitioning to AVAILABLE can immediately claim one or more queued
+        cases, up to this engineer's own concurrent-chat capacity; each one
+        is delivered separately over this engineer's SSE stream.
+      operationId: setEngineerStatus
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatSetPresencePayload'
+      responses:
+        "200":
+          description: Status updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatPresenceResult'
+        "400":
+          description: Bad request (status must be AVAILABLE, BUSY, or OFFLINE).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: The routing service could not apply the status change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+    get:
+      summary: >-
+        Get the authenticated engineer's current chat status, concurrent-
+        chat capacity and load, and every chat session they currently hold
+        (pending or accepted alike) -- lets the browser rehydrate lost
+        local state (e.g. after a refresh) from server-side truth.
+      operationId: getEngineerStatus
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Defaults to chatStatus OFFLINE with no cases for an engineer never seen before.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatPresenceDetail'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: The routing service could not be reached.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /engineers/me/capacity:
+    patch:
+      summary: >-
+        Set the authenticated engineer's own configurable concurrent-chat
+        capacity (1-20, default 1). Never disturbs a chat session the
+        engineer already holds -- lowering the limit below their current
+        active count only stops new work from routing to them until they
+        fall back under it.
+      operationId: setEngineerCapacity
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatSetCapacityPayload'
+      responses:
+        "200":
+          description: Capacity updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCapacityResponse'
+        "400":
+          description: maxConcurrentChats must be between 1 and 20.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: The routing service could not apply the capacity change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -13635,3 +13996,129 @@ components:
           type: array
           items:
             type: string
+    ChatConversationIdPayload:
+      type: object
+      required: [conversationId]
+      properties:
+        conversationId:
+          type: string
+          format: uuid
+
+    ChatEngineerMessagePayload:
+      type: object
+      required: [conversationId, message]
+      properties:
+        conversationId:
+          type: string
+          format: uuid
+        message:
+          type: string
+
+    ChatMessageAckResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    ChatConvertToCaseResponse:
+      type: object
+      properties:
+        entityCaseId:
+          type: string
+          description: The real entity-service case ID this chat was converted into.
+
+    ChatSetPresencePayload:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [AVAILABLE, BUSY, OFFLINE]
+
+    ChatCaseInfo:
+      type: object
+      description: >-
+        The chat's originally-submitted details, carried through from
+        escalation. Opaque as far as the routing service is concerned.
+      required: [caseId, conversationId]
+      properties:
+        caseId:
+          type: string
+        conversationId:
+          type: string
+        projectId:
+          type: string
+        subject:
+          type: string
+        customerEmail:
+          type: string
+        customerName:
+          type: string
+        message:
+          type: string
+
+    ChatCaseStatus:
+      description: One chat session the engineer currently holds, pending or accepted.
+      allOf:
+        - $ref: '#/components/schemas/ChatCaseInfo'
+        - type: object
+          required: [pending, assignedAt]
+          properties:
+            pending:
+              type: boolean
+              description: True until the engineer accepts this specific session.
+            assignedAt:
+              type: string
+              format: date-time
+              description: When this session was assigned to this engineer.
+
+    ChatPresenceResult:
+      type: object
+      properties:
+        applied:
+          type: boolean
+        assignedCases:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatCaseInfo'
+          description: >-
+            Set when transitioning to AVAILABLE immediately claimed one or
+            more cases off the waiting queue, up to this engineer's own
+            capacity.
+
+    ChatPresenceDetail:
+      type: object
+      properties:
+        chatStatus:
+          type: string
+          enum: [AVAILABLE, BUSY, OFFLINE]
+        activeChats:
+          type: integer
+          description: How many chat sessions this engineer currently holds (pending or accepted).
+        maxConcurrentChats:
+          type: integer
+          description: This engineer's own configurable capacity (default 1).
+        atCapacity:
+          type: boolean
+        cases:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatCaseStatus'
+        pendingTimeoutSeconds:
+          type: integer
+          description: How long a pending (assigned, not yet accepted) session can sit before the routing service reassigns it.
+
+    ChatSetCapacityPayload:
+      type: object
+      required: [maxConcurrentChats]
+      properties:
+        maxConcurrentChats:
+          type: integer
+          minimum: 1
+          maximum: 20
+
+    ChatCapacityResponse:
+      type: object
+      properties:
+        applied:
+          type: boolean

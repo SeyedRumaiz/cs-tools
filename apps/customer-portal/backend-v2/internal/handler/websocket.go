@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -115,6 +116,14 @@ type WebSocketHandler struct {
 	entity  entityCommentCreator
 	auth    wsTokenValidator
 	upgrade websocket.Upgrader
+
+	// connsMu/conns is a per-replica, in-memory registry of the customer's
+	// open AI-chat WebSocket connections, keyed by conversation ID. It lets
+	// ChatEventsHandler (chat.go) deliver an engineer-side event into the
+	// customer's already-open connection via PushEvent, without introducing
+	// a new transport of its own.
+	connsMu sync.Mutex
+	conns   map[string]*websocket.Conn
 }
 
 // NewWebSocketHandler creates a WebSocketHandler backed by the given AI chat
@@ -232,6 +241,7 @@ type wsEvent struct {
 	Type           string `json:"type"`
 	Message        string `json:"message,omitempty"`
 	ConversationID string `json:"conversationId,omitempty"`
+	EngineerEmail  string `json:"engineerEmail,omitempty"`
 	TS             string `json:"ts,omitempty"`
 }
 
@@ -310,6 +320,7 @@ func (h *WebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer conn.Close()
+	defer h.unregisterConnAll(conn)
 
 	// The server's ReadTimeout/WriteTimeout (see cmd/server/main.go) can leave
 	// deadlines on the connection Hijack handed off for this upgrade; clear
@@ -342,6 +353,15 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, conn *websocket.Co
 	trimmed := strings.TrimSpace(strings.ToLower(string(data)))
 	var parsed map[string]any
 	_ = json.Unmarshal(data, &parsed)
+
+	// Register this connection under its conversation ID so an engineer-side
+	// event (relayed via ChatEventsHandler -> PushEvent) can find its way
+	// back to this customer's browser. Registration is refreshed on every
+	// inbound message rather than only once, since the conversation ID is
+	// not known until the first message that carries one.
+	if convID, _ := parsed["conversationId"].(string); convID != "" && uuidRe.MatchString(convID) {
+		h.registerConn(convID, conn)
+	}
 
 	isPing := trimmed == "ping"
 	if !isPing {
@@ -589,4 +609,45 @@ func writeWSJSON(conn *websocket.Conn, v any) error {
 		return err
 	}
 	return conn.WriteMessage(websocket.TextMessage, payload)
+}
+
+// registerConn records conn as the open WebSocket connection for
+// conversationID, so a later PushEvent for that conversation can find it.
+// Safe to call repeatedly for the same connection/ID pair.
+func (h *WebSocketHandler) registerConn(conversationID string, conn *websocket.Conn) {
+	h.connsMu.Lock()
+	defer h.connsMu.Unlock()
+	if h.conns == nil {
+		h.conns = make(map[string]*websocket.Conn)
+	}
+	h.conns[conversationID] = conn
+}
+
+// unregisterConnAll removes every registry entry pointing at conn. A single
+// connection can be registered under more than one conversation ID over its
+// lifetime (a customer's AI chat can move between conversations), so this
+// scans rather than deleting a single known key.
+func (h *WebSocketHandler) unregisterConnAll(conn *websocket.Conn) {
+	h.connsMu.Lock()
+	defer h.connsMu.Unlock()
+	for id, c := range h.conns {
+		if c == conn {
+			delete(h.conns, id)
+		}
+	}
+}
+
+// PushEvent delivers evt into the customer's already-open AI-chat WebSocket
+// connection for conversationID, if one is currently registered. It reports
+// whether a connection was found and the write succeeded; the caller (see
+// ChatEventsHandler in chat.go) treats a false return as best-effort — the
+// customer simply was not connected at that moment.
+func (h *WebSocketHandler) PushEvent(conversationID string, evt wsEvent) bool {
+	h.connsMu.Lock()
+	conn := h.conns[conversationID]
+	h.connsMu.Unlock()
+	if conn == nil {
+		return false
+	}
+	return writeWSJSON(conn, evt) == nil
 }

@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/aichatagent"
+	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/csmchat"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/entity"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/handler"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/middleware"
@@ -188,6 +189,19 @@ func main() {
 	registryHandler := handler.NewRegistryHandler(entityClient, registryClient, adminRole)
 	contactHandler := handler.NewContactHandler(entityClient, userManagementClient)
 
+	// Live-engineer-chat escalation feature (Novera chat "Talk to a live
+	// engineer" button). This backend owns case creation (it has the
+	// deployment/deployed-product context a case requires) and relays
+	// to/from csm-portal/backend's own internal listener for the engineer
+	// side. See .env.example for the corresponding env vars.
+	internalChatToken := os.Getenv("INTERNAL_CHAT_TOKEN")
+	csmChatClient := csmchat.NewClient(csmchat.Config{
+		BaseURL:       envOrDefault("CSM_PORTAL_INTERNAL_BASE_URL", "http://localhost:9095"),
+		InternalToken: internalChatToken,
+	})
+	chatEscalationHandler := handler.NewChatEscalationHandler(entityClient, csmChatClient)
+	chatEventsHandler := handler.NewChatEventsHandler(webSocketHandler)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -336,6 +350,10 @@ func main() {
 	mux.HandleFunc("GET /updates/product-update-levels", updatesHandler.GetProductUpdateLevels)
 	mux.HandleFunc("POST /updates/levels/search", updatesHandler.SearchUpdatesBetweenUpdateLevels)
 
+	// Live-engineer-chat: customer-facing escalate/message endpoints.
+	mux.HandleFunc("POST /projects/{id}/support/chat/escalate", chatEscalationHandler.HandleEscalate)
+	mux.HandleFunc("POST /projects/{id}/support/chat/{conversationId}/message", chatEscalationHandler.HandleSendMessage)
+
 	addr := ":" + mustPort("PORT", "8080")
 
 	ln, err := net.Listen("tcp", addr)
@@ -387,6 +405,15 @@ func main() {
 	// .choreo/component.yaml.
 	wsMux := http.NewServeMux()
 	wsMux.HandleFunc("GET /ws", webSocketHandler.HandleWebSocket)
+
+	// Live-engineer-chat: internal service-to-service receivers for
+	// csm-portal/backend's outbound calls (chatnotify.Client), gated by
+	// middleware.InternalToken instead of user auth -- there is no customer
+	// JWT on these calls. Registered on the same unauthenticated listener as
+	// GET /ws for the same reason that handler omits normal Auth (see the
+	// comment on wsMux above); the InternalToken check takes its place here.
+	wsMux.Handle("POST /internal/chat-events", middleware.InternalToken(internalChatToken)(http.HandlerFunc(chatEventsHandler.Handle)))
+	wsMux.Handle("POST /internal/chat/create-case", middleware.InternalToken(internalChatToken)(http.HandlerFunc(chatEscalationHandler.HandleCreateCase)))
 
 	wsAddr := ":" + mustPort("WS_PORT", "8081")
 	// ctx here covers only the listen operation itself (address resolution and
