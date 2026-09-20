@@ -100,6 +100,14 @@ type snIncidentFilters struct {
 	Number string `json:"number,omitempty"`
 	// StateKeys: see domain.SearchIncidentsFilters.StateKeys doc comment.
 	StateKeys []int `json:"stateKeys,omitempty"`
+	// IncidentStateKeys: see domain.SearchIncidentsFilters Filters
+	// "incidentStateKeys" doc comment. nil/empty (omitted) means the filter
+	// was not supplied. Deliberately kept separate from StateKeys above --
+	// this filters ServiceNow's raw `incident_state` field, a distinct field
+	// that exists independently of the OOB `state` field on the same
+	// incident row; carried through only for exact parity with SN's native
+	// incident dashboards.
+	IncidentStateKeys []int `json:"incidentStateKeys,omitempty"`
 	// AssignmentGroupIDs: sys_user_group sys_ids (converted from UUIDs).
 	AssignmentGroupIDs []string `json:"assignmentGroupIds,omitempty"`
 	// BusinessServiceIDs: business_service sys_ids (converted from UUIDs).
@@ -119,6 +127,14 @@ type snIncidentFilters struct {
 	// less-reliable `made_sla` field, carried through only for exact parity
 	// with SN's native incident dashboards; prefer SlaViolated otherwise.
 	MadeSla *bool `json:"madeSla,omitempty"`
+	// MadeSlaNotFalse: see domain.SearchIncidentsFilters Filters
+	// "madeSlaNotFalse" doc comment. nil (omitted) means the filter was not
+	// supplied. Deliberately kept separate from MadeSla above -- MadeSla is
+	// a boolean-equality filter that would incorrectly exclude incidents
+	// where `made_sla` is null/unset, while this matches "not explicitly
+	// false"; carried through only for exact parity with SN's native
+	// incident dashboards.
+	MadeSlaNotFalse *bool `json:"madeSlaNotFalse,omitempty"`
 	// ProductNames: see domain.SearchIncidentsFilters Filters "productName"
 	// doc comment. Matched as a union against the incident's backing
 	// business_service name.
@@ -280,12 +296,14 @@ func (s *snIncidentService) SearchIncidents(ctx context.Context, req domain.Sear
 			ParentIDs:          uuidsToSysids(req.Filters.ParentIDs),
 			Number:             stringPtrValue(req.Filters.Number),
 			StateKeys:          parsedFilters.StateKeys,
+			IncidentStateKeys:  parsedFilters.IncidentStateKeys,
 			AssignmentGroupIDs: uuidsToSysids(parsedFilters.AssignmentGroupIDs),
 			BusinessServiceIDs: uuidsToSysids(parsedFilters.BusinessServiceIDs),
 			StartCreatedDate:   formatSNDateTimeUTC(parsedFilters.StartCreatedDate),
 			EndCreatedDate:     formatSNDateTimeUTC(parsedFilters.EndCreatedDate),
 			SlaViolated:        parsedFilters.SlaViolated,
 			MadeSla:            parsedFilters.MadeSla,
+			MadeSlaNotFalse:    parsedFilters.MadeSlaNotFalse,
 			ProductNames:       parsedFilters.ProductNames,
 			AssignedUserIDs:    uuidsToSysids(parsedFilters.AssignedUserIDs),
 		},
@@ -426,12 +444,14 @@ func (s *snIncidentService) AggregateIncidents(ctx context.Context, req domain.A
 			ParentIDs:          uuidsToSysids(req.Filters.ParentIDs),
 			Number:             stringPtrValue(req.Filters.Number),
 			StateKeys:          parsedFilters.StateKeys,
+			IncidentStateKeys:  parsedFilters.IncidentStateKeys,
 			AssignmentGroupIDs: uuidsToSysids(parsedFilters.AssignmentGroupIDs),
 			BusinessServiceIDs: uuidsToSysids(parsedFilters.BusinessServiceIDs),
 			StartCreatedDate:   formatSNDateTimeUTC(parsedFilters.StartCreatedDate),
 			EndCreatedDate:     formatSNDateTimeUTC(parsedFilters.EndCreatedDate),
 			SlaViolated:        parsedFilters.SlaViolated,
 			MadeSla:            parsedFilters.MadeSla,
+			MadeSlaNotFalse:    parsedFilters.MadeSlaNotFalse,
 			ProductNames:       parsedFilters.ProductNames,
 			AssignedUserIDs:    uuidsToSysids(parsedFilters.AssignedUserIDs),
 		},

@@ -12371,8 +12371,10 @@ components:
             - createdOn
             - slaViolated
             - madeSla
+            - madeSlaNotFalse
             - productName
             - assignedUserId
+            - incidentStateKeys
         op:
           type: string
           enum: [in, gte, lte, eq]
@@ -12406,12 +12408,29 @@ components:
           madeSla is ServiceNow's own less-reliable raw field, kept only for
           exact parity with SN's native incident dashboards. Prefer
           slaViolated unless dashboard parity is the explicit goal.
+        - **madeSlaNotFalse** (eq): a single boolean value ("true"/"false").
+          Restricts to incidents where ServiceNow's raw `made_sla` field is
+          not explicitly false (true or null/unset). Deliberately separate
+          from madeSla above and not a newer/better version of it: madeSla is
+          a boolean-equality filter that would incorrectly exclude incidents
+          where made_sla is null/unset, while this filter matches "not
+          explicitly false". Kept only for exact parity with SN's native
+          incident dashboards; prefer slaViolated for correctness-sensitive
+          breach filtering.
         - **productName** (in): one or more product names to match as a
           union (an incident matching any one of them is returned). Only a
           minority of incidents carry a product association, so this filter
           narrows rather than guarantees full coverage.
         - **assignedUserId** (in): assignee UUIDs to filter the incident's
           assigned user by.
+        - **incidentStateKeys** (in): one or more raw ServiceNow
+          `incident_state` numeric keys, passed through unmapped (unlike
+          state above, which translates the domain IncidentState enum to
+          SN's raw `state` numeric key). Deliberately separate from state:
+          `incident_state` is a distinct field that exists independently on
+          the same incident row. Kept only for exact parity with SN's native
+          incident dashboards; prefer state for general-purpose state
+          filtering.
 
     SearchIncidentsRequest:
       type: object

@@ -18,6 +18,7 @@ package service
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -29,17 +30,18 @@ import (
 var incidentFilterFieldSet = map[string]bool{
 	"state": true, "assignmentGroupId": true, "businessServiceId": true,
 	"createdOn": true, "slaViolated": true, "madeSla": true, "productName": true,
-	"assignedUserId": true,
+	"assignedUserId": true, "madeSlaNotFalse": true, "incidentStateKeys": true,
 }
 
 // incidentFilterOpSet is the exact set of IncidentFieldFilter.Op values
 // accepted by incident search, independent of field. Field/op compatibility
 // is enforced separately in ParseIncidentFieldFilters -- "in" covers state/
-// assignmentGroupId/businessServiceId/productName, "gte"/"lte" cover
-// createdOn (mirrors case_filters.go's "createdOn" handling exactly,
-// including its relative-date placeholder support, e.g. "__daysAgo:90__"),
-// and "eq" covers slaViolated/madeSla (single boolean value, mirroring case
-// search's "number"/"internalId" single-value eq fields).
+// assignmentGroupId/businessServiceId/productName/incidentStateKeys,
+// "gte"/"lte" cover createdOn (mirrors case_filters.go's "createdOn"
+// handling exactly, including its relative-date placeholder support, e.g.
+// "__daysAgo:90__"), and "eq" covers slaViolated/madeSla/madeSlaNotFalse
+// (single boolean value, mirroring case search's "number"/"internalId"
+// single-value eq fields).
 var incidentFilterOpSet = map[string]bool{
 	"in": true, "gte": true, "lte": true, "eq": true,
 }
@@ -81,6 +83,19 @@ func parseIncidentFilterDate(f domain.IncidentFieldFilter, value string, now tim
 	return nil, &apierror.ValidationError{Msg: fmt.Sprintf("filters: field %q op %q value %q must be an RFC3339 timestamp, YYYY-MM-DD date, or a recognized relative-date placeholder", f.Field, f.Op, value)}
 }
 
+// parseIncidentFilterInt mirrors case_filters.go's parseCaseFilterPercent,
+// retyped for incidentStateKeys' raw ServiceNow numeric key values -- these
+// are passed through unmapped (unlike "state", which translates the domain
+// IncidentState enum via snIncidentStateKeyMap), so any non-negative integer
+// is accepted without validating it against a known state.
+func parseIncidentFilterInt(f domain.IncidentFieldFilter, value string) (int, error) {
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		return 0, &apierror.ValidationError{Msg: fmt.Sprintf("filters: field %q op %q value %q must be a non-negative integer", f.Field, f.Op, value)}
+	}
+	return n, nil
+}
+
 // requireIncidentFilterValues rejects a filter entry whose op needs a
 // non-empty values array but doesn't have one.
 func requireIncidentFilterValues(f domain.IncidentFieldFilter) error {
@@ -105,6 +120,14 @@ type parsedIncidentFilters struct {
 	// translated from the wire-level domain.IncidentState enum values via
 	// snIncidentStateKeyMap.
 	StateKeys []int
+	// IncidentStateKeys are set from an "incidentStateKeys" "in" filter:
+	// raw ServiceNow `incident_state` numeric keys, passed through unmapped
+	// (unlike StateKeys above, which is translated from the domain
+	// IncidentState enum). Deliberately kept separate from StateKeys -- see
+	// domain.SearchIncidentsFilters Filters "incidentStateKeys" doc comment:
+	// `incident_state` is a distinct field that exists independently of the
+	// OOB `state` field on the same incident row.
+	IncidentStateKeys []int
 	// AssignmentGroupIDs are sys_user_group UUIDs (not yet converted to
 	// sysids -- that conversion happens where the outbound payload is built,
 	// same as before).
@@ -127,6 +150,15 @@ type parsedIncidentFilters struct {
 	// comment: this is SN's own less-reliable raw signal, kept only for
 	// exact parity with SN's native incident dashboards.
 	MadeSla *bool
+	// MadeSlaNotFalse is set from a "madeSlaNotFalse" "eq" filter: true
+	// restricts to incidents where ServiceNow's raw `made_sla` field is not
+	// explicitly false (true or null/unset); nil means the filter was not
+	// supplied. Deliberately kept separate from MadeSla above -- see
+	// domain.SearchIncidentsFilters Filters "madeSlaNotFalse" doc comment:
+	// MadeSla is a boolean-equality filter that would incorrectly exclude
+	// incidents where `made_sla` is null/unset, while this is "not
+	// explicitly false".
+	MadeSlaNotFalse *bool
 	// ProductNames are the values of a "productName" "in" filter, matched as a
 	// union against the incident's backing business_service name.
 	ProductNames []string
@@ -241,6 +273,37 @@ func ParseIncidentFieldFilters(filters []domain.IncidentFieldFilter, now time.Ti
 				return parsedIncidentFilters{}, err
 			}
 			p.MadeSla = &b
+
+		case "madeSlaNotFalse":
+			if f.Op != "eq" {
+				return parsedIncidentFilters{}, badIncidentFilterCombo(f)
+			}
+			if err := requireIncidentFilterValues(f); err != nil {
+				return parsedIncidentFilters{}, err
+			}
+			if len(f.Values) != 1 {
+				return parsedIncidentFilters{}, &apierror.ValidationError{Msg: "filters: madeSlaNotFalse eq requires exactly one value"}
+			}
+			b, err := parseIncidentFilterBool(f, f.Values[0])
+			if err != nil {
+				return parsedIncidentFilters{}, err
+			}
+			p.MadeSlaNotFalse = &b
+
+		case "incidentStateKeys":
+			if f.Op != "in" {
+				return parsedIncidentFilters{}, badIncidentFilterCombo(f)
+			}
+			if err := requireIncidentFilterValues(f); err != nil {
+				return parsedIncidentFilters{}, err
+			}
+			for _, v := range f.Values {
+				n, err := parseIncidentFilterInt(f, v)
+				if err != nil {
+					return parsedIncidentFilters{}, err
+				}
+				p.IncidentStateKeys = append(p.IncidentStateKeys, n)
+			}
 
 		case "productName":
 			if f.Op != "in" {
