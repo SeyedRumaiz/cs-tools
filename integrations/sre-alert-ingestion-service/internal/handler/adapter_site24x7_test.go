@@ -163,6 +163,7 @@ func TestCreateAlertFromSite24x7_NonActionableStatusReturns200AndNeverEnqueues(t
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/site24x7", bytes.NewReader(site24x7AlertJSON("UP")))
+	r = withAuthenticatedUsername(r, "site24x7")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromSite24x7(w, r)
 
@@ -172,11 +173,33 @@ func TestCreateAlertFromSite24x7_NonActionableStatusReturns200AndNeverEnqueues(t
 	}
 }
 
+// TestCreateAlertFromSite24x7_MismatchedAuthenticatedSourceWithIgnoredPayloadReturns403
+// is the regression test for the ordering bug CodeRabbit caught: the
+// authorization check must run before the non-actionable-STATUS 200
+// short-circuit, not after it. A caller authenticated as a different source
+// must get 403 even when the payload itself would otherwise be silently
+// ignored (STATUS not TROUBLE/DOWN/CRITICAL) -- it must never see 200.
+func TestCreateAlertFromSite24x7_MismatchedAuthenticatedSourceWithIgnoredPayloadReturns403(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/site24x7", bytes.NewReader(site24x7AlertJSON("UP")))
+	r = withAuthenticatedUsername(r, "azure")
+	w := httptest.NewRecorder()
+	h.CreateAlertFromSite24x7(w, r)
+
+	assertStatus(t, w, http.StatusForbidden)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when the authenticated identity does not match this adapter's fixed source")
+	}
+}
+
 func TestCreateAlertFromSite24x7_MalformedBodyReturns400(t *testing.T) {
 	store := &mockStore{}
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/site24x7", bytes.NewReader([]byte(`not json`)))
+	r = withAuthenticatedUsername(r, "site24x7")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromSite24x7(w, r)
 

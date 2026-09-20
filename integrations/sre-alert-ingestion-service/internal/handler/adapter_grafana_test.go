@@ -190,6 +190,7 @@ func TestCreateAlertFromGrafana_NonAlertingStateReturns200AndNeverEnqueues(t *te
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/grafana", bytes.NewReader(grafanaAlertJSON("resolved", "checkout", "1")))
+	r = withAuthenticatedUsername(r, "grafana")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromGrafana(w, r)
 
@@ -199,11 +200,33 @@ func TestCreateAlertFromGrafana_NonAlertingStateReturns200AndNeverEnqueues(t *te
 	}
 }
 
+// TestCreateAlertFromGrafana_MismatchedAuthenticatedSourceWithIgnoredPayloadReturns403
+// is the regression test for the ordering bug CodeRabbit caught: the
+// authorization check must run before the non-"alerting"-state 200
+// short-circuit, not after it. A caller authenticated as a different source
+// must get 403 even when the payload itself would otherwise be silently
+// ignored (state not "alerting") -- it must never see 200.
+func TestCreateAlertFromGrafana_MismatchedAuthenticatedSourceWithIgnoredPayloadReturns403(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/grafana", bytes.NewReader(grafanaAlertJSON("resolved", "checkout", "1")))
+	r = withAuthenticatedUsername(r, "azure")
+	w := httptest.NewRecorder()
+	h.CreateAlertFromGrafana(w, r)
+
+	assertStatus(t, w, http.StatusForbidden)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when the authenticated identity does not match this adapter's fixed source")
+	}
+}
+
 func TestCreateAlertFromGrafana_MalformedBodyReturns400(t *testing.T) {
 	store := &mockStore{}
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/grafana", bytes.NewReader([]byte(`not json`)))
+	r = withAuthenticatedUsername(r, "grafana")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromGrafana(w, r)
 
