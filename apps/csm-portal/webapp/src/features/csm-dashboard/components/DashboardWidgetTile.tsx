@@ -692,6 +692,7 @@ function DashboardWidgetTile({
                     // (teamFilterPlaceholder.ts's fail-open), returning
                     // every team's cases instead of the viewer's own.
                     filters: resolvePlaceholders(filters),
+                    resourceType,
                     currentUserId,
                   })}
                   size="small"
