@@ -83,17 +83,21 @@ func parseIncidentFilterDate(f domain.IncidentFieldFilter, value string, now tim
 	return nil, &apierror.ValidationError{Msg: fmt.Sprintf("filters: field %q op %q value %q must be an RFC3339 timestamp, YYYY-MM-DD date, or a recognized relative-date placeholder", f.Field, f.Op, value)}
 }
 
-// parseIncidentFilterInt mirrors case_filters.go's parseCaseFilterPercent,
-// retyped for incidentStateKeys' raw ServiceNow numeric key values -- these
-// are passed through unmapped (unlike "state", which translates the domain
-// IncidentState enum via snIncidentStateKeyMap), so any non-negative integer
-// is accepted without validating it against a known state.
-func parseIncidentFilterInt(f domain.IncidentFieldFilter, value string) (int, error) {
+// parseIncidentFilterNonNegativeIntString validates that value looks like a
+// non-negative integer and returns it unchanged as a string -- this layer
+// stays data-source-agnostic and must not commit to Go's int type for a
+// ServiceNow-only raw numeric key; the actual int conversion belongs solely
+// to sn_incident_service.go (see snIncidentStateKeysFromStrings), the one
+// branch that knows these values are ServiceNow incident_state keys. Any
+// non-negative integer is accepted without validating it against a known
+// state -- see this field's own doc comment on why it's passed through
+// unmapped, unlike "state" (translated via snIncidentStateKeyMap).
+func parseIncidentFilterNonNegativeIntString(f domain.IncidentFieldFilter, value string) (string, error) {
 	n, err := strconv.Atoi(value)
 	if err != nil || n < 0 {
-		return 0, &apierror.ValidationError{Msg: fmt.Sprintf("filters: field %q op %q value %q must be a non-negative integer", f.Field, f.Op, value)}
+		return "", &apierror.ValidationError{Msg: fmt.Sprintf("filters: field %q op %q value %q must be a non-negative integer", f.Field, f.Op, value)}
 	}
-	return n, nil
+	return value, nil
 }
 
 // requireIncidentFilterValues rejects a filter entry whose op needs a
@@ -127,7 +131,14 @@ type parsedIncidentFilters struct {
 	// domain.SearchIncidentsFilters Filters "incidentStateKeys" doc comment:
 	// `incident_state` is a distinct field that exists independently of the
 	// OOB `state` field on the same incident row.
-	IncidentStateKeys []int
+	//
+	// Typed []string, not []int: this struct is this service's
+	// data-source-agnostic parsed-filter representation, not SN-specific.
+	// Each value is validated as a non-negative integer at parse time (see
+	// parseIncidentFilterNonNegativeIntString) but kept as a string here --
+	// only sn_incident_service.go, the one branch that actually knows these
+	// are ServiceNow incident_state keys, converts to []int.
+	IncidentStateKeys []string
 	// AssignmentGroupIDs are sys_user_group UUIDs (not yet converted to
 	// sysids -- that conversion happens where the outbound payload is built,
 	// same as before).
@@ -298,11 +309,11 @@ func ParseIncidentFieldFilters(filters []domain.IncidentFieldFilter, now time.Ti
 				return parsedIncidentFilters{}, err
 			}
 			for _, v := range f.Values {
-				n, err := parseIncidentFilterInt(f, v)
+				s, err := parseIncidentFilterNonNegativeIntString(f, v)
 				if err != nil {
 					return parsedIncidentFilters{}, err
 				}
-				p.IncidentStateKeys = append(p.IncidentStateKeys, n)
+				p.IncidentStateKeys = append(p.IncidentStateKeys, s)
 			}
 
 		case "productName":

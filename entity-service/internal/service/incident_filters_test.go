@@ -156,13 +156,13 @@ func TestParseIncidentFieldFilters_IncidentStateKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := []int{1, 6}
+	want := []string{"1", "6"}
 	if len(parsed.IncidentStateKeys) != len(want) {
 		t.Fatalf("IncidentStateKeys = %v, want %v", parsed.IncidentStateKeys, want)
 	}
 	for i, v := range want {
 		if parsed.IncidentStateKeys[i] != v {
-			t.Errorf("IncidentStateKeys[%d] = %d, want %d", i, parsed.IncidentStateKeys[i], v)
+			t.Errorf("IncidentStateKeys[%d] = %q, want %q", i, parsed.IncidentStateKeys[i], v)
 		}
 	}
 
