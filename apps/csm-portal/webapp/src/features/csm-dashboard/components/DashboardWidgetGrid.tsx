@@ -26,7 +26,9 @@ import { resolveWidgetText } from "@features/csm-dashboard/utils/widgetTextPlace
 import { invalidateWidgetQueries } from "@features/csm-dashboard/utils/invalidateWidgetQueries";
 import {
   WIDGET_GRID_SX,
+  denseWidgetGridSx,
   groupWidgetsBySection,
+  isDenseSection,
   type WidgetGroup,
 } from "@features/csm-dashboard/utils/dashboardWidgetGridLayout";
 import { resolveDateRangeFilterPlaceholder } from "@features/csm-dashboard/utils/dateRangeFilterPlaceholder";
@@ -46,6 +48,12 @@ const hoverRevealSx = {
   transition: "opacity 0.15s ease",
 } as const;
 
+// Computed once at module scope (not per-render/per-section) — `denseWidgetGridSx`
+// takes an optional minWidthPx override no call site here actually uses, so
+// there is exactly one object identity for every dense section on every
+// render.
+const DENSE_WIDGET_GRID_SX = denseWidgetGridSx();
+
 const sectionHeaderSx = {
   display: "flex",
   alignItems: "center",
@@ -56,7 +64,15 @@ const sectionHeaderSx = {
   },
 } as const;
 
-function widgetGridColumnSx(widget: BeDashboardWidget) {
+function widgetGridColumnSx(widget: BeDashboardWidget, dense: boolean) {
+  // A dense section (see `isDenseSection`) renders through
+  // `denseWidgetGridSx`'s `auto-fill` track list instead of a fixed
+  // 12-column one, so `widget.gridWidth`'s "span N of 12" meaning doesn't
+  // apply there — every tile just takes the one auto-placed cell
+  // `auto-fill` gives it (an explicit `gridColumn` span here would count
+  // against however many same-width tracks happened to fit, not against a
+  // stable basis, wrapping unpredictably).
+  if (dense) return {};
   // A list-shape widget renders a real table (4 rows, several columns) —
   // its configured `gridWidth` was sized for the old compact text list, so
   // it always spans the full row here regardless of that value.
@@ -254,19 +270,23 @@ export default function DashboardWidgetGrid({
   // contribute two grid items (its own tile plus, conditionally, the panel
   // right after it) from one `.map()` call, which is exactly the layout bug
   // this fix removes.
-  const renderTile = (widget: BeDashboardWidget) => {
+  const renderTile = (widget: BeDashboardWidget, dense: boolean) => {
     const action = renderWidgetAction?.(widget);
     const resolvedFilters = getResolvedFilters(widget);
     const thisWidgetExpandedSlice =
       expanded?.widgetId === widget.widgetId ? expanded.slice : null;
     return (
-      <Box key={widget.widgetId} sx={{ position: "relative", ...widgetGridColumnSx(widget) }}>
+      <Box
+        key={widget.widgetId}
+        sx={{ position: "relative", ...widgetGridColumnSx(widget, dense) }}
+      >
         <DashboardWidgetTile
           widgetId={widget.widgetId}
           displayName={widget.displayName}
           description={widget.description}
           resourceType={widget.resourceType}
           shape={widget.shape}
+          dense={dense}
           // `widget.query` is legally absent for a slices-only pie/bar
           // widget (see `BeDashboardWidget.query`'s doc comment) —
           // default to `{}` here too, at the source, on top of
@@ -345,9 +365,16 @@ export default function DashboardWidgetGrid({
   const groups = groupWidgetsBySection(widgets);
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
+    // The gap tightens at `xl` (>=1536px, e.g. a 1920px-wide screen) —
+    // never below it, so a laptop-width viewport (which was never the
+    // problem; it already scrolls fine) keeps today's exact spacing. Only a
+    // dashboard with enough sections to actually feel this (cs-overview's 4)
+    // benefits in practice; a shorter dashboard just gets a few px of extra
+    // headroom.
+    <Box sx={{ display: "flex", flexDirection: "column", gap: { xs: 2.5, xl: 1.5 } }}>
       {groups.map((group, i) => {
         if (group.widgets.length === 0) return null;
+        const dense = isDenseSection(group.widgets);
 
         // Namespaced so a real section named e.g. `"__default_0"` can never
         // collide with the synthetic key generated for the unnamed section —
@@ -371,8 +398,8 @@ export default function DashboardWidgetGrid({
 
         return (
           <Fragment key={sectionKey}>
-            {i > 0 && <Divider />}
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
+            {i > 0 && <Divider sx={{ my: { xl: 0 } }} />}
+            <Box sx={{ display: "flex", flexDirection: "column", gap: { xs: 1.5, xl: 1 } }}>
               <Box
                 sx={{
                   ...sectionHeaderSx,
@@ -380,7 +407,10 @@ export default function DashboardWidgetGrid({
                 }}
               >
                 {resolvedSectionTitle && (
-                  <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                  <Typography
+                    variant="subtitle1"
+                    sx={{ fontWeight: 600, fontSize: { xl: "0.9rem" } }}
+                  >
                     {resolvedSectionTitle}
                   </Typography>
                 )}
@@ -407,8 +437,8 @@ export default function DashboardWidgetGrid({
                   section owns the currently-expanded widget) renders once,
                   after every tile — see `renderExpandedPanel`'s own doc
                   comment for why. */}
-              <Box sx={WIDGET_GRID_SX}>
-                {group.widgets.map(renderTile)}
+              <Box sx={dense ? DENSE_WIDGET_GRID_SX : WIDGET_GRID_SX}>
+                {group.widgets.map((widget) => renderTile(widget, dense))}
                 {renderExpandedPanel(group)}
               </Box>
             </Box>

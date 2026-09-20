@@ -184,6 +184,17 @@ interface DashboardWidgetTileProps {
    * widget or another — was previously expanded), or `null` to collapse
    * (clicking the already-expanded slice again). */
   onExpandChange?: (slice: PieSliceResult | null) => void;
+  /** Set by `DashboardWidgetGrid` when this tile's own section is "dense"
+   * (see `isDenseSection`) — every widget in it is `shape: "count"`, so the
+   * whole section renders through the denser `auto-fill` grid track list
+   * instead of the `gridWidth`-proportional one (see `denseWidgetGridSx`).
+   * Only the `shape === "count"` branch below reads this: it tightens that
+   * branch's own padding/icon/number sizing (all `xl`-breakpoint-gated, so
+   * it only actually shrinks anything on a wide-enough screen) to fit
+   * meaningfully more tiles per row/column at that density. A no-op for
+   * every other shape, and a no-op for shape "count" below `xl` — this
+   * never changes what a laptop-width viewer sees. */
+  dense?: boolean;
 }
 
 /**
@@ -239,6 +250,7 @@ function DashboardWidgetTile({
   inlineLabels,
   expandedSlice = null,
   onExpandChange,
+  dense = false,
 }: DashboardWidgetTileProps): JSX.Element {
   const theme = useTheme();
   const navigate = useNavigate();
@@ -842,7 +854,7 @@ function DashboardWidgetTile({
       <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1.25 }}>
         <Box
           sx={{
-            p: 0.75,
+            p: dense ? { xs: 0.75, xl: 0.5 } : 0.75,
             mt: 0.25,
             borderRadius: "50%",
             bgcolor: alpha(theme.palette[config.iconColor].light, 0.1),
@@ -853,10 +865,47 @@ function DashboardWidgetTile({
             flexShrink: 0,
           }}
         >
-          <Icon size={16} />
+          <Icon size={dense ? 14 : 16} />
         </Box>
         <Box sx={{ minWidth: 0, flex: 1 }}>
-          <Typography variant="caption" color="text.secondary" noWrap>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            // Dense (count-only-section) tiles wrap the label to (at most)
+            // two lines instead of single-line ellipsis truncation — at the
+            // `168px`-and-up dense tile widths (see `denseWidgetGridSx`), a
+            // long label like "FDE - InProgress Engagement Case" was
+            // truncating mid-word (e.g. "FDE - InProgress Engagem…"),
+            // dropping information a viewer could otherwise just read.
+            // `-webkit-line-clamp` (widely supported despite the vendor
+            // prefix — it's the only cross-browser way to cap wrapped text
+            // at N lines with a trailing ellipsis) still falls back to an
+            // ellipsis if the label genuinely doesn't fit in two lines, so
+            // this never regresses to unbounded height. Non-dense tiles (and
+            // dense tiles below the `xl` breakpoint the rest of `dense`
+            // styling is gated on) keep the original single-line `noWrap`
+            // behavior unchanged — this only turns on where the layout is
+            // actually tight enough to truncate mid-word in the first place.
+            noWrap={!dense}
+            sx={
+              dense
+                ? {
+                    fontSize: { xl: "0.7rem" },
+                    display: "-webkit-box",
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: "vertical",
+                    overflow: "hidden",
+                    lineHeight: 1.2,
+                    // Reserves the full 2-line height up front (rather than
+                    // only as tall as a shorter label needs) so every tile
+                    // in the same dense grid row stays the same height —
+                    // `auto-fill`/`minmax` grid tracks don't otherwise force
+                    // sibling row items to match a taller neighbor's label.
+                    minHeight: "2.4em",
+                  }
+                : undefined
+            }
+          >
             {resolvedDisplayName}
           </Typography>
           <Typography
@@ -865,7 +914,14 @@ function DashboardWidgetTile({
               mt: 0.5,
               lineHeight: 1.1,
               fontWeight: 400,
-              fontSize: "3.25rem",
+              // Dense (count-only-section) tiles at `xl` shrink the big
+              // number considerably — that's the single biggest per-tile
+              // height lever this component has, since the label above and
+              // the icon beside it are already small. Untouched below `xl`
+              // and for any non-dense tile, so a laptop-width viewer (or a
+              // count tile that isn't part of an all-count section) sees
+              // this exact size unchanged.
+              fontSize: dense ? { xs: "3.25rem", xl: "2rem" } : "3.25rem",
               overflow: "hidden",
               textOverflow: "ellipsis",
             }}
@@ -889,7 +945,7 @@ function DashboardWidgetTile({
       variant="outlined"
       sx={{
         position: "relative",
-        p: 1.75,
+        p: dense ? { xs: 1.75, xl: 1 } : 1.75,
         height: "100%",
         ...cardRefreshRevealSx,
       }}

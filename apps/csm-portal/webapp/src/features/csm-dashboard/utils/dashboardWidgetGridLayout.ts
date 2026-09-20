@@ -30,12 +30,47 @@ export const WIDGET_GRID_SX = {
   },
 } as const;
 
+/** A denser alternative to `WIDGET_GRID_SX` for a section made up ENTIRELY
+ * of `shape: "count"` widgets (see `isDenseSection`) — those tiles are just
+ * an icon, a label and a number, so packing more of them per row (as many
+ * as fit at a comfortable minimum width, via `auto-fill`) reads fine even
+ * though it drops each widget's own `gridWidth`-driven relative sizing.
+ * `gridWidth` still matters for a section with any pie/bar/list widget in
+ * it (that shape genuinely needs the width its author gave it), which is
+ * exactly the case `WIDGET_GRID_SX` above continues to cover — this export
+ * only replaces it where every widget in the section opted out of that
+ * distinction by being the plainest shape there is.
+ *
+ * `auto-fill`/`minmax` (rather than a wider fixed column COUNT, e.g.
+ * `repeat(24, …)`) is deliberate: it scales with the real container width
+ * at render time instead of assuming a specific viewport, so this needs no
+ * viewport-specific breakpoint or magic pixel budget to stay correct as the
+ * window resizes — on a narrow window it gracefully falls back to fewer,
+ * still `minWidthPx`-wide columns (wrapping more rows) rather than
+ * squeezing every tile down to illegibility the way a fixed column count
+ * would. */
+export function denseWidgetGridSx(minWidthPx = 168) {
+  return {
+    display: "grid",
+    gap: 1.25,
+    gridTemplateColumns: `repeat(auto-fill, minmax(${minWidthPx}px, 1fr))`,
+  } as const;
+}
+
 export interface WidgetGroup {
   /** `undefined` for the untitled/default group — every widget with no
    * `section` set lands here, rendered exactly as before this field
    * existed (no heading). */
   section?: string;
   widgets: BeDashboardWidget[];
+}
+
+/** True when every widget in `widgets` is `shape: "count"` — see
+ * `denseWidgetGridSx`'s own doc comment for why that's the bar for opting a
+ * section into the denser grid instead of the `gridWidth`-proportional one.
+ * `false` for an empty list (nothing to render densely). */
+export function isDenseSection(widgets: BeDashboardWidget[]): boolean {
+  return widgets.length > 0 && widgets.every((w) => w.shape === "count");
 }
 
 /** Groups widgets by `section`, preserving the order each distinct section
