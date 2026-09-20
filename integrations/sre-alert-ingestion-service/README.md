@@ -20,7 +20,7 @@ PGHOST="${DB_HOST:-localhost}" PGPORT="${DB_PORT:-5432}" \
 PGUSER="$DB_USER" PGPASSWORD="$DB_PASSWORD" \
 PGDATABASE="$DB_NAME" PGSSLMODE="$DB_SSLMODE" \
 psql -f migrations/0001_create_alert_buffer.up.sql
-go run ./cmd/server/main.go
+go run ./cmd/server
 ```
 
 (the server itself reads `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME`/
@@ -51,7 +51,7 @@ Server starts at `http://localhost:8080`.
     PagerDuty, etc.) gets its own username/password pair, configured via
     `SRE_ALERT_AUTH_USERS` as comma-separated `username:bcryptHash` entries
     — passwords are never stored in plaintext, only their bcrypt hash. Use
-    `cmd/gen-basic-auth-hash` to generate the hash for a new password. This
+    `go run ./cmd/server gen-basic-auth-hash` to generate the hash for a new password. This
     variable is required; the service refuses to start without it, and
     fails fast on any malformed entry. `GET /health` is deliberately
     exempt, so liveness/readiness probes don't need credentials.
@@ -108,7 +108,7 @@ Copy `.env.example` to `.env` and fill in the values:
 | `CSM_INTEGRATION_CLIENT_SECRET` | OAuth2 client secret |
 | `CSM_INTEGRATION_SCOPES` | Comma-separated OAuth2 scopes |
 | `SRE_ALERT_CALLER_ID` | A real, provisioned platform user id — see "Known limitations" |
-| `SRE_ALERT_AUTH_USERS` | Required. Comma-separated `username:bcryptHash` pairs for inbound HTTP Basic Auth on `POST /alerts` — generate a hash with `cmd/gen-basic-auth-hash` |
+| `SRE_ALERT_AUTH_USERS` | Required. Comma-separated `username:bcryptHash` pairs for inbound HTTP Basic Auth on `POST /alerts` — generate a hash with `go run ./cmd/server gen-basic-auth-hash` |
 | `SRE_ALERT_MAX_RETRIES` | Retryable-failure count before escalation (default `3`) |
 | `SRE_ALERT_POLL_INTERVAL_SECONDS` | How often the worker scans the buffer (default `15`) |
 | `SRE_ALERT_GROUP_WINDOW_MINUTES` | How far back the incident-grouping search looks for an attachable incident (default `15`) |

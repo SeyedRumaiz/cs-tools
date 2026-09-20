@@ -40,6 +40,17 @@ import (
 )
 
 func main() {
+	// "gen-basic-auth-hash" is a one-shot local CLI subcommand (not the
+	// server), invoked as `go run . gen-basic-auth-hash` — see
+	// genBasicAuthHash's doc comment. Dispatched before loadDotEnv/
+	// ConfigureLogger since it needs neither: no server config, no logger,
+	// no CSM/database env vars — those are mustEnv'd below and would fail
+	// startup for a caller who only wants a password hash.
+	if len(os.Args) > 1 && os.Args[1] == "gen-basic-auth-hash" {
+		genBasicAuthHash()
+		return
+	}
+
 	loadDotEnv(".env")
 	middleware.ConfigureLogger()
 
@@ -129,8 +140,8 @@ func main() {
 	// authentication is HTTP Basic Auth on POST /alerts (see the wiring
 	// comment below), so a missing/malformed value must fail startup, not
 	// silently leave the route unauthenticated. See internal/middleware.BasicAuth
-	// and cmd/gen-basic-auth-hash for the credential format and how to
-	// generate a hash.
+	// and the "gen-basic-auth-hash" subcommand (gen_basic_auth_hash.go) for
+	// the credential format and how to generate a hash.
 	authUsers, err := middleware.ParseBasicAuthUsers(mustEnv("SRE_ALERT_AUTH_USERS"))
 	if err != nil {
 		slog.Error("invalid SRE_ALERT_AUTH_USERS", "err", err)

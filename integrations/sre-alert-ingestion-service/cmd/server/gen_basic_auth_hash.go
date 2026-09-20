@@ -14,10 +14,20 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Command gen-basic-auth-hash reads a single password line from stdin and
-// prints its bcrypt hash to stdout, so operators can build
-// SRE_ALERT_AUTH_USERS entries ("username:bcryptHash") without any other
-// tooling.
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+// genBasicAuthHash implements the "gen-basic-auth-hash" subcommand: it reads
+// a single password line from stdin and prints its bcrypt hash to stdout, so
+// operators can build SRE_ALERT_AUTH_USERS entries ("username:bcryptHash")
+// without any other tooling.
 //
 // Always hashes at bcrypt.DefaultCost — not configurable, deliberately.
 // internal/middleware.BasicAuth's username-enumeration defense (comparing
@@ -30,25 +40,15 @@
 //
 // Usage:
 //
-//	echo -n 'the-password' | go run ./cmd/gen-basic-auth-hash
-package main
-
-import (
-	"bufio"
-	"fmt"
-	"os"
-
-	"golang.org/x/crypto/bcrypt"
-)
-
-func main() {
+//	echo -n 'the-password' | go run ./cmd/server gen-basic-auth-hash
+func genBasicAuthHash() {
 	reader := bufio.NewReader(os.Stdin)
 	line, err := reader.ReadString('\n')
 	if err != nil && line == "" {
 		fmt.Fprintln(os.Stderr, "gen-basic-auth-hash: failed to read password from stdin:", err)
 		os.Exit(1)
 	}
-	password := trimNewline(line)
+	password := trimGenHashNewline(line)
 	if password == "" {
 		fmt.Fprintln(os.Stderr, "gen-basic-auth-hash: empty password")
 		os.Exit(1)
@@ -63,10 +63,11 @@ func main() {
 	fmt.Println(string(hash))
 }
 
-// trimNewline strips a single trailing "\n" and, if present, a preceding
-// "\r" — bufio.Reader.ReadString('\n') includes the delimiter itself, and a
-// CRLF-terminated input would otherwise leave a stray "\r" in the password.
-func trimNewline(s string) string {
+// trimGenHashNewline strips a single trailing "\n" and, if present, a
+// preceding "\r" — bufio.Reader.ReadString('\n') includes the delimiter
+// itself, and a CRLF-terminated input would otherwise leave a stray "\r" in
+// the password.
+func trimGenHashNewline(s string) string {
 	if n := len(s); n > 0 && s[n-1] == '\n' {
 		s = s[:n-1]
 	}
