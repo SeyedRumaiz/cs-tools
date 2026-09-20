@@ -169,12 +169,54 @@ func TestCreateAlertFromAzure_Success(t *testing.T) {
 
 	body := azureAlertJSON("Sev0", "Fired", "svc-checkout", "high_error_rate")
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/azure", bytes.NewReader(body))
+	r = withAuthenticatedUsername(r, "azure")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromAzure(w, r)
 
 	assertStatus(t, w, http.StatusAccepted)
 	if len(store.enqueuedPayloads) != 1 {
 		t.Fatalf("Enqueue called %d times, want 1", len(store.enqueuedPayloads))
+	}
+}
+
+// TestCreateAlertFromAzure_MismatchedAuthenticatedSourceReturns403 is the
+// template regression test for the authorization gap this fix closes: a
+// caller authenticated with a DIFFERENT vendor's credential (e.g. the
+// site24x7 Basic Auth user) must not be able to hit another vendor's
+// dedicated adapter route and have it accepted as that route's own fixed
+// Source literal.
+func TestCreateAlertFromAzure_MismatchedAuthenticatedSourceReturns403(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	body := azureAlertJSON("Sev0", "Fired", "svc-checkout", "high_error_rate")
+	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/azure", bytes.NewReader(body))
+	r = withAuthenticatedUsername(r, "site24x7")
+	w := httptest.NewRecorder()
+	h.CreateAlertFromAzure(w, r)
+
+	assertStatus(t, w, http.StatusForbidden)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when the authenticated identity does not match this adapter's fixed source")
+	}
+}
+
+// TestCreateAlertFromAzure_NoAuthenticatedUsernameReturns500 covers the
+// defensive path: should never happen given main.go's route wiring, but a
+// missing authenticated identity must fail closed, not silently pass through.
+func TestCreateAlertFromAzure_NoAuthenticatedUsernameReturns500(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	body := azureAlertJSON("Sev0", "Fired", "svc-checkout", "high_error_rate")
+	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/azure", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.CreateAlertFromAzure(w, r)
+
+	assertStatus(t, w, http.StatusInternalServerError)
+	assertErrorMessage(t, w, ErrMsgInternal)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when there is no authenticated identity in context")
 	}
 }
 
@@ -199,6 +241,7 @@ func TestCreateAlertFromAzure_ValidationFailureReturns400(t *testing.T) {
 	// alertId containing a tag-delimiter character fails AlertRequest.validate.
 	body := []byte(`{"data":{"essentials":{"alertId":"id]with[delims","alertRule":"r","severity":"Sev1","monitorCondition":"Fired","monitoringService":"svc"}}}`)
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/azure", bytes.NewReader(body))
+	r = withAuthenticatedUsername(r, "azure")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromAzure(w, r)
 
@@ -216,6 +259,7 @@ func TestCreateAlertFromAzure_StoreFailureReturns500(t *testing.T) {
 
 	body := azureAlertJSON("Sev0", "Fired", "svc-checkout", "high_error_rate")
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/azure", bytes.NewReader(body))
+	r = withAuthenticatedUsername(r, "azure")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromAzure(w, r)
 

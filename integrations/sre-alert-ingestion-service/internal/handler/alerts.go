@@ -29,6 +29,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/integrations/sre-alert-ingestion-service/internal/alertpayload"
 	"github.com/wso2-open-operations/cs-tools/integrations/sre-alert-ingestion-service/internal/csmclient"
 	"github.com/wso2-open-operations/cs-tools/integrations/sre-alert-ingestion-service/internal/idgen"
+	"github.com/wso2-open-operations/cs-tools/integrations/sre-alert-ingestion-service/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/integrations/sre-alert-ingestion-service/internal/severity"
 )
 
@@ -290,6 +291,42 @@ func (h *AlertHandler) enqueueAlert(ctx context.Context, req AlertRequest) (id, 
 	return id, alertNumber, nil
 }
 
+// requireAuthenticatedSource enforces that the identity BasicAuth
+// authenticated this request as (see internal/middleware.BasicAuth) is the
+// same identity claiming to be expectedSource — case-insensitively, with
+// leading/trailing whitespace trimmed. HTTP Basic Auth alone only proves
+// *who* is calling; nothing else in this service tied that identity to the
+// Source an alert claims, so any of the N configured credentials could
+// submit an alert claiming to be a different, possibly higher-trust source
+// (spoofing csmclient.GroupTag/DedupTag and severity.MapContactType, all of
+// which key off Source). This closes that gap for both CreateAlert (which
+// reads Source from the request body) and every vendor adapter (which each
+// hardcode their own fixed Source literal — see adapter_*.go).
+//
+// On success, returns true and writes nothing. On a mismatch, writes a 403
+// (an authorization failure, not a validation failure — deliberately not
+// errValidation/400) and returns false so callers can
+// `if !h.requireAuthenticatedSource(w, r, req.Source) { return }`. If no
+// authenticated username is present in context at all — which should never
+// happen, since cmd/server/main.go wraps every route this handler serves in
+// the BasicAuth middleware — that is treated as an internal error (500,
+// logged) rather than silently allowed through.
+func (h *AlertHandler) requireAuthenticatedSource(w http.ResponseWriter, r *http.Request, expectedSource string) bool {
+	username, ok := middleware.AuthenticatedUsernameFromContext(r.Context())
+	if !ok {
+		slog.ErrorContext(r.Context(), "handler: no authenticated username in request context; BasicAuth middleware is not wired for this route")
+		writeError(w, http.StatusInternalServerError, ErrMsgInternal)
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(username), strings.TrimSpace(expectedSource)) {
+		slog.WarnContext(r.Context(), "handler: authenticated identity does not match claimed alert source",
+			"authenticatedUsername", username, "claimedSource", expectedSource)
+		writeError(w, http.StatusForbidden, fmt.Sprintf("source %q does not match the authenticated identity", expectedSource))
+		return false
+	}
+	return true
+}
+
 // CreateAlert handles POST /alerts: the generic, pre-normalized entrypoint
 // for any source that can speak AlertRequest's own JSON shape directly. It
 // reads the body, unmarshals it into an AlertRequest, and delegates to
@@ -310,6 +347,10 @@ func (h *AlertHandler) CreateAlert(w http.ResponseWriter, r *http.Request) {
 	var req AlertRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	if !h.requireAuthenticatedSource(w, r, req.Source) {
 		return
 	}
 

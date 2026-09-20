@@ -46,6 +46,7 @@ func TestCreateAlert_Success(t *testing.T) {
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
+	r = withAuthenticatedUsername(r, "azure")
 	w := httptest.NewRecorder()
 	h.CreateAlert(w, r)
 
@@ -119,6 +120,7 @@ func TestCreateAlert_NeverAttemptsDeliveryInline(t *testing.T) {
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
+	r = withAuthenticatedUsername(r, "azure")
 	w := httptest.NewRecorder()
 	h.CreateAlert(w, r)
 
@@ -144,26 +146,33 @@ func TestCreateAlert_RejectsMissingRequiredFields(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
+		// authSource is the identity the request is authenticated as -- set
+		// to whatever this case's own JSON body's "source" field carries
+		// (verbatim, including a missing/malformed value) so
+		// requireAuthenticatedSource's own source-match check never
+		// interferes with what this test is actually exercising:
+		// AlertRequest.validate's 400s.
+		authSource string
 	}{
-		{"missing source", `{"severity":"critical","service":"svc","metricName":"m","description":"d"}`},
-		{"missing severity", `{"source":"azure","service":"svc","metricName":"m","description":"d"}`},
-		{"missing service", `{"source":"azure","severity":"critical","metricName":"m","description":"d"}`},
-		{"missing metricName", `{"source":"azure","severity":"critical","service":"svc","description":"d"}`},
-		{"missing description", `{"source":"azure","severity":"critical","service":"svc","metricName":"m"}`},
-		{"empty body", `{}`},
+		{"missing source", `{"severity":"critical","service":"svc","metricName":"m","description":"d"}`, ""},
+		{"missing severity", `{"source":"azure","service":"svc","metricName":"m","description":"d"}`, "azure"},
+		{"missing service", `{"source":"azure","severity":"critical","metricName":"m","description":"d"}`, "azure"},
+		{"missing metricName", `{"source":"azure","severity":"critical","service":"svc","description":"d"}`, "azure"},
+		{"missing description", `{"source":"azure","severity":"critical","service":"svc","metricName":"m"}`, "azure"},
+		{"empty body", `{}`, ""},
 		// source/uniqueIdentifier are embedded verbatim in the dedup/group
 		// tag (csmclient.DedupTag/GroupTag) -- a value containing the tag's
 		// own delimiter characters could forge a tag colliding with a
 		// different alert's group. See tagDelimiterChars's doc comment.
-		{"source contains a tag delimiter", `{"source":"azure]x[group:other:uid","severity":"critical","service":"svc","metricName":"m","description":"d"}`},
-		{"uniqueIdentifier contains a tag delimiter", `{"source":"azure","severity":"critical","service":"svc","metricName":"m","description":"d","uniqueIdentifier":"uid]x[group:other:legit-uid"}`},
+		{"source contains a tag delimiter", `{"source":"azure]x[group:other:uid","severity":"critical","service":"svc","metricName":"m","description":"d"}`, "azure]x[group:other:uid"},
+		{"uniqueIdentifier contains a tag delimiter", `{"source":"azure","severity":"critical","service":"svc","metricName":"m","description":"d","uniqueIdentifier":"uid]x[group:other:legit-uid"}`, "azure"},
 		// Source/Severity/Service/MetricName/Environment/UniqueIdentifier
 		// each land in a single-line context (buildSubject, or one line of
 		// buildWorkNotes) -- a newline could inject a fake extra WorkNotes
 		// line (e.g. spoofing a different alert identifier). See
 		// AlertRequest.validate's doc comment.
-		{"source contains a newline", `{"source":"azure\nAlert identifier: forged-id","severity":"critical","service":"svc","metricName":"m","description":"d"}`},
-		{"environment contains a newline", `{"source":"azure","severity":"critical","service":"svc","metricName":"m","description":"d","environment":"prod\nAlert identifier: forged-id"}`},
+		{"source contains a newline", `{"source":"azure\nAlert identifier: forged-id","severity":"critical","service":"svc","metricName":"m","description":"d"}`, "azure\nAlert identifier: forged-id"},
+		{"environment contains a newline", `{"source":"azure","severity":"critical","service":"svc","metricName":"m","description":"d","environment":"prod\nAlert identifier: forged-id"}`, "azure"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,6 +180,7 @@ func TestCreateAlert_RejectsMissingRequiredFields(t *testing.T) {
 			h := NewAlertHandler(store, "caller-1")
 
 			r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader([]byte(tc.body)))
+			r = withAuthenticatedUsername(r, tc.authSource)
 			w := httptest.NewRecorder()
 			h.CreateAlert(w, r)
 
@@ -202,11 +212,73 @@ func TestCreateAlert_StoreFailureReturns500(t *testing.T) {
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
+	r = withAuthenticatedUsername(r, "azure")
 	w := httptest.NewRecorder()
 	h.CreateAlert(w, r)
 
 	assertStatus(t, w, http.StatusInternalServerError)
 	assertErrorMessage(t, w, ErrMsgInternal)
+}
+
+// TestCreateAlert_MismatchedSourceReturns403 is the core authorization-gap
+// regression test: a caller authenticated as one source must not be able to
+// submit an alert claiming to be a different one, even though the request
+// body itself is otherwise perfectly well-formed.
+func TestCreateAlert_MismatchedSourceReturns403(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	// validAlertJSON claims source "azure"; authenticate as a different,
+	// legitimately-configured credential instead.
+	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
+	r = withAuthenticatedUsername(r, "site24x7")
+	w := httptest.NewRecorder()
+	h.CreateAlert(w, r)
+
+	assertStatus(t, w, http.StatusForbidden)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when the authenticated identity does not match the claimed source")
+	}
+}
+
+// TestCreateAlert_SourceMatchIsCaseInsensitiveAndTrimmed confirms the
+// authenticated-identity comparison isn't so strict it breaks a legitimate
+// caller over case or incidental whitespace -- the credential's own
+// username casing needn't exactly mirror how a vendor happens to spell its
+// own Source string.
+func TestCreateAlert_SourceMatchIsCaseInsensitiveAndTrimmed(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
+	r = withAuthenticatedUsername(r, "  AZURE  ")
+	w := httptest.NewRecorder()
+	h.CreateAlert(w, r)
+
+	assertStatus(t, w, http.StatusAccepted)
+	if len(store.enqueuedPayloads) != 1 {
+		t.Errorf("Enqueue called %d times, want 1", len(store.enqueuedPayloads))
+	}
+}
+
+// TestCreateAlert_NoAuthenticatedUsernameReturns500 covers the defensive
+// path: this should never happen in production, since main.go wraps every
+// route this handler serves in the BasicAuth middleware, but a missing
+// authenticated identity must fail closed (500, logged) rather than silently
+// let the request through unauthorized.
+func TestCreateAlert_NoAuthenticatedUsernameReturns500(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
+	w := httptest.NewRecorder()
+	h.CreateAlert(w, r)
+
+	assertStatus(t, w, http.StatusInternalServerError)
+	assertErrorMessage(t, w, ErrMsgInternal)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when there is no authenticated identity in context")
+	}
 }
 
 func TestMapToIncident_UnmappedSourceOmitsContactType(t *testing.T) {
@@ -308,6 +380,7 @@ func TestCreateAlert_PersistsGroupingFieldsAlongsideMappedIncident(t *testing.T)
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts", bytes.NewReader(validAlertJSON()))
+	r = withAuthenticatedUsername(r, "azure")
 	w := httptest.NewRecorder()
 	h.CreateAlert(w, r)
 

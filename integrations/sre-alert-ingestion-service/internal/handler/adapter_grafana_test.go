@@ -139,12 +139,49 @@ func TestCreateAlertFromGrafana_Success(t *testing.T) {
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/grafana", bytes.NewReader(grafanaAlertJSON("alerting", "checkout", "1")))
+	r = withAuthenticatedUsername(r, "grafana")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromGrafana(w, r)
 
 	assertStatus(t, w, http.StatusAccepted)
 	if len(store.enqueuedPayloads) != 1 {
 		t.Fatalf("Enqueue called %d times, want 1", len(store.enqueuedPayloads))
+	}
+}
+
+// TestCreateAlertFromGrafana_MismatchedAuthenticatedSourceReturns403 mirrors
+// TestCreateAlertFromAzure_MismatchedAuthenticatedSourceReturns403 -- see its
+// doc comment.
+func TestCreateAlertFromGrafana_MismatchedAuthenticatedSourceReturns403(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/grafana", bytes.NewReader(grafanaAlertJSON("alerting", "checkout", "1")))
+	r = withAuthenticatedUsername(r, "azure")
+	w := httptest.NewRecorder()
+	h.CreateAlertFromGrafana(w, r)
+
+	assertStatus(t, w, http.StatusForbidden)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when the authenticated identity does not match this adapter's fixed source")
+	}
+}
+
+// TestCreateAlertFromGrafana_NoAuthenticatedUsernameReturns500 mirrors
+// TestCreateAlertFromAzure_NoAuthenticatedUsernameReturns500 -- see its doc
+// comment.
+func TestCreateAlertFromGrafana_NoAuthenticatedUsernameReturns500(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/grafana", bytes.NewReader(grafanaAlertJSON("alerting", "checkout", "1")))
+	w := httptest.NewRecorder()
+	h.CreateAlertFromGrafana(w, r)
+
+	assertStatus(t, w, http.StatusInternalServerError)
+	assertErrorMessage(t, w, ErrMsgInternal)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when there is no authenticated identity in context")
 	}
 }
 
@@ -183,6 +220,7 @@ func TestCreateAlertFromGrafana_StoreFailureReturns500(t *testing.T) {
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/grafana", bytes.NewReader(grafanaAlertJSON("alerting", "checkout", "1")))
+	r = withAuthenticatedUsername(r, "grafana")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromGrafana(w, r)
 

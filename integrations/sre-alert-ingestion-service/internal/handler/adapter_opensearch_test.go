@@ -104,12 +104,49 @@ func TestCreateAlertFromOpenSearch_Success(t *testing.T) {
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/opensearch", bytes.NewReader(openSearchAlertJSON("critical")))
+	r = withAuthenticatedUsername(r, "opensearch")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromOpenSearch(w, r)
 
 	assertStatus(t, w, http.StatusAccepted)
 	if len(store.enqueuedPayloads) != 1 {
 		t.Fatalf("Enqueue called %d times, want 1", len(store.enqueuedPayloads))
+	}
+}
+
+// TestCreateAlertFromOpenSearch_MismatchedAuthenticatedSourceReturns403
+// mirrors TestCreateAlertFromAzure_MismatchedAuthenticatedSourceReturns403 --
+// see its doc comment.
+func TestCreateAlertFromOpenSearch_MismatchedAuthenticatedSourceReturns403(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/opensearch", bytes.NewReader(openSearchAlertJSON("critical")))
+	r = withAuthenticatedUsername(r, "azure")
+	w := httptest.NewRecorder()
+	h.CreateAlertFromOpenSearch(w, r)
+
+	assertStatus(t, w, http.StatusForbidden)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when the authenticated identity does not match this adapter's fixed source")
+	}
+}
+
+// TestCreateAlertFromOpenSearch_NoAuthenticatedUsernameReturns500 mirrors
+// TestCreateAlertFromAzure_NoAuthenticatedUsernameReturns500 -- see its doc
+// comment.
+func TestCreateAlertFromOpenSearch_NoAuthenticatedUsernameReturns500(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/opensearch", bytes.NewReader(openSearchAlertJSON("critical")))
+	w := httptest.NewRecorder()
+	h.CreateAlertFromOpenSearch(w, r)
+
+	assertStatus(t, w, http.StatusInternalServerError)
+	assertErrorMessage(t, w, ErrMsgInternal)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when there is no authenticated identity in context")
 	}
 }
 
@@ -134,6 +171,7 @@ func TestCreateAlertFromOpenSearch_StoreFailureReturns500(t *testing.T) {
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/opensearch", bytes.NewReader(openSearchAlertJSON("critical")))
+	r = withAuthenticatedUsername(r, "opensearch")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromOpenSearch(w, r)
 

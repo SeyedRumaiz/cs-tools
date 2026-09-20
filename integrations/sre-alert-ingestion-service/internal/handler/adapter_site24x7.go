@@ -120,6 +120,10 @@ func (h *AlertHandler) CreateAlertFromSite24x7(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	if !h.requireAuthenticatedSource(w, r, req.Source) {
+		return
+	}
+
 	id, alertNumber, err := h.enqueueAlert(r.Context(), req)
 	h.writeEnqueueResult(w, r, id, alertNumber, err)
 }

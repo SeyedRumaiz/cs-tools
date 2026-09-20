@@ -112,12 +112,49 @@ func TestCreateAlertFromSite24x7_Success(t *testing.T) {
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/site24x7", bytes.NewReader(site24x7AlertJSON("DOWN")))
+	r = withAuthenticatedUsername(r, "site24x7")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromSite24x7(w, r)
 
 	assertStatus(t, w, http.StatusAccepted)
 	if len(store.enqueuedPayloads) != 1 {
 		t.Fatalf("Enqueue called %d times, want 1", len(store.enqueuedPayloads))
+	}
+}
+
+// TestCreateAlertFromSite24x7_MismatchedAuthenticatedSourceReturns403 mirrors
+// TestCreateAlertFromAzure_MismatchedAuthenticatedSourceReturns403 -- see its
+// doc comment.
+func TestCreateAlertFromSite24x7_MismatchedAuthenticatedSourceReturns403(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/site24x7", bytes.NewReader(site24x7AlertJSON("DOWN")))
+	r = withAuthenticatedUsername(r, "azure")
+	w := httptest.NewRecorder()
+	h.CreateAlertFromSite24x7(w, r)
+
+	assertStatus(t, w, http.StatusForbidden)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when the authenticated identity does not match this adapter's fixed source")
+	}
+}
+
+// TestCreateAlertFromSite24x7_NoAuthenticatedUsernameReturns500 mirrors
+// TestCreateAlertFromAzure_NoAuthenticatedUsernameReturns500 -- see its doc
+// comment.
+func TestCreateAlertFromSite24x7_NoAuthenticatedUsernameReturns500(t *testing.T) {
+	store := &mockStore{}
+	h := NewAlertHandler(store, "caller-1")
+
+	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/site24x7", bytes.NewReader(site24x7AlertJSON("DOWN")))
+	w := httptest.NewRecorder()
+	h.CreateAlertFromSite24x7(w, r)
+
+	assertStatus(t, w, http.StatusInternalServerError)
+	assertErrorMessage(t, w, ErrMsgInternal)
+	if len(store.enqueuedPayloads) != 0 {
+		t.Error("Enqueue should not be called when there is no authenticated identity in context")
 	}
 }
 
@@ -156,6 +193,7 @@ func TestCreateAlertFromSite24x7_StoreFailureReturns500(t *testing.T) {
 	h := NewAlertHandler(store, "caller-1")
 
 	r := httptest.NewRequest(http.MethodPost, "/alerts/adapters/site24x7", bytes.NewReader(site24x7AlertJSON("DOWN")))
+	r = withAuthenticatedUsername(r, "site24x7")
 	w := httptest.NewRecorder()
 	h.CreateAlertFromSite24x7(w, r)
 
