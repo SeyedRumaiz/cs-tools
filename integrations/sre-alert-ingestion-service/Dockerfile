@@ -14,12 +14,8 @@
 # specific language governing permissions and limitations
 # under the License.
 # This Dockerfile creates an image that contains the sre-alert-ingestion-service
-# executable. A Dockerfile (rather than Choreo's default Go buildpack) is required
-# here because this module has two main packages (./cmd/server, the deployed
-# server, and ./cmd/gen-basic-auth-hash, a local-only credential-hashing CLI) —
-# the buildpack's default GOOGLE_BUILDABLE="." build target has no Go files at
-# the module root and fails with "no Go files in /workspace" when it can't infer
-# a single main package. Building ./cmd/server explicitly resolves that.
+# executable. This service is deployed on AKS (see README.md), outside Choreo,
+# so it needs its own container image regardless of any buildpack.
 
 FROM golang:1.27.1-alpine AS builder
 
