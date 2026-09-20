@@ -224,6 +224,29 @@ func (w *Worker) attempt(ctx context.Context, row store.AlertRecord) {
 			// problem distinct from CSM's availability, and should still
 			// eventually reach the normal retry-budget/escalation path
 			// rather than loop indefinitely.
+			//
+			// That budget check has to happen HERE, not by falling through
+			// to the normal path below: this branch always returns, so
+			// nothing past it (including the nextRetryCount check further
+			// down) ever runs for this row. Without this, a row stuck here
+			// retries MarkDelivered forever and never escalates, contrary
+			// to the comment above -- CreateIncident is never called again
+			// for a row with IncidentID already set, so it can't reach the
+			// budget check any other way.
+			if row.RetryCount+1 >= w.cfg.MaxRetries {
+				slog.WarnContext(attemptCtx, "worker: retry budget exhausted retrying MarkDelivered for an already-recorded incident, escalating", "id", row.ID, "alertNumber", row.AlertNumber, "incidentID", row.IncidentID, "retryCount", row.RetryCount+1, "maxRetries", w.cfg.MaxRetries, "err", merr)
+				message := fmt.Sprintf(
+					"SRE alert ingestion service: alert %s (id %s) has incident %s created, but this service could not mark it delivered after %d attempts. Last error: %s",
+					row.AlertNumber, row.ID, row.IncidentID, row.RetryCount+1, truncate(merr.Error(), 200),
+				)
+				if terr := w.twilio.Escalate(ctx, message); terr != nil {
+					slog.ErrorContext(attemptCtx, "worker: twilio escalation call failed", "id", row.ID, "err", terr)
+				}
+				if eerr := w.store.MarkEscalated(ctx, row.ID, merr.Error()); eerr != nil {
+					slog.ErrorContext(attemptCtx, "worker: MarkEscalated (post-MarkDelivered-retry) failed", "id", row.ID, "err", eerr)
+				}
+				return
+			}
 			if aerr := w.store.MarkAttemptFailed(ctx, row.ID, fmt.Sprintf("incident %s already recorded but retrying MarkDelivered failed: %v", row.IncidentID, merr)); aerr != nil {
 				slog.ErrorContext(attemptCtx, "worker: MarkAttemptFailed (post-MarkDelivered-retry) also failed", "id", row.ID, "err", aerr)
 			}

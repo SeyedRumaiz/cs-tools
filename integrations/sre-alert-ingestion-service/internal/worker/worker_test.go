@@ -1014,3 +1014,42 @@ func TestRunOnce_ShortCircuitRetryFails_FallsBackToAttemptFailed(t *testing.T) {
 		t.Errorf("attemptFailed = %+v, want one row for alert-1", s.attemptFailed)
 	}
 }
+
+// TestRunOnce_ShortCircuitRetryBudgetExhausted_Escalates is the regression
+// test for the bug this branch's own comment already warned about: it
+// always returns, so nothing past it (including the normal path's
+// nextRetryCount check) ever runs for this row. Without a budget check
+// here too, a row stuck retrying MarkDelivered for an already-recorded
+// incident would retry forever and never escalate, since CreateIncident is
+// never called again once row.IncidentID is set.
+func TestRunOnce_ShortCircuitRetryBudgetExhausted_Escalates(t *testing.T) {
+	row := rowWithPayload(t, "alert-1", 2, nil) // RetryCount 2, MaxRetries 3 -> next attempt exhausts the budget
+	row.IncidentID = "inc-already-created"
+	s := &mockStore{
+		pendingBatchFn: func(ctx context.Context, limit int) ([]store.AlertRecord, error) {
+			return []store.AlertRecord{row}, nil
+		},
+		markDeliveredErr: errors.New("db: connection reset"),
+	}
+	csm := &mockIncidentCreator{createFn: func(ctx context.Context, req csmclient.CreateIncidentRequest) (*csmclient.CreateIncidentResult, error) {
+		t.Fatal("CreateIncident must not be called when row.IncidentID is already set")
+		return nil, nil
+	}}
+	tw := &mockEscalator{}
+
+	w := New(s, csm, tw, Config{MaxRetries: 3})
+	w.RunOnce(context.Background())
+
+	if len(tw.messages) != 1 {
+		t.Fatalf("Escalate called %d times, want 1", len(tw.messages))
+	}
+	if len(s.escalated) != 1 || s.escalated[0].id != "alert-1" {
+		t.Fatalf("escalated = %+v, want one row for alert-1", s.escalated)
+	}
+	if len(s.attemptFailed) != 0 {
+		t.Errorf("attemptFailed = %+v, want none — the budget was exhausted, so this must escalate, not retry again", s.attemptFailed)
+	}
+	if len(s.delivered) != 0 {
+		t.Errorf("delivered = %+v, want none — MarkDelivered failed again", s.delivered)
+	}
+}
