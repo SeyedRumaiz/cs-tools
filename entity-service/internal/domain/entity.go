@@ -4366,6 +4366,14 @@ type SearchIncidentsFilters struct {
 	//     unless dashboard parity is the explicit goal.
 	//   - "productName" (op in): one or more product names, matched as a
 	//     union against the incident's backing business_service name.
+	//   - "incidentStateKeys" (op in): one or more raw ServiceNow
+	//     `incident_state` numeric keys, passed through unmapped (unlike
+	//     "state" above, which translates the domain IncidentState enum to
+	//     SN's raw `state` numeric key). Deliberately separate from "state":
+	//     `incident_state` is a distinct field that exists independently on
+	//     the same incident row. Kept only for exact parity with SN's native
+	//     incident dashboards; prefer "state" for general-purpose state
+	//     filtering.
 	// See service.ParseIncidentFieldFilters.
 	Filters []IncidentFieldFilter `json:"filters,omitempty"`
 }

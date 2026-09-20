@@ -12447,6 +12447,7 @@ components:
             - madeSla
             - productName
             - assignedUserId
+            - incidentStateKeys
         op:
           type: string
           enum: [in, gte, lte, eq]
@@ -12486,6 +12487,14 @@ components:
           narrows rather than guarantees full coverage.
         - **assignedUserId** (in): assignee UUIDs to filter the incident's
           assigned user by.
+        - **incidentStateKeys** (in): one or more raw ServiceNow
+          `incident_state` numeric keys, passed through unmapped (unlike
+          state above, which translates the domain IncidentState enum to
+          SN's raw `state` numeric key). Deliberately separate from state:
+          `incident_state` is a distinct field that exists independently on
+          the same incident row. Kept only for exact parity with SN's native
+          incident dashboards; prefer state for general-purpose state
+          filtering.
 
     SearchIncidentsRequest:
       type: object
