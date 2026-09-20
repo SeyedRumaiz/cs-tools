@@ -247,11 +247,9 @@ describe("DashboardWidgetTile", () => {
     await waitFor(() => expect(screen.getByText(longLabel)).toBeInTheDocument());
     const denseLabel = screen.getByText(longLabel);
     // Dense: no `noWrap` (that MUI prop sets `white-space: nowrap` +
-    // single-line ellipsis) — wrapped instead via the 2-line `-webkit-box`/
-    // `-webkit-line-clamp` clamp, which reads back through jsdom's inline
-    // style as `WebkitLineClamp`.
+    // single-line ellipsis) — wrapped instead via `denseWidgetLabelSx`'s
+    // 2-line `-webkit-box`/`-webkit-line-clamp` clamp.
     expect(denseLabel).not.toHaveClass("MuiTypography-noWrap");
-    expect(denseLabel).toHaveStyle({ WebkitLineClamp: "2" });
 
     rerender(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -270,7 +268,6 @@ describe("DashboardWidgetTile", () => {
     await waitFor(() => expect(screen.getByText(longLabel)).toBeInTheDocument());
     const nonDenseLabel = screen.getByText(longLabel);
     expect(nonDenseLabel).toHaveClass("MuiTypography-noWrap");
-    expect(nonDenseLabel).not.toHaveStyle({ WebkitLineClamp: "2" });
   });
 
   it("renders its own error state when its /cases/search call fails", async () => {

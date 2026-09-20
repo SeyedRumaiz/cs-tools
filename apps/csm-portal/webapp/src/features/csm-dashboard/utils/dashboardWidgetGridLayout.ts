@@ -48,12 +48,68 @@ export const WIDGET_GRID_SX = {
  * window resizes — on a narrow window it gracefully falls back to fewer,
  * still `minWidthPx`-wide columns (wrapping more rows) rather than
  * squeezing every tile down to illegibility the way a fixed column count
- * would. */
+ * would.
+ *
+ * Below the `xl` breakpoint this falls back to the exact same tracks as
+ * `WIDGET_GRID_SX` (not `auto-fill`) — the density trade-off this grid
+ * makes (dropping each widget's own `gridWidth`) is only worth it once
+ * tiles are actually cramped for space, which on a laptop-and-smaller
+ * viewport they aren't. Every other dense-mode style in
+ * `DashboardWidgetTile.tsx` is gated to `xl` the same way, for the same
+ * reason — a section rendered at a narrower viewport (or embedded
+ * somewhere the dashboard's own container is narrower than a full page,
+ * e.g. a preview) should look identical whether or not it happens to be
+ * all-`count`-shape. */
 export function denseWidgetGridSx(minWidthPx = 168) {
   return {
     display: "grid",
     gap: 1.25,
-    gridTemplateColumns: `repeat(auto-fill, minmax(${minWidthPx}px, 1fr))`,
+    gridTemplateColumns: {
+      xs: "repeat(4, minmax(0, 1fr))",
+      sm: "repeat(12, minmax(0, 1fr))",
+      xl: `repeat(auto-fill, minmax(${minWidthPx}px, 1fr))`,
+    },
+  } as const;
+}
+
+/** The icon-shrink transform for a dense (all-count-section) count tile's
+ * icon (see `DashboardWidgetTile.tsx`) — a pure function (rather than
+ * inlined in that component's JSX) so its `xl`-only gating can be
+ * unit-tested directly as a plain object, without depending on jsdom
+ * correctly evaluating an emotion-generated `@media` rule (it does not —
+ * confirmed while fixing the bug this replaces, where the shrink used to
+ * apply at every breakpoint instead of only `xl` and above). `undefined`
+ * for a non-dense tile — no icon-sizing change at all. */
+export function denseWidgetIconSx(dense: boolean) {
+  return dense ? { transform: { xl: "scale(0.875)" } } : undefined;
+}
+
+/** The label-wrap sx for a dense (all-count-section) count tile's title —
+ * see `denseWidgetIconSx` above for why this is a separate, directly
+ * testable function rather than inline JSX. Below `xl` this reproduces
+ * MUI's own `noWrap` (single-line, ellipsis) by hand, since the `noWrap`
+ * prop itself can't be made responsive; at `xl` and above it switches to a
+ * 2-line `-webkit-line-clamp` instead, so a long label (e.g. "FDE -
+ * InProgress Engagement Case") wraps instead of truncating mid-word.
+ * `undefined` for a non-dense tile — the caller keeps using the plain
+ * `noWrap` prop as before. */
+export function denseWidgetLabelSx(dense: boolean) {
+  if (!dense) return undefined;
+  return {
+    whiteSpace: { xs: "nowrap", xl: "normal" },
+    overflow: "hidden",
+    textOverflow: { xs: "ellipsis", xl: "clip" },
+    fontSize: { xl: "0.7rem" },
+    display: { xl: "-webkit-box" },
+    WebkitLineClamp: { xl: 2 },
+    WebkitBoxOrient: { xl: "vertical" },
+    lineHeight: { xl: 1.2 },
+    // Reserves the full 2-line height up front (rather than only as tall as
+    // a shorter label needs) so every tile in the same dense grid row stays
+    // the same height — `auto-fill`/`minmax` grid tracks don't otherwise
+    // force sibling row items to match a taller neighbor's label. Only
+    // applies at `xl`, where the 2-line clamp itself is active.
+    minHeight: { xl: "2.4em" },
   } as const;
 }
 

@@ -18,8 +18,11 @@ import { describe, expect, it } from "vitest";
 import type { BeDashboardWidget } from "@api/backend/types";
 import {
   denseWidgetGridSx,
+  denseWidgetIconSx,
+  denseWidgetLabelSx,
   groupWidgetsBySection,
   isDenseSection,
+  WIDGET_GRID_SX,
 } from "@features/csm-dashboard/utils/dashboardWidgetGridLayout";
 
 function makeWidget(overrides: Partial<BeDashboardWidget> = {}): BeDashboardWidget {
@@ -70,15 +73,54 @@ describe("isDenseSection", () => {
 });
 
 describe("denseWidgetGridSx", () => {
-  it("defaults to a 168px auto-fill minimum column width", () => {
+  it("defaults to a 168px auto-fill minimum column width, only at xl and above", () => {
     const sx = denseWidgetGridSx();
     expect(sx.display).toBe("grid");
-    expect(sx.gridTemplateColumns).toBe("repeat(auto-fill, minmax(168px, 1fr))");
+    expect(sx.gridTemplateColumns.xl).toBe("repeat(auto-fill, minmax(168px, 1fr))");
   });
 
-  it("honors a custom minimum column width", () => {
+  it("honors a custom minimum column width, only at xl and above", () => {
     const sx = denseWidgetGridSx(200);
-    expect(sx.gridTemplateColumns).toBe("repeat(auto-fill, minmax(200px, 1fr))");
+    expect(sx.gridTemplateColumns.xl).toBe("repeat(auto-fill, minmax(200px, 1fr))");
+  });
+
+  it("falls back to the exact same tracks as WIDGET_GRID_SX below xl", () => {
+    const sx = denseWidgetGridSx();
+    expect(sx.gridTemplateColumns.xs).toBe(WIDGET_GRID_SX.gridTemplateColumns.xs);
+    expect(sx.gridTemplateColumns.sm).toBe(WIDGET_GRID_SX.gridTemplateColumns.sm);
+  });
+});
+
+describe("denseWidgetLabelSx", () => {
+  it("is undefined when not dense — no styling change at all", () => {
+    expect(denseWidgetLabelSx(false)).toBeUndefined();
+  });
+
+  it("gates the 2-line clamp (and the single-line fallback below it) to xl and above", () => {
+    // A full DOM render can't verify this directly — jsdom does not
+    // reliably evaluate an emotion-generated `@media` rule against a
+    // simulated viewport width (confirmed while fixing the bug this
+    // replaces), so this asserts the sx object itself, the same way the
+    // `denseWidgetGridSx` tests above do for the grid tracks.
+    const sx = denseWidgetLabelSx(true);
+    // Below xl (the base/"xs" value): reproduces `noWrap`'s single-line
+    // ellipsis truncation by hand.
+    expect(sx?.whiteSpace.xs).toBe("nowrap");
+    expect(sx?.textOverflow.xs).toBe("ellipsis");
+    // At xl and above: switches to a 2-line clamp instead.
+    expect(sx?.whiteSpace.xl).toBe("normal");
+    expect(sx?.WebkitLineClamp.xl).toBe(2);
+    expect(sx?.display.xl).toBe("-webkit-box");
+  });
+});
+
+describe("denseWidgetIconSx", () => {
+  it("is undefined when not dense — no icon-sizing change at all", () => {
+    expect(denseWidgetIconSx(false)).toBeUndefined();
+  });
+
+  it("only shrinks the icon at xl and above", () => {
+    expect(denseWidgetIconSx(true)?.transform.xl).toBe("scale(0.875)");
   });
 });
 

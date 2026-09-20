@@ -65,25 +65,25 @@ const sectionHeaderSx = {
 } as const;
 
 function widgetGridColumnSx(widget: BeDashboardWidget, dense: boolean) {
-  // A dense section (see `isDenseSection`) renders through
-  // `denseWidgetGridSx`'s `auto-fill` track list instead of a fixed
-  // 12-column one, so `widget.gridWidth`'s "span N of 12" meaning doesn't
-  // apply there — every tile just takes the one auto-placed cell
-  // `auto-fill` gives it (an explicit `gridColumn` span here would count
-  // against however many same-width tracks happened to fit, not against a
-  // stable basis, wrapping unpredictably).
-  if (dense) return {};
   // A list-shape widget renders a real table (4 rows, several columns) —
   // its configured `gridWidth` was sized for the old compact text list, so
   // it always spans the full row here regardless of that value.
-  return widget.shape === "list"
-    ? { gridColumn: "1 / -1" }
-    : {
-        gridColumn: {
-          xs: `span ${Math.min(widget.gridWidth, 4)}`,
-          sm: `span ${widget.gridWidth}`,
-        },
-      };
+  if (widget.shape === "list") return { gridColumn: "1 / -1" };
+  const gridWidthSpan = {
+    xs: `span ${Math.min(widget.gridWidth, 4)}`,
+    sm: `span ${widget.gridWidth}`,
+  };
+  // A dense section (see `isDenseSection`) renders through
+  // `denseWidgetGridSx`'s `auto-fill` track list only at `xl` and above —
+  // below that it falls back to the same fixed 12-column tracks as a
+  // non-dense section (see that function's own doc comment), so
+  // `widget.gridWidth`'s "span N of 12" meaning still applies there and
+  // must be kept, not dropped for every viewport width. Only at `xl`,
+  // where the grid actually switches to `auto-fill`, does an explicit span
+  // stop making sense (it would count against however many same-width
+  // tracks happened to fit, not against a stable basis) — so `xl` alone
+  // resets to `"auto"` there, letting `auto-fill` place the tile itself.
+  return dense ? { gridColumn: { ...gridWidthSpan, xl: "auto" } } : { gridColumn: gridWidthSpan };
 }
 
 export interface DashboardWidgetGridProps {

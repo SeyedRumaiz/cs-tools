@@ -47,6 +47,10 @@ import {
   resolveCurrentUserPlaceholder,
 } from "@features/csm-dashboard/utils/currentUserFilterPlaceholder";
 import { resolveWidgetText } from "@features/csm-dashboard/utils/widgetTextPlaceholder";
+import {
+  denseWidgetIconSx,
+  denseWidgetLabelSx,
+} from "@features/csm-dashboard/utils/dashboardWidgetGridLayout";
 import DashboardPieChart from "@features/csm-dashboard/components/DashboardPieChart";
 import DashboardBarChart from "@features/csm-dashboard/components/DashboardBarChart";
 
@@ -863,9 +867,16 @@ function DashboardWidgetTile({
             alignItems: "center",
             justifyContent: "center",
             flexShrink: 0,
+            // The icon prop itself (`size`) can't take a responsive object
+            // the way `sx` can, so the `xl`-only shrink is `denseWidgetIconSx`
+            // (a CSS transform), not a conditional `size` value — keeping the
+            // rendered SVG's own intrinsic size at a constant 16 (below)
+            // avoids the icon looking blurry/off-center from being scaled
+            // down and back up as the viewport crosses the breakpoint.
+            ...denseWidgetIconSx(dense),
           }}
         >
-          <Icon size={dense ? 14 : 16} />
+          <Icon size={16} />
         </Box>
         <Box sx={{ minWidth: 0, flex: 1 }}>
           <Typography
@@ -886,25 +897,11 @@ function DashboardWidgetTile({
             // styling is gated on) keep the original single-line `noWrap`
             // behavior unchanged — this only turns on where the layout is
             // actually tight enough to truncate mid-word in the first place.
+            // See `denseWidgetLabelSx`'s own doc comment for why the
+            // `noWrap`-equivalent behavior below `xl` is reproduced by hand
+            // there instead of relying on the (non-responsive) `noWrap` prop.
             noWrap={!dense}
-            sx={
-              dense
-                ? {
-                    fontSize: { xl: "0.7rem" },
-                    display: "-webkit-box",
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: "vertical",
-                    overflow: "hidden",
-                    lineHeight: 1.2,
-                    // Reserves the full 2-line height up front (rather than
-                    // only as tall as a shorter label needs) so every tile
-                    // in the same dense grid row stays the same height —
-                    // `auto-fill`/`minmax` grid tracks don't otherwise force
-                    // sibling row items to match a taller neighbor's label.
-                    minHeight: "2.4em",
-                  }
-                : undefined
-            }
+            sx={denseWidgetLabelSx(dense)}
           >
             {resolvedDisplayName}
           </Typography>
