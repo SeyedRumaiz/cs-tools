@@ -70,20 +70,23 @@ lost to a timeout or connection reset. `internal/worker.attempt` therefore
 never blindly retries: for any row with `RetryCount > 0` (never the first
 attempt — nothing could exist yet on attempt 1) it first calls
 `csmclient.Client.SearchIncidentByTag` looking for
-`csmclient.DedupTag(row.ID)` (`"[alert:<row-id>]"`), which
+`csmclient.DedupTag(row.AlertNumber)` (`"[alert:<alert-number>]"`), which
 `internal/handler.buildSubject` already stamped as the leading text of this
 row's own `CreateIncidentRequest.Subject` back when the row was first
-buffered — `row.ID` is stable for the row's lifetime, so it's always the
-right tag to search for, no re-parsing needed. A match short-circuits
-straight to `MarkDelivered` against the found incident; `POST /incidents`
-is not called again.
+buffered — `row.AlertNumber` is stable for the row's lifetime, so it's
+always the right tag to search for, no re-parsing needed. A match
+short-circuits straight to `MarkDelivered` against the found incident;
+`POST /incidents` is not called again.
 
-The id itself is generated client-side by `internal/idgen`, in
-`internal/handler.CreateAlert`, *before* `store.Enqueue` — not left to
-`alert_buffer.id`'s `gen_random_uuid()` column default — because the tag has
-to already be inside the JSON payload being persisted, not bolted on after
-the fact. Don't move id generation back into the store: that reintroduces
-the exact chicken-and-egg problem this was built to avoid.
+`row.ID` (a *different* field, the row's own primary key) is generated
+client-side by `internal/idgen`, in `internal/handler.CreateAlert`, *before*
+`store.Enqueue` — not left to `alert_buffer.id`'s `gen_random_uuid()` column
+default — because `store.Enqueue` takes it as an explicit parameter, needed
+up front to issue the INSERT at all. This is unrelated to the dedup tag
+above, which is built from `alertNumber`, not `id`. Don't move id
+generation back into the store: `Enqueue`'s signature requires it as an
+argument, not something it can generate internally and hand back before
+the row exists.
 
 The search call fails open: no match, or the search call itself erroring
 (including the 401 it also currently always gets, for the identical

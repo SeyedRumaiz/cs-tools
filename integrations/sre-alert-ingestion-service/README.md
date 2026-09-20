@@ -159,7 +159,7 @@ for consistency rather than re-evaluated independently.
 |---|---|
 | `id` | UUID primary key, generated **client-side** by `internal/idgen` before the row is persisted (not by the column's `gen_random_uuid()` default — see "Duplicate-incident dedup" below for why) — returned to the caller as the buffered alert's id |
 | `received_at` | When the alert was accepted |
-| `payload` | The already-mapped `CreateIncidentRequest` JSON (not the raw inbound alert) — see `internal/handler.MapToIncident`. Its `Subject` is tagged with this row's own `id` (`internal/csmclient.DedupTag`) |
+| `payload` | The already-mapped `CreateIncidentRequest` JSON (not the raw inbound alert) — see `internal/handler.MapToIncident`. Its `Subject` is tagged with this row's own `alertNumber`, not `id` (`internal/csmclient.DedupTag`) |
 | `status` | `pending` \| `delivered` \| `escalated` \| `failed` |
 | `retry_count` | Number of failed, retryable delivery attempts so far |
 | `last_attempt_at` | Timestamp of the most recent delivery attempt |
@@ -295,15 +295,17 @@ lost (timeout, connection reset, etc.). Retrying blindly in that situation
 risks creating a second, duplicate incident for the same alert. This
 service guards against that in two parts:
 
-1. **Every incident's `Subject` is tagged with its buffer row's own id.**
-   `internal/idgen` generates `alert_buffer.id` client-side, *before* the
-   row is persisted (not via the column's `gen_random_uuid()` default), so
-   `internal/handler.MapToIncident` can embed it as a dedup tag —
-   `internal/csmclient.DedupTag(id)`, format `"[alert:<row-id>]"` — as the
-   leading text of `CreateIncidentRequest.Subject`. This is fully within
-   this service's own control, unlike `AlertRequest.UniqueIdentifier`
-   (vendor-supplied and optional), and guaranteed unique per buffered
-   alert.
+1. **Every incident's `Subject` is tagged with its buffer row's own
+   `alertNumber`, not its `id`.** `internal/store.Store.Enqueue` generates
+   `alertNumber` (this service's own Postgres sequence) as part of the same
+   INSERT that persists the row, and `internal/handler.MapToIncident`
+   embeds it as a dedup tag — `internal/csmclient.DedupTag(alertNumber)`,
+   format `"[alert:<alert-number>]"` — as the leading text of
+   `CreateIncidentRequest.Subject`. This is fully within this service's own
+   control, unlike `AlertRequest.UniqueIdentifier` (vendor-supplied and
+   optional), and guaranteed unique per buffered alert. (`internal/idgen`
+   generates `id` client-side for a different reason — see its own doc
+   comment — not for this dedup tag.)
 2. **Before any *retry* (never the first attempt — nothing could exist yet
    on attempt 1), the worker searches for that tag first.**
    `internal/worker.attempt` calls
