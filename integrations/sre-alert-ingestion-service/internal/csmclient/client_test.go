@@ -168,6 +168,34 @@ func TestCreateIncident_ForwardsCorrelationID(t *testing.T) {
 	}
 }
 
+// TestNewClient_TokenFetchDoesNotFollowRedirects guards against the
+// client-credentials POST (ClientID/ClientSecret in the form body) being
+// resent to a redirect target: a 307/308 from the token endpoint must not
+// be followed.
+func TestNewClient_TokenFetchDoesNotFollowRedirects(t *testing.T) {
+	redirectTargetCalled := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectTargetCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"test-token","token_type":"bearer","expires_in":3600}`))
+	}))
+	defer target.Close()
+
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer tokenSrv.Close()
+
+	client := newClient(Config{BaseURL: tokenSrv.URL, TokenURL: tokenSrv.URL + "/token", ClientID: "id", ClientSecret: "secret"}, true)
+	_, err := client.CreateIncident(context.Background(), CreateIncidentRequest{})
+	if err == nil {
+		t.Fatal("expected an error for an unfollowed token-endpoint redirect, got nil")
+	}
+	if redirectTargetCalled {
+		t.Error("client followed the redirect; ClientID/ClientSecret were resubmitted to the redirect target")
+	}
+}
+
 func TestTokenFetchTimeout(t *testing.T) {
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
