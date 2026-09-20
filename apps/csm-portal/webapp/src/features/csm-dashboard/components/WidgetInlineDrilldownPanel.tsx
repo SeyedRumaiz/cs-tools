@@ -210,6 +210,7 @@ export default function WidgetInlineDrilldownPanel({
                   widgetId,
                   displayName: resolvedDisplayName,
                   filters: resolvePlaceholders(mergedFilters),
+                  resourceType,
                   currentUserId,
                 })}
                 size="small"
