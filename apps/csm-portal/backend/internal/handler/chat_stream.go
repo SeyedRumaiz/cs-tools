@@ -35,12 +35,16 @@ const engineerAlertStreamHeartbeat = 15 * time.Second
 // backend delivers to this engineer — a customer escalation the routing
 // service assigned to them specifically (see chat.go's engineerHubKey),
 // another engineer accepting/completing a session, or a customer message
-// arriving during an accepted session. It is registered on its own
-// always-on listener (see cmd/server/main.go) so the main :8083 listener's
-// WriteTimeout/IdleTimeout can't kill it, mirroring StreamCaseActivities's
-// split — but unlike that endpoint, this one is unconditional: it does not
-// depend on Event Hub being configured, since live engineer chat has no
-// Kafka-backed fallback path to degrade to.
+// arriving during an accepted session. It is registered on this backend's
+// main API listener alongside every other route, behind the same
+// authMiddleware/CORS chain (see cmd/server/main.go) — unlike
+// StreamCaseActivities, which still uses its own dedicated listener. Since
+// the main listener's WriteTimeout would otherwise cut this connection off
+// after that many seconds, the handler clears its own write deadline via
+// http.NewResponseController on entry (see the call below) rather than
+// requiring a second always-on listener just for this one endpoint. It is
+// unconditional: it does not depend on Event Hub being configured, since
+// live engineer chat has no Kafka-backed fallback path to degrade to.
 //
 // Registers under TWO stream.BroadcastHub keys at once: this engineer's own
 // (engineerHubKey(user.UserID) -- the IdP "userid" claim, see
@@ -67,6 +71,20 @@ func (h *ChatHandler) StreamEngineerAlerts(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		writeError(w, http.StatusInternalServerError, ErrMsgInternal)
 		return
+	}
+
+	// This connection is meant to stay open indefinitely, unlike every other
+	// route on the shared main listener (see cmd/server/main.go's
+	// srv.WriteTimeout) — clear the write deadline for this response only,
+	// rather than raising the shared listener's timeout for every route.
+	// A zero time.Time means "no deadline". Requires
+	// internal/middleware.Logger's responseWriter to forward
+	// SetWriteDeadline to the underlying connection (it does); an error
+	// here would mean that wrapper regressed, which is why it's still
+	// worth capturing for the log even though there is nothing else to do
+	// about it at this point in the request.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		slog.WarnContext(r.Context(), "engineer chat alert stream: failed to clear write deadline", "err", err)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")

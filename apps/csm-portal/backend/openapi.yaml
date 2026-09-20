@@ -6742,6 +6742,126 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
 
+  /chat/alerts/stream:
+    get:
+      summary: Live-engineer-chat alerts for the authenticated engineer.
+      description: >
+        Opens a long-lived Server-Sent Events connection on this backend's
+        main API listener (the handler clears its own write deadline so the
+        listener's normal WriteTimeout doesn't cut it off -- see
+        StreamEngineerAlerts's doc comment). Emits a `chat_alert` event
+        (data: a compact JSON object -- see chat.go's chatEvent type, e.g.
+        {type, caseId, conversationId, ...}) for every live-chat event this
+        backend delivers to this engineer: a customer escalation the
+        routing service assigned to them specifically, another engineer
+        accepting/completing a session, or a customer message arriving
+        during an accepted session. A comment-only `: ping` heartbeat is
+        sent every 15s otherwise.
+      operationId: getChatAlertsStream
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Ok
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /internal/chat/escalate:
+    post:
+      summary: Route a chat-first escalation to an available engineer.
+      description: >
+        Service-to-service only -- called by customer-portal/backend-v2's
+        own internal/csmchat.Client, never by a browser, but authenticated
+        exactly like every other route here: an OAuth2 client-credentials
+        token carried as x-jwt-assertion (see internal/middleware.Auth),
+        not a bespoke shared secret. Called before any entity-service case
+        exists -- chat-first escalation defers real case creation until the
+        assigned engineer explicitly converts the chat (see
+        POST /chat/sessions/{id}/convert-to-case). caseId here is
+        chat-routing-service's own provisional case identity (equal to
+        conversationId), not a real entity-service case ID. Always responds
+        202: if the routing service is unreachable, this falls back to
+        broadcasting the escalation to every connected engineer rather than
+        failing the customer's request.
+      operationId: postInternalChatEscalate
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatEscalateRequest'
+        required: true
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatMessageAck'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /internal/chat/customer-message:
+    post:
+      summary: Relay a customer's message to the engineer holding this chat.
+      description: >
+        Service-to-service only -- called by customer-portal/backend-v2's
+        own HandleSendMessage, authenticated the same way as
+        POST /internal/chat/escalate above (see that path's description).
+        The message is best-effort persisted via chat-routing-service's
+        LOCAL STAND-IN comment storage, then relayed live to every
+        connected engineer over GET /chat/alerts/stream -- persistence
+        failing does not fail this call, since dropping the durable record
+        is far less costly than dropping the live relay itself.
+      operationId: postInternalChatCustomerMessage
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCustomerMessageRequest'
+        required: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatMessageAck'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+
 components:
   securitySchemes:
     bearerAuth:
@@ -6750,6 +6870,48 @@ components:
       bearerFormat: JWT
   schemas:
     ErrorPayload:
+      type: object
+      properties:
+        message:
+          type: string
+
+    ChatEscalateRequest:
+      type: object
+      required: [caseId, conversationId]
+      properties:
+        caseId:
+          type: string
+          format: uuid
+        conversationId:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        subject:
+          type: string
+        customerEmail:
+          type: string
+        customerName:
+          type: string
+        message:
+          type: string
+    ChatCustomerMessageRequest:
+      type: object
+      required: [caseId, conversationId, message]
+      properties:
+        caseId:
+          type: string
+          format: uuid
+        conversationId:
+          type: string
+          format: uuid
+        message:
+          type: string
+        customerEmail:
+          type: string
+          description: Attributes the persisted comment to its actual sender.
+    ChatMessageAck:
       type: object
       properties:
         message:

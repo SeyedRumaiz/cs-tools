@@ -49,9 +49,9 @@ func main() {
 	loadDotEnv(".env")
 	middleware.ConfigureLogger()
 
-	// entity-service, the updates service, and SCIM all authenticate as the
-	// same OAuth2 client-credentials app; only each service's base URL and
-	// scopes differ.
+	// entity-service, the updates service, SCIM, and chatnotify's csmchat
+	// client below all authenticate as the same OAuth2 client-credentials
+	// app; only each service's base URL and scopes differ.
 	oauth2ClientID := os.Getenv("OAUTH2_CLIENT_ID")
 	oauth2ClientSecret := os.Getenv("OAUTH2_CLIENT_SECRET")
 	oauth2TokenURL := optionalURL("OAUTH2_TOKEN_URL", "http", "https")
@@ -166,6 +166,12 @@ func main() {
 	// One validator, shared by the REST middleware chain and the WebSocket
 	// listener, so the JWKS is fetched and refreshed once per process.
 	tokenValidator := middleware.NewTokenValidator(authCfg)
+	// Built once and reused on both the main REST chain and the two
+	// internal live-engineer-chat routes registered on wsMux below — same
+	// reasoning as sharing tokenValidator itself: constructing it twice
+	// would gain nothing since every caller validates the exact same
+	// tokens the exact same way.
+	authMiddleware := middleware.AuthWithValidator(tokenValidator)
 
 	userHandler := handler.NewUserHandler(entityClient, scimClient)
 	projectHandler := handler.NewProjectHandler(entityClient)
@@ -192,12 +198,17 @@ func main() {
 	// Live-engineer-chat escalation feature (Novera chat "Talk to a live
 	// engineer" button). This backend owns case creation (it has the
 	// deployment/deployed-product context a case requires) and relays
-	// to/from csm-portal/backend's own internal listener for the engineer
-	// side. See .env.example for the corresponding env vars.
-	internalChatToken := os.Getenv("INTERNAL_CHAT_TOKEN")
+	// to/from csm-portal/backend's own live-engineer-chat endpoints for the
+	// engineer side. csmChatClient authenticates as the same shared OAuth2
+	// client-credentials app as entity/updates/scim above; only its base
+	// URL and scopes differ. See .env.example for the corresponding env
+	// vars.
 	csmChatClient := csmchat.NewClient(csmchat.Config{
-		BaseURL:       envOrDefault("CSM_PORTAL_INTERNAL_BASE_URL", "http://localhost:9095"),
-		InternalToken: internalChatToken,
+		BaseURL:      envOrDefault("CSM_PORTAL_INTERNAL_BASE_URL", "http://localhost:8080"),
+		TokenURL:     oauth2TokenURL,
+		ClientID:     oauth2ClientID,
+		ClientSecret: oauth2ClientSecret,
+		Scopes:       splitComma(os.Getenv("CSM_CHAT_SCOPES")),
 	})
 	chatEscalationHandler := handler.NewChatEscalationHandler(entityClient, csmChatClient)
 	chatEventsHandler := handler.NewChatEventsHandler(webSocketHandler)
@@ -370,7 +381,7 @@ func main() {
 		Handler: middleware.CORS(nil)(
 			middleware.SecurityHeaders(
 				middleware.CorrelationID(
-					middleware.AuthWithValidator(tokenValidator)(
+					authMiddleware(
 						middleware.Logger(mux),
 					),
 				),
@@ -407,13 +418,18 @@ func main() {
 	wsMux.HandleFunc("GET /ws", webSocketHandler.HandleWebSocket)
 
 	// Live-engineer-chat: internal service-to-service receivers for
-	// csm-portal/backend's outbound calls (chatnotify.Client), gated by
-	// middleware.InternalToken instead of user auth -- there is no customer
-	// JWT on these calls. Registered on the same unauthenticated listener as
-	// GET /ws for the same reason that handler omits normal Auth (see the
-	// comment on wsMux above); the InternalToken check takes its place here.
-	wsMux.Handle("POST /internal/chat-events", middleware.InternalToken(internalChatToken)(http.HandlerFunc(chatEventsHandler.Handle)))
-	wsMux.Handle("POST /internal/chat/create-case", middleware.InternalToken(internalChatToken)(http.HandlerFunc(chatEscalationHandler.HandleCreateCase)))
+	// csm-portal/backend's outbound calls (chatnotify.Client). Registered on
+	// this same listener as GET /ws purely because that's where this
+	// backend's own internal/service-facing surface already lives, NOT
+	// because these two routes share GET /ws's browser-can't-set-headers
+	// constraint -- a backend-to-backend HTTP client can set any header it
+	// likes, so unlike GET /ws these two authenticate exactly like every
+	// route on the main REST API above: authMiddleware (the same
+	// middleware.Auth/JWKS chain), validating an x-jwt-assertion carrying an
+	// OAuth2 client-credentials token from csm-portal/backend's chatnotify
+	// client, not a bespoke shared secret.
+	wsMux.Handle("POST /internal/chat-events", authMiddleware(http.HandlerFunc(chatEventsHandler.Handle)))
+	wsMux.Handle("POST /internal/chat/create-case", authMiddleware(http.HandlerFunc(chatEscalationHandler.HandleCreateCase)))
 
 	wsAddr := ":" + mustPort("WS_PORT", "8081")
 	// ctx here covers only the listen operation itself (address resolution and

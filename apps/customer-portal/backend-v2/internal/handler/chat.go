@@ -422,7 +422,15 @@ type chatEventPushBody struct {
 	ConversationID string `json:"conversationId"`
 	EngineerEmail  string `json:"engineerEmail"`
 	Message        string `json:"message"`
-	Timestamp      string `json:"timestamp"`
+	// EntityCaseID is set only on a "converted_to_case" event (see
+	// csm-portal/backend's HandleConvertToCase) -- the real entity-service
+	// case ID the customer's browser should point to now that this chat
+	// has ended. Must stay in sync with that handler's chatEvent.EntityCaseID
+	// field name/tag; dropping this silently discards the field on
+	// unmarshal instead of erroring, which is what happened before this
+	// field existed here.
+	EntityCaseID string `json:"entityCaseId,omitempty"`
+	Timestamp    string `json:"timestamp"`
 }
 
 // ChatEventsHandler receives the internal push from csm-portal/backend and
@@ -437,10 +445,13 @@ func NewChatEventsHandler(ws chatEventPushTarget) *ChatEventsHandler {
 }
 
 // Handle implements POST /internal/chat-events. Registered on the same
-// listener as GET /ws (see cmd/server/main.go) — like that route, it cannot
-// go through the normal Auth middleware, since csm-portal/backend has no
-// customer x-jwt-assertion to present; it is instead gated by
-// middleware.InternalToken at the route-registration layer.
+// listener as GET /ws (see cmd/server/main.go) purely because that is where
+// this backend's internal/service-facing surface already lives -- unlike
+// GET /ws, this route DOES go through the normal authMiddleware
+// (middleware.Auth/AuthWithValidator), since csm-portal/backend is a
+// regular HTTP client that can set any header it likes and authenticates
+// with an OAuth2 client-credentials token carried as x-jwt-assertion, not a
+// browser unable to set one on a WebSocket handshake.
 //
 // A conversationId with no currently-open connection is not an error — the
 // customer may simply have the tab closed — so this always responds 202,
@@ -461,6 +472,7 @@ func (h *ChatEventsHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		Message:        evt.Message,
 		ConversationID: evt.ConversationID,
 		EngineerEmail:  evt.EngineerEmail,
+		EntityCaseID:   evt.EntityCaseID,
 		TS:             evt.Timestamp,
 	})
 	if !delivered {

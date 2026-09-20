@@ -242,7 +242,12 @@ type wsEvent struct {
 	Message        string `json:"message,omitempty"`
 	ConversationID string `json:"conversationId,omitempty"`
 	EngineerEmail  string `json:"engineerEmail,omitempty"`
-	TS             string `json:"ts,omitempty"`
+	// EntityCaseID is set only on a "converted_to_case" event -- the real
+	// entity-service case ID the customer's browser should navigate to now
+	// that this chat has ended (see ChatEventsHandler.Handle in chat.go,
+	// which populates this from chatEventPushBody.EntityCaseID).
+	EntityCaseID string `json:"entityCaseId,omitempty"`
+	TS           string `json:"ts,omitempty"`
 }
 
 // HandleWebSocket handles GET /ws?sessionId={projectId}. The query parameter

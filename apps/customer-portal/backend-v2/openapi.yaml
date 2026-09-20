@@ -5837,6 +5837,123 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
 
+  /projects/{id}/support/chat/escalate:
+    post:
+      summary: Escalate the customer's current AI chat to a live engineer.
+      description: >
+        Chat-first escalation: no entity-service case is created by this
+        call. req.conversationId becomes chat-routing-service's own case
+        identity; a real case is only created later, if and when the
+        assigned engineer converts the chat (see POST
+        /internal/chat/create-case, an internal-only route not exposed
+        here). This call does resolve and validate that the project has a
+        deployment and deployed product on file — the same resolution that
+        will be re-run for real at conversion time — failing fast with 409
+        if neither exists, since a case could never be created for this
+        project later either way.
+      operationId: postProjectsIdSupportChatEscalate
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatEscalateRequest'
+        required: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatEscalateResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "409":
+          description: >-
+            The project has no deployment (or the deployment has no
+            deployed product) on file, so a case could not be created
+            automatically later either. Use "Create Case" instead.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "503":
+          description: csm-portal/backend or entity-service was unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /projects/{id}/support/chat/{conversationId}/message:
+    post:
+      summary: Send a message from the customer to the engineer handling this chat.
+      description: >
+        Thin relay to csm-portal/backend, which is now the record-of-truth
+        for this chat's messages (see the LOCAL STAND-IN routing-service
+        persistence tables) — nothing is written to entity-service by this
+        call.
+      operationId: postProjectsIdSupportChatConversationIdMessage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: conversationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatSendMessageRequest'
+        required: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatSendMessageResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "503":
+          description: csm-portal/backend was unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -9916,3 +10033,51 @@ components:
           type: string
         contactDetails:
           $ref: '#/components/schemas/Contact'
+    ChatEscalateRequest:
+      type: object
+      required: [conversationId]
+      properties:
+        conversationId:
+          type: string
+          format: uuid
+          description: >-
+            The AI chat conversation this escalation continues. Becomes
+            chat-routing-service's own case identity for the lifetime of
+            this chat.
+        message:
+          type: string
+          description: >-
+            The customer's own opening text, shown to the engineer as
+            context. Optional — a default message is used when omitted.
+        customerName:
+          type: string
+          description: >-
+            Display label only, shown in the engineer's alert UI. Never
+            used for authorization or attribution — the case's own
+            createdBy always comes from the authenticated session.
+    ChatEscalateResponse:
+      type: object
+      required: [caseId, message]
+      properties:
+        caseId:
+          type: string
+          format: uuid
+          description: Equal to the request's conversationId.
+        message:
+          type: string
+    ChatSendMessageRequest:
+      type: object
+      required: [caseId, message]
+      properties:
+        caseId:
+          type: string
+          format: uuid
+          description: chat-routing-service's case identity for this chat.
+        message:
+          type: string
+    ChatSendMessageResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string

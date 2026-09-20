@@ -340,9 +340,12 @@ type escalateRequest struct {
 }
 
 // HandleEscalate handles POST /internal/chat/escalate. Not browser-facing —
-// registered only on the internal listener behind middleware.InternalToken
-// (see cmd/server/main.go), called by customer-portal/backend-v2's own
-// HandleEscalate before any entity-service case exists -- chat-first
+// registered on this backend's main API listener like every other route
+// (see cmd/server/main.go), behind the same middleware.Auth JWT check;
+// called by customer-portal/backend-v2's own csmchat.Client, authenticating
+// with an OAuth2 client-credentials token rather than a user's own session
+// token. It is invoked from HandleEscalate before any entity-service case
+// exists -- chat-first
 // escalation defers real case creation until the assigned engineer
 // explicitly converts the chat (see HandleConvertToCase below and
 // backend-v2's escalation handler's own doc comment). req.CaseID here is
@@ -435,7 +438,8 @@ type customerMessageRequest struct {
 }
 
 // HandleCustomerMessage handles POST /internal/chat/customer-message. Also
-// internal-listener-only (see HandleEscalate). Persists the customer's
+// service-to-service only, authenticated the same way as HandleEscalate
+// above (see that handler's doc comment). Persists the customer's
 // message as a comment via the LOCAL STAND-IN routing-service tables (see
 // routingService's own doc comment) — entity-service's real CreateCaseComment
 // was never usable here (this internal, service-to-service call from

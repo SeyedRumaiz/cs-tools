@@ -30,7 +30,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -63,9 +62,10 @@ func main() {
 	// request path.
 	dir := loadDirectory()
 
-	// All upstream service clients (entity, updates, SCIM, and future notification
-	// channels) authenticate as the same OAuth2 client-credentials app; only the
-	// base URL and scopes differ per service.
+	// All upstream service clients (entity, updates, SCIM, chatnotify, and
+	// future notification channels) authenticate as the same OAuth2
+	// client-credentials app; only the base URL and scopes differ per
+	// service.
 	oauth2ClientID := mustEnv("OAUTH2_CLIENT_ID")
 	oauth2ClientSecret := mustEnv("OAUTH2_CLIENT_SECRET")
 	oauth2TokenURL := mustEnv("OAUTH2_TOKEN_URL")
@@ -85,15 +85,18 @@ func main() {
 
 	// Live-engineer-chat escalation feature (Novera chat "Talk to a live
 	// engineer" button). engineerHub fans SSE alerts out to connected
-	// engineers (StreamEngineerAlerts); chatNotifyClient/routingClient are
-	// this backend's two outbound integrations (customer-portal/backend-v2's
-	// internal listener, and the standalone chat-routing-service). See
-	// .env.example for the corresponding env vars.
+	// engineers (StreamEngineerAlerts, registered on the main API listener
+	// below); chatNotifyClient/routingClient are this backend's two
+	// outbound integrations (customer-portal/backend-v2's internal
+	// listener, and the standalone chat-routing-service). See .env.example
+	// for the corresponding env vars.
 	engineerHub := stream.NewBroadcastHub()
-	internalChatToken := os.Getenv("INTERNAL_CHAT_TOKEN")
 	chatNotifyClient := chatnotify.NewClient(chatnotify.Config{
-		BaseURL:       envOrDefault("CUSTOMER_PORTAL_INTERNAL_BASE_URL", "http://localhost:8082"),
-		InternalToken: internalChatToken,
+		BaseURL:      envOrDefault("CUSTOMER_PORTAL_INTERNAL_BASE_URL", "http://localhost:8081"),
+		TokenURL:     oauth2TokenURL,
+		ClientID:     oauth2ClientID,
+		ClientSecret: oauth2ClientSecret,
+		Scopes:       splitComma(os.Getenv("CHAT_NOTIFY_SCOPES")),
 	})
 	routingClient := routingclient.NewClient(routingclient.Config{
 		BaseURL:       envOrDefault("ROUTING_SERVICE_BASE_URL", "http://localhost:9096"),
@@ -322,7 +325,16 @@ func main() {
 	// Called manually today; not yet wired into real incident/case creation.
 	mux.HandleFunc("POST /notifications/google-chat/alerts", notificationHandler.PostGoogleChatAlert)
 
-	// Live-engineer-chat: engineer-facing session lifecycle + presence.
+	// Live-engineer-chat: engineer-facing session lifecycle + presence, the
+	// long-lived alert stream, and the two service-to-service receivers
+	// customer-portal/backend-v2's internal/csmchat.Client calls. All on
+	// this same main API listener, behind the same authMiddleware/CORS
+	// chain as every other route above — the SSE route's own long-lived
+	// connection is handled by clearing its write deadline (see
+	// StreamEngineerAlerts), not by a separate listener, and the two
+	// internal routes authenticate exactly like any other route (a JWT in
+	// x-jwt-assertion, here an OAuth2 service-account token from
+	// backend-v2's csmchat.Client) rather than a bespoke shared secret.
 	mux.HandleFunc("POST /chat/sessions/{id}/accept", chatHandler.HandleAcceptSession)
 	mux.HandleFunc("POST /chat/sessions/{id}/messages", chatHandler.HandleEngineerMessage)
 	mux.HandleFunc("POST /chat/sessions/{id}/complete", chatHandler.HandleCompleteSession)
@@ -331,13 +343,9 @@ func main() {
 	mux.HandleFunc("POST /engineers/me/status", chatHandler.HandleSetPresence)
 	mux.HandleFunc("GET /engineers/me/status", chatHandler.HandleGetPresence)
 	mux.HandleFunc("PATCH /engineers/me/capacity", chatHandler.HandleSetMaxConcurrentChats)
-
-	// Built once and reused on both listeners below: Auth() does a real JWKS
-	// fetch (when TokenValidatorEnabled), so calling it a second time would
-	// duplicate that startup network round-trip and double the chance of a
-	// transient JWKS hiccup aborting startup, for no benefit — both
-	// listeners validate the exact same tokens the exact same way.
-	authMiddleware := middleware.Auth(authCfg)
+	mux.HandleFunc("GET /chat/alerts/stream", chatHandler.StreamEngineerAlerts)
+	mux.HandleFunc("POST /internal/chat/escalate", chatHandler.HandleEscalate)
+	mux.HandleFunc("POST /internal/chat/customer-message", chatHandler.HandleCustomerMessage)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -366,7 +374,7 @@ func main() {
 		Handler: middleware.SecurityHeaders(
 			middleware.CORS(splitComma(os.Getenv("CORS_ALLOWED_ORIGINS")))(
 				middleware.CorrelationID(
-					authMiddleware(
+					middleware.Auth(authCfg)(
 						middleware.Logger(mux),
 					),
 				),
@@ -386,105 +394,14 @@ func main() {
 	}()
 	slog.Info("CSM Portal Backend started", "addr", addr)
 
-	// Live-engineer-chat: two more always-on listeners, separate from the
-	// main API above.
-	//   - chatStreamSrv (CHAT_STREAM_PORT): SSE stream engineers subscribe to
-	//     for live escalation alerts, behind the same authMiddleware chain as
-	//     the main API. WriteTimeout/IdleTimeout are left at zero: unlike the
-	//     main API's short-lived requests, this connection is meant to stay
-	//     open indefinitely.
-	//   - internalChatSrv (INTERNAL_CHAT_PORT): service-to-service receiver
-	//     for customer-portal/backend-v2's escalate/customer-message calls,
-	//     gated by middleware.InternalToken instead of user auth (there is no
-	//     customer JWT on these calls).
-	chatStreamMux := http.NewServeMux()
-	chatStreamMux.HandleFunc("GET /chat/alerts/stream", chatHandler.StreamEngineerAlerts)
-	chatStreamAddr := ":" + mustPort("CHAT_STREAM_PORT", "9094")
-	chatStreamLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", chatStreamAddr)
-	if err != nil {
-		slog.Error("failed to bind", "addr", chatStreamAddr, "err", err)
-		os.Exit(1)
-	}
-	chatStreamSrv := &http.Server{
-		Handler: middleware.SecurityHeaders(
-			middleware.CORS(splitComma(os.Getenv("STREAM_CORS_ALLOWED_ORIGINS")))(
-				middleware.CorrelationID(authMiddleware(middleware.Logger(chatStreamMux))),
-			),
-		),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      0,
-		IdleTimeout:       0,
-	}
-
-	internalChatMux := http.NewServeMux()
-	internalChatMux.HandleFunc("POST /internal/chat/escalate", chatHandler.HandleEscalate)
-	internalChatMux.HandleFunc("POST /internal/chat/customer-message", chatHandler.HandleCustomerMessage)
-	internalChatAddr := ":" + mustPort("INTERNAL_CHAT_PORT", "9095")
-	internalChatLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", internalChatAddr)
-	if err != nil {
-		slog.Error("failed to bind", "addr", internalChatAddr, "err", err)
-		os.Exit(1)
-	}
-	internalChatSrv := &http.Server{
-		Handler: middleware.SecurityHeaders(
-			middleware.CorrelationID(
-				middleware.InternalToken(internalChatToken)(middleware.Logger(internalChatMux)),
-			),
-		),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-
-	go func() {
-		if err := chatStreamSrv.Serve(chatStreamLn); err != nil && err != http.ErrServerClosed {
-			slog.Error("chat alert stream server exited", "err", err)
-			os.Exit(1)
-		}
-	}()
-	slog.Info("engineer chat alert stream server started", "addr", chatStreamLn.Addr().String())
-
-	go func() {
-		if err := internalChatSrv.Serve(internalChatLn); err != nil && err != http.ErrServerClosed {
-			slog.Error("internal chat server exited", "err", err)
-			os.Exit(1)
-		}
-	}()
-	slog.Info("internal chat server started", "addr", internalChatLn.Addr().String())
-
 	<-ctx.Done()
 	stop()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	var wg sync.WaitGroup
-	var chatStreamErr, internalChatErr, srvErr error
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		chatStreamErr = chatStreamSrv.Shutdown(shutdownCtx)
-	}()
-	go func() {
-		defer wg.Done()
-		internalChatErr = internalChatSrv.Shutdown(shutdownCtx)
-	}()
-	go func() {
-		defer wg.Done()
-		srvErr = srv.Shutdown(shutdownCtx)
-	}()
-	wg.Wait()
-
-	if chatStreamErr != nil {
-		slog.Error("chat alert stream server graceful shutdown failed", "err", chatStreamErr)
-	}
-	if internalChatErr != nil {
-		slog.Error("internal chat server graceful shutdown failed", "err", internalChatErr)
-	}
-	if srvErr != nil {
-		slog.Error("graceful shutdown failed", "err", srvErr)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("graceful shutdown failed", "err", err)
 		os.Exit(1)
 	}
 

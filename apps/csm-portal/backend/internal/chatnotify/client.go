@@ -16,16 +16,30 @@
 
 // Package chatnotify is the outbound HTTP client this backend uses to push
 // live-engineer-chat events into customer-portal/backend-v2's open browser
-// WebSocket for a conversation (POST /internal/chat-events).
+// WebSocket for a conversation (POST /internal/chat-events) and to create a
+// case on the engineer's behalf when a chat is converted
+// (POST /internal/chat/create-case).
 //
-// This is deliberately NOT authenticated the same way as this backend's own
-// inbound endpoints (see internal/middleware.Auth): it is a server-to-server
-// call between two backends that do not share a JWT audience/issuer for a
-// "service identity", so it carries a shared bearer secret
-// (X-Internal-Chat-Token) instead of a user JWT. See
-// internal/middleware.InternalToken for the matching inbound check this
-// backend applies to the reverse direction (backend-v2 calling into this
-// backend's own /internal/chat/escalate).
+// This authenticates the same way every other inter-service client in this
+// repo does: the OAuth2 client-credentials grant (see
+// internal/entity.NewCustomerEntityClient for the canonical example this
+// mirrors), NOT a bespoke shared-secret scheme. The one twist is where the
+// resulting token is attached: backend-v2's inbound routes are guarded by
+// its own internal/middleware.Auth, which reads the access token from
+// x-jwt-assertion (never Authorization), so jwtAssertionTransport below
+// attaches it there instead of relying on oauth2.Transport's default
+// Authorization: Bearer header. See internal/middleware.Auth in this
+// backend for the identical inbound check this backend applies to the
+// reverse direction (backend-v2 calling into this backend's own
+// /internal/chat/escalate and /internal/chat/customer-message).
+//
+// This does require backend-v2's OAuth2 identity-provider application (the
+// one issuing tokens for Config.TokenURL/ClientID) to be provisioned to
+// emit "email" and "userid" claims on its client-credentials tokens, since
+// middleware.Auth's extractUserInfo hard-requires both. That is an
+// IdP/infra provisioning step, not something this code can satisfy on its
+// own -- flagged here so it isn't mistaken for something this refactor
+// forgot.
 package chatnotify
 
 import (
@@ -36,12 +50,19 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
 )
 
-// internalTokenHeader must match internal/middleware.InternalTokenHeader and
-// the header name customer-portal/backend-v2 checks on its own
-// /internal/chat-events endpoint.
-const internalTokenHeader = "X-Internal-Chat-Token"
+// jwtAssertionHeader must match internal/middleware.jwtAssertionHeader in
+// this backend and customer-portal/backend-v2's identical constant --
+// that is the header both backends' middleware.Auth validates.
+const jwtAssertionHeader = "x-jwt-assertion"
+
+// tokenFetchTimeout is the HTTP client timeout for token-endpoint requests.
+// Overridden in tests to keep them fast.
+var tokenFetchTimeout = 10 * time.Second
 
 // maxResponseBodyBytes bounds how much of an error response this client will
 // read into memory/log.
@@ -50,20 +71,49 @@ const maxResponseBodyBytes = 64 << 10 // 64 KiB
 // Config holds the configuration for the backend-v2 internal push client.
 type Config struct {
 	// BaseURL is customer-portal/backend-v2's internal listener base URL
-	// (its WS_PORT listener — see that backend's cmd/server/main.go, which
-	// registers POST /internal/chat-events on the same unauthenticated
-	// listener as GET /ws, since neither can carry a user x-jwt-assertion).
+	// (its WS_PORT listener -- see that backend's cmd/server/main.go, which
+	// registers POST /internal/chat-events and POST /internal/chat/create-case
+	// on the same listener as GET /ws, since a browser cannot carry an
+	// x-jwt-assertion header on a WebSocket handshake; this service-to-service
+	// call is unaffected by that constraint, and authenticates via the
+	// backend's normal Auth middleware like any other route).
 	BaseURL string
-	// InternalToken is the shared secret sent as X-Internal-Chat-Token. Must
-	// equal the INTERNAL_CHAT_TOKEN backend-v2 is configured with.
-	InternalToken string
+	// TokenURL, ClientID, ClientSecret, and Scopes authenticate this client
+	// against backend-v2 via the OAuth2 client-credentials grant -- the
+	// same shared app (and usually the same TokenURL/ClientID/ClientSecret
+	// values) this backend already uses for entity/updates/scim, just with
+	// its own Scopes.
+	TokenURL     string
+	ClientID     string
+	ClientSecret string
+	Scopes       []string
+}
+
+// jwtAssertionTransport attaches an OAuth2 client-credentials token to every
+// outgoing request as x-jwt-assertion. source (an oauth2.TokenSource)
+// already caches and refreshes the token exactly as oauth2.Transport would;
+// the only difference from that default transport is the header the token
+// is attached under, since the receiving side (middleware.Auth) reads
+// x-jwt-assertion, never Authorization.
+type jwtAssertionTransport struct {
+	base   http.RoundTripper
+	source oauth2.TokenSource
+}
+
+func (t *jwtAssertionTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	token, err := t.source.Token()
+	if err != nil {
+		return nil, fmt.Errorf("chatnotify: fetch service token: %w", err)
+	}
+	req = req.Clone(req.Context())
+	req.Header.Set(jwtAssertionHeader, token.AccessToken)
+	return t.base.RoundTrip(req)
 }
 
 // Client pushes chat events to customer-portal/backend-v2.
 type Client struct {
 	http    *http.Client
 	baseURL string
-	token   string
 }
 
 // NewClient constructs a Client. Does not validate connectivity — the first
@@ -71,10 +121,24 @@ type Client struct {
 // consistent with this feature's "best effort" live-relay design: a failed
 // push never blocks the case/comment write that already succeeded.
 func NewClient(cfg Config) *Client {
+	cc := clientcredentials.Config{
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+		TokenURL:     cfg.TokenURL,
+		Scopes:       cfg.Scopes,
+	}
+	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient,
+		&http.Client{Timeout: tokenFetchTimeout})
+
 	return &Client{
-		http:    &http.Client{Timeout: 10 * time.Second},
+		http: &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &jwtAssertionTransport{
+				base:   http.DefaultTransport,
+				source: cc.TokenSource(tokenCtx),
+			},
+		},
 		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
-		token:   cfg.InternalToken,
 	}
 }
 
@@ -88,7 +152,6 @@ func (c *Client) PushEvent(ctx context.Context, payload []byte) error {
 		return fmt.Errorf("chatnotify: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(internalTokenHeader, c.token)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -114,7 +177,6 @@ func (c *Client) CreateCase(ctx context.Context, payload []byte, userIDToken str
 		return nil, fmt.Errorf("chatnotify: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(internalTokenHeader, c.token)
 	// Forwarded on to entity-service by backend-v2's HandleCreateCase (see
 	// that handler's doc comment) -- entity-service's CreateCase requires
 	// this header, and this internal route has no end-user session of its
