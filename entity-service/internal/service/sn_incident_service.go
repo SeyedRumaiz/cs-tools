@@ -127,14 +127,6 @@ type snIncidentFilters struct {
 	// less-reliable `made_sla` field, carried through only for exact parity
 	// with SN's native incident dashboards; prefer SlaViolated otherwise.
 	MadeSla *bool `json:"madeSla,omitempty"`
-	// MadeSlaNotFalse: see domain.SearchIncidentsFilters Filters
-	// "madeSlaNotFalse" doc comment. nil (omitted) means the filter was not
-	// supplied. Deliberately kept separate from MadeSla above -- MadeSla is
-	// a boolean-equality filter that would incorrectly exclude incidents
-	// where `made_sla` is null/unset, while this matches "not explicitly
-	// false"; carried through only for exact parity with SN's native
-	// incident dashboards.
-	MadeSlaNotFalse *bool `json:"madeSlaNotFalse,omitempty"`
 	// ProductNames: see domain.SearchIncidentsFilters Filters "productName"
 	// doc comment. Matched as a union against the incident's backing
 	// business_service name.
@@ -303,7 +295,6 @@ func (s *snIncidentService) SearchIncidents(ctx context.Context, req domain.Sear
 			EndCreatedDate:     formatSNDateTimeUTC(parsedFilters.EndCreatedDate),
 			SlaViolated:        parsedFilters.SlaViolated,
 			MadeSla:            parsedFilters.MadeSla,
-			MadeSlaNotFalse:    parsedFilters.MadeSlaNotFalse,
 			ProductNames:       parsedFilters.ProductNames,
 			AssignedUserIDs:    uuidsToSysids(parsedFilters.AssignedUserIDs),
 		},
@@ -451,7 +442,6 @@ func (s *snIncidentService) AggregateIncidents(ctx context.Context, req domain.A
 			EndCreatedDate:     formatSNDateTimeUTC(parsedFilters.EndCreatedDate),
 			SlaViolated:        parsedFilters.SlaViolated,
 			MadeSla:            parsedFilters.MadeSla,
-			MadeSlaNotFalse:    parsedFilters.MadeSlaNotFalse,
 			ProductNames:       parsedFilters.ProductNames,
 			AssignedUserIDs:    uuidsToSysids(parsedFilters.AssignedUserIDs),
 		},

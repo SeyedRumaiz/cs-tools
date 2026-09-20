@@ -4364,15 +4364,6 @@ type SearchIncidentsFilters struct {
 	//     ServiceNow's own less-reliable raw field, kept only for exact
 	//     parity with SN's native incident dashboards. Prefer "slaViolated"
 	//     unless dashboard parity is the explicit goal.
-	//   - "madeSlaNotFalse" (op eq): a single boolean value; restricts to
-	//     incidents where ServiceNow's raw `made_sla` field is not explicitly
-	//     false (true or null/unset). Deliberately kept separate from
-	//     "madeSla" above and NOT a newer/better version of it: "madeSla" is
-	//     a boolean-equality filter that would incorrectly exclude incidents
-	//     where `made_sla` is null/unset, while this filter matches "not
-	//     explicitly false". Kept only for exact parity with SN's native
-	//     incident dashboards; prefer "slaViolated" for correctness-sensitive
-	//     breach filtering.
 	//   - "productName" (op in): one or more product names, matched as a
 	//     union against the incident's backing business_service name.
 	//   - "incidentStateKeys" (op in): one or more raw ServiceNow

@@ -454,75 +454,6 @@ func TestSNIncidentService_SearchIncidents_MadeSlaInvalidValue(t *testing.T) {
 	}
 }
 
-// TestSNIncidentService_SearchIncidents_InvalidStateValue verifies an
-// unrecognized state filter value is rejected with a clean validation error
-// before any SN call.
-// TestSNIncidentService_SearchIncidents_MadeSlaNotFalsePassedThrough verifies
-// the generic filters array's madeSlaNotFalse predicate reaches the outgoing
-// payload under the exact wire name Ballerina accepts, as a sibling to (and
-// independent of) madeSla -- see domain.SearchIncidentsFilters Filters
-// "madeSlaNotFalse" doc comment for why the two are kept distinct.
-func TestSNIncidentService_SearchIncidents_MadeSlaNotFalsePassedThrough(t *testing.T) {
-	var gotBody map[string]any
-	mux := http.NewServeMux()
-	mux.HandleFunc("/incidents/search", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("expected POST, got %s", r.Method)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatalf("decode request body: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"incidents": [], "totalRecords": 0, "offset": 0, "limit": 20}`))
-	})
-
-	client := newTestSNClient(t, mux)
-	svc := NewServiceNowIncidentService(client, nil)
-
-	req := domain.SearchIncidentsRequest{
-		Filters: domain.SearchIncidentsFilters{
-			Filters: []domain.IncidentFieldFilter{
-				{Field: "madeSlaNotFalse", Op: "eq", Values: []string{"true"}},
-			},
-		},
-	}
-	if _, err := svc.SearchIncidents(contextWithUserIDToken("token"), req); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	gotFilters, ok := gotBody["filters"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected filters object in payload, got %+v", gotBody["filters"])
-	}
-
-	if gotFilters["madeSlaNotFalse"] != true {
-		t.Fatalf("filters.madeSlaNotFalse: got %v, want true", gotFilters["madeSlaNotFalse"])
-	}
-	if _, present := gotFilters["madeSla"]; present {
-		t.Fatalf("filters.madeSla: got present with value %v, want omitted since it was not requested", gotFilters["madeSla"])
-	}
-}
-
-// TestSNIncidentService_SearchIncidents_MadeSlaNotFalseInvalidValue verifies
-// a non-boolean madeSlaNotFalse filter value is rejected with a clean
-// validation error before any SN call.
-func TestSNIncidentService_SearchIncidents_MadeSlaNotFalseInvalidValue(t *testing.T) {
-	// client is intentionally nil: validation must fail before touching it.
-	svc := NewServiceNowIncidentService(nil, nil)
-
-	req := domain.SearchIncidentsRequest{
-		Filters: domain.SearchIncidentsFilters{
-			Filters: []domain.IncidentFieldFilter{
-				{Field: "madeSlaNotFalse", Op: "eq", Values: []string{"not-a-bool"}},
-			},
-		},
-	}
-	_, err := svc.SearchIncidents(contextWithUserIDToken("token"), req)
-	if _, ok := err.(*apierror.ValidationError); !ok {
-		t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
-	}
-}
-
 // TestSNIncidentService_SearchIncidents_IncidentStateKeysPassedThrough
 // verifies the generic filters array's incidentStateKeys predicate reaches
 // the outgoing payload under the exact wire name Ballerina accepts, as a
@@ -591,6 +522,9 @@ func TestSNIncidentService_SearchIncidents_IncidentStateKeysInvalidValue(t *test
 	}
 }
 
+// TestSNIncidentService_SearchIncidents_InvalidStateValue verifies an
+// unrecognized state filter value is rejected with a clean validation error
+// before any SN call.
 func TestSNIncidentService_SearchIncidents_InvalidStateValue(t *testing.T) {
 	// client is intentionally nil: validation must fail before touching it.
 	svc := NewServiceNowIncidentService(nil, nil)

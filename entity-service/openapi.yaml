@@ -12371,7 +12371,6 @@ components:
             - createdOn
             - slaViolated
             - madeSla
-            - madeSlaNotFalse
             - productName
             - assignedUserId
             - incidentStateKeys
@@ -12408,15 +12407,6 @@ components:
           madeSla is ServiceNow's own less-reliable raw field, kept only for
           exact parity with SN's native incident dashboards. Prefer
           slaViolated unless dashboard parity is the explicit goal.
-        - **madeSlaNotFalse** (eq): a single boolean value ("true"/"false").
-          Restricts to incidents where ServiceNow's raw `made_sla` field is
-          not explicitly false (true or null/unset). Deliberately separate
-          from madeSla above and not a newer/better version of it: madeSla is
-          a boolean-equality filter that would incorrectly exclude incidents
-          where made_sla is null/unset, while this filter matches "not
-          explicitly false". Kept only for exact parity with SN's native
-          incident dashboards; prefer slaViolated for correctness-sensitive
-          breach filtering.
         - **productName** (in): one or more product names to match as a
           union (an incident matching any one of them is returned). Only a
           minority of incidents carry a product association, so this filter

@@ -30,7 +30,7 @@ import (
 var incidentFilterFieldSet = map[string]bool{
 	"state": true, "assignmentGroupId": true, "businessServiceId": true,
 	"createdOn": true, "slaViolated": true, "madeSla": true, "productName": true,
-	"assignedUserId": true, "madeSlaNotFalse": true, "incidentStateKeys": true,
+	"assignedUserId": true, "incidentStateKeys": true,
 }
 
 // incidentFilterOpSet is the exact set of IncidentFieldFilter.Op values
@@ -39,7 +39,7 @@ var incidentFilterFieldSet = map[string]bool{
 // assignmentGroupId/businessServiceId/productName/incidentStateKeys,
 // "gte"/"lte" cover createdOn (mirrors case_filters.go's "createdOn"
 // handling exactly, including its relative-date placeholder support, e.g.
-// "__daysAgo:90__"), and "eq" covers slaViolated/madeSla/madeSlaNotFalse
+// "__daysAgo:90__"), and "eq" covers slaViolated/madeSla
 // (single boolean value, mirroring case search's "number"/"internalId"
 // single-value eq fields).
 var incidentFilterOpSet = map[string]bool{
@@ -161,15 +161,6 @@ type parsedIncidentFilters struct {
 	// comment: this is SN's own less-reliable raw signal, kept only for
 	// exact parity with SN's native incident dashboards.
 	MadeSla *bool
-	// MadeSlaNotFalse is set from a "madeSlaNotFalse" "eq" filter: true
-	// restricts to incidents where ServiceNow's raw `made_sla` field is not
-	// explicitly false (true or null/unset); nil means the filter was not
-	// supplied. Deliberately kept separate from MadeSla above -- see
-	// domain.SearchIncidentsFilters Filters "madeSlaNotFalse" doc comment:
-	// MadeSla is a boolean-equality filter that would incorrectly exclude
-	// incidents where `made_sla` is null/unset, while this is "not
-	// explicitly false".
-	MadeSlaNotFalse *bool
 	// ProductNames are the values of a "productName" "in" filter, matched as a
 	// union against the incident's backing business_service name.
 	ProductNames []string
@@ -284,22 +275,6 @@ func ParseIncidentFieldFilters(filters []domain.IncidentFieldFilter, now time.Ti
 				return parsedIncidentFilters{}, err
 			}
 			p.MadeSla = &b
-
-		case "madeSlaNotFalse":
-			if f.Op != "eq" {
-				return parsedIncidentFilters{}, badIncidentFilterCombo(f)
-			}
-			if err := requireIncidentFilterValues(f); err != nil {
-				return parsedIncidentFilters{}, err
-			}
-			if len(f.Values) != 1 {
-				return parsedIncidentFilters{}, &apierror.ValidationError{Msg: "filters: madeSlaNotFalse eq requires exactly one value"}
-			}
-			b, err := parseIncidentFilterBool(f, f.Values[0])
-			if err != nil {
-				return parsedIncidentFilters{}, err
-			}
-			p.MadeSlaNotFalse = &b
 
 		case "incidentStateKeys":
 			if f.Op != "in" {

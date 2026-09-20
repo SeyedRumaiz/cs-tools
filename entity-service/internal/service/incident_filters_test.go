@@ -122,33 +122,6 @@ func TestParseIncidentFieldFilters_MadeSla(t *testing.T) {
 	}
 }
 
-func TestParseIncidentFieldFilters_MadeSlaNotFalse(t *testing.T) {
-	parsed, err := ParseIncidentFieldFilters([]domain.IncidentFieldFilter{
-		{Field: "madeSlaNotFalse", Op: "eq", Values: []string{"true"}},
-	}, time.Now().UTC())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if parsed.MadeSlaNotFalse == nil || !*parsed.MadeSlaNotFalse {
-		t.Fatalf("MadeSlaNotFalse = %v, want pointer to true", parsed.MadeSlaNotFalse)
-	}
-
-	parsed, err = ParseIncidentFieldFilters([]domain.IncidentFieldFilter{
-		{Field: "madeSlaNotFalse", Op: "eq", Values: []string{"false"}},
-	}, time.Now().UTC())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if parsed.MadeSlaNotFalse == nil || *parsed.MadeSlaNotFalse {
-		t.Fatalf("MadeSlaNotFalse = %v, want pointer to false", parsed.MadeSlaNotFalse)
-	}
-
-	// MadeSla itself must not be set by a madeSlaNotFalse filter.
-	if parsed.MadeSla != nil {
-		t.Fatalf("MadeSla = %v, want nil (madeSlaNotFalse must not leak into madeSla)", parsed.MadeSla)
-	}
-}
-
 func TestParseIncidentFieldFilters_IncidentStateKeys(t *testing.T) {
 	parsed, err := ParseIncidentFieldFilters([]domain.IncidentFieldFilter{
 		{Field: "incidentStateKeys", Op: "in", Values: []string{"1", "6"}},
@@ -255,18 +228,6 @@ func TestParseIncidentFieldFilters_Rejections(t *testing.T) {
 		{
 			name:    "madeSla with more than one value",
 			filters: []domain.IncidentFieldFilter{{Field: "madeSla", Op: "eq", Values: []string{"true", "false"}}},
-		},
-		{
-			name:    "madeSlaNotFalse with unsupported op",
-			filters: []domain.IncidentFieldFilter{{Field: "madeSlaNotFalse", Op: "in", Values: []string{"true"}}},
-		},
-		{
-			name:    "madeSlaNotFalse with non-boolean value",
-			filters: []domain.IncidentFieldFilter{{Field: "madeSlaNotFalse", Op: "eq", Values: []string{"yes"}}},
-		},
-		{
-			name:    "madeSlaNotFalse with more than one value",
-			filters: []domain.IncidentFieldFilter{{Field: "madeSlaNotFalse", Op: "eq", Values: []string{"true", "false"}}},
 		},
 		{
 			name:    "incidentStateKeys with unsupported op",
