@@ -156,11 +156,13 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("invalid DATA_SOURCE %q: must be %q or %q", c.DataSource, DataSourcePostgres, DataSourceServiceNow)
 	}
-	// Postgres credentials are required only for DATA_SOURCE=postgres.
-	// servicenow mode skips the pool (db.NewPoolIfNeeded) so a local
-	// customer-portal can start without a reachable database. Side tables
-	// that have no ServiceNow equivalent are registered only when a pool
-	// is available — see routes.go.
+	// Postgres credentials are required only for DATA_SOURCE=postgres, kept
+	// optional (not required) for DATA_SOURCE=servicenow so a local
+	// customer-portal can still start with no reachable database at all.
+	// db.NewPoolIfNeeded gates on DBUser being set, not on DataSource, so an
+	// SN-mode deployment that DOES configure DB_USER/etc. still gets a real
+	// pool — required for the Postgres-only side tables (routes.go) that
+	// have no ServiceNow equivalent and must work regardless of DataSource.
 	if c.DataSource == DataSourcePostgres {
 		if c.DBUser == "" {
 			return fmt.Errorf("DB_USER is required when DATA_SOURCE=postgres")
