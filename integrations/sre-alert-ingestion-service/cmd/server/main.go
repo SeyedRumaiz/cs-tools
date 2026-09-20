@@ -102,9 +102,19 @@ func main() {
 		"SRE Alert Ingestion Service: incident delivery to CSM has been failing",
 	)
 
+	// PollInterval feeds time.NewTicker, which panics for a non-positive
+	// duration — validated here instead of letting a misconfigured
+	// SRE_ALERT_POLL_INTERVAL_SECONDS=0 (or negative) crash the worker
+	// goroutine after startup.
+	pollIntervalSeconds := envInt("SRE_ALERT_POLL_INTERVAL_SECONDS", 15)
+	if pollIntervalSeconds <= 0 {
+		slog.Error("SRE_ALERT_POLL_INTERVAL_SECONDS must be greater than zero", "value", pollIntervalSeconds)
+		os.Exit(1)
+	}
+
 	w := worker.New(dbStore, csmClient, escalator, worker.Config{
 		MaxRetries:   envInt("SRE_ALERT_MAX_RETRIES", 3),
-		PollInterval: time.Duration(envInt("SRE_ALERT_POLL_INTERVAL_SECONDS", 15)) * time.Second,
+		PollInterval: time.Duration(pollIntervalSeconds) * time.Second,
 		GroupWindow:  time.Duration(envInt("SRE_ALERT_GROUP_WINDOW_MINUTES", 15)) * time.Minute,
 	})
 
