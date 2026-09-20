@@ -84,10 +84,16 @@ describe("denseWidgetGridSx", () => {
     expect(sx.gridTemplateColumns.xl).toBe("repeat(auto-fill, minmax(200px, 1fr))");
   });
 
-  it("falls back to the exact same tracks as WIDGET_GRID_SX below xl", () => {
+  it("falls back to the exact same tracks and gap as WIDGET_GRID_SX below xl", () => {
     const sx = denseWidgetGridSx();
     expect(sx.gridTemplateColumns.xs).toBe(WIDGET_GRID_SX.gridTemplateColumns.xs);
     expect(sx.gridTemplateColumns.sm).toBe(WIDGET_GRID_SX.gridTemplateColumns.sm);
+    expect(sx.gap.xs).toBe(WIDGET_GRID_SX.gap);
+  });
+
+  it("only tightens the gap at xl and above", () => {
+    const sx = denseWidgetGridSx();
+    expect(sx.gap.xl).toBe(1.25);
   });
 });
 

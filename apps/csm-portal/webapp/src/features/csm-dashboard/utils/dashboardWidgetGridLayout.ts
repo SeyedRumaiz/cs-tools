@@ -63,7 +63,11 @@ export const WIDGET_GRID_SX = {
 export function denseWidgetGridSx(minWidthPx = 168) {
   return {
     display: "grid",
-    gap: 1.25,
+    // Same xs-base/xl-override pattern as `gridTemplateColumns` below: the
+    // tighter `1.25` gap is part of the dense treatment, so it only applies
+    // once the tracks themselves actually go dense at `xl` — below that,
+    // this must match `WIDGET_GRID_SX.gap` exactly, not just "look similar."
+    gap: { xs: WIDGET_GRID_SX.gap, xl: 1.25 },
     gridTemplateColumns: {
       xs: "repeat(4, minmax(0, 1fr))",
       sm: "repeat(12, minmax(0, 1fr))",
