@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
@@ -98,11 +99,41 @@ var m2mExemptRoutes = map[string]bool{
 	http.MethodPost + " /internal/chat/customer-message": true,
 }
 
+// bearerAuthPrefix is the standard "Authorization: Bearer <token>" scheme
+// prefix (RFC 6750), matched case-insensitively.
+const bearerAuthPrefix = "Bearer "
+
+// bearerTokenFromRequest extracts the raw token from a standard
+// "Authorization: Bearer <token>" header. Returns "" if the header is
+// missing, uses a different scheme, or carries an empty/whitespace-only
+// token -- any of which leaves the caller unauthenticated exactly as if no
+// fallback existed at all.
+func bearerTokenFromRequest(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if len(auth) <= len(bearerAuthPrefix) || !strings.EqualFold(auth[:len(bearerAuthPrefix)], bearerAuthPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(auth[len(bearerAuthPrefix):])
+}
+
 // Auth returns an HTTP middleware that validates the x-jwt-assertion header on
 // every request and stores the resulting UserInfo in the request context.
 // When Config.TokenValidatorEnabled is false the token is only decoded without
 // signature verification — safe for local development only. Requests to
 // m2mExemptRoutes skip validation entirely — see that map's doc comment.
+//
+// Local-development-only Authorization fallback: in every deployed
+// environment, Choreo's API Manager gateway sits in front of this backend
+// and is what injects x-jwt-assertion after validating the caller's real
+// access token -- there is no gateway between a browser and a backend
+// running directly on a developer's machine. When TokenValidatorEnabled is
+// false and x-jwt-assertion is absent, the (still-unverified,
+// still-claim-checked) token is instead read from a standard
+// "Authorization: Bearer <token>" header, matching what the webapp's
+// useBackendApi() actually sends. x-jwt-assertion always wins when present,
+// and when TokenValidatorEnabled is true (production) no fallback is
+// attempted at all -- the gateway trust boundary and signature/issuer/
+// audience verification are both left completely intact.
 func Auth(cfg Config) func(http.Handler) http.Handler {
 	var keyFunc jwt.Keyfunc
 	if cfg.TokenValidatorEnabled {
@@ -133,6 +164,9 @@ func Auth(cfg Config) func(http.Handler) http.Handler {
 			}
 
 			tokenStr := r.Header.Get(jwtAssertionHeader)
+			if tokenStr == "" && !cfg.TokenValidatorEnabled {
+				tokenStr = bearerTokenFromRequest(r)
+			}
 			if tokenStr == "" {
 				writeAuthError(w, "You are not authorized to perform this action. Please try again.")
 				return

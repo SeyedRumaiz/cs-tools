@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
@@ -138,6 +139,23 @@ func Auth(cfg Config) func(http.Handler) http.Handler {
 	return AuthWithValidator(NewTokenValidator(cfg))
 }
 
+// bearerAuthPrefix is the standard "Authorization: Bearer <token>" scheme
+// prefix (RFC 6750), matched case-insensitively.
+const bearerAuthPrefix = "Bearer "
+
+// bearerTokenFromRequest extracts the raw token from a standard
+// "Authorization: Bearer <token>" header. Returns "" if the header is
+// missing, uses a different scheme, or carries an empty/whitespace-only
+// token -- any of which leaves the caller unauthenticated exactly as if no
+// fallback existed at all.
+func bearerTokenFromRequest(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if len(auth) <= len(bearerAuthPrefix) || !strings.EqualFold(auth[:len(bearerAuthPrefix)], bearerAuthPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(auth[len(bearerAuthPrefix):])
+}
+
 // AuthWithValidator is Auth over an already-built TokenValidator, so a process
 // that also authenticates elsewhere (the WebSocket listener) shares one JWKS
 // client instead of opening a second.
@@ -153,6 +171,30 @@ func AuthWithValidator(v *TokenValidator) func(http.Handler) http.Handler {
 			}
 
 			tokenStr := r.Header.Get(jwtAssertionHeader)
+			// Local-development-only fallback: in every deployed environment,
+			// Choreo's API Manager gateway sits in front of this backend and is
+			// what injects x-jwt-assertion after validating the caller's real
+			// access token -- there is no gateway between a browser and a
+			// backend running directly on a developer's machine. Without this,
+			// every request from the webapp (which only ever sends
+			// "Authorization: Bearer <idToken>", per useAuthApiClient.ts) 401s
+			// against a local backend even for a fully signed-in user.
+			//
+			// This is intentionally gated on TokenValidatorEnabled, not on the
+			// header alone: when TokenValidatorEnabled is true (production),
+			// x-jwt-assertion is still required exactly as before, with no
+			// fallback attempted at all -- the gateway trust boundary and
+			// signature/issuer/audience verification are both left completely
+			// intact. When it is false, the token was already only being
+			// decoded without signature verification (see extractUserInfo), so
+			// reading that same unverified token from a second, equally
+			// browser-controlled header does not weaken anything -- it only
+			// widens which header the (still-unverified, still
+			// email/userid-claim-checked) token may arrive in for local testing.
+			// x-jwt-assertion always wins when both are present.
+			if tokenStr == "" && !v.cfg.TokenValidatorEnabled {
+				tokenStr = bearerTokenFromRequest(r)
+			}
 			if tokenStr == "" {
 				writeAuthError(w, "You are not authorized to perform this action. Please try again.")
 				return
