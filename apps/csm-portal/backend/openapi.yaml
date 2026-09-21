@@ -1852,6 +1852,124 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
 
+  /announcements/audience/search:
+    post:
+      summary: Resolve the "All customer projects" audience for a customer announcement.
+      description: >
+        Forwards to the entity service's general project search (same shape
+        as POST /projects/search), but unconditionally injects the
+        configured mandatory excludeProjectKeys denylist first — a caller-
+        supplied value for that field, if any, is ignored. The caller's own
+        excludeClosureStates/excludeSubscriptionTypes filters are forwarded
+        unchanged. This is a dedicated endpoint, not a change to
+        /projects/search itself, so the mandatory exclusion never affects
+        unrelated project pickers/typeahead callers.
+      operationId: postAnnouncementsAudienceSearch
+      requestBody:
+        description: Project search payload (same shape as ProjectSearchPayload).
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectSearchPayload'
+        required: true
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectSearchResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /announcements/audience/excluded-project-keys:
+    get:
+      summary: List the mandatory excluded-project-key denylist for customer announcements.
+      description: >
+        Read-only — this list is configured via
+        CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS and is not editable through
+        the portal. Exists so the "All customer projects" audience screen
+        can show which specific projects are excluded, rather than leaving
+        it an opaque "a configured list" with no way to see what it
+        contains.
+      operationId: getAnnouncementsAudienceExcludedProjectKeys
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  excludedProjectKeys:
+                    type: array
+                    items:
+                      type: string
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
   /projects/{id}/contacts/{contactId}:
     get:
       summary: Get one contact's attributes for a single project.
@@ -9900,6 +10018,30 @@ components:
         searchQuery:
           type: string
           description: Searches across name, projectKey, and subscriptionType (case-insensitive); max 200 characters
+        excludeClosureStates:
+          type: array
+          items:
+            type: string
+            enum:
+              - Open
+              - Suspended
+              - Restricted
+          description: Excludes projects whose overall closure state matches any of these values.
+        excludeSubscriptionTypes:
+          type: array
+          items:
+            type: string
+            enum:
+              - development_support
+              - managed_cloud_subscription
+              - evaluation_subscription
+              - subscription
+              - cloud_evaluation_support
+              - internal
+              - platformer_subscription
+              - cloud_support
+              - professional_services
+          description: Excludes projects whose subscriptionType matches any of these values.
 
     ProjectSearchResponse:
       type: object

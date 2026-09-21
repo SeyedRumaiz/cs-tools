@@ -100,6 +100,14 @@ type snIncidentFilters struct {
 	Number string `json:"number,omitempty"`
 	// StateKeys: see domain.SearchIncidentsFilters.StateKeys doc comment.
 	StateKeys []int `json:"stateKeys,omitempty"`
+	// IncidentStateKeys: see domain.SearchIncidentsFilters Filters
+	// "incidentStateKeys" doc comment. nil/empty (omitted) means the filter
+	// was not supplied. Deliberately kept separate from StateKeys above --
+	// this filters ServiceNow's raw `incident_state` field, a distinct field
+	// that exists independently of the OOB `state` field on the same
+	// incident row; carried through only for exact parity with SN's native
+	// incident dashboards.
+	IncidentStateKeys []int `json:"incidentStateKeys,omitempty"`
 	// AssignmentGroupIDs: sys_user_group sys_ids (converted from UUIDs).
 	AssignmentGroupIDs []string `json:"assignmentGroupIds,omitempty"`
 	// BusinessServiceIDs: business_service sys_ids (converted from UUIDs).
@@ -280,6 +288,7 @@ func (s *snIncidentService) SearchIncidents(ctx context.Context, req domain.Sear
 			ParentIDs:          uuidsToSysids(req.Filters.ParentIDs),
 			Number:             stringPtrValue(req.Filters.Number),
 			StateKeys:          parsedFilters.StateKeys,
+			IncidentStateKeys:  snIncidentStateKeysFromStrings(parsedFilters.IncidentStateKeys),
 			AssignmentGroupIDs: uuidsToSysids(parsedFilters.AssignmentGroupIDs),
 			BusinessServiceIDs: uuidsToSysids(parsedFilters.BusinessServiceIDs),
 			StartCreatedDate:   formatSNDateTimeUTC(parsedFilters.StartCreatedDate),
@@ -426,6 +435,7 @@ func (s *snIncidentService) AggregateIncidents(ctx context.Context, req domain.A
 			ParentIDs:          uuidsToSysids(req.Filters.ParentIDs),
 			Number:             stringPtrValue(req.Filters.Number),
 			StateKeys:          parsedFilters.StateKeys,
+			IncidentStateKeys:  snIncidentStateKeysFromStrings(parsedFilters.IncidentStateKeys),
 			AssignmentGroupIDs: uuidsToSysids(parsedFilters.AssignmentGroupIDs),
 			BusinessServiceIDs: uuidsToSysids(parsedFilters.BusinessServiceIDs),
 			StartCreatedDate:   formatSNDateTimeUTC(parsedFilters.StartCreatedDate),

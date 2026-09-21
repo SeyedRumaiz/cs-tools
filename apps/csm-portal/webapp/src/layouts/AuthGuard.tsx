@@ -14,11 +14,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { type JSX, useEffect, useRef, useState } from "react";
+import { type JSX, Suspense, useEffect, useRef, useState } from "react";
+import { Box } from "@wso2/oxygen-ui";
 import { useAsgardeo } from "@asgardeo/react";
 import { ProtectedRoute } from "@asgardeo/react-router";
-import { useLocation, useNavigate } from "react-router";
+import { Outlet, useLocation, useNavigate } from "react-router";
 import AppLayout from "@layouts/AppLayout";
+import BareAuthLoader from "@layouts/BareAuthLoader";
 import { POST_LOGIN_REDIRECT_KEY } from "@layouts/postLoginRedirect";
 import { isTopLevelWindow } from "@utils/isTopLevelWindow";
 import {
@@ -79,9 +81,13 @@ function AuthPendingShell(): JSX.Element {
  * the ref guard keeps a re-render (or StrictMode's double-invoked effect) from
  * firing a second authorize request.
  *
- * @returns {JSX.Element} The app shell, held until the IdP redirect lands.
+ * `bare` swaps the held shell for `BareAuthLoader` (no `AppLayout` chrome) so a
+ * `bare` route's sign-in redirect looks the same as the rest of that route —
+ * the sign-in kickoff itself is identical either way.
+ *
+ * @returns {JSX.Element} The shell, held until the IdP redirect lands.
  */
-function SignInRedirect(): JSX.Element {
+function SignInRedirect({ bare = false }: { bare?: boolean }): JSX.Element {
   const { signIn, signInSilently } = useAsgardeo();
   const location = useLocation();
   const logger = useLogger();
@@ -128,7 +134,7 @@ function SignInRedirect(): JSX.Element {
     location.hash,
   ]);
 
-  return <AuthPendingShell />;
+  return bare ? <BareAuthLoader /> : <AuthPendingShell />;
 }
 
 /**
@@ -191,6 +197,82 @@ function AuthorizedAppShell(): JSX.Element {
 }
 
 /**
+ * `bare` mode's counterpart to `AuthorizedAppShell` above — the exact same
+ * `/users/me` entitlement gate (loading / not-authorized / authorized),
+ * just rendered into `bare` mode's own full-viewport, chrome-free frame
+ * instead of `AppLayout`.
+ *
+ * This gate is not optional for `bare` routes: skipping it (an earlier
+ * version of this file did, rendering `<Outlet />` the instant Asgardeo
+ * sign-in succeeded) let anyone with a valid WSO2 identity reach the routed
+ * page — and the widgets it mounts, which fire their own authenticated API
+ * calls immediately — before `/users/me` had confirmed they were actually
+ * entitled to this portal at all, not just signed in to the IdP. Same class
+ * of gap `AuthorizedAppShell` exists to close for every other route.
+ *
+ * Deliberately stricter than `AuthorizedAppShell` on one point: an `isError`
+ * that ISN'T a confirmed 401/403 (a transient 5xx or network failure on
+ * `/users/me`) holds here on `BareAuthLoader` rather than falling through to
+ * the outlet the way `AuthorizedAppShell` does for normal routes. Failing
+ * open there is a reasonable default for a route a signed-in employee is
+ * actively driving — worst case they briefly see the wrong loading state and
+ * retry. `/cs-monitor-dashboard` is this fix's whole reason to exist: an
+ * unattended kiosk with no one to notice or retry, where "wait a bit longer"
+ * costs nothing and "fire real widget queries without confirmed entitlement
+ * because `/users/me` hiccuped" is exactly the CWE-862 gap being closed.
+ *
+ * `NoPortalAccessPage` renders fine outside `AppLayout` — its own root is a
+ * `flex: 1` `Box` meant to fill whatever flex-column parent it's given,
+ * which the wrapper below (matching `BareAuthLoader`'s own frame) provides.
+ */
+function BareAuthorizedContent(): JSX.Element {
+  const { isLoading, isError, error } = useCurrentUser();
+  const notAuthorized =
+    isError && (isUnauthorizedError(error) || isForbiddenError(error));
+
+  if (isLoading) {
+    return <BareAuthLoader />;
+  }
+
+  if (notAuthorized) {
+    return (
+      <Box sx={{ height: "100dvh", width: "100%", display: "flex", flexDirection: "column" }}>
+        <NoPortalAccessPage />
+      </Box>
+    );
+  }
+
+  // `isError` here means `/users/me` failed for a reason OTHER than a
+  // confirmed 401/403 (see `notAuthorized` above) — entitlement is simply
+  // unknown, not confirmed. Hold on the loader rather than falling through
+  // to the outlet; see this function's own doc comment for why that's the
+  // right default specifically for an unattended kiosk route.
+  if (isError) {
+    return <BareAuthLoader />;
+  }
+
+  return (
+    <Suspense fallback={<BareAuthLoader />}>
+      <Outlet />
+    </Suspense>
+  );
+}
+
+export interface AuthGuardProps {
+  /** Skips `AppLayout` (header, sidebar, banners, idle-timeout provider)
+   * once authenticated, rendering a bare `<Outlet />` instead — for a route
+   * that needs real authentication but must show nothing else on screen
+   * (e.g. `/cs-monitor-dashboard`, a full-screen kiosk-style view).
+   * `false` (the default) is every other route's normal, chrome-wrapped
+   * behavior. Deliberately a prop on THIS guard rather than a second,
+   * parallel guard component — the sign-in latching/redirect-preservation
+   * logic below is exactly the same either way; only the shells it renders
+   * (the pending, sign-in-redirect and authenticated states) swap from
+   * `AppLayout`-based to `BareAuthLoader` / a plain `<Outlet />`. */
+  bare?: boolean;
+}
+
+/**
  * AuthGuard renders AppLayout (header/footer) so loading state is visible
  * and the IdP authentication flow can be observed. Redirects to home only
  * when not signed in and auth check is complete.
@@ -203,9 +285,10 @@ function AuthorizedAppShell(): JSX.Element {
  * engineer-scoped, so the landing route `/` resolves to the ABT dashboard
  * via App.tsx instead.
  *
- * @returns {JSX.Element} AppLayout or redirect to home.
+ * @returns {JSX.Element} AppLayout (or, in `bare` mode, a plain Outlet) or a
+ * redirect to home.
  */
-export default function AuthGuard(): JSX.Element {
+export default function AuthGuard({ bare = false }: AuthGuardProps): JSX.Element {
   const { isSignedIn } = useAsgardeo();
   const location = useLocation();
   const navigate = useNavigate();
@@ -259,13 +342,25 @@ export default function AuthGuard(): JSX.Element {
     if (!isSignedIn) return;
     const redirect = sessionStorage.getItem(POST_LOGIN_REDIRECT_KEY);
     if (!redirect) return;
+    // A `bare` route is a fixed kiosk destination — it must never navigate
+    // away to a stored deep link, including a stale one left in
+    // `sessionStorage` by an abandoned sign-in elsewhere in the same
+    // browser session (a real risk on a shared kiosk machine: someone
+    // deep-links to `/cases/:id`, gets bounced to the IdP, walks away; the
+    // key outlives that tab's session and the next `/cs-monitor-dashboard`
+    // sign-in would restore it). Drop any such key and stay put —
+    // `SignInRedirect` only ever stores this exact path for a bare route.
+    if (bare) {
+      sessionStorage.removeItem(POST_LOGIN_REDIRECT_KEY);
+      return;
+    }
     // Compare (and restore) the full location including the hash, so anchor
     // permalinks like `/cases/:id#description` are honoured, not stripped.
     const here = location.pathname + location.search + location.hash;
     if (here !== redirect) {
       void navigate(redirect, { replace: true });
     }
-  }, [isSignedIn, navigate, location.pathname, location.search, location.hash]);
+  }, [bare, isSignedIn, navigate, location.pathname, location.search, location.hash]);
 
   // Once a session has been established at least once, never again let
   // `ProtectedRoute` hide the app behind its `loader` for a transient
@@ -292,19 +387,27 @@ export default function AuthGuard(): JSX.Element {
   // already recovers correctly on any actual 401 from real use — once
   // signed in, that is the ONLY recovery trigger this app needs; a token
   // expiring while the user does nothing at all needs no proactive fix.
+  //
+  // In `bare` mode the authenticated content is `BareAuthorizedContent`
+  // rather than `AuthorizedAppShell` — the same `/users/me` entitlement
+  // gate (see that component's own doc comment for why it's not optional),
+  // just rendered without any portal chrome (no header/sidebar/banners).
+  const authenticatedContent = bare ? (
+    <BareAuthorizedContent />
+  ) : (
+    <AuthorizedAppShell />
+  );
+
   if (hasSignedInOnce && !isSigningOut) {
-    return (
-      <CurrentUserProvider>
-        <AuthorizedAppShell />
-      </CurrentUserProvider>
-    );
+    return <CurrentUserProvider>{authenticatedContent}</CurrentUserProvider>;
   }
 
   return (
-    <ProtectedRoute loader={<AuthPendingShell />} fallback={<SignInRedirect />}>
-      <CurrentUserProvider>
-        <AuthorizedAppShell />
-      </CurrentUserProvider>
+    <ProtectedRoute
+      loader={bare ? <BareAuthLoader /> : <AuthPendingShell />}
+      fallback={<SignInRedirect bare={bare} />}
+    >
+      <CurrentUserProvider>{authenticatedContent}</CurrentUserProvider>
     </ProtectedRoute>
   );
 }

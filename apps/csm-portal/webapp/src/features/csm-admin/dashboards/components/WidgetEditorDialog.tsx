@@ -283,19 +283,18 @@ export default function WidgetEditorDialog({
   // costs a second real network request; it just reads the one the Preview
   // tile is already making (or about to make).
   const columnPathSampleEnabled = previewSnapshot?.shape === "list";
-  const { data: columnPathSampleData } = useWidgetData(
-    previewSnapshot?.widgetId ?? widgetId,
-    previewSnapshot?.resourceType ?? resourceType,
-    previewSnapshot?.query ?? {},
-    previewSnapshot?.shape ?? shape,
-    previewSnapshot?.listLimit,
-    0,
-    columnPathSampleEnabled,
+  const { data: columnPathSampleData } = useWidgetData({
+    widgetId: previewSnapshot?.widgetId ?? widgetId,
+    resourceType: previewSnapshot?.resourceType ?? resourceType,
+    filters: previewSnapshot?.query ?? {},
+    shape: previewSnapshot?.shape ?? shape,
+    listLimit: previewSnapshot?.listLimit,
+    enabled: columnPathSampleEnabled,
     selectedTeamCreGroupId,
     selectedTeamSreGroupId,
-    previewSnapshot?.sortBy,
-    user?.id,
-  );
+    sortBy: previewSnapshot?.sortBy,
+    currentUserId: user?.id,
+  });
   // Paths actually reachable in the widget's own real Preview data, offered
   // as autocomplete options for a column's `path` field below — empty until
   // Preview has been run at least once for a list-shape widget, in which

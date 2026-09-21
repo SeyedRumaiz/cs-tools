@@ -303,6 +303,48 @@ func TestSNProjectService_SearchProjects_MapsStartDate(t *testing.T) {
 	}
 }
 
+// TestSNProjectService_SearchProjects_UnrecognizedSubscriptionTypeDoesNotFail
+// verifies that a project whose ServiceNow "type" name doesn't match any
+// known SubscriptionType value no longer fails the whole search. Reported
+// live: fetchEligibleProjectIDs (SearchProjectsByProductVersion's mandatory
+// audience-exclusion check) pages through every project on the platform with
+// no scoping filter, and a single project anywhere with an unrecognized type
+// took down every caller's product-version audience resolution with an
+// opaque 500 ("Couldn't resolve the audience. Try again."). The project must
+// still come back, with a best-effort derived (non-canonical)
+// SubscriptionType, rather than aborting the request -- see
+// snTypeNameToSubscriptionType's own doc comment.
+func TestSNProjectService_SearchProjects_UnrecognizedSubscriptionTypeDoesNotFail(t *testing.T) {
+	client := newTestSNClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"projects": []map[string]any{
+				{
+					"id": "11111111111111111111111111111111", "name": "Legacy Type Project", "key": "LT",
+					"type":    map[string]any{"name": "Some Legacy Type"},
+					"endDate": "", "createdOn": "2026-01-01 00:00:00",
+					"account": map[string]any{"id": "", "name": ""},
+				},
+			},
+			"totalRecords": 1, "offset": 0, "limit": 10,
+		})
+	}))
+
+	svc := NewServiceNowProjectService(client, nil)
+	resp, err := svc.SearchProjects(contextWithUserIDToken("token"), domain.SearchProjectsRequest{
+		Pagination: domain.Pagination{Limit: 10},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(resp.Projects))
+	}
+	if got := resp.Projects[0].SubscriptionType; got != domain.SubscriptionType("some_legacy_type") {
+		t.Errorf("SubscriptionType = %q, want best-effort derived \"some_legacy_type\"", got)
+	}
+}
+
 // The contact id is optional upstream: absent on an instance that predates the field, and
 // null for a row with no linked contact record. Neither case may produce a bogus id — the
 // caller uses emptiness to decide whether the row is clickable.
@@ -484,6 +526,34 @@ func TestSNProjectService_GetProjectByID_MapsHasSr(t *testing.T) {
 	}
 	if !got.HasSr {
 		t.Errorf("GetProjectByID HasSr = false, want true (passthrough of SN's hasSr)")
+	}
+}
+
+// TestSNProjectService_GetProjectByID_UnrecognizedSubscriptionTypeDoesNotFail
+// is GetProjectByID's counterpart to
+// TestSNProjectService_SearchProjects_UnrecognizedSubscriptionTypeDoesNotFail
+// -- the other of snTypeNameToSubscriptionType's two callers. An unrecognized
+// type name must not make a single project's own detail page unviewable.
+func TestSNProjectService_GetProjectByID_UnrecognizedSubscriptionTypeDoesNotFail(t *testing.T) {
+	projectSysid := sysid32('d')
+
+	client := newTestSNClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": projectSysid, "name": "Legacy Type Project", "key": "LT", "sfId": "sf-3",
+			"createdOn": "2026-01-01 00:00:00", "startDate": "2026-01-01", "endDate": "2026-12-31",
+			"type":    map[string]any{"name": "Some Legacy Type"},
+			"account": map[string]any{"id": "", "name": ""},
+		})
+	}))
+
+	svc := NewServiceNowProjectService(client, nil)
+	got, err := svc.GetProjectByID(contextWithUserIDToken("token"), sysidToUUID(projectSysid))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.SubscriptionType != domain.SubscriptionType("some_legacy_type") {
+		t.Errorf("SubscriptionType = %q, want best-effort derived \"some_legacy_type\"", got.SubscriptionType)
 	}
 }
 

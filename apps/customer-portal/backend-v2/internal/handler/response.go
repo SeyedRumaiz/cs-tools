@@ -257,7 +257,7 @@ func readJSONBody(w http.ResponseWriter, r *http.Request) (body []byte, ok bool)
 		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
 		return nil, false
 	}
-	return body, true
+	return normalizeBodyIDs(body), true
 }
 
 // readBinaryBody caps r.Body at maxBytes and reads it fully, for endpoints

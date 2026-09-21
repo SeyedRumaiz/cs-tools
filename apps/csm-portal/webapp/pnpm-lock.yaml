@@ -35,6 +35,9 @@ importers:
       '@lexical/selection':
         specifier: 0.40.0
         version: 0.40.0
+      '@lexical/table':
+        specifier: 0.40.0
+        version: 0.40.0
       '@lexical/utils':
         specifier: 0.40.0
         version: 0.40.0
@@ -52,7 +55,7 @@ importers:
         version: 0.13.1(@mui/system@7.3.8(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(@wso2/oxygen-ui-icons-react@0.13.1(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
       '@wso2/oxygen-ui-charts-react':
         specifier: 0.13.1
-        version: 0.13.1(@types/react@19.2.5)(@wso2/oxygen-ui@0.13.1(@mui/system@7.3.8(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(@wso2/oxygen-ui-icons-react@0.13.1(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react-is@19.0.0)(react@19.2.0)(redux@5.0.1)
+        version: 0.13.1(@types/react@19.2.5)(@wso2/oxygen-ui@0.13.1(@mui/system@7.3.8(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(@wso2/oxygen-ui-icons-react@0.13.1(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react-is@19.2.4)(react@19.2.0)(redux@5.0.1)
       '@wso2/oxygen-ui-icons-react':
         specifier: 0.13.1
         version: 0.13.1(react@19.2.0)
@@ -4464,7 +4467,7 @@ snapshots:
       '@vitest/pretty-format': 4.0.18
       tinyrainbow: 3.0.3
 
-  '@wso2/oxygen-ui-charts-react@0.13.1(@types/react@19.2.5)(@wso2/oxygen-ui@0.13.1(@mui/system@7.3.8(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(@wso2/oxygen-ui-icons-react@0.13.1(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react-is@19.0.0)(react@19.2.0)(redux@5.0.1)':
+  '@wso2/oxygen-ui-charts-react@0.13.1(@types/react@19.2.5)(@wso2/oxygen-ui@0.13.1(@mui/system@7.3.8(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(@wso2/oxygen-ui-icons-react@0.13.1(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react-is@19.2.4)(react@19.2.0)(redux@5.0.1)':
     dependencies:
       '@wso2/oxygen-ui': 0.13.1(@mui/system@7.3.8(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(react@19.2.0))(@types/react@19.2.5)(@wso2/oxygen-ui-icons-react@0.13.1(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
       react: 19.2.0
