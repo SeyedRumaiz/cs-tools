@@ -610,9 +610,11 @@ func (r *Router) GetPresence(ctx context.Context, userID string) (PresenceDetail
 
 // ErrInvalidCapacity is returned by SetMaxConcurrentChats when max is
 // outside cs_engineer_status.max_concurrent_chats's own CHECK constraint
-// (1-20) -- checked here too so a caller gets a clean, typed rejection
-// instead of a raw constraint-violation error from Postgres.
-var ErrInvalidCapacity = errors.New("max_concurrent_chats must be between 1 and 20")
+// (1-10, lowered from 1-20 by 000020_lower_max_concurrent_chats -- Sajith
+// confirmed 10 as the intended maximum) -- checked here too so a caller
+// gets a clean, typed rejection instead of a raw constraint-violation
+// error from Postgres.
+var ErrInvalidCapacity = errors.New("max_concurrent_chats must be between 1 and 10")
 
 // SetMaxConcurrentChats sets userID's configurable concurrent-chat
 // capacity, creating their row (defaulting to OFFLINE, capacity 1) on
@@ -628,7 +630,7 @@ var ErrInvalidCapacity = errors.New("max_concurrent_chats must be between 1 and 
 // them (via popAvailableEngineer/SetPresence's queue-drain, both of which
 // compare against this same column) until they fall back under it.
 func (r *Router) SetMaxConcurrentChats(ctx context.Context, userID string, max int) error {
-	if max < 1 || max > 20 {
+	if max < 1 || max > 10 {
 		return ErrInvalidCapacity
 	}
 	return r.withTx(ctx, func(tx pgx.Tx) error {

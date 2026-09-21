@@ -435,7 +435,7 @@ func (c *Client) SweepTimeouts(ctx context.Context) (SweepResult, error) {
 
 // SetMaxConcurrentChats calls PATCH /route/capacity, setting userID's
 // configurable concurrent-chat capacity (see router.Router.
-// SetMaxConcurrentChats). max must be between 1 and 20 inclusive -- an
+// SetMaxConcurrentChats). max must be between 1 and 10 inclusive -- an
 // out-of-range value gets a 400 from that endpoint, surfaced here as a
 // plain error.
 func (c *Client) SetMaxConcurrentChats(ctx context.Context, userID string, max int) error {

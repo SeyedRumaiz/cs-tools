@@ -805,12 +805,14 @@ type setMaxConcurrentChatsRequest struct {
 
 // minMaxConcurrentChats/maxMaxConcurrentChats mirror chat-routing-service's
 // own cs_engineer_status.max_concurrent_chats CHECK constraint (see that
-// service's migrations/000018_concurrent_chat_capacity.up.sql) -- checked
-// here too so an out-of-range value gets a clean 400 from this browser-
-// facing endpoint instead of a raw upstream error surfacing as a 502.
+// service's migrations/000018_concurrent_chat_capacity.up.sql, lowered
+// from 1-20 to 1-10 by 000020_lower_max_concurrent_chats.up.sql -- Sajith
+// confirmed 10 as the intended maximum) -- checked here too so an
+// out-of-range value gets a clean 400 from this browser-facing endpoint
+// instead of a raw upstream error surfacing as a 502.
 const (
 	minMaxConcurrentChats = 1
-	maxMaxConcurrentChats = 20
+	maxMaxConcurrentChats = 10
 )
 
 // HandleSetMaxConcurrentChats handles PATCH /engineers/me/capacity —
@@ -840,7 +842,7 @@ func (h *ChatHandler) HandleSetMaxConcurrentChats(w http.ResponseWriter, r *http
 		return
 	}
 	if req.MaxConcurrentChats < minMaxConcurrentChats || req.MaxConcurrentChats > maxMaxConcurrentChats {
-		writeError(w, http.StatusBadRequest, "maxConcurrentChats must be between 1 and 20.")
+		writeError(w, http.StatusBadRequest, "maxConcurrentChats must be between 1 and 10.")
 		return
 	}
 

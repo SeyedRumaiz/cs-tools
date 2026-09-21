@@ -423,13 +423,27 @@ func main() {
 	// backend's own internal/service-facing surface already lives, NOT
 	// because these two routes share GET /ws's browser-can't-set-headers
 	// constraint -- a backend-to-backend HTTP client can set any header it
-	// likes, so unlike GET /ws these two authenticate exactly like every
-	// route on the main REST API above: authMiddleware (the same
-	// middleware.Auth/JWKS chain), validating an x-jwt-assertion carrying an
-	// OAuth2 client-credentials token from csm-portal/backend's chatnotify
-	// client, not a bespoke shared secret.
-	wsMux.Handle("POST /internal/chat-events", authMiddleware(http.HandlerFunc(chatEventsHandler.Handle)))
-	wsMux.Handle("POST /internal/chat/create-case", authMiddleware(http.HandlerFunc(chatEscalationHandler.HandleCreateCase)))
+	// likes.
+	//
+	// Unlike every route on the main REST API above, these two are NOT
+	// wrapped in authMiddleware: neither handler (ChatEventsHandler.Handle,
+	// ChatEscalationHandler.HandleCreateCase) ever reads an end-user
+	// identity out of the request -- HandleCreateCase takes the accepting
+	// engineer's x-user-id-token as a plain forwarded header instead (see
+	// that handler). They are pure M2M calls from csm-portal/backend's
+	// chatnotify.Client, trusted the same way
+	// integrations/csm-integration-service trusts its own M2M callers:
+	// entirely at Choreo's API Manager gateway (subscription +
+	// client-credentials app auth), not validated again here. See that
+	// service's CLAUDE.md ("Why no Auth middleware") for the established
+	// precedent this follows. This intentionally does NOT reuse
+	// authMiddleware's browser-facing x-jwt-assertion/email/userid check:
+	// this repo already has a dedicated pattern for pure M2M routes, and
+	// requiring an IdP to emit synthetic end-user claims on a
+	// client-credentials token merely to satisfy that check would be
+	// inventing a second, weaker way to do the same thing.
+	wsMux.HandleFunc("POST /internal/chat-events", chatEventsHandler.Handle)
+	wsMux.HandleFunc("POST /internal/chat/create-case", chatEscalationHandler.HandleCreateCase)
 
 	wsAddr := ":" + mustPort("WS_PORT", "8081")
 	// ctx here covers only the listen operation itself (address resolution and

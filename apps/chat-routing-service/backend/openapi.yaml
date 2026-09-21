@@ -291,7 +291,7 @@ paths:
     patch:
       tags: [routing]
       summary: >-
-        Set an engineer's own configurable concurrent-chat capacity (1-20,
+        Set an engineer's own configurable concurrent-chat capacity (1-10,
         default 1 on first contact). Never disturbs a case the engineer
         already holds — lowering the limit below their current active count
         only stops new work from routing to them until they fall back
@@ -311,7 +311,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/CapacityResponse'
         "400":
-          description: Missing userId, or maxConcurrentChats outside 1-20.
+          description: Missing userId, or maxConcurrentChats outside 1-10.
           content:
             application/json:
               schema:

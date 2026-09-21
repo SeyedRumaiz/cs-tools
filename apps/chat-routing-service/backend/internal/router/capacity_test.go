@@ -19,6 +19,7 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -70,7 +71,11 @@ func TestSetMaxConcurrentChats_RejectsOutOfRange(t *testing.T) {
 	r, pool := newTestRouter(t)
 	userID := testUserID(t, r, pool, "capacity-range")
 
-	for _, n := range []int{0, -1, 21, 100} {
+	// 11 is the first value above the ceiling (lowered from 20 to 10 by
+	// 000020_lower_max_concurrent_chats -- Sajith confirmed 10 as the
+	// intended maximum); 100 stays as a clearly-out-of-range case above
+	// that boundary too.
+	for _, n := range []int{0, -1, 11, 100} {
 		if err := r.SetMaxConcurrentChats(context.Background(), userID, n); !errors.Is(err, ErrInvalidCapacity) {
 			t.Errorf("SetMaxConcurrentChats(%d): expected ErrInvalidCapacity, got %v", n, err)
 		}
@@ -84,6 +89,38 @@ func TestSetMaxConcurrentChats_RejectsOutOfRange(t *testing.T) {
 	}
 	if detail.MaxConcurrentChats != 1 {
 		t.Errorf("expected a rejected SetMaxConcurrentChats to leave capacity untouched (1), got %d", detail.MaxConcurrentChats)
+	}
+}
+
+// TestSetMaxConcurrentChats_BoundaryValues directly exercises the four
+// boundary cases around the 1-10 range enforced by both this method's own
+// max<1||max>10 check and cs_engineer_status's CHECK constraint
+// (chk_max_concurrent_chats, see migrations/000020_lower_max_concurrent_chats):
+// 1 and 10 must be accepted (the inclusive endpoints), 0 and 11 must be
+// rejected (one below, one above).
+func TestSetMaxConcurrentChats_BoundaryValues(t *testing.T) {
+	r, pool := newTestRouter(t)
+
+	for _, n := range []int{1, 10} {
+		userID := testUserID(t, r, pool, fmt.Sprintf("capacity-boundary-accept-%d", n))
+		if err := r.SetMaxConcurrentChats(context.Background(), userID, n); err != nil {
+			t.Errorf("SetMaxConcurrentChats(%d): expected success, got %v", n, err)
+			continue
+		}
+		detail, err := r.GetPresence(context.Background(), userID)
+		if err != nil {
+			t.Fatalf("GetPresence: %v", err)
+		}
+		if detail.MaxConcurrentChats != n {
+			t.Errorf("expected MaxConcurrentChats=%d, got %d", n, detail.MaxConcurrentChats)
+		}
+	}
+
+	for _, n := range []int{0, 11} {
+		userID := testUserID(t, r, pool, fmt.Sprintf("capacity-boundary-reject-%d", n))
+		if err := r.SetMaxConcurrentChats(context.Background(), userID, n); !errors.Is(err, ErrInvalidCapacity) {
+			t.Errorf("SetMaxConcurrentChats(%d): expected ErrInvalidCapacity, got %v", n, err)
+		}
 	}
 }
 

@@ -195,6 +195,50 @@ func TestAuth_SecurityHeaders(t *testing.T) {
 	}
 }
 
+// ----- M2M-exempt internal routes -----
+
+// TestAuth_M2MExemptRoutes verifies that the two pure machine-to-machine
+// internal chat routes (see middleware.m2mExemptRoutes) bypass token
+// validation entirely -- no x-jwt-assertion header needed -- while a
+// same-path GET (the wrong method) and an unrelated POST still require one,
+// so the exemption is scoped to exactly "METHOD path", not the path alone.
+func TestAuth_M2MExemptRoutes(t *testing.T) {
+	exempt := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/internal/chat/escalate"},
+		{http.MethodPost, "/internal/chat/customer-message"},
+	}
+	for _, tc := range exempt {
+		t.Run(tc.method+" "+tc.path+" skips auth with no token", func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			w := serve(r)
+			if w.Code != http.StatusOK {
+				t.Errorf("status = %d, want 200 (exempt route, no token needed)", w.Code)
+			}
+		})
+	}
+
+	notExempt := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"GET on an exempt path still requires auth", http.MethodGet, "/internal/chat/escalate"},
+		{"unrelated internal-looking path still requires auth", http.MethodPost, "/internal/chat/escalate-typo"},
+	}
+	for _, tc := range notExempt {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			w := serve(r)
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401 (not an exempt route)", w.Code)
+			}
+		})
+	}
+}
+
 // ----- error response shape -----
 
 func TestAuth_ErrorResponse(t *testing.T) {

@@ -73,10 +73,36 @@ type jwtClaims struct {
 	jwt.RegisteredClaims
 }
 
+// m2mExemptRoutes lists the routes that skip Auth entirely because they are
+// pure machine-to-machine calls with no end-user identity behind them --
+// customer-portal/backend-v2's internal/csmchat.Client calling
+// POST /internal/chat/escalate and POST /internal/chat/customer-message.
+// Neither receiving handler (ChatHandler.HandleEscalate,
+// ChatHandler.HandleCustomerMessage) ever reads UserInfoFromContext or an
+// entity.WithUserIDToken value, so there is no end-user identity these
+// routes need Auth to establish.
+//
+// These are trusted the same way integrations/csm-integration-service
+// trusts its own M2M callers: entirely at Choreo's API Manager gateway
+// (subscription + client-credentials app auth), not validated again here.
+// See that service's CLAUDE.md ("Why no Auth middleware") for the
+// established precedent this follows, and openapi.yaml's
+// oauth2ClientCredentials securityScheme on these two paths for the
+// corresponding API contract change. This intentionally does NOT reuse the
+// browser-facing x-jwt-assertion/email/userid check: this repo already has
+// a dedicated pattern for pure M2M routes, and requiring an IdP to emit
+// synthetic end-user claims on a client-credentials token merely to satisfy
+// that check would be inventing a second, weaker way to do the same thing.
+var m2mExemptRoutes = map[string]bool{
+	http.MethodPost + " /internal/chat/escalate":         true,
+	http.MethodPost + " /internal/chat/customer-message": true,
+}
+
 // Auth returns an HTTP middleware that validates the x-jwt-assertion header on
 // every request and stores the resulting UserInfo in the request context.
 // When Config.TokenValidatorEnabled is false the token is only decoded without
-// signature verification — safe for local development only.
+// signature verification — safe for local development only. Requests to
+// m2mExemptRoutes skip validation entirely — see that map's doc comment.
 func Auth(cfg Config) func(http.Handler) http.Handler {
 	var keyFunc jwt.Keyfunc
 	if cfg.TokenValidatorEnabled {
@@ -95,6 +121,13 @@ func Auth(cfg Config) func(http.Handler) http.Handler {
 
 			// Skip auth for the health check endpoint.
 			if r.Method == http.MethodGet && r.URL.Path == "/health" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Skip auth for the M2M-only internal chat routes -- see
+			// m2mExemptRoutes's doc comment.
+			if m2mExemptRoutes[r.Method+" "+r.URL.Path] {
 				next.ServeHTTP(w, r)
 				return
 			}

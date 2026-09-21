@@ -328,13 +328,17 @@ func main() {
 	// Live-engineer-chat: engineer-facing session lifecycle + presence, the
 	// long-lived alert stream, and the two service-to-service receivers
 	// customer-portal/backend-v2's internal/csmchat.Client calls. All on
-	// this same main API listener, behind the same authMiddleware/CORS
-	// chain as every other route above — the SSE route's own long-lived
+	// this same main API listener — the SSE route's own long-lived
 	// connection is handled by clearing its write deadline (see
-	// StreamEngineerAlerts), not by a separate listener, and the two
-	// internal routes authenticate exactly like any other route (a JWT in
-	// x-jwt-assertion, here an OAuth2 service-account token from
-	// backend-v2's csmchat.Client) rather than a bespoke shared secret.
+	// StreamEngineerAlerts), not by a separate listener. The engineer-facing
+	// routes sit behind the same CORS/Auth chain as every other route above
+	// (a browser's x-jwt-assertion); the two internal routes below are pure
+	// M2M calls with no end-user identity involved and are exempted from
+	// Auth entirely (see middleware.m2mExemptRoutes) — they authenticate
+	// via a plain OAuth2 client-credentials token trusted at Choreo's API
+	// Manager gateway, the same established pattern
+	// integrations/csm-integration-service uses, not a bespoke shared
+	// secret and not the browser-facing JWT check.
 	mux.HandleFunc("POST /chat/sessions/{id}/accept", chatHandler.HandleAcceptSession)
 	mux.HandleFunc("POST /chat/sessions/{id}/messages", chatHandler.HandleEngineerMessage)
 	mux.HandleFunc("POST /chat/sessions/{id}/complete", chatHandler.HandleCompleteSession)
