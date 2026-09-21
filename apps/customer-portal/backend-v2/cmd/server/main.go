@@ -353,7 +353,7 @@ func main() {
 			middleware.SecurityHeaders(
 				middleware.CorrelationID(
 					middleware.AuthWithValidator(tokenValidator)(
-						middleware.Logger(mux),
+						middleware.Logger(middleware.NormalizeSysIDs(mux)),
 					),
 				),
 			),
@@ -404,7 +404,7 @@ func main() {
 	wsSrv := &http.Server{
 		Handler: middleware.SecurityHeaders(
 			middleware.CorrelationID(
-				middleware.Logger(wsMux),
+				middleware.Logger(middleware.NormalizeSysIDs(wsMux)),
 			),
 		),
 		// ReadHeaderTimeout bounds the handshake itself. Read/Write/Idle
