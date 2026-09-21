@@ -31,6 +31,8 @@ import { useGetConversationMessages } from "@features/support/api/useGetConversa
 import useGetUserDetails from "@features/settings/api/useGetUserDetails";
 import { usePostCaseClassifications } from "@features/support/api/usePostCaseClassifications";
 import { useChatWebSocket } from "@features/support/api/useChatWebSocket";
+import { usePostChatEscalation } from "@features/support/api/usePostChatEscalation";
+import { usePostChatMessage } from "@features/support/api/usePostChatMessage";
 import useGetProjectDetails from "@api/useGetProjectDetails";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import type { SearchProjectsResponse } from "@features/project-hub/types/projects";
@@ -86,6 +88,12 @@ import {
 // the chat WebSocket) before creating a case, so the created case links to the
 // chat. Bounded so a missing id (e.g. socket down) can never block case creation.
 const CONVERSATION_ID_WAIT_MS = 3000;
+
+// Minimum number of messages the customer must send to Novera before
+// "Chat with an Engineer" is offered — gives the AI assistant a real chance
+// to resolve the issue first. See userMessageCount/liveEscalationEnabled
+// below, where this is combined with the feature flag and conversationId.
+const MIN_CUSTOMER_MESSAGES_BEFORE_ESCALATION = 3;
 
 /**
  * NoveraChatPage component to provide AI-powered support assistance.
@@ -148,6 +156,21 @@ export default function NoveraChatPage(): JSX.Element {
   const { mutateAsync: classifyCase } = usePostCaseClassifications();
   const accountId =
     navAccountId || projectDetails?.account?.id || projectId || "";
+  // Live-engineer-chat escalation (see the queued/engineer_assigned/
+  // engineer_message/engineer_disconnected cases in the WS onEvent switch
+  // below, and handleEscalateToEngineer/sendViaHumanChat further down this
+  // component).
+  const postChatEscalation = usePostChatEscalation(projectId ?? "");
+  const postChatMessage = usePostChatMessage(projectId ?? "");
+  const [isEscalating, setIsEscalating] = useState(false);
+  const [isHumanConnected, setIsHumanConnected] = useState(false);
+  const [assignedEngineerName, setAssignedEngineerName] = useState<
+    string | null
+  >(null);
+  // The case the active escalation created — needed on every human-chat send
+  // (see sendViaHumanChat) but not itself rendered, so a ref rather than
+  // state. Cleared on engineer_disconnected/converted_to_case.
+  const escalationCaseIdRef = useRef<string | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(
     () => urlConversationId ?? conversationResponse?.conversationId ?? null,
   );
@@ -649,6 +672,104 @@ export default function NoveraChatPage(): JSX.Element {
           }
           break;
         }
+        // Live-engineer-chat: these arrive as a push from csm-portal/
+        // backend into backend-v2's /internal/chat-events, relayed onto this
+        // same connection (see backend-v2's handler.ChatEventsHandler /
+        // WebSocketHandler.PushEvent) — no second socket. See
+        // handleEscalateToEngineer/sendViaHumanChat below for the outbound
+        // half of this feature.
+        // "queued" arrives when the routing service had no available
+        // engineer at escalation time (see csm-portal/backend's
+        // HandleEscalate) — a simple informational bot message, no state
+        // change: isEscalating stays true until engineer_assigned (or the
+        // escalation error path) actually resolves it.
+        case "queued": {
+          const text = String(
+            event.message ?? "You're in the queue. An engineer will be with you shortly.",
+          );
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `queued-${Date.now()}`,
+              text,
+              sender: ChatSender.BOT,
+              timestamp: new Date(),
+            },
+          ]);
+          break;
+        }
+        case "engineer_assigned": {
+          const engineer = String(
+            event.engineerEmail ?? "a support engineer",
+          );
+          setIsEscalating(false);
+          setIsHumanConnected(true);
+          setAssignedEngineerName(engineer);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `engineer-assigned-${Date.now()}`,
+              text: `You're now connected with ${engineer}. They can see this conversation and will reply here.`,
+              sender: ChatSender.BOT,
+              timestamp: new Date(),
+              isHumanMessage: true,
+              engineerName: engineer,
+            },
+          ]);
+          break;
+        }
+        case "engineer_message": {
+          const text = String(event.message ?? "");
+          if (!text) break;
+          const engineer = String(
+            event.engineerEmail ?? assignedEngineerName ?? "a support engineer",
+          );
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `engineer-msg-${Date.now()}`,
+              text,
+              sender: ChatSender.BOT,
+              timestamp: new Date(),
+              isHumanMessage: true,
+              engineerName: engineer,
+            },
+          ]);
+          break;
+        }
+        case "engineer_disconnected": {
+          setIsHumanConnected(false);
+          setAssignedEngineerName(null);
+          escalationCaseIdRef.current = null;
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `engineer-disconnected-${Date.now()}`,
+              text: "The live chat session has ended. You're back with Novera, our AI assistant.",
+              sender: ChatSender.BOT,
+              timestamp: new Date(),
+            },
+          ]);
+          break;
+        }
+        // Sent when the assigned engineer converts this chat into a case.
+        // Mirrors engineer_disconnected's state resets since the live
+        // session ends the same way, just for a different reason.
+        case "converted_to_case": {
+          setIsHumanConnected(false);
+          setAssignedEngineerName(null);
+          escalationCaseIdRef.current = null;
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `converted-to-case-${Date.now()}`,
+              text: "This chat has been converted into a support case. The live chat has now ended.",
+              sender: ChatSender.BOT,
+              timestamp: new Date(),
+            },
+          ]);
+          break;
+        }
         case "error":
           pendingFinalRef.current = null;
           tokenQueueRef.current = [];
@@ -777,6 +898,90 @@ export default function NoveraChatPage(): JSX.Element {
     ],
   );
 
+  // Sends a customer message once a live engineer has accepted the session
+  // (see the "engineer_assigned" case above). Deliberately separate from
+  // sendViaWebSocket: a human-attended message goes over REST to
+  // backend-v2, which relays it to csm-portal/backend to be persisted as a
+  // case comment — not over the AI chat WebSocket, and not persisted as a
+  // conversation comment the way an AI-chat message is. See
+  // usePostChatMessage's own doc comment.
+  const sendViaHumanChat = useCallback(
+    async (text: string): Promise<void> => {
+      const caseId = escalationCaseIdRef.current;
+      if (!conversationId || !caseId) return;
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `user-${Date.now()}`,
+          text,
+          sender: ChatSender.USER,
+          isCurrentUser: true,
+          timestamp: new Date(),
+        },
+      ]);
+
+      try {
+        await postChatMessage.mutateAsync({ conversationId, caseId, message: text });
+      } catch {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `human-send-error-${Date.now()}`,
+            text: "Your message could not be delivered to the engineer. Please try again.",
+            sender: ChatSender.BOT,
+            timestamp: new Date(),
+            isError: true,
+          },
+        ]);
+      }
+    },
+    [conversationId, postChatMessage],
+  );
+
+  // Escalates the current conversation to a live engineer — see
+  // usePostChatEscalation's own doc comment for what this call does
+  // server-side. The engineer actually joining arrives later as the
+  // "engineer_assigned" WS event above; this call only starts that process.
+  const handleEscalateToEngineer = useCallback(async (): Promise<void> => {
+    if (!conversationId || isEscalating || isHumanConnected) return;
+    setIsEscalating(true);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `escalation-pending-${Date.now()}`,
+        text: "Connecting you to a live engineer — we've notified our support team and you'll be joined here as soon as one is available.",
+        sender: ChatSender.BOT,
+        timestamp: new Date(),
+      },
+    ]);
+    try {
+      const result = await postChatEscalation.mutateAsync({
+        conversationId,
+        customerName: currentUserEmail || undefined,
+      });
+      escalationCaseIdRef.current = result.caseId;
+    } catch {
+      setIsEscalating(false);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `escalation-error-${Date.now()}`,
+          text: 'We couldn\'t reach a live engineer right now. Please try again in a moment, or use "Create Case" instead.',
+          sender: ChatSender.BOT,
+          timestamp: new Date(),
+          isError: true,
+        },
+      ]);
+    }
+  }, [
+    conversationId,
+    isEscalating,
+    isHumanConnected,
+    postChatEscalation,
+    currentUserEmail,
+  ]);
+
   const handleSolutionWorked = useCallback(() => {
     if (isSending) return;
     void sendViaWebSocket("This Resolved My Issue");
@@ -896,6 +1101,22 @@ export default function NoveraChatPage(): JSX.Element {
   // it has somewhere to send a rating — so no separate prop is needed.
   const feedbackEnabled =
     window.config?.CUSTOMER_PORTAL_NOVERA_FEEDBACK_ENABLED ?? false;
+
+  // Feature-flagged (config.js): "Chat with an Engineer" escalation from
+  // underneath a Novera reply. See handleEscalateToEngineer/sendViaHumanChat
+  // and the engineer_assigned/engineer_message/engineer_disconnected cases
+  // in the WS onEvent switch above for the rest of this feature.
+  const liveEscalationEnabled =
+    window.config?.CUSTOMER_PORTAL_NOVERA_LIVE_ESCALATION_ENABLED ?? false;
+  // How many messages the customer has sent Novera so far — gates the
+  // escalation CTA below (MIN_CUSTOMER_MESSAGES_BEFORE_ESCALATION) so it only
+  // appears once they've given the AI assistant a real chance to help.
+  // Derived from `messages` rather than tracked separately so restored/
+  // preloaded history counts too, not just messages sent this session.
+  const userMessageCount = useMemo(
+    () => messages.filter((msg) => msg.sender === ChatSender.USER).length,
+    [messages],
+  );
   const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
 
   const handleTokenIncreaseSubmit = useCallback(
@@ -932,10 +1153,26 @@ export default function NoveraChatPage(): JSX.Element {
     piiGuard.checkBeforeSubmit(text, () => {
       setInputValueAndRef("");
       setResetTrigger((prev) => prev + 1);
-      void sendViaWebSocket(text);
+      // Once a live engineer has accepted the session, messages route to
+      // them instead of the AI agent — see sendViaHumanChat's own doc
+      // comment for why this is a separate path rather than a branch
+      // inside sendViaWebSocket.
+      if (isHumanConnected) {
+        void sendViaHumanChat(text);
+      } else {
+        void sendViaWebSocket(text);
+      }
     });
     return true;
-  }, [isSending, projectId, sendViaWebSocket, setInputValueAndRef, piiGuard]);
+  }, [
+    isSending,
+    projectId,
+    isHumanConnected,
+    sendViaHumanChat,
+    sendViaWebSocket,
+    setInputValueAndRef,
+    piiGuard,
+  ]);
 
   useEffect(() => {
     if (!initialUserMessage?.trim()) return;
@@ -993,6 +1230,18 @@ export default function NoveraChatPage(): JSX.Element {
               onRequestTokenIncrease={
                 tokenRequestEnabled
                   ? () => setIsTokenModalOpen(true)
+                  : undefined
+              }
+              onRequestEngineerEscalation={
+                liveEscalationEnabled &&
+                isConnected &&
+                !!conversationId &&
+                userMessageCount >= MIN_CUSTOMER_MESSAGES_BEFORE_ESCALATION &&
+                !isEscalating &&
+                !isHumanConnected
+                  ? () => {
+                      void handleEscalateToEngineer();
+                    }
                   : undefined
               }
               onFetchOlder={

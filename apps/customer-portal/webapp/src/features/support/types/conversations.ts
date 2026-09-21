@@ -226,6 +226,16 @@ export type Message = {
   thinkingLabel?: string | null;
   isStreaming?: boolean;
   actions?: NoveraAction[];
+  /**
+   * True for a message delivered by a live engineer during an accepted
+   * live-engineer-chat session, as opposed to Novera (the AI agent) or the
+   * customer. Rendered with the engineer's identity instead of Novera's
+   * name/avatar (see ChatMessageBubble) but otherwise shares the bot
+   * message layout — sender stays ChatSender.BOT.
+   */
+  isHumanMessage?: boolean;
+  /** Display name/email of the engineer who sent this message. Only set when isHumanMessage is true. */
+  engineerName?: string;
 };
 
 // Model type for chat navigation state.

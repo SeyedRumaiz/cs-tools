@@ -38,6 +38,8 @@ export interface CustomerPortalWindowConfig {
   CUSTOMER_PORTAL_NOVERA_TOKEN_REQUEST_ENABLED?: boolean;
   /** Enables 👍/👎 answer feedback, with its reason tags, on Novera answers. */
   CUSTOMER_PORTAL_NOVERA_FEEDBACK_ENABLED?: boolean;
+  /** Enables the "Chat with an Engineer" live-escalation flow from Novera chat. */
+  CUSTOMER_PORTAL_NOVERA_LIVE_ESCALATION_ENABLED?: boolean;
   CUSTOMER_PORTAL_TOP_BANNERS?: Array<{
     enabled: boolean;
     html: string;

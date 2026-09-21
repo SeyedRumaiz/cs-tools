@@ -27,6 +27,7 @@ import {
 } from "@context/current-user/CurrentUserContext";
 import RouteSuspenseFallback from "@components/route-fallback/RouteSuspenseFallback";
 import NoPortalAccessPage from "@components/error/NoPortalAccessPage";
+import EngineerAlertNotification from "@features/csm-chat/components/EngineerAlertNotification";
 import { useLogger } from "@hooks/useLogger";
 import { trySilentSignInOnce } from "@hooks/silentSignIn";
 import { isForbiddenError, isUnauthorizedError } from "@utils/ApiError";
@@ -181,7 +182,12 @@ function AuthorizedAppShell(): JSX.Element {
     );
   }
 
-  return <AppLayout />;
+  return (
+    <>
+      <AppLayout />
+      <EngineerAlertNotification />
+    </>
+  );
 }
 
 /**

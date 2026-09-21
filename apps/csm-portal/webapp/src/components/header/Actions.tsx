@@ -25,6 +25,7 @@ import { useAsgardeo } from "@asgardeo/react";
 import UserProfile from "@components/header/UserProfile";
 import RecentViewsButton from "@features/csm-recent/components/RecentViewsButton";
 import PinThisPageButton from "@features/csm-recent/components/PinThisPageButton";
+import EngineerStatusMenu from "@components/header/EngineerStatusMenu";
 
 interface ActionsProps {
   /** Hides pin/recent-views (nothing to pin or revisit without real pages)
@@ -40,6 +41,7 @@ export default function Actions({ hideProjectControls = false }: ActionsProps): 
   return (
     <HeaderUI.Actions>
       <ColorSchemeToggle />
+      {isSignedIn && <EngineerStatusMenu />}
       {showProjectControls && <PinThisPageButton />}
       {showProjectControls && <RecentViewsButton />}
       <Divider
