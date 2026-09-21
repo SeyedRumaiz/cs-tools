@@ -171,9 +171,31 @@ export default function NoveraChatPage(): JSX.Element {
   // (see sendViaHumanChat) but not itself rendered, so a ref rather than
   // state. Cleared on engineer_disconnected/converted_to_case.
   const escalationCaseIdRef = useRef<string | null>(null);
-  const [conversationId, setConversationId] = useState<string | null>(
-    () => urlConversationId ?? conversationResponse?.conversationId ?? null,
-  );
+  const [conversationId, setConversationId] = useState<string | null>(() => {
+    if (urlConversationId) return urlConversationId;
+    if (conversationResponse?.conversationId) {
+      return conversationResponse.conversationId;
+    }
+    // LOCAL DEVELOPMENT ONLY (see
+    // CUSTOMER_PORTAL_LOCAL_DEV_CLIENT_CONVERSATION_ID_ENABLED in
+    // portalConfig.ts / public/config.js). Fabricates a client-side
+    // conversation id up front so this chat session already has a non-empty
+    // conversationId before the very first WebSocket message (see
+    // sendViaWebSocket below, which always sends conversationId ?? "") --
+    // letting backend-v2 skip its own CreateConversation call, which 404s
+    // under entity-service's DATA_SOURCE=postgres (entity-service only
+    // registers POST /conversations in ServiceNow mode). This lazy
+    // useState initializer runs exactly once per chat session/mount, so the
+    // same id is reused for every message afterwards; it is never
+    // regenerated on re-render. Left unset/false, this branch never runs
+    // and conversationId stays null exactly as it does today, until a real
+    // urlConversationId/conversationResponse/conversation_created/final
+    // value arrives -- production behavior is unchanged.
+    if (window.config?.CUSTOMER_PORTAL_LOCAL_DEV_CLIENT_CONVERSATION_ID_ENABLED) {
+      return crypto.randomUUID();
+    }
+    return null;
+  });
   // Resolver for a pending "wait for the conversation id" promise (see
   // waitForConversationId). Resolved when conversation_created arrives, so a
   // case created moments after the first message still carries the id.
