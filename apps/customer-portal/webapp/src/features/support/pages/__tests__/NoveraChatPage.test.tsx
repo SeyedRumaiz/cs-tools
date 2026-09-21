@@ -15,7 +15,7 @@
 // under the License.
 
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NoveraChatPage from "@features/support/pages/NoveraChatPage";
 
 const mockNavigate = vi.fn();
@@ -51,6 +51,28 @@ vi.mock("@features/support/api/usePostCaseClassifications", () => ({
   usePostCaseClassifications: () => ({ mutateAsync: mockClassifyCase }),
 }));
 
+// usePostChatEscalation/usePostChatMessage both call @tanstack/react-query's
+// useMutation internally, which needs a real QueryClientProvider -- mocked
+// out here the same way usePostCaseClassifications is above, so this file
+// doesn't need to wrap every render in a provider just to satisfy hooks the
+// tests in this file don't otherwise exercise.
+const mockPostChatEscalation = vi.fn();
+const mockPostChatMessage = vi.fn();
+
+vi.mock("@features/support/api/usePostChatEscalation", () => ({
+  usePostChatEscalation: () => ({
+    mutateAsync: mockPostChatEscalation,
+    isPending: false,
+  }),
+}));
+
+vi.mock("@features/support/api/usePostChatMessage", () => ({
+  usePostChatMessage: () => ({
+    mutateAsync: mockPostChatMessage,
+    isPending: false,
+  }),
+}));
+
 vi.mock("@features/support/hooks/useAllDeploymentProducts", () => ({
   useAllDeploymentProducts: () => ({ productsByDeploymentId: {}, isLoading: false }),
 }));
@@ -59,10 +81,13 @@ vi.mock("@api/useGetProjectDetails", () => ({
   default: () => ({ data: { account: { id: "account-1" }, type: { id: "type-1", label: "Enterprise" } } }),
 }));
 
+const mockConnect = vi.fn().mockResolvedValue(undefined);
+const mockSendUserMessage = vi.fn().mockResolvedValue(undefined);
+
 vi.mock("@features/support/api/useChatWebSocket", () => ({
   useChatWebSocket: () => ({
-    connect: vi.fn(),
-    sendUserMessage: vi.fn(),
+    connect: mockConnect,
+    sendUserMessage: mockSendUserMessage,
   }),
 }));
 
@@ -129,13 +154,109 @@ describe("NoveraChatPage", () => {
     fireEvent.click(screen.getByText("Create Case"));
 
     expect(mockNavigate).toHaveBeenCalledWith(-1);
-    await waitFor(() => {
-      expect(mockNavigate).toHaveBeenCalledWith(
-        "/projects/project-1/support/chat/create-case",
-        expect.objectContaining({
-          state: expect.objectContaining({ messages: expect.any(Array) }),
-        }),
+    // No conversationId is available in this test (no urlConversationId, no
+    // conversationResponse, local-dev flag unset) -- create-case's
+    // waitForConversationId() falls through to its real
+    // CONVERSATION_ID_WAIT_MS (3s) timeout before resolving null and
+    // navigating, so this needs a longer waitFor than the default 1s.
+    await waitFor(
+      () => {
+        expect(mockNavigate).toHaveBeenCalledWith(
+          "/projects/project-1/support/chat/create-case",
+          expect.objectContaining({
+            state: expect.objectContaining({ messages: expect.any(Array) }),
+          }),
+        );
+      },
+      { timeout: 4000 },
+    );
+  });
+
+  // CUSTOMER_PORTAL_LOCAL_DEV_CLIENT_CONVERSATION_ID_ENABLED (see
+  // portalConfig.ts / public/config.js): a local-development-only fallback
+  // that fabricates a conversationId up front so "Chat with an Engineer"
+  // can be exercised against entity-service running with DATA_SOURCE=postgres,
+  // where entity-service never emits conversation_created (see
+  // chat-persistence-mapping-plan.md). These tests pin down both sides: the
+  // flag off/unset must leave today's production behavior byte-for-byte
+  // unchanged, and the flag on must supply a stable id before the very
+  // first WebSocket message and reuse it for the rest of the session.
+  describe("local-dev conversationId fallback (CUSTOMER_PORTAL_LOCAL_DEV_CLIENT_CONVERSATION_ID_ENABLED)", () => {
+    const UUID_RE =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    afterEach(() => {
+      window.config = {
+        ...window.config,
+        CUSTOMER_PORTAL_LOCAL_DEV_CLIENT_CONVERSATION_ID_ENABLED: undefined,
+      };
+    });
+
+    it("sends an empty conversationId on the first WebSocket message when the flag is unset (production behavior)", async () => {
+      render(<NoveraChatPage />);
+
+      await waitFor(() => {
+        expect(mockSendUserMessage).toHaveBeenCalled();
+      });
+
+      expect(mockSendUserMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ conversationId: "" }),
       );
+    });
+
+    it("sends an empty conversationId on the first WebSocket message when the flag is explicitly false", async () => {
+      window.config = {
+        ...window.config,
+        CUSTOMER_PORTAL_LOCAL_DEV_CLIENT_CONVERSATION_ID_ENABLED: false,
+      };
+
+      render(<NoveraChatPage />);
+
+      await waitFor(() => {
+        expect(mockSendUserMessage).toHaveBeenCalled();
+      });
+
+      expect(mockSendUserMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ conversationId: "" }),
+      );
+    });
+
+    it("generates a client-side conversationId before the first WebSocket message, and reuses the same id for the rest of the session, when the flag is enabled", async () => {
+      const randomUUIDSpy = vi.spyOn(crypto, "randomUUID");
+      window.config = {
+        ...window.config,
+        CUSTOMER_PORTAL_LOCAL_DEV_CLIENT_CONVERSATION_ID_ENABLED: true,
+      };
+
+      render(<NoveraChatPage />);
+
+      await waitFor(() => {
+        expect(mockSendUserMessage).toHaveBeenCalled();
+      });
+
+      const firstCallArg = mockSendUserMessage.mock.calls[0]?.[0] as {
+        conversationId: string;
+      };
+      expect(firstCallArg.conversationId).toMatch(UUID_RE);
+
+      // Reused, not regenerated: create-case reads the same conversationId
+      // state (see waitForConversationId/performClassification), so it must
+      // resolve to the exact same value handed to the first WS message.
+      fireEvent.click(screen.getByText("Create Case"));
+      await waitFor(() => {
+        expect(mockNavigate).toHaveBeenCalledWith(
+          "/projects/project-1/support/chat/create-case",
+          expect.objectContaining({
+            state: expect.objectContaining({
+              conversationId: firstCallArg.conversationId,
+            }),
+          }),
+        );
+      });
+
+      // Generated exactly once for the whole chat session -- never
+      // regenerated on re-render or on a later message/action.
+      expect(randomUUIDSpy).toHaveBeenCalledTimes(1);
     });
   });
 });

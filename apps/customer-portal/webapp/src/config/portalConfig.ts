@@ -40,6 +40,21 @@ export interface CustomerPortalWindowConfig {
   CUSTOMER_PORTAL_NOVERA_FEEDBACK_ENABLED?: boolean;
   /** Enables the "Chat with an Engineer" live-escalation flow from Novera chat. */
   CUSTOMER_PORTAL_NOVERA_LIVE_ESCALATION_ENABLED?: boolean;
+  /**
+   * LOCAL DEVELOPMENT ONLY. When true, and NoveraChatPage has no
+   * conversationId yet (no urlConversationId, no conversationResponse from
+   * the describe-issue flow), it generates one crypto.randomUUID()
+   * client-side and reuses it for the rest of that chat session, instead of
+   * waiting for the WebSocket's conversation_created event. This lets
+   * "Chat with an Engineer" be exercised locally against entity-service
+   * running with DATA_SOURCE=postgres, where POST /conversations (and thus
+   * conversation_created) is never registered -- entity-service only wires
+   * that route up in ServiceNow mode (see
+   * chat-persistence-mapping-plan.md). Leave unset/false everywhere else:
+   * it does not create any entity-service record, it only fabricates the
+   * correlation id the escalation flow keys off of.
+   */
+  CUSTOMER_PORTAL_LOCAL_DEV_CLIENT_CONVERSATION_ID_ENABLED?: boolean;
   CUSTOMER_PORTAL_TOP_BANNERS?: Array<{
     enabled: boolean;
     html: string;

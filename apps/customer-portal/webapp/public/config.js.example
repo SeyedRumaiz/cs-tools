@@ -266,6 +266,10 @@ window.config = {
   //           Desktop browsers are never affected by this setting.
   CUSTOMER_PORTAL_MOBILE_APP_INCLUDE_TABLETS: false,
 
+  // Local development only.
+  // Generates a client-side conversation ID when entity-service runs with Postgres.
+  CUSTOMER_PORTAL_LOCAL_DEV_CLIENT_CONVERSATION_ID_ENABLED: false,
+
   // ── Case creation: inline add deployment/product ────────────────────────────
   //
   // CUSTOMER_PORTAL_ALLOW_DEPLOYMENT_SETUP_DURING_CASE_CREATION  (optional — default: true)
