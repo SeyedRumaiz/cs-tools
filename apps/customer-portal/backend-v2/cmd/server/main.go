@@ -171,7 +171,7 @@ func main() {
 	// reasoning as sharing tokenValidator itself: constructing it twice
 	// would gain nothing since every caller validates the exact same
 	// tokens the exact same way.
-	authMiddleware := middleware.AuthWithValidator(tokenValidator)
+	// authMiddleware := middleware.AuthWithValidator(tokenValidator)
 
 	userHandler := handler.NewUserHandler(entityClient, scimClient)
 	projectHandler := handler.NewProjectHandler(entityClient)
@@ -381,8 +381,8 @@ func main() {
 		Handler: middleware.CORS(nil)(
 			middleware.SecurityHeaders(
 				middleware.CorrelationID(
-					authMiddleware(
-						middleware.Logger(mux),
+					middleware.AuthWithValidator(tokenValidator)(
+						middleware.Logger(middleware.NormalizeSysIDs(mux)),
 					),
 				),
 			),
@@ -461,7 +461,7 @@ func main() {
 	wsSrv := &http.Server{
 		Handler: middleware.SecurityHeaders(
 			middleware.CorrelationID(
-				middleware.Logger(wsMux),
+				middleware.Logger(middleware.NormalizeSysIDs(wsMux)),
 			),
 		),
 		// ReadHeaderTimeout bounds the handshake itself. Read/Write/Idle

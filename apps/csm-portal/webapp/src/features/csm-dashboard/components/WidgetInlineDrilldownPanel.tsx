@@ -118,19 +118,16 @@ export default function WidgetInlineDrilldownPanel({
 
   const mergedFilters = mergeWidgetFilters(filters, slice.query);
   const listLimitValue = listLimit ?? 4;
-  const { data, isLoading, isError } = useWidgetData(
+  const { data, isLoading, isError } = useWidgetData({
     widgetId,
     resourceType,
-    mergedFilters,
-    "list",
-    listLimitValue,
-    0,
-    true,
+    filters: mergedFilters,
+    shape: "list",
+    listLimit: listLimitValue,
     selectedTeamCreGroupId,
     selectedTeamSreGroupId,
-    undefined,
     currentUserId,
-  );
+  });
   const total = data?.total ?? 0;
 
   if (!config) {
@@ -213,6 +210,7 @@ export default function WidgetInlineDrilldownPanel({
                   widgetId,
                   displayName: resolvedDisplayName,
                   filters: resolvePlaceholders(mergedFilters),
+                  resourceType,
                   currentUserId,
                 })}
                 size="small"

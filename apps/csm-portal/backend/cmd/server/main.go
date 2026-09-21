@@ -109,6 +109,7 @@ func main() {
 	metadataHandler := handler.NewMetadataHandler()
 	accountHandler := handler.NewAccountHandler(customerEntityClient)
 	projectHandler := handler.NewProjectHandler(customerEntityClient)
+	announcementHandler := handler.NewAnnouncementHandler(customerEntityClient, loadAnnouncementExcludedProjectKeys())
 	productHandler := handler.NewProductHandler(customerEntityClient)
 	deploymentHandler := handler.NewDeploymentHandler(customerEntityClient)
 	changeRequestHandler := handler.NewChangeRequestHandler(customerEntityClient)
@@ -251,6 +252,8 @@ func main() {
 	mux.HandleFunc("GET /projects/{id}", projectHandler.GetProject)
 	mux.HandleFunc("GET /projects/{id}/metadata", projectHandler.GetProjectMetadata)
 	mux.HandleFunc("POST /projects/search", projectHandler.SearchProjects)
+	mux.HandleFunc("POST /announcements/audience/search", announcementHandler.SearchCustomerAnnouncementAudience)
+	mux.HandleFunc("GET /announcements/audience/excluded-project-keys", announcementHandler.GetExcludedProjectKeys)
 	mux.HandleFunc("POST /projects/{id}/contacts/search", projectHandler.SearchProjectContacts)
 	mux.HandleFunc("GET /projects/{id}/contacts/{contactId}", projectHandler.GetProjectContact)
 	mux.HandleFunc("PATCH /projects/{id}", projectHandler.UpdateProject)
@@ -594,6 +597,36 @@ func loadDashboardDesignerEmails() map[string]struct{} {
 		set[strings.ToLower(e)] = struct{}{}
 	}
 	return set
+}
+
+// loadAnnouncementExcludedProjectKeys resolves the "All customer projects"
+// announcement audience's mandatory excluded-project-key denylist from its
+// configuration form:
+//
+//	CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS  A comma-separated list of project
+//	                                         keys, whitespace around each
+//	                                         entry trimmed. AnnouncementHandler
+//	                                         injects this list into every
+//	                                         POST /announcements/audience/search
+//	                                         call unconditionally — the
+//	                                         caller cannot opt out — mirroring
+//	                                         the real ServiceNow flow this
+//	                                         replaces, whose own "Create
+//	                                         announcement for customers" flow
+//	                                         hardcodes an equivalent Project
+//	                                         Key exclusion with no way for
+//	                                         whoever triggers it to opt out.
+//
+// Unlike directory.DefaultRoles, this deliberately has no committed default:
+// project keys are organisation-specific data, not generic platform
+// vocabulary, so there is nothing safe to commit — the same reasoning
+// CSM_TEAM_REGISTRY's own lack of a default follows. An unset or empty value
+// yields no exclusions, so a deployment that has not configured this yet
+// still starts and simply excludes nothing extra.
+func loadAnnouncementExcludedProjectKeys() []string {
+	keys := splitComma(os.Getenv("CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS"))
+	slog.Info("resolved announcement excluded-project-key list", "count", len(keys))
+	return keys
 }
 
 // loadSftpgoConfig resolves the SFTPGo-backed attachment-storage feature

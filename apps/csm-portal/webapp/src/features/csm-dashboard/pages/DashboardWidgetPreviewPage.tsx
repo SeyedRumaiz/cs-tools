@@ -507,14 +507,14 @@ function CallRequestWidgetPreview({
     [crFilters],
   );
 
-  const { data, isLoading, isError, isFetching, refetch, dataUpdatedAt } = useWidgetData(
+  const { data, isLoading, isError, isFetching, refetch, dataUpdatedAt } = useWidgetData({
     widgetId,
-    "call_request",
-    queriedFilters,
-    "list",
-    rowsPerPage,
-    page * rowsPerPage,
-  );
+    resourceType: "call_request",
+    filters: queriedFilters,
+    shape: "list",
+    listLimit: rowsPerPage,
+    offset: page * rowsPerPage,
+  });
   const ListRenderer = WIDGET_LIST_RENDERERS.call_request;
 
   const handleRowsPerPageChange = (e: ChangeEvent<HTMLInputElement>): void => {
@@ -709,14 +709,14 @@ function CaseFeedbackWidgetPreview({
     setPage(0);
   };
 
-  const { data, isLoading, isError, isFetching, refetch, dataUpdatedAt } = useWidgetData(
+  const { data, isLoading, isError, isFetching, refetch, dataUpdatedAt } = useWidgetData({
     widgetId,
-    "case_feedback",
-    queriedFilters,
-    "list",
-    rowsPerPage,
-    page * rowsPerPage,
-  );
+    resourceType: "case_feedback",
+    filters: queriedFilters,
+    shape: "list",
+    listLimit: rowsPerPage,
+    offset: page * rowsPerPage,
+  });
   const ListRenderer = WIDGET_LIST_RENDERERS.case_feedback;
 
   const handleRowsPerPageChange = (e: ChangeEvent<HTMLInputElement>): void => {
@@ -828,14 +828,14 @@ function DashboardWidgetPreviewContent({
   // free-text search term, which the search box right below already shows.
   const filterSummary = useMemo(() => describeWidgetFilters(filters), [filters]);
 
-  const { data, isLoading, isError, isFetching, refetch, dataUpdatedAt } = useWidgetData(
+  const { data, isLoading, isError, isFetching, refetch, dataUpdatedAt } = useWidgetData({
     widgetId,
     resourceType,
-    queriedFilters,
-    "list",
-    rowsPerPage,
-    page * rowsPerPage,
-  );
+    filters: queriedFilters,
+    shape: "list",
+    listLimit: rowsPerPage,
+    offset: page * rowsPerPage,
+  });
   const ListRenderer = WIDGET_LIST_RENDERERS[resourceType];
 
   const handleSearchChange = (e: ChangeEvent<HTMLInputElement>): void => {

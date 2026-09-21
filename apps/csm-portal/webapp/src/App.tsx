@@ -61,6 +61,7 @@ import { useAppMountedSignal } from "@utils/appMountedEvent";
  * already eager (tiny, immediate fallbacks) and are unaffected.
  */
 import CsmDashboardPage from "@features/csm-dashboard/pages/CsmDashboardPage";
+import CsMonitorDashboardPage from "@features/csm-dashboard/pages/CsMonitorDashboardPage";
 import DashboardWidgetPreviewPage from "@features/csm-dashboard/pages/DashboardWidgetPreviewPage";
 import CsmCasesPage from "@features/csm-cases/pages/CsmCasesPage";
 import CsmCaseCreatePage from "@features/csm-cases/pages/CsmCaseCreatePage";
@@ -246,6 +247,22 @@ export default function App(): JSX.Element {
                   </ErrorLayout>
                 }
               />
+
+              {/* Standalone full-screen wallboard/kiosk view of the
+                  cs-overview dashboard — real sign-in required (still
+                  routed through AuthGuard), but no portal chrome at all:
+                  no header, sidebar, banners, or dashboard switcher, just
+                  this one page. Deliberately its own AuthGuard instance
+                  (`bare`) and OUTSIDE FeatureRouteGuard — it has no nav
+                  entry to be WIP-gated against, unlike every route in the
+                  main authenticated block below. See
+                  CsMonitorDashboardPage.tsx's own doc comment. */}
+              <Route element={<AuthGuard bare />}>
+                <Route
+                  path="cs-monitor-dashboard"
+                  element={<CsMonitorDashboardPage />}
+                />
+              </Route>
 
               <Route element={<AuthGuard />}>
                 <Route element={<FeatureRouteGuard />}>
