@@ -24,6 +24,20 @@ import { useAuthApiClient } from "@/hooks/useAuthApiClient";
 // backend's internal/handler/chat.go doc comment).
 export type ChatEscalationApiError = Error & { status: number };
 
+/**
+ * One message from the customer's AI-chatbot (Novera) conversation, already
+ * visible in this page at the moment "Chat with an Engineer" was clicked —
+ * see NoveraChatPage's handleEscalateToEngineer, which builds these from its
+ * own messages[] state. Mirrors backend-v2's escalatePriorMessage /
+ * chat-routing-service's router.PriorMessage field-for-field.
+ */
+export type EscalationPriorMessage = {
+  role: "customer" | "assistant";
+  content: string;
+  /** RFC 3339, optional. */
+  createdAt?: string;
+};
+
 export type PostChatEscalationVariables = {
   /** The conversation this escalation was raised from — links the created case back to this chat. */
   conversationId: string;
@@ -31,6 +45,13 @@ export type PostChatEscalationVariables = {
   message?: string;
   /** Display label only, shown in the engineer's alert UI — never used for authorization/attribution. */
   customerName?: string;
+  /**
+   * The conversation history already visible on this page, in chronological
+   * order, so the engineer who picks this up sees the same context the
+   * customer already gave the AI instead of starting cold. Optional —
+   * omitted or empty just means the engineer's chat starts without it.
+   */
+  priorMessages?: EscalationPriorMessage[];
 };
 
 export type PostChatEscalationResponse = {
