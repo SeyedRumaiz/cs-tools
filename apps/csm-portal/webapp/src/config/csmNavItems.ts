@@ -30,6 +30,7 @@ import {
   KeyRound,
   LifeBuoy,
   Megaphone,
+  MessagesSquare,
   RefreshCw,
   Settings,
   Shield,
@@ -108,6 +109,12 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
     label: "Support",
     href: "/cases",
     icon: Headset,
+  },
+  {
+    id: "chat",
+    label: "Chat",
+    href: "/chat",
+    icon: MessagesSquare,
   },
   {
     id: "operations",

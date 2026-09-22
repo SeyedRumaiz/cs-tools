@@ -83,6 +83,27 @@ vi.mock("@layouts/BareAuthLoader", () => ({
   default: () => <div data-testid="bare-auth-loader" />,
 }));
 
+// AuthorizedAppShell renders this as a sibling of AppLayout (both inside a
+// real ChatSessionsProvider -- see AuthGuard.tsx). Its own hooks
+// (useChatAlertsStream, useGetEngineerStatus, the accept/decline/send
+// mutations) need real API config/react-query wiring this test doesn't set
+// up, and nothing here asserts on its rendering -- stub it out the same way
+// AppLayout is stubbed above, rather than mocking its whole context surface.
+vi.mock("@features/csm-chat/components/EngineerAlertNotification", () => ({
+  default: () => null,
+}));
+
+// AuthGuard.tsx also imports the chat-sessions context module directly (it
+// wraps AppLayout + EngineerAlertNotification in one provider so both sit in
+// the same tree -- see AuthGuard.tsx). That import alone pulls in the chat
+// API hooks, which read apiConfig.ts at import time and throw when
+// CSM_PORTAL_BACKEND_BASE_URL isn't configured, regardless of whether
+// anything actually calls the useChatSessions hook -- so this needs its own
+// mock even with the notification component stubbed out above.
+vi.mock("@context/chat-sessions/ChatSessionsContext", () => ({
+  ChatSessionsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+
 // Mutable so individual tests can simulate a /users/me outcome. Defaults to
 // "loaded fine, no error" — the common case for every pre-existing test in
 // this file, which don't care about CurrentUserContext at all.
