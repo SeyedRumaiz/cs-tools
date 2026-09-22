@@ -463,14 +463,13 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, conn *websocket.Co
 		return
 	}
 
-	agentSessionID := projectID + ":" + conversationID
-	result, err := h.ai.StreamChat(ctx, agentSessionID, string(enriched), conn)
-	if err != nil {
-		slog.ErrorContext(ctx, "aichatagent StreamChat failed", "userID", user.UserID, "conversationID", conversationID, "err", summarizeErr(err))
-		_ = writeWSJSON(conn, wsEvent{Type: "error", Message: "Failed to process message."})
-		return
-	}
-
+	// Persisted before the upstream call, not after: if StreamChat fails
+	// below, the customer's own message must still land in entity-service's
+	// history. Previously this ran only after a successful StreamChat call,
+	// so a flaky/unreachable AI backend silently dropped the customer's
+	// message from history entirely -- and any later escalation snapshot
+	// (see customer-portal/backend-v2's HandleEscalate) had nothing to hand
+	// the assigned engineer even though the customer had typed something.
 	if userMessage != "" {
 		_, err := h.entity.CreateComment(ctx, entity.CreateCommentRequest{
 			ReferenceID:   conversationID,
@@ -481,6 +480,14 @@ func (h *WebSocketHandler) handleMessage(ctx context.Context, conn *websocket.Co
 		if err != nil {
 			slog.ErrorContext(ctx, "entity CreateComment failed for conversation message", "userID", user.UserID, "conversationID", conversationID, "err", summarizeErr(err))
 		}
+	}
+
+	agentSessionID := projectID + ":" + conversationID
+	result, err := h.ai.StreamChat(ctx, agentSessionID, string(enriched), conn)
+	if err != nil {
+		slog.ErrorContext(ctx, "aichatagent StreamChat failed", "userID", user.UserID, "conversationID", conversationID, "err", summarizeErr(err))
+		_ = writeWSJSON(conn, wsEvent{Type: "error", Message: "Failed to process message."})
+		return
 	}
 
 	var agentMessageText string
