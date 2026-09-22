@@ -75,6 +75,50 @@ type CaseInfo struct {
 	CustomerEmail  string `json:"customerEmail,omitempty"`
 	CustomerName   string `json:"customerName,omitempty"`
 	Message        string `json:"message,omitempty"`
+	// PriorMessages is the customer's AI-chatbot (Novera) conversation
+	// history, visible in Customer Portal at the moment "Chat with an
+	// Engineer" was clicked -- see PriorMessage. Sent by the frontend
+	// itself (NoveraChatPage's own messages[] state), not fetched from
+	// entity-service: this deployment's DATA_SOURCE=postgres entity-service
+	// has no conversation/comment persistence of its own, so this is the
+	// only source. CreateWorkItem is the only place that reads this field
+	// (persisting it into chat_routing.comment, once) -- every other
+	// CaseInfo/CaseStatus this package returns instead has PriorMessages
+	// populated fresh from that comment table (see commentsForCase), which
+	// is the durable, idempotency-safe copy from here on.
+	PriorMessages []PriorMessage `json:"priorMessages,omitempty"`
+}
+
+// PriorMessageRole says who sent one PriorMessage -- the customer or the
+// Novera AI assistant. Deliberately just these two: a pre-escalation
+// transcript never contains an engineer message (no engineer exists yet).
+type PriorMessageRole string
+
+const (
+	PriorMessageRoleCustomer  PriorMessageRole = "customer"
+	PriorMessageRoleAssistant PriorMessageRole = "assistant"
+)
+
+// priorMessageAssistantAuthor is the chat_routing.comment.created_by value
+// that means "the Novera AI assistant said this", both when CreateWorkItem
+// inserts a PriorMessage with Role Assistant and when commentsForCase reads
+// it back -- matching the same "Novera" convention customer-portal's own
+// ConversationDetailsPage/dto.MapSearchComments already use to tell the
+// assistant's replies apart from the customer's own messages.
+const priorMessageAssistantAuthor = "Novera"
+
+// PriorMessage is one message from the customer's AI-chatbot (Novera)
+// conversation that happened before this escalation, carried through so
+// the engineer assigned this case sees the same context the customer
+// already gave the AI instead of starting cold. CreatedAt is RFC 3339,
+// optional -- carried as a string (not time.Time) since CaseInfo crosses
+// two service boundaries as JSON before it reaches CreateWorkItem, the
+// only place that parses it (falling back to now() if empty/malformed
+// rather than failing the whole escalation over it).
+type PriorMessage struct {
+	Role      PriorMessageRole `json:"role"`
+	Content   string           `json:"content"`
+	CreatedAt string           `json:"createdAt,omitempty"`
 }
 
 // CaseStatus is one case an engineer currently holds, as reported by

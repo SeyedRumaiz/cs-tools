@@ -649,19 +649,26 @@ func (r *Router) SetMaxConcurrentChats(ctx context.Context, userID string, max i
 	})
 }
 
-// pgxQuerier is the subset of *pgxpool.Pool that engineerCases needs --
-// satisfied directly by *pgxpool.Pool, declared here just to name the
-// dependency.
+// pgxQuerier is the subset of *pgxpool.Pool that engineerCases and
+// commentsForCase/commentsForWorkItem (workitem.go) need -- satisfied
+// directly by *pgxpool.Pool and by pgx.Tx alike, declared here just to
+// name the dependency and let those helpers run either standalone
+// (r.db) or as part of a larger transaction (tx).
 type pgxQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 // engineerCases returns every case currently held by userID (state OPEN or
 // ACTIVE, session not yet ended), oldest-assigned first. Shared by
-// GetPresence and debugEngineers.
+// GetPresence and debugEngineers. PriorMessages on each CaseInfo is
+// populated fresh from chat_routing.comment (see commentsForWorkItem), not
+// trusted from the case_info JSONB decode -- work_item_id is selected
+// alongside case_info for exactly that, avoiding a redundant case_id
+// lookup (see commentsForCase, which every other read path uses instead).
 func engineerCases(ctx context.Context, q pgxQuerier, userID string) ([]CaseStatus, error) {
 	rows, err := q.Query(ctx, `
-		SELECT case_info, state, accepted_at, updated_at
+		SELECT work_item_id, case_info, state, accepted_at, updated_at
 		FROM chat_conversation
 		WHERE assignee_id = $1 AND state IN ('OPEN', 'ACTIVE') AND session_ended_at IS NULL
 		ORDER BY updated_at ASC
@@ -674,12 +681,13 @@ func engineerCases(ctx context.Context, q pgxQuerier, userID string) ([]CaseStat
 	var cases []CaseStatus
 	for rows.Next() {
 		var (
+			workItemID   string
 			caseInfoJSON []byte
 			state        string
 			acceptedAt   *time.Time
 			updatedAt    time.Time
 		)
-		if err := rows.Scan(&caseInfoJSON, &state, &acceptedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&workItemID, &caseInfoJSON, &state, &acceptedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan case: %w", err)
 		}
 		var c CaseInfo
@@ -688,6 +696,11 @@ func engineerCases(ctx context.Context, q pgxQuerier, userID string) ([]CaseStat
 				return nil, fmt.Errorf("decode case info: %w", err)
 			}
 		}
+		priorMessages, err := commentsForWorkItem(ctx, q, workItemID)
+		if err != nil {
+			return nil, fmt.Errorf("engineer cases: %w", err)
+		}
+		c.PriorMessages = priorMessages
 		cases = append(cases, CaseStatus{
 			CaseInfo:   c,
 			Pending:    isPending(state, acceptedAt),
@@ -894,7 +907,9 @@ func activeCaseCount(ctx context.Context, tx pgx.Tx, userID string) (int, error)
 // (state OPEN, accepted_at NULL), and not yet ended -- or ok=false
 // otherwise (already accepted, reassigned elsewhere, or never held by
 // userID at all). Shared by Accept and Decline, which both only ever act
-// on a case in exactly this state.
+// on a case in exactly this state. PriorMessages is populated fresh from
+// chat_routing.comment (see commentsForCase) before returning, same as
+// every other CaseInfo this package hands back.
 func lockPendingConversation(ctx context.Context, tx pgx.Tx, caseID, userID string) (CaseInfo, bool, error) {
 	var (
 		caseInfoJSON []byte
@@ -923,6 +938,11 @@ func lockPendingConversation(ctx context.Context, tx pgx.Tx, caseID, userID stri
 			return CaseInfo{}, false, fmt.Errorf("decode case info: %w", err)
 		}
 	}
+	priorMessages, err := commentsForCase(ctx, tx, caseID)
+	if err != nil {
+		return CaseInfo{}, false, fmt.Errorf("lock conversation: %w", err)
+	}
+	c.PriorMessages = priorMessages
 	return c, true, nil
 }
 
@@ -1045,6 +1065,10 @@ func insertQueueRow(ctx context.Context, tx pgx.Tx, c CaseInfo, caseInfoJSON []b
 // returns its case, or ok=false if nothing is waiting. FOR UPDATE SKIP
 // LOCKED inside the subquery, same job-queue idiom popAvailableEngineer
 // uses. The row is updated in place, not deleted -- it lives until Accept.
+// PriorMessages is populated fresh from chat_routing.comment (see
+// commentsForCase) before returning, same as every other CaseInfo this
+// package hands back -- the chat_queue.case_info blob decoded below is
+// only a point-in-time snapshot from Escalate time.
 func claimOldestWaiting(ctx context.Context, tx pgx.Tx) (CaseInfo, bool, error) {
 	var caseInfoJSON []byte
 	err := tx.QueryRow(ctx, `
@@ -1070,6 +1094,11 @@ func claimOldestWaiting(ctx context.Context, tx pgx.Tx) (CaseInfo, bool, error) 
 	if err := json.Unmarshal(caseInfoJSON, &c); err != nil {
 		return CaseInfo{}, false, fmt.Errorf("decode queued case: %w", err)
 	}
+	priorMessages, err := commentsForCase(ctx, tx, c.CaseID)
+	if err != nil {
+		return CaseInfo{}, false, fmt.Errorf("claim oldest waiting case: %w", err)
+	}
+	c.PriorMessages = priorMessages
 	return c, true, nil
 }
 

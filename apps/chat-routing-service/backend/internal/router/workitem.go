@@ -81,21 +81,33 @@ type WorkItemDetail struct {
 }
 
 // CreateWorkItem creates the work_item + chat_conversation pair (starting
-// in state OPEN, unassigned) for a brand-new escalation, plus its first
-// comment if c.Message is non-empty. Also stores c itself as
-// chat_conversation.case_info -- the durable display blob (subject,
-// customer email/name, message) GetPresence/DebugState read back for as
-// long as this conversation is held by an engineer, including after
-// Accept (unlike chat_queue's own case_info, which Accept deletes).
+// in state OPEN, unassigned) for a brand-new escalation, plus its prior
+// AI-chatbot messages and first comment if c.Message is non-empty. Also
+// stores c itself as chat_conversation.case_info -- the durable display
+// blob (subject, customer email/name, message) GetPresence/DebugState read
+// back for as long as this conversation is held by an engineer, including
+// after Accept (unlike chat_queue's own case_info, which Accept deletes).
+// That blob's own copy of PriorMessages is never trusted on read, though --
+// see commentsForCase, which every read path uses instead, so the
+// chat_routing.comment rows inserted below are the durable source of truth.
 //
 // Called once per case, BEFORE Router.Escalate -- unlike the single-case
 // model this replaced, Escalate's own assignment now writes
 // chat_conversation.assignee_id directly (see assignCaseToEngineer), so
 // this row must already exist by the time Escalate runs. This mirrors how
 // the real entity-service case this stand-in mimics already exists before
-// csm-portal/backend's HandleEscalate is even called. This is a create,
-// not an upsert: calling it twice for the same c.CaseID is a caller bug
-// this doesn't try to reconcile.
+// csm-portal/backend's HandleEscalate is even called.
+//
+// Idempotent by case_id: escalation retries (a network hiccup, backend-v2
+// or csm-portal/backend re-sending the same request) are expected, and
+// must not duplicate the prior-message transcript inserted below. If
+// chat_conversation already has a row for c.CaseID, this returns nil
+// immediately without touching work_item/chat_conversation/comment at all
+// -- never by deleting and reinserting anything. The existence check and
+// every insert below share one transaction, so a genuinely concurrent
+// double call still can't duplicate anything: whichever call loses the
+// race gets a unique-constraint error on the chat_conversation insert
+// (case_id has a UNIQUE INDEX) and its whole transaction rolls back.
 func (r *Router) CreateWorkItem(ctx context.Context, c CaseInfo) error {
 	caseInfoJSON, err := json.Marshal(c)
 	if err != nil {
@@ -103,6 +115,19 @@ func (r *Router) CreateWorkItem(ctx context.Context, c CaseInfo) error {
 	}
 
 	return r.withTx(ctx, func(tx pgx.Tx) error {
+		var existingWorkItemID string
+		err := tx.QueryRow(ctx, `
+			SELECT work_item_id FROM chat_conversation WHERE case_id = $1
+		`, c.CaseID).Scan(&existingWorkItemID)
+		switch {
+		case err == nil:
+			// Already created by an earlier call -- idempotent no-op,
+			// including PriorMessages.
+			return nil
+		case !errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("check existing chat_conversation: %w", err)
+		}
+
 		var workItemID string
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO work_item (creator_id, subject) VALUES ($1, $2)
@@ -116,6 +141,35 @@ func (r *Router) CreateWorkItem(ctx context.Context, c CaseInfo) error {
 			VALUES ($1, $2, $3::jsonb)
 		`, workItemID, c.CaseID, caseInfoJSON); err != nil {
 			return fmt.Errorf("insert chat_conversation: %w", err)
+		}
+
+		// Prior AI-chatbot (Novera) messages, inserted first and each with
+		// its own real created_at (parsed from CaseInfo.PriorMessages,
+		// falling back to now() for an empty/malformed timestamp rather
+		// than failing the whole escalation over it) so the transcript --
+		// ordered by created_at everywhere it's read back (DebugWorkItem,
+		// commentsForCase, AddComment) -- reads in the order these
+		// actually happened, ahead of the triggering message below (which
+		// keeps the column's default now()). Role maps to created_by the
+		// same way commentsForCase maps it back: Assistant ->
+		// priorMessageAssistantAuthor, Customer -> the customer's own email
+		// (already on hand as c.CustomerEmail, matching AddComment's own
+		// convention for a live customer message).
+		for _, m := range c.PriorMessages {
+			createdBy := c.CustomerEmail
+			if m.Role == PriorMessageRoleAssistant {
+				createdBy = priorMessageAssistantAuthor
+			}
+			createdAt := time.Now()
+			if t, parseErr := time.Parse(time.RFC3339, m.CreatedAt); parseErr == nil {
+				createdAt = t
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO comment (work_item_id, content, created_by, created_at)
+				VALUES ($1, $2, $3, $4)
+			`, workItemID, m.Content, createdBy, createdAt); err != nil {
+				return fmt.Errorf("insert prior comment: %w", err)
+			}
 		}
 
 		if c.Message != "" {
@@ -161,7 +215,10 @@ func (r *Router) AddComment(ctx context.Context, caseID, authorEmail, content st
 // GetCaseInfo returns caseID's originally-submitted CaseInfo (subject,
 // customer email/name, message, projectId) as CreateWorkItem stored it,
 // so callers can build a case request without resending data this service
-// already has.
+// already has. PriorMessages is NOT read from that stored blob -- it's
+// replaced with a fresh read of chat_routing.comment (see commentsForCase),
+// so what a caller gets here always matches what's actually durably
+// persisted, including anything AddComment has added since.
 func (r *Router) GetCaseInfo(ctx context.Context, caseID string) (CaseInfo, error) {
 	var caseInfoJSON []byte
 	err := r.db.QueryRow(ctx, `SELECT case_info FROM chat_conversation WHERE case_id = $1`, caseID).Scan(&caseInfoJSON)
@@ -177,7 +234,76 @@ func (r *Router) GetCaseInfo(ctx context.Context, caseID string) (CaseInfo, erro
 			return CaseInfo{}, fmt.Errorf("get case info: decode: %w", err)
 		}
 	}
+	priorMessages, err := commentsForCase(ctx, r.db, caseID)
+	if err != nil {
+		return CaseInfo{}, fmt.Errorf("get case info: %w", err)
+	}
+	c.PriorMessages = priorMessages
 	return c, nil
+}
+
+// commentsForCase loads caseID's chat_routing.comment rows as PriorMessage,
+// oldest first -- the durable source of truth for what a case's
+// PriorMessages should show to an engineer, resolved via
+// chat_conversation.work_item_id. Used by every path that returns a
+// CaseInfo/CaseStatus destined for csm-portal/backend's assignedCaseEvent
+// or GetPresence rehydration (GetCaseInfo above, and claimOldestWaiting/
+// lockPendingConversation/engineerCases in state.go), instead of trusting
+// whatever CreateWorkItem/Escalate originally snapshotted into the
+// case_info JSONB blob -- see CaseInfo.PriorMessages's own doc comment.
+// created_by maps back to Role the same way CreateWorkItem maps Role to
+// created_by on insert: priorMessageAssistantAuthor -> Assistant, anything
+// else (an email, whether the customer's own or an engineer's on a live
+// comment added later) -> Customer. That's safe here even though it can't
+// distinguish a live engineer message from a customer one: PriorMessages
+// is only ever replayed by the frontend for a still-pending (not yet
+// accepted) case, which by construction can't have a live engineer message
+// yet -- no engineer exists to have sent one.
+func commentsForCase(ctx context.Context, q pgxQuerier, caseID string) ([]PriorMessage, error) {
+	var workItemID string
+	err := q.QueryRow(ctx, `SELECT work_item_id FROM chat_conversation WHERE case_id = $1`, caseID).Scan(&workItemID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("comments for case: resolve work item: %w", err)
+	}
+	return commentsForWorkItem(ctx, q, workItemID)
+}
+
+// commentsForWorkItem is commentsForCase's query, factored out for callers
+// that already have workItemID on hand (avoiding a redundant case_id
+// lookup) -- currently just engineerCases in state.go, which selects
+// work_item_id directly off the same chat_conversation row it's already
+// reading.
+func commentsForWorkItem(ctx context.Context, q pgxQuerier, workItemID string) ([]PriorMessage, error) {
+	rows, err := q.Query(ctx, `
+		SELECT content, created_by, created_at FROM comment
+		WHERE work_item_id = $1 ORDER BY created_at ASC
+	`, workItemID)
+	if err != nil {
+		return nil, fmt.Errorf("comments for work item: query: %w", err)
+	}
+	defer rows.Close()
+
+	var msgs []PriorMessage
+	for rows.Next() {
+		var (
+			content, createdBy string
+			createdAt          time.Time
+		)
+		if err := rows.Scan(&content, &createdBy, &createdAt); err != nil {
+			return nil, fmt.Errorf("comments for work item: scan: %w", err)
+		}
+		role := PriorMessageRoleCustomer
+		if createdBy == priorMessageAssistantAuthor {
+			role = PriorMessageRoleAssistant
+		}
+		msgs = append(msgs, PriorMessage{
+			Role: role, Content: content, CreatedAt: createdAt.Format(time.RFC3339),
+		})
+	}
+	return msgs, rows.Err()
 }
 
 // DebugWorkItem returns caseID's full work item, chat conversation, and

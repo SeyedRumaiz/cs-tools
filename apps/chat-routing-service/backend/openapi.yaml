@@ -588,6 +588,42 @@ components:
           type: string
         message:
           type: string
+        priorMessages:
+          type: array
+          description: >-
+            The customer's AI-chatbot (Novera) conversation history, visible
+            in Customer Portal at the moment "Chat with an Engineer" was
+            clicked. On POST /route/workitem, this is the only place this
+            data is ever accepted from -- it's persisted into
+            chat_routing.comment right there, once. Every other CaseInfo/
+            CaseStatus this service returns (including a later POST
+            /route/escalate for the same case) instead has this populated
+            fresh from that comment table, not from whatever was originally
+            submitted -- so it reflects the durable, idempotency-safe copy,
+            not a stale snapshot.
+          items:
+            $ref: '#/components/schemas/PriorMessage'
+
+    PriorMessage:
+      type: object
+      description: >-
+        One message from the customer's AI-chatbot (Novera) conversation
+        that happened before an escalation, supplied by the caller (never
+        fetched by this service itself) and persisted into
+        chat_routing.comment by POST /route/workitem. There is no engineer
+        role here -- a pre-escalation transcript predates any engineer being
+        involved.
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [customer, assistant]
+        content:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          description: RFC 3339, optional -- falls back to now() if empty/malformed.
 
     CaseStatus:
       description: >-
