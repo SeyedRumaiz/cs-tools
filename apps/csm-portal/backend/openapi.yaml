@@ -7036,6 +7036,35 @@ components:
           type: string
         message:
           type: string
+        priorMessages:
+          type: array
+          description: >-
+            The customer's AI-chatbot (Novera) conversation history, already
+            visible in Customer Portal at the moment "Chat with an Engineer"
+            was clicked -- forwarded from customer-portal/backend-v2
+            unchanged and passed straight through to chat-routing-service's
+            POST /route/workitem, which persists it into chat_routing.comment
+            once. Optional -- omitted or empty just means the engineer's
+            chat starts without that context. See ChatPriorMessage.
+          items:
+            $ref: '#/components/schemas/ChatPriorMessage'
+    ChatPriorMessage:
+      type: object
+      description: >-
+        One message from the customer's AI-chatbot (Novera) conversation
+        that happened before this escalation. Mirrors chat-routing-service's
+        PriorMessage / internal/routingclient.PriorMessage field-for-field.
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [customer, assistant]
+        content:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          description: RFC 3339, optional.
     ChatCustomerMessageRequest:
       type: object
       required: [caseId, conversationId, message]
