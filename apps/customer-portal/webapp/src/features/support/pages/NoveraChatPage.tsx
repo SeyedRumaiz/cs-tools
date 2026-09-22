@@ -35,7 +35,10 @@ import {
   usePostChatEscalation,
   type EscalationPriorMessage,
 } from "@features/support/api/usePostChatEscalation";
-import { usePostChatMessage } from "@features/support/api/usePostChatMessage";
+import {
+  usePostChatMessage,
+  type ChatMessageApiError,
+} from "@features/support/api/usePostChatMessage";
 import useGetProjectDetails from "@api/useGetProjectDetails";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import type { SearchProjectsResponse } from "@features/project-hub/types/projects";
@@ -949,7 +952,35 @@ export default function NoveraChatPage(): JSX.Element {
 
       try {
         await postChatMessage.mutateAsync({ conversationId, caseId, message: text });
-      } catch {
+      } catch (err) {
+        // 410 means the session already ended server-side (the engineer
+        // clicked "End session", or converted the chat to a case) before
+        // this message reached it -- see csm-portal/backend's
+        // HandleCustomerMessage and chat-routing-service's
+        // router.ErrConversationEnded. Normally the "engineer_disconnected"/
+        // "converted_to_case" WS event resets this page for exactly that
+        // reason, but that push is a single best-effort attempt with no
+        // retry (see backend-v2's WebSocketHandler.PushEvent) -- if it
+        // never arrived, this page would otherwise keep behaving as though
+        // the live chat were still ongoing, silently "failing" every
+        // message the customer sends with no visible explanation. Perform
+        // the identical reset here instead, rather than showing a generic
+        // "please try again" that would never succeed.
+        if ((err as ChatMessageApiError)?.status === 410) {
+          setIsHumanConnected(false);
+          setAssignedEngineerName(null);
+          escalationCaseIdRef.current = null;
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `human-session-ended-${Date.now()}`,
+              text: "The live chat session has ended. You're back with Novera, our AI assistant.",
+              sender: ChatSender.BOT,
+              timestamp: new Date(),
+            },
+          ]);
+          return;
+        }
         setMessages((prev) => [
           ...prev,
           {

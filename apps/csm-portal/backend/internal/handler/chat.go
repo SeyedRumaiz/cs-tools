@@ -73,6 +73,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -463,6 +464,16 @@ type customerMessageRequest struct {
 // has no record of who that is — see the package doc comment on why there
 // is no server-side session table); an accepted scope decision for this
 // prototype phase.
+//
+// AddComment's failure is best-effort EXCEPT for routingclient.
+// ErrConversationEnded, which is checked explicitly and short-circuits with
+// a 410 instead of falling through to the generic warn-and-continue below.
+// That distinction used to not exist at all: this handler always answered
+// 201 "relayed" no matter what, so once an engineer clicked "End session"
+// the customer could keep "sending" messages that silently went nowhere,
+// with no sign anything had ended. See backend-v2's HandleSendMessage and
+// customer-portal's sendViaHumanChat for how this 410 propagates from here
+// all the way to resetting the customer's own chat UI.
 func (h *ChatHandler) HandleCustomerMessage(w http.ResponseWriter, r *http.Request) {
 	body, ok := readChatBody(w, r)
 	if !ok {
@@ -479,12 +490,17 @@ func (h *ChatHandler) HandleCustomerMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Best-effort: must not block the live relay below. The customer is
-	// mid-chat with an engineer right now, and losing this message's
-	// durable record is far less costly than silently dropping the message
-	// itself (which returning early here used to do, back when this was a
-	// blocking entity-service call).
 	if err := h.routing.AddComment(r.Context(), req.CaseID, req.CustomerEmail, req.Message); err != nil {
+		if errors.Is(err, routingclient.ErrConversationEnded) {
+			writeError(w, http.StatusGone, "This chat session has already ended.")
+			return
+		}
+		// Best-effort for every other failure: must not block the live
+		// relay below. The customer is mid-chat with an engineer right
+		// now, and losing this message's durable record is far less
+		// costly than silently dropping the message itself (which
+		// returning early here used to do, back when this was a blocking
+		// entity-service call).
 		slog.WarnContext(r.Context(), "chat: routing service add comment failed for customer chat message (non-blocking)", "caseID", req.CaseID, "err", err)
 	}
 
@@ -637,7 +653,17 @@ func (h *ChatHandler) HandleEngineerMessage(w http.ResponseWriter, r *http.Reque
 	// moved here so both directions of the conversation land in the same
 	// place (the stand-in comment table) instead of being split across two
 	// storage systems -- see the project's chat-persistence-mapping-plan.md.
+	//
+	// ErrConversationEnded is the one exception, exactly as in
+	// HandleCustomerMessage -- normally the engineer's own UI removes an
+	// ended session's tab before another message can be sent, but a
+	// request already in flight when "End session" is clicked shouldn't
+	// silently report success either.
 	if err := h.routing.AddComment(r.Context(), caseID, user.Email, req.Message); err != nil {
+		if errors.Is(err, routingclient.ErrConversationEnded) {
+			writeError(w, http.StatusGone, "This chat session has already ended.")
+			return
+		}
 		slog.WarnContext(r.Context(), "chat: routing service add comment failed for engineer chat message (non-blocking)", "userID", user.UserID, "caseID", caseID, "err", err)
 	}
 

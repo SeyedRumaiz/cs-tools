@@ -190,17 +190,32 @@ func (r *Router) CreateWorkItem(ctx context.Context, c CaseInfo) error {
 // rather than a silent no-op if caseID has no chat_conversation row, since
 // that means CreateWorkItem was never called for it -- worth surfacing
 // even though current callers still treat this call as best-effort.
+//
+// Also rejects a comment on a case whose session_ended_at is already set
+// (ErrConversationEnded), instead of silently inserting it -- this used to
+// succeed unconditionally, which was the direct cause of a live bug: after
+// an engineer clicked "End session", the case vanished from their own
+// view, but the customer's page kept accepting and "relaying" messages
+// with no error at all (see csm-portal/backend's HandleCustomerMessage,
+// which previously treated this call as pure best-effort and always
+// reported success regardless of the outcome here).
 func (r *Router) AddComment(ctx context.Context, caseID, authorEmail, content string) error {
 	return r.withTx(ctx, func(tx pgx.Tx) error {
-		var workItemID string
+		var (
+			workItemID     string
+			sessionEndedAt *time.Time
+		)
 		err := tx.QueryRow(ctx, `
-			SELECT work_item_id FROM chat_conversation WHERE case_id = $1
-		`, caseID).Scan(&workItemID)
+			SELECT work_item_id, session_ended_at FROM chat_conversation WHERE case_id = $1
+		`, caseID).Scan(&workItemID, &sessionEndedAt)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			return fmt.Errorf("add comment: no chat_conversation for case %s", caseID)
 		case err != nil:
 			return fmt.Errorf("add comment: look up work item: %w", err)
+		}
+		if sessionEndedAt != nil {
+			return fmt.Errorf("%w: case_id=%s", ErrConversationEnded, caseID)
 		}
 
 		if _, err := tx.Exec(ctx, `
