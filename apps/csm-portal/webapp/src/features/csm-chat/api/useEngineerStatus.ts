@@ -22,6 +22,7 @@ import {
   type UseQueryResult,
 } from "@tanstack/react-query";
 import { useBackendApi } from "@api/backend/client";
+import type { PriorMessage } from "@features/csm-chat/types/chatAlerts";
 
 // AVAILABLE/BUSY/OFFLINE are all directly requestable -- chat_status is a
 // plain manual toggle, independent of how many cases the engineer is
@@ -40,6 +41,11 @@ export interface EngineerCaseInfo {
   customerEmail?: string;
   customerName?: string;
   message?: string;
+  // The customer's AI-chatbot (Novera) transcript snapshotted at escalation
+  // time -- see ChatAlertEvent.priorMessages. Threaded through here too so
+  // a still-PENDING case (not yet accepted) survives a page refresh with
+  // this context intact, same as its other fields.
+  priorMessages?: PriorMessage[];
 }
 
 // Mirrors router.CaseStatus / routingclient.CaseStatus -- one case the

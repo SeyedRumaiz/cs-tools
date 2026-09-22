@@ -41,11 +41,16 @@ import {
   useGetEngineerStatus,
   type EngineerPresence,
 } from "@features/csm-chat/api/useEngineerStatus";
-import type { ChatAlertEvent } from "@features/csm-chat/types/chatAlerts";
+import type { ChatAlertEvent, PriorMessage } from "@features/csm-chat/types/chatAlerts";
 
 export type LiveChatMessage = {
   id: string;
-  from: "customer" | "engineer";
+  // "assistant" is Novera's own reply, replayed from the customer's prior
+  // AI-chatbot transcript at escalation time (see PendingAlert.
+  // priorMessages/ActiveSession.priorMessageCount below) -- it never
+  // appears in a live post-escalation message, only in that seeded
+  // history.
+  from: "customer" | "engineer" | "assistant";
   text: string;
 };
 
@@ -65,6 +70,10 @@ export type PendingAlert = {
   customerEmail?: string;
   customerName?: string;
   message?: string;
+  // The customer's AI-chatbot (Novera) transcript snapshotted at
+  // escalation time -- carried on the pending alert so accept() below can
+  // seed the resulting ActiveSession's messages with it.
+  priorMessages?: PriorMessage[];
   // ISO 8601 -- when this engineer was assigned this case (from the SSE
   // event's own timestamp for a fresh assignment, or from GetPresence's
   // per-case assignedAt when rehydrating after a refresh). Drives the
@@ -78,6 +87,14 @@ export type ActiveSession = {
   conversationId: string;
   customerName?: string;
   messages: LiveChatMessage[];
+  // How many of the entries at the front of `messages` are replayed prior
+  // AI-chatbot history (seeded once, at accept() time) rather than part of
+  // the live post-escalation conversation -- lets the chat UI draw a
+  // divider between the two instead of presenting them as one
+  // continuous thread. 0/undefined for a session rehydrated after a page
+  // refresh (messages start empty either way -- see the rehydration effect
+  // below's own doc comment).
+  priorMessageCount?: number;
 };
 
 export type CaseEntry = PendingAlert | ActiveSession;
@@ -190,12 +207,12 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
   // casesByCaseId, which lives only in this provider's own state). Adds one
   // entry per case in presence.cases that isn't already tracked locally --
   // pending cases (assigned, not yet accepted) become pending alerts,
-  // already-accepted cases go straight into an active session with an empty
-  // message history (any messages exchanged before the reload are still in
-  // the case's comment history server-side, just not replayed into this
-  // local transcript). This is what gets an engineer un-stuck who is
-  // genuinely still holding one or more cases server-side with nothing left
-  // in the UI to act on.
+  // already-accepted cases go straight into an active session seeded from
+  // the same c.priorMessages field (see the "session" branch below for why
+  // that's not just the pre-escalation snapshot for an already-accepted
+  // case). This is what gets an engineer un-stuck who is genuinely still
+  // holding one or more cases server-side with nothing left in the UI to
+  // act on.
   useEffect(() => {
     if (!presence?.cases?.length) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- syncs local state to cases the server already holds for this engineer (post-refresh rehydration), not state derivable from props/render
@@ -214,14 +231,48 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
               customerEmail: c.customerEmail,
               customerName: c.customerName,
               message: c.message,
+              priorMessages: c.priorMessages,
               assignedAt: c.assignedAt,
             }
           : {
+              // Already-accepted sessions used to rehydrate with an empty
+              // transcript -- reported live as "on refresh all the messages
+              // disappeared". They don't need to: for an accepted case,
+              // chat-routing-service's c.priorMessages is no longer just the
+              // pre-escalation snapshot, it's commentsForWorkItem's live
+              // read-back of chat_routing.comment (see that function's own
+              // doc comment), which AddComment keeps appending to for every
+              // message either side sends after acceptance too. So it's
+              // really "the transcript so far", and gets mapped into
+              // messages the same way accept() below seeds a fresh session.
+              //
+              // Known gap, not fixed here: commentsForWorkItem can only
+              // tell "the Novera assistant" apart from "everyone else" (see
+              // its own doc comment) -- it has no way to know a given live
+              // message came from the engineer rather than the customer, so
+              // any live engineer reply already sent before this refresh
+              // replays as a left-aligned "customer" bubble instead of the
+              // engineer's own. Fixing that needs commentsForWorkItem to
+              // also compare created_by against the assigned engineer's own
+              // email. Not losing the transcript at all is still a strict
+              // improvement over today.
               kind: "session",
               caseId: c.caseId,
               conversationId: c.conversationId,
               customerName: c.customerName,
-              messages: [],
+              messages: (c.priorMessages ?? []).map((m, i) => ({
+                id: `prior-${c.caseId}-${i}`,
+                from: m.role === "assistant" ? "assistant" : "customer",
+                text: m.content,
+              })),
+              // The whole restored transcript is treated as "prior" content
+              // rather than trying to guess where live chat resumes -- see
+              // this branch's own doc comment above. ChatWorkspacePage's
+              // "Live chat started" divider only renders when
+              // priorMessageCount is strictly less than messages.length, so
+              // this just means no divider shows on a rehydrated session,
+              // not that anything is mislabeled.
+              priorMessageCount: c.priorMessages?.length,
             };
       }
       return changed ? next : prev;
@@ -253,6 +304,7 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
                 customerEmail: event.customerEmail,
                 customerName: event.customerName,
                 message: event.message,
+                priorMessages: event.priorMessages,
                 assignedAt: event.timestamp,
               },
             };
@@ -339,12 +391,30 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
 
   const accept = useCallback(
     async (alert: PendingAlert): Promise<boolean> => {
-      const { caseId, conversationId, customerName } = alert;
+      const { caseId, conversationId, customerName, priorMessages } = alert;
       try {
         await acceptMutation.mutateAsync({ caseId, conversationId });
+        // Seed the new session with the customer's prior AI-chatbot
+        // (Novera) transcript, if any, so the engineer opens the chat
+        // already knowing what the customer asked -- see PendingAlert.
+        // priorMessages and ActiveSession.priorMessageCount. m.role is
+        // already "customer" or "assistant" (see chatAlerts.ts's
+        // PriorMessage) -- no more author-string heuristic needed.
+        const seededMessages: LiveChatMessage[] = (priorMessages ?? []).map((m, i) => ({
+          id: `prior-${caseId}-${i}`,
+          from: m.role === "assistant" ? "assistant" : "customer",
+          text: m.content,
+        }));
         setCasesByCaseId((current) => ({
           ...current,
-          [caseId]: { kind: "session", caseId, conversationId, customerName, messages: [] },
+          [caseId]: {
+            kind: "session",
+            caseId,
+            conversationId,
+            customerName,
+            messages: seededMessages,
+            priorMessageCount: seededMessages.length,
+          },
         }));
         return true;
       } catch (err) {

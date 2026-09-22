@@ -31,6 +31,24 @@ export type ChatAlertType =
   // left untouched. Only caseId and timestamp are set.
   | "case_timed_out";
 
+// One message from the customer's AI-chatbot (Novera) conversation, from
+// before this escalation happened -- sent by the customer's own browser at
+// escalation time (see customer-portal's NoveraChatPage), persisted into
+// chat_routing.comment, and read back fresh from there on every
+// CaseInfo/CaseStatus this whole pipeline returns. Mirrors csm-portal/
+// backend's routingclient.PriorMessage / chat-routing-service's router.
+// PriorMessage field-for-field. Role, not a display name -- "assistant"
+// covers Novera's own replies, "customer" everything else; there is no
+// third value since a pre-escalation transcript predates any engineer.
+export type PriorMessageRole = "customer" | "assistant";
+
+export type PriorMessage = {
+  role: PriorMessageRole;
+  content: string;
+  /** ISO 8601 / RFC 3339, optional. */
+  createdAt?: string;
+};
+
 export type ChatAlertEvent = {
   type: ChatAlertType;
   /** Present on every type — the case this escalation created. */
@@ -49,5 +67,12 @@ export type ChatAlertEvent = {
   engineerEmail?: string;
   /** Set on customer_escalation (opening text) and customer_message. */
   message?: string;
+  /**
+   * Set on customer_escalation only — the customer's AI-chatbot transcript
+   * snapshotted at the moment of escalation, so the engineer's chat can be
+   * seeded with that context instead of starting cold. See
+   * ChatSessionsContext's handling of customer_escalation and accept().
+   */
+  priorMessages?: PriorMessage[];
   timestamp: string;
 };
