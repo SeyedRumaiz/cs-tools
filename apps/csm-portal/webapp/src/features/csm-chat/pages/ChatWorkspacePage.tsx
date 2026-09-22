@@ -19,6 +19,7 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Divider,
   Paper,
   Stack,
   TextField,
@@ -29,6 +30,35 @@ import {
   useChatSessions,
   type ActiveSession,
 } from "@context/chat-sessions/ChatSessionsContext";
+
+// Typed structurally rather than against the theme type -- these two
+// members are all this needs, and MUI passes the real theme at call time.
+// See CaseTabStrip.tsx's own copy of this type for the full rationale.
+type ColorSchemeAwareTheme = {
+  palette: { grey: { 100: string; 800: string } };
+  applyStyles: (
+    scheme: "dark" | "light",
+    styles: Record<string, unknown>,
+  ) => Record<string, unknown>;
+};
+
+// `grey.100` is a literal, non-scheme-aware MUI token: it renders the same
+// near-white shade under both the light and dark color schemes (this app
+// drives theming through MUI CssVars, where `palette.mode` stays pinned to
+// the default scheme no matter which one is actually showing -- see
+// CaseTabStrip.tsx's own doc comment on `activeTabFillStyles` for why a
+// mode check can't be used here instead). Paired with `text.primary` on the
+// bubble's text, which DOES flip to a light color under the dark scheme,
+// that rendered Novera's own message bubble as near-white text on a
+// near-white background -- illegible, reported live. `applyStyles("dark",
+// …)` swaps in a dark grey surface for that one scheme instead, the same
+// mechanism CaseTabStrip.tsx already uses for the same class of bug.
+function assistantBubbleBackground(theme: ColorSchemeAwareTheme): Record<string, unknown> {
+  return {
+    backgroundColor: theme.palette.grey[100],
+    ...theme.applyStyles("dark", { backgroundColor: theme.palette.grey[800] }),
+  };
+}
 
 /**
  * Full-page workspace for an engineer's accepted live chats -- the large
@@ -204,27 +234,65 @@ export default function ChatWorkspacePage(): JSX.Element {
                 No messages yet — say hello.
               </Typography>
             ) : (
-              selectedSession.messages.map((m) => (
-                <Box
-                  key={m.id}
-                  sx={{
-                    alignSelf: m.from === "engineer" ? "flex-end" : "flex-start",
-                    maxWidth: "70%",
-                  }}
-                >
-                  <Typography
-                    variant="body1"
+              selectedSession.messages.map((m, i) => (
+                <Box key={m.id} sx={{ width: "100%" }}>
+                  {i === 0 && (selectedSession.priorMessageCount ?? 0) > 0 && (
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ display: "block", mb: 0.5 }}
+                    >
+                      Previous conversation with Novera
+                    </Typography>
+                  )}
+                  <Box
                     sx={{
-                      p: 1.5,
-                      borderRadius: 2,
-                      whiteSpace: "pre-wrap",
-                      overflowWrap: "anywhere",
-                      bgcolor: m.from === "engineer" ? "primary.main" : "action.hover",
-                      color: m.from === "engineer" ? "primary.contrastText" : "text.primary",
+                      display: "flex",
+                      justifyContent: m.from === "engineer" ? "flex-end" : "flex-start",
                     }}
                   >
-                    {m.text}
-                  </Typography>
+                    <Box sx={{ maxWidth: "70%" }}>
+                      {m.from === "assistant" && (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ display: "block", mb: 0.25, fontStyle: "italic" }}
+                        >
+                          Novera
+                        </Typography>
+                      )}
+                      <Typography
+                        variant="body1"
+                        sx={(theme: ColorSchemeAwareTheme) => ({
+                          p: 1.5,
+                          borderRadius: 2,
+                          whiteSpace: "pre-wrap",
+                          overflowWrap: "anywhere",
+                          color: m.from === "engineer" ? "primary.contrastText" : "text.primary",
+                          ...(m.from === "engineer"
+                            ? { bgcolor: "primary.main" }
+                            : m.from === "assistant"
+                              ? assistantBubbleBackground(theme)
+                              : { bgcolor: "action.hover" }),
+                        })}
+                      >
+                        {m.text}
+                      </Typography>
+                    </Box>
+                  </Box>
+                  {/* Divider right after the last replayed prior-AI-chat
+                      message, before the live post-escalation conversation
+                      starts -- see ActiveSession.priorMessageCount. Only
+                      rendered once, and only when this session actually
+                      has prior history. */}
+                  {i + 1 === (selectedSession.priorMessageCount ?? 0) &&
+                    i + 1 < selectedSession.messages.length && (
+                      <Divider sx={{ my: 1.5 }}>
+                        <Typography variant="caption" color="text.secondary">
+                          Live chat started
+                        </Typography>
+                      </Divider>
+                    )}
                 </Box>
               ))
             )}
