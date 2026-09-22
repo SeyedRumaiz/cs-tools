@@ -51,6 +51,10 @@ vi.mock("@context/case-tabs/CaseTabsContext", () => ({
   CaseTabsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
+vi.mock("@context/chat-sessions/ChatSessionsContext", () => ({
+  ChatSessionsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+
 // The component under test for the actual bug: renders a marker (real
 // `CaseTabsContentHost` would instead mount a restored case tab's page,
 // which is what called `useCurrentUser` outside its provider and crashed).

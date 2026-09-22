@@ -64,6 +64,7 @@ import CsmDashboardPage from "@features/csm-dashboard/pages/CsmDashboardPage";
 import CsMonitorDashboardPage from "@features/csm-dashboard/pages/CsMonitorDashboardPage";
 import DashboardWidgetPreviewPage from "@features/csm-dashboard/pages/DashboardWidgetPreviewPage";
 import CsmCasesPage from "@features/csm-cases/pages/CsmCasesPage";
+import ChatWorkspacePage from "@features/csm-chat/pages/ChatWorkspacePage";
 import CsmCaseCreatePage from "@features/csm-cases/pages/CsmCaseCreatePage";
 import OperationsPage from "@features/csm-operations/pages/OperationsPage";
 import CreateServiceRequestPage from "@features/csm-operations/pages/CreateServiceRequestPage";
@@ -436,6 +437,7 @@ export default function App(): JSX.Element {
                   />
                   <Route path="cases" element={<CsmCasesPage />} />
                   <Route path="cases/new" element={<CsmCaseCreatePage />} />
+                  <Route path="chat" element={<ChatWorkspacePage />} />
                   <Route
                     path="cases/:caseId"
                     element={<CaseDetailRouteSync kind="case" />}
