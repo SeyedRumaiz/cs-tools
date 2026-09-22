@@ -59,6 +59,17 @@ import (
 
 // escalationEntityClient is the subset of the entity client this feature
 // needs. entityClient (cmd/server/main.go) already implements this.
+//
+// Deliberately no SearchComments here (unlike ai_chat.go's own entity
+// client interface, which still uses it for the AI-chat transcript itself):
+// HandleEscalate's priorMessages now comes directly from the browser (see
+// escalateRequestBody.PriorMessages below), not from an entity-service
+// fetch -- this deployment's DATA_SOURCE=postgres entity-service has no
+// conversation/comment persistence of its own to fetch from, so a
+// SearchComments call here would either fail or (on a ServiceNow-backed
+// deployment) risk double-counting the same history the frontend already
+// sent. See this file's package doc comment and the project's
+// chat-persistence-mapping-plan.md / chat-first-escalation-plan.md.
 type escalationEntityClient interface {
 	GetProject(ctx context.Context, id string) (entity.ProjectDetailsView, error)
 	SearchDeployments(ctx context.Context, req entity.SearchDeploymentsRequest) (entity.SearchDeploymentsResponse, error)
@@ -115,6 +126,47 @@ const escalationSearchLimit = 25
 // chatNotifyTimeout bounds the best-effort push to csm-portal/backend.
 const chatNotifyTimeout = 5 * time.Second
 
+// escalatePriorMessageRole is who sent one escalatePriorMessage -- the
+// customer or the Novera AI assistant. Mirrors chat-routing-service's
+// router.PriorMessageRole / csm-portal/backend's routingclient.
+// PriorMessageRole exactly (same two values, same wire tag), since this
+// value is forwarded through both of those services unchanged before
+// finally being persisted as chat_routing.comment.created_by.
+type escalatePriorMessageRole string
+
+const (
+	escalatePriorMessageRoleCustomer  escalatePriorMessageRole = "customer"
+	escalatePriorMessageRoleAssistant escalatePriorMessageRole = "assistant"
+)
+
+// escalatePriorMessage is one message from the customer's AI-chatbot
+// (Novera) conversation, sent by the browser (NoveraChatPage's own
+// messages[] state -- see that page's handleEscalateToEngineer) and
+// forwarded verbatim in the escalation push to csm-portal/backend so the
+// assigned engineer's chat opens with the same context the customer already
+// gave the AI. Field names mirror chat-routing-service's router.
+// PriorMessage / csm-portal/backend's routingclient.PriorMessage.
+type escalatePriorMessage struct {
+	Role      escalatePriorMessageRole `json:"role"`
+	Content   string                   `json:"content"`
+	CreatedAt string                   `json:"createdAt,omitempty"`
+}
+
+// escalatePushPayload is the JSON body sent to csm-portal/backend's
+// POST /internal/chat/escalate. Replaces the old inline map[string]string
+// now that PriorMessages needs a nested array rather than a flat string
+// value.
+type escalatePushPayload struct {
+	CaseID         string                 `json:"caseId"`
+	ConversationID string                 `json:"conversationId"`
+	ProjectID      string                 `json:"projectId"`
+	Subject        string                 `json:"subject"`
+	CustomerEmail  string                 `json:"customerEmail"`
+	CustomerName   string                 `json:"customerName"`
+	Message        string                 `json:"message"`
+	PriorMessages  []escalatePriorMessage `json:"priorMessages,omitempty"`
+}
+
 // escalateRequestBody is the body the customer's browser sends.
 type escalateRequestBody struct {
 	ConversationID string `json:"conversationId"`
@@ -127,6 +179,14 @@ type escalateRequestBody struct {
 	// record (the case's own createdBy comes from entity-service's auth
 	// context, exactly like every other case this backend creates).
 	CustomerName string `json:"customerName,omitempty"`
+	// PriorMessages is the customer's AI-chatbot (Novera) conversation
+	// history already visible in the browser at the moment "Chat with an
+	// Engineer" was clicked -- see escalatePriorMessage. Sent directly by
+	// NoveraChatPage's own messages[] state, not fetched from
+	// entity-service (see escalationEntityClient's own doc comment).
+	// Optional -- omitted or empty just means the engineer's chat starts
+	// without that context, same as before this field existed.
+	PriorMessages []escalatePriorMessage `json:"priorMessages,omitempty"`
 }
 
 // pickDeployment prefers a primary_production deployment when one exists,
@@ -213,14 +273,40 @@ func (h *ChatEscalationHandler) HandleEscalate(w http.ResponseWriter, r *http.Re
 	if customerName == "" {
 		customerName = user.Email
 	}
-	pushPayload, err := json.Marshal(map[string]string{
-		"caseId":         req.ConversationID,
-		"conversationId": req.ConversationID,
-		"projectId":      projectID,
-		"subject":        escalationDefaultSubject,
-		"customerEmail":  user.Email,
-		"customerName":   customerName,
-		"message":        message,
+
+	// Prior messages come straight from the browser now, not from an
+	// entity-service fetch (see escalateRequestBody.PriorMessages's own doc
+	// comment and escalationEntityClient's) -- NoveraChatPage already sends
+	// its own visible transcript, in chronological order, as of the moment
+	// "Chat with an Engineer" was clicked. Only light validation here: an
+	// unrecognized role collapses to "customer" rather than rejecting the
+	// whole escalation over one bad value, and a message with no content is
+	// dropped.
+	priorMessages := make([]escalatePriorMessage, 0, len(req.PriorMessages))
+	for _, m := range req.PriorMessages {
+		if m.Content == "" {
+			continue
+		}
+		role := m.Role
+		if role != escalatePriorMessageRoleAssistant {
+			role = escalatePriorMessageRoleCustomer
+		}
+		priorMessages = append(priorMessages, escalatePriorMessage{
+			Role:      role,
+			Content:   m.Content,
+			CreatedAt: m.CreatedAt,
+		})
+	}
+
+	pushPayload, err := json.Marshal(escalatePushPayload{
+		CaseID:         req.ConversationID,
+		ConversationID: req.ConversationID,
+		ProjectID:      projectID,
+		Subject:        escalationDefaultSubject,
+		CustomerEmail:  user.Email,
+		CustomerName:   customerName,
+		Message:        message,
+		PriorMessages:  priorMessages,
 	})
 	if err == nil {
 		pushCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), chatNotifyTimeout)

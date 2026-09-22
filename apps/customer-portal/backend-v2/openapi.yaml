@@ -10055,6 +10055,35 @@ components:
             Display label only, shown in the engineer's alert UI. Never
             used for authorization or attribution — the case's own
             createdBy always comes from the authenticated session.
+        priorMessages:
+          type: array
+          description: >-
+            The AI-chatbot (Novera) conversation already visible on this
+            page at the moment "Chat with an Engineer" was clicked, in
+            chronological order — sent by the browser itself, not fetched
+            server-side (this backend's entity-service has no
+            conversation/comment persistence of its own to fetch from).
+            Forwarded to csm-portal/backend and on to chat-routing-service,
+            which persists it once. Optional — omitted or empty just means
+            the engineer's chat starts without that context.
+          items:
+            $ref: '#/components/schemas/ChatPriorMessage'
+    ChatPriorMessage:
+      type: object
+      description: >-
+        One message from the customer's AI-chatbot (Novera) conversation
+        that happened before this escalation.
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [customer, assistant]
+        content:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          description: RFC 3339, optional.
     ChatEscalateResponse:
       type: object
       required: [caseId, message]
