@@ -264,6 +264,18 @@ export type ChatWebSocketPayload =
       envProducts: Record<string, string[]>;
     }
   | {
+      // Keepalive frame -- see NoveraChatPage's heartbeat effect and
+      // HUMAN_CHAT_WS_HEARTBEAT_INTERVAL_MS's own doc comment for why this
+      // is sent periodically during a live-engineer chat. conversationId is
+      // included (not just the bare "ping" string backend-v2 also accepts)
+      // so the server's handleMessage re-registers this connection for
+      // PushEvent delivery on every tick, not just resets its read
+      // deadline -- see backend-v2's own registerConn call, which runs
+      // before its isPing check and keys off exactly this field.
+      type: "ping";
+      conversationId?: string;
+    }
+  | {
       type: "token_increase_request";
       accountId: string;
       /**

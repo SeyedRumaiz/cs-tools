@@ -56,6 +56,7 @@ import {
 import {
   CHAT_TYPING_CHARS_PER_TICK,
   CHAT_TYPING_INTERVAL_MS,
+  HUMAN_CHAT_WS_HEARTBEAT_INTERVAL_MS,
   NOVERA_ANALYZING_PLACEHOLDER_TEXT,
   NOVERA_INITIAL_WELCOME_TEXT,
   NOVERA_WELCOME_MESSAGE_ID,
@@ -995,6 +996,32 @@ export default function NoveraChatPage(): JSX.Element {
     },
     [conversationId, postChatMessage],
   );
+
+  // Keeps the WebSocket alive (and registered for delivery) for the whole
+  // duration of a live-engineer chat -- see HUMAN_CHAT_WS_HEARTBEAT_INTERVAL_MS's
+  // own doc comment for why this is necessary: once escalated, every
+  // customer message goes over REST (sendViaHumanChat above), so nothing
+  // else ever touches this socket, and backend-v2 closes (and unregisters)
+  // a connection it hasn't read from in 5 minutes purely for looking idle.
+  // Sending "ping" with conversationId both resets that read deadline and
+  // re-registers the connection in backend-v2's delivery map on every tick
+  // (see registerConn in websocket.go, which runs before the isPing check),
+  // so this also self-heals a connection that already dropped for some
+  // other reason (a backend restart, a network blip) instead of leaving the
+  // customer silently unreachable until they think to refresh.
+  useEffect(() => {
+    if (!isHumanConnected || !projectId || !conversationId) return;
+    const id = window.setInterval(() => {
+      void connect(projectId)
+        .then(() => sendUserMessage({ type: "ping", conversationId }))
+        .catch(() => {
+          // Best-effort: the next tick tries again. Surfacing this to the
+          // customer would be noise for what is, in the common case, a
+          // single transient blip self-healed a minute later.
+        });
+    }, HUMAN_CHAT_WS_HEARTBEAT_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [isHumanConnected, projectId, conversationId, connect, sendUserMessage]);
 
   // Escalates the current conversation to a live engineer — see
   // usePostChatEscalation's own doc comment for what this call does
