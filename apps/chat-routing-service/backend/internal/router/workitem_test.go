@@ -25,6 +25,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -322,5 +323,78 @@ func TestEscalateAndAccept_StillWorkAfterCreateWorkItemWithPriorMessages(t *test
 	row := getConversationRow(t, pool, caseID)
 	if row.State != "ACTIVE" || row.AcceptedAt == nil {
 		t.Errorf("expected ACTIVE with accepted_at set after Accept, got %+v", row)
+	}
+}
+
+// TestAddComment_RejectsAfterSessionEnded is the regression test for a live
+// bug: AddComment used to succeed unconditionally, even once Completed had
+// already set session_ended_at -- so after an engineer clicked "End
+// session", the case correctly vanished from their own view, but the
+// customer's page kept "sending" messages that were silently accepted and
+// went nowhere, with no error surfaced anywhere (see csm-portal/backend's
+// HandleCustomerMessage, which treated this call as pure best-effort and
+// always reported success regardless of what happened here). AddComment
+// must instead fail with ErrConversationEnded once the session has ended,
+// so that failure can propagate back to the customer instead of being
+// swallowed.
+func TestAddComment_RejectsAfterSessionEnded(t *testing.T) {
+	r, pool := newTestRouter(t)
+	userID := testUserID(t, r, pool, "addcomment-ended")
+	caseID := testCaseID(t, pool, "addcomment-ended")
+	customerEmail := "addcomment-ended@example.com"
+
+	ci := CaseInfo{
+		CaseID: caseID, ConversationID: "conv-" + caseID,
+		Subject: "test", CustomerEmail: customerEmail,
+	}
+	workItemFixture(t, r, pool, ci)
+
+	// Reach ACTIVE (assigned + accepted), same fixture pattern as
+	// TestEscalateAndAccept_StillWorkAfterCreateWorkItemWithPriorMessages
+	// above -- Completed's own UPDATE requires assignee_id to be set, so a
+	// bare workItemFixture alone (no assignee) isn't enough to exercise it.
+	caseInfoJSON, err := json.Marshal(ci)
+	if err != nil {
+		t.Fatalf("marshal case info: %v", err)
+	}
+	err = r.withTx(context.Background(), func(tx pgx.Tx) error {
+		if _, err := insertQueueRow(context.Background(), tx, ci, caseInfoJSON, queueAssigned); err != nil {
+			return err
+		}
+		return assignCaseToEngineer(context.Background(), tx, userID, ci)
+	})
+	if err != nil {
+		t.Fatalf("assign fixture: %v", err)
+	}
+	if _, err := r.Accept(context.Background(), userID, caseID); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	// A live message before the session ends must still succeed normally.
+	if err := r.AddComment(context.Background(), caseID, customerEmail, "still live"); err != nil {
+		t.Fatalf("AddComment before Completed: %v", err)
+	}
+
+	completedResult, err := r.Completed(context.Background(), userID, caseID)
+	if err != nil {
+		t.Fatalf("Completed: %v", err)
+	}
+	if !completedResult.Ended {
+		t.Fatalf("expected Completed to end the session, got %+v", completedResult)
+	}
+
+	err = r.AddComment(context.Background(), caseID, customerEmail, "sent after end")
+	if !errors.Is(err, ErrConversationEnded) {
+		t.Fatalf("expected ErrConversationEnded for AddComment on an ended session, got: %v", err)
+	}
+
+	detail, err := r.DebugWorkItem(context.Background(), caseID)
+	if err != nil {
+		t.Fatalf("DebugWorkItem: %v", err)
+	}
+	for _, c := range detail.Comments {
+		if c.Content == "sent after end" {
+			t.Fatalf("expected the rejected comment to NOT be persisted, but found it: %+v", detail.Comments)
+		}
 	}
 }

@@ -157,6 +157,20 @@ func mapUpstreamError(w http.ResponseWriter, err error, fallbackMsg string) {
 			writeError(w, http.StatusBadRequest, msg)
 		case http.StatusConflict, http.StatusUnprocessableEntity:
 			writeError(w, apiErr.StatusCode, apiErr.Body)
+		case http.StatusGone:
+			// Reserved, currently, for exactly one meaning: csm-portal/backend's
+			// HandleSendMessage got this from AddComment-on-an-ended-session
+			// (see chat-routing-service's router.ErrConversationEnded and its
+			// own AddComment HTTP handler). Passed through as its own status
+			// rather than folded into a generic message, so the frontend can
+			// tell "the session already ended" apart from any other failure
+			// and reset its own chat UI accordingly (see NoveraChatPage's
+			// sendViaHumanChat).
+			msg := apiErr.Body
+			if msg == "" {
+				msg = "This chat session has already ended."
+			}
+			writeError(w, http.StatusGone, msg)
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			writeError(w, http.StatusServiceUnavailable, fallbackMsg)
 		default:

@@ -326,6 +326,13 @@ var ErrNotConversationOwner = errors.New("case is not an active conversation hel
 // been converted to a case or otherwise ended.
 var ErrAlreadyConverted = errors.New("chat_conversation is already converted to a case or otherwise ended")
 
+// ErrConversationEnded is returned by AddComment when caseID's
+// chat_conversation already has session_ended_at set (via Completed or
+// ConvertToCase) -- see AddComment's own doc comment for why silently
+// accepting a comment on an already-ended session is exactly the bug this
+// guards against.
+var ErrConversationEnded = errors.New("chat session has already ended for this case")
+
 // ConvertToCaseResult mirrors CompletedResult -- converting a chat ends its
 // session like Completed does, so it can backfill a freed capacity slot.
 type ConvertToCaseResult struct {

@@ -328,6 +328,11 @@ type commentRequest struct {
 // router/workitem.go's package doc comment. Called for both directions of
 // a live chat message (customer and engineer) -- see csm-portal/backend's
 // HandleCustomerMessage and HandleEngineerMessage.
+//
+// router.ErrConversationEnded gets its own 410 Gone rather than falling
+// into writeStorageError's generic 502 -- callers (routingclient.AddComment)
+// need to tell "the session already ended" apart from "the store is down"
+// so they can react correctly instead of just logging and moving on.
 func (h *RoutingHandler) AddComment(w http.ResponseWriter, r *http.Request) {
 	var req commentRequest
 	if !decodeBody(w, r, &req) {
@@ -339,6 +344,10 @@ func (h *RoutingHandler) AddComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.router.AddComment(r.Context(), req.CaseID, req.AuthorEmail, req.Content); err != nil {
+		if errors.Is(err, router.ErrConversationEnded) {
+			writeError(w, http.StatusGone, "This chat session has already ended.")
+			return
+		}
 		writeStorageError(w, "comment:add", err)
 		return
 	}

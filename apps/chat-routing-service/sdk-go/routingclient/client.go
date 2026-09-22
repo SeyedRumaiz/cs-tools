@@ -50,6 +50,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -57,6 +58,14 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrConversationEnded is returned by AddComment when chat-routing-service
+// reports (via 410 Gone) that the case's session already ended -- mirrors
+// router.ErrConversationEnded on the server side. 410 is reserved across
+// this whole client for exactly this meaning; do's own status-to-error
+// mapping below is what makes errors.Is(err, ErrConversationEnded) work
+// regardless of which endpoint returned it.
+var ErrConversationEnded = errors.New("chat session has already ended for this case")
 
 // internalTokenHeader must match chat-routing-service/backend's own
 // internal/middleware.InternalTokenHeader.
@@ -277,6 +286,9 @@ func (c *Client) do(ctx context.Context, method, path string, reqBody, out any) 
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
+		if resp.StatusCode == http.StatusGone {
+			return fmt.Errorf("routingclient: %s %s: %w: %s", method, path, ErrConversationEnded, string(body))
+		}
 		return fmt.Errorf("routingclient: %s %s: upstream returned %d: %s", method, path, resp.StatusCode, string(body))
 	}
 
