@@ -96,14 +96,25 @@ func isValidStatus(s string) bool {
 
 // caseInfoRequest is the body shape shared by POST /route/escalate and
 // POST /route/workitem -- one field per router.CaseInfo field.
+//
+// PriorMessages only actually does anything on POST /route/workitem (see
+// router.Router.CreateWorkItem) -- Escalate's own caseInfoRequest is
+// decoded through the exact same struct only because the two routes have
+// always shared one body shape, but by the time Escalate runs, the
+// chat_conversation row (and, if any, its persisted prior messages) already
+// exists from the preceding CreateWorkItem call. Reusing router.PriorMessage
+// directly (rather than a separate request-only type) since the wire shape
+// is identical -- role/content/createdAt -- and this package already
+// depends on the router package for everything else here.
 type caseInfoRequest struct {
-	CaseID         string `json:"caseId"`
-	ConversationID string `json:"conversationId"`
-	ProjectID      string `json:"projectId"`
-	Subject        string `json:"subject"`
-	CustomerEmail  string `json:"customerEmail"`
-	CustomerName   string `json:"customerName"`
-	Message        string `json:"message"`
+	CaseID         string                `json:"caseId"`
+	ConversationID string                `json:"conversationId"`
+	ProjectID      string                `json:"projectId"`
+	Subject        string                `json:"subject"`
+	CustomerEmail  string                `json:"customerEmail"`
+	CustomerName   string                `json:"customerName"`
+	Message        string                `json:"message"`
+	PriorMessages  []router.PriorMessage `json:"priorMessages,omitempty"`
 }
 
 func (req caseInfoRequest) toCaseInfo() router.CaseInfo {
@@ -115,6 +126,7 @@ func (req caseInfoRequest) toCaseInfo() router.CaseInfo {
 		CustomerEmail:  req.CustomerEmail,
 		CustomerName:   req.CustomerName,
 		Message:        req.Message,
+		PriorMessages:  req.PriorMessages,
 	}
 }
 
@@ -433,14 +445,22 @@ func (h *RoutingHandler) SetCapacity(w http.ResponseWriter, r *http.Request) {
 // caseInfoResponse mirrors router.CaseInfo -- kept as its own type (rather
 // than encoding router.CaseInfo directly) so this endpoint's wire shape can
 // diverge from the router's internal one if it ever needs to.
+//
+// PriorMessages is included here mainly for GetCaseInfo (POST
+// /route/workitem/{caseId}/info): the router.CaseInfo it's given always has
+// PriorMessages populated fresh from chat_routing.comment by that point
+// (see router.Router.GetCaseInfo), so this response would otherwise silently
+// drop it on the floor -- the same gap caseInfoRequest had before it grew a
+// PriorMessages field for the request side.
 type caseInfoResponse struct {
-	CaseID         string `json:"caseId"`
-	ConversationID string `json:"conversationId"`
-	ProjectID      string `json:"projectId,omitempty"`
-	Subject        string `json:"subject,omitempty"`
-	CustomerEmail  string `json:"customerEmail,omitempty"`
-	CustomerName   string `json:"customerName,omitempty"`
-	Message        string `json:"message,omitempty"`
+	CaseID         string                `json:"caseId"`
+	ConversationID string                `json:"conversationId"`
+	ProjectID      string                `json:"projectId,omitempty"`
+	Subject        string                `json:"subject,omitempty"`
+	CustomerEmail  string                `json:"customerEmail,omitempty"`
+	CustomerName   string                `json:"customerName,omitempty"`
+	Message        string                `json:"message,omitempty"`
+	PriorMessages  []router.PriorMessage `json:"priorMessages,omitempty"`
 }
 
 func caseInfoToResponse(c router.CaseInfo) caseInfoResponse {
@@ -452,6 +472,7 @@ func caseInfoToResponse(c router.CaseInfo) caseInfoResponse {
 		CustomerEmail:  c.CustomerEmail,
 		CustomerName:   c.CustomerName,
 		Message:        c.Message,
+		PriorMessages:  c.PriorMessages,
 	}
 }
 
