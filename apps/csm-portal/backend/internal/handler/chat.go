@@ -228,7 +228,12 @@ type chatEvent struct {
 	// HandleConvertToCase) -- the real entity-service case ID the customer's
 	// browser should point to now that this chat has ended.
 	EntityCaseID string `json:"entityCaseId,omitempty"`
-	Timestamp    string `json:"timestamp"`
+	// PriorMessages is set only on customer_escalation -- the customer's
+	// AI-chatbot (Novera) transcript snapshotted at escalation time, so the
+	// receiving engineer's browser can seed the chat with that context
+	// instead of starting cold. See routingclient.PriorMessage.
+	PriorMessages []routingclient.PriorMessage `json:"priorMessages,omitempty"`
+	Timestamp     string                       `json:"timestamp"`
 }
 
 // publish marshals evt and publishes it on the given hub key. Best-effort
@@ -318,6 +323,7 @@ func assignedCaseEvent(ci routingclient.CaseInfo) chatEvent {
 		CustomerEmail:  ci.CustomerEmail,
 		CustomerName:   ci.CustomerName,
 		Message:        ci.Message,
+		PriorMessages:  ci.PriorMessages,
 		Timestamp:      time.Now().UTC().Format(time.RFC3339),
 	}
 }
@@ -337,6 +343,11 @@ type escalateRequest struct {
 	CustomerEmail  string `json:"customerEmail"`
 	CustomerName   string `json:"customerName"`
 	Message        string `json:"message"`
+	// PriorMessages is the customer's AI-chatbot (Novera) transcript up to
+	// the moment of escalation -- see routingclient.PriorMessage. Optional:
+	// omitted or empty just means the engineer's chat starts without that
+	// context, same as before this field existed.
+	PriorMessages []routingclient.PriorMessage `json:"priorMessages,omitempty"`
 }
 
 // HandleEscalate handles POST /internal/chat/escalate. Not browser-facing —
@@ -380,6 +391,7 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 		CustomerEmail:  req.CustomerEmail,
 		CustomerName:   req.CustomerName,
 		Message:        req.Message,
+		PriorMessages:  req.PriorMessages,
 	}
 
 	// Best-effort: LOCAL STAND-IN persistence (see routingService's own doc
