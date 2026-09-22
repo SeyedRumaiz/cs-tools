@@ -136,6 +136,33 @@ type CaseInfo struct {
 	CustomerEmail  string `json:"customerEmail,omitempty"`
 	CustomerName   string `json:"customerName,omitempty"`
 	Message        string `json:"message,omitempty"`
+	// PriorMessages mirrors router.CaseInfo.PriorMessages -- the customer's
+	// AI-chatbot (Novera) conversation history, snapshotted at the moment
+	// of escalation. See PriorMessage below.
+	PriorMessages []PriorMessage `json:"priorMessages,omitempty"`
+}
+
+// PriorMessageRole mirrors router.PriorMessageRole -- who sent one
+// PriorMessage, the customer or the Novera AI assistant. Never an engineer:
+// a pre-escalation transcript predates any engineer being involved.
+type PriorMessageRole string
+
+const (
+	PriorMessageRoleCustomer  PriorMessageRole = "customer"
+	PriorMessageRoleAssistant PriorMessageRole = "assistant"
+)
+
+// PriorMessage mirrors router.PriorMessage -- one message from the
+// customer's AI-chatbot (Novera) conversation that happened before an
+// escalation, supplied by the caller (customer-portal/backend-v2, from the
+// frontend's own visible conversation) and persisted into
+// chat_routing.comment by CreateWorkItem. Duplicated rather than shared,
+// same as every other type in this file (see this file's own package doc
+// comment). CreatedAt is RFC 3339, optional.
+type PriorMessage struct {
+	Role      PriorMessageRole `json:"role"`
+	Content   string           `json:"content"`
+	CreatedAt string           `json:"createdAt,omitempty"`
 }
 
 // CaseStatus mirrors router.CaseStatus — one case an engineer currently
