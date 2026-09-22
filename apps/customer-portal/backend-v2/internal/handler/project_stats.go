@@ -21,11 +21,36 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/dto"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/entity"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/middleware"
 )
+
+// queryListValues reads a query parameter that may arrive either repeated
+// (?caseTypes=a&caseTypes=b) or comma-joined (?caseTypes=a,b), and returns the
+// individual values.
+//
+// Both spellings are in use by real clients: the webapp repeats the parameter,
+// the microapp joins with commas. url.Values only splits on repetition, so a
+// comma-joined value used to reach entity-service as one item and be rejected
+// whole ("caseTypes contains invalid value: a,b,c") rather than validated
+// element by element. Empty items are dropped so a trailing comma is harmless.
+func queryListValues(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		for _, part := range strings.Split(raw, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
 
 // entityProjectStatsClient abstracts the entity-service project metadata/stats
 // operations used by ProjectStatsHandler.
@@ -119,7 +144,7 @@ func (h *ProjectStatsHandler) GetProjectDashboardStats(w http.ResponseWriter, r 
 		return
 	}
 
-	caseTypes := r.URL.Query()["caseTypes"]
+	caseTypes := queryListValues(r.URL.Query()["caseTypes"])
 	createdBy := r.URL.Query().Get("createdBy")
 
 	var caseStatsPtr *entity.ProjectCaseStatsResponse
@@ -167,7 +192,7 @@ func (h *ProjectStatsHandler) GetProjectCaseStats(w http.ResponseWriter, r *http
 		return
 	}
 
-	result, err := h.entity.GetProjectCaseStats(r.Context(), id, r.URL.Query()["caseTypes"], r.URL.Query().Get("createdBy"))
+	result, err := h.entity.GetProjectCaseStats(r.Context(), id, queryListValues(r.URL.Query()["caseTypes"]), r.URL.Query().Get("createdBy"))
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity GetProjectCaseStats failed", "userID", user.UserID, "projectID", id, "err", summarizeErr(err))
 		mapUpstreamError(w, err, "Failed to retrieve case statistics.")
@@ -217,7 +242,7 @@ func (h *ProjectStatsHandler) GetProjectSupportStats(w http.ResponseWriter, r *h
 		return
 	}
 
-	caseTypes := r.URL.Query()["caseTypes"]
+	caseTypes := queryListValues(r.URL.Query()["caseTypes"])
 	createdBy := r.URL.Query().Get("createdBy")
 
 	var caseStatsPtr *entity.ProjectCaseStatsResponse
