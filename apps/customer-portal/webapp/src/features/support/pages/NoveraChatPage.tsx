@@ -31,7 +31,10 @@ import { useGetConversationMessages } from "@features/support/api/useGetConversa
 import useGetUserDetails from "@features/settings/api/useGetUserDetails";
 import { usePostCaseClassifications } from "@features/support/api/usePostCaseClassifications";
 import { useChatWebSocket } from "@features/support/api/useChatWebSocket";
-import { usePostChatEscalation } from "@features/support/api/usePostChatEscalation";
+import {
+  usePostChatEscalation,
+  type EscalationPriorMessage,
+} from "@features/support/api/usePostChatEscalation";
 import { usePostChatMessage } from "@features/support/api/usePostChatMessage";
 import useGetProjectDetails from "@api/useGetProjectDetails";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
@@ -74,6 +77,7 @@ import ChatMessageList from "@features/support/components/novera-ai-assistant/no
 import TokenRequestModal from "@features/support/components/novera-ai-assistant/novera-chat-page/TokenRequestModal";
 import ChatSkeleton from "@features/support/components/novera-ai-assistant/novera-chat-page/ChatSkeleton";
 import {
+  buildEscalationPriorMessages,
   displayTextFromConversationContent,
   getFinalMessageFromPayload,
   sanitizeStreamToken,
@@ -968,6 +972,14 @@ export default function NoveraChatPage(): JSX.Element {
   const handleEscalateToEngineer = useCallback(async (): Promise<void> => {
     if (!conversationId || isEscalating || isHumanConnected) return;
     setIsEscalating(true);
+
+    // Snapshot the conversation exactly as it's already visible on this
+    // page, before appending the "connecting you" placeholder below -- see
+    // buildEscalationPriorMessages's own doc comment for exactly what's
+    // excluded and why.
+    const priorMessages: EscalationPriorMessage[] =
+      buildEscalationPriorMessages(messages);
+
     setMessages((prev) => [
       ...prev,
       {
@@ -981,6 +993,7 @@ export default function NoveraChatPage(): JSX.Element {
       const result = await postChatEscalation.mutateAsync({
         conversationId,
         customerName: currentUserEmail || undefined,
+        priorMessages,
       });
       escalationCaseIdRef.current = result.caseId;
     } catch {
@@ -1002,6 +1015,7 @@ export default function NoveraChatPage(): JSX.Element {
     isHumanConnected,
     postChatEscalation,
     currentUserEmail,
+    messages,
   ]);
 
   const handleSolutionWorked = useCallback(() => {
