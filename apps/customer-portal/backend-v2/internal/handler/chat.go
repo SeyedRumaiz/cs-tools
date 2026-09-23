@@ -22,11 +22,12 @@
 // Chat-first escalation: HandleEscalate no longer creates a real
 // entity-service case. It only resolves and validates that this project
 // COULD have one created for it later (see below), then hands the chat off
-// using req.ConversationID as its own identity — see that method's own doc
-// comment and the project's chat-first-escalation-plan.md. A real case is
-// created later, exactly once, only if and when the assigned engineer
-// explicitly converts the chat — see HandleCreateCase below, this file's
-// other exported method.
+// under a fresh caseId/liveChatId it mints itself for this one escalation
+// instance — see that method's own doc comment, newLiveChatCaseID, and the
+// project's chat-first-escalation-plan.md. A real case is created later,
+// exactly once, only if and when the assigned engineer explicitly converts
+// the chat — see HandleCreateCase below, this file's other exported
+// method.
 //
 // Case creation (whenever it does happen) lives HERE, not in csm-portal/
 // backend, even though csm-portal owns everything else about a case:
@@ -49,10 +50,12 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/entity"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/middleware"
 )
@@ -205,9 +208,16 @@ func pickDeployment(deployments []entity.DeploymentView) entity.DeploymentView {
 
 // HandleEscalate handles POST /projects/{id}/support/chat/escalate.
 // Resolves a deployment/deployed-product for the project as a fail-fast
-// check, then best-effort notifies csm-portal/backend so a connected
-// engineer sees the alert. No entity-service case is created here -- one
-// is only created later, if the engineer converts the chat (HandleCreateCase).
+// check, mints a fresh caseId/liveChatId for this one escalation instance
+// (see newLiveChatCaseID), then notifies csm-portal/backend so a connected
+// engineer sees the alert -- best-effort for most failures, but a 409 is
+// treated as a real, customer-facing rejection (see the push-error handling
+// below). No entity-service case is created here -- one is only created
+// later, if the engineer converts the chat (HandleCreateCase). The minted
+// caseId is returned to the caller, which must store it separately from
+// conversationId and use it for every subsequent human-chat message (see
+// sendMessageRequestBody) -- Novera WebSocket traffic keeps using
+// conversationId, unaffected by any of this (see ChatEventsHandler.Handle).
 func (h *ChatEscalationHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -298,8 +308,22 @@ func (h *ChatEscalationHandler) HandleEscalate(w http.ResponseWriter, r *http.Re
 		})
 	}
 
+	// caseId/liveChatId: a fresh identity for this ONE live-engineer-chat
+	// escalation instance, minted here rather than reusing
+	// req.ConversationID (the stable Novera AI-chat conversation this
+	// escalation came from). Never generated in the browser -- see
+	// escalateRequestBody's own doc comment and NoveraChatPage, which only
+	// ever stores whatever caseId this response hands back. The same
+	// conversationId can produce more than one caseId over its lifetime
+	// (one per escalation, sequentially -- see newLiveChatCaseID's own doc
+	// comment), which is exactly the scenario the caseId/conversationId
+	// identity split exists to support: re-escalating the same Novera
+	// conversation after a previous case ended must get a genuinely
+	// different caseId, not reuse the old (now-ended) one.
+	caseID := newLiveChatCaseID()
+
 	pushPayload, err := json.Marshal(escalatePushPayload{
-		CaseID:         req.ConversationID,
+		CaseID:         caseID,
 		ConversationID: req.ConversationID,
 		ProjectID:      projectID,
 		Subject:        escalationDefaultSubject,
@@ -308,22 +332,41 @@ func (h *ChatEscalationHandler) HandleEscalate(w http.ResponseWriter, r *http.Re
 		Message:        message,
 		PriorMessages:  priorMessages,
 	})
-	if err == nil {
-		pushCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), chatNotifyTimeout)
-		if pushErr := h.csm.Escalate(pushCtx, pushPayload); pushErr != nil {
-			// Best-effort: a dropped push means this escalation has no
-			// record anywhere until the customer retries, but failing the
-			// request here would bypass csm-portal/backend's own broadcast
-			// fallback for an unreachable chat-routing-service.
-			slog.ErrorContext(r.Context(), "csm-portal escalate push failed", "userID", user.UserID, "conversationID", req.ConversationID, "err", pushErr)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "failed to encode csm-portal escalate push payload", "userID", user.UserID, "conversationID", req.ConversationID, "caseID", caseID, "err", err)
+		writeError(w, http.StatusInternalServerError, ErrMsgInternal)
+		return
+	}
+
+	pushCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), chatNotifyTimeout)
+	pushErr := h.csm.Escalate(pushCtx, pushPayload)
+	cancel()
+	if pushErr != nil {
+		// A 409 from csm-portal/backend is not a dropped push -- it is a
+		// genuine, customer-facing rejection (this customer already has an
+		// open live chat for this project, or -- defense in depth only --
+		// this caseId's case had already ended; see chat-routing-service's
+		// router.ErrDuplicateOpenChat/ErrCaseAlreadyEnded and csm-portal/
+		// backend's own HandleEscalate). Surfacing it via mapUpstreamError
+		// (which already passes a 409's status and message straight
+		// through) instead of swallowing it, unlike every other failure
+		// here, which stays best-effort: a dropped push for any other
+		// reason (a network blip, chat-routing-service being down) means
+		// this escalation has no record anywhere until the customer
+		// retries, but failing the request here would bypass csm-portal/
+		// backend's own broadcast fallback for an unreachable
+		// chat-routing-service.
+		var apiErr *apierror.Error
+		if errors.As(pushErr, &apiErr) && apiErr.StatusCode == http.StatusConflict {
+			slog.InfoContext(r.Context(), "csm-portal escalate push rejected", "userID", user.UserID, "conversationID", req.ConversationID, "caseID", caseID, "err", pushErr)
+			mapUpstreamError(w, pushErr, "Failed to escalate to a live engineer.")
+			return
 		}
-		cancel()
-	} else {
-		slog.ErrorContext(r.Context(), "failed to encode csm-portal escalate push payload", "userID", user.UserID, "conversationID", req.ConversationID, "err", err)
+		slog.ErrorContext(r.Context(), "csm-portal escalate push failed", "userID", user.UserID, "conversationID", req.ConversationID, "caseID", caseID, "err", pushErr)
 	}
 
 	writeJSONValue(w, http.StatusCreated, map[string]string{
-		"caseId":  req.ConversationID,
+		"caseId":  caseID,
 		"message": "Escalated to available engineers.",
 	})
 }
@@ -332,8 +375,11 @@ func (h *ChatEscalationHandler) HandleEscalate(w http.ResponseWriter, r *http.Re
 // POST /internal/chat/create-case: the chat's original escalation details,
 // so nothing here is resent by an engineer's browser or invented fresh.
 type createCaseRequestBody struct {
-	// CaseID is chat-routing-service's own case identity for this chat
-	// (equal to ConversationID), included only for logging on this end.
+	// CaseID is chat-routing-service's own case identity for this one
+	// live-engineer-chat escalation instance -- NOT the same as
+	// ConversationID (the stable Novera AI-chat conversation it came from)
+	// since HandleEscalate started minting a fresh UUID per escalation --
+	// included only for logging on this end.
 	CaseID         string `json:"caseId"`
 	ConversationID string `json:"conversationId"`
 	ProjectID      string `json:"projectId"`
