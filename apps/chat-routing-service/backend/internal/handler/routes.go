@@ -440,7 +440,8 @@ func (h *RoutingHandler) SetCapacity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.router.SetMaxConcurrentChats(r.Context(), req.UserID, req.MaxConcurrentChats); err != nil {
+	result, err := h.router.SetMaxConcurrentChats(r.Context(), req.UserID, req.MaxConcurrentChats)
+	if err != nil {
 		if errors.Is(err, router.ErrInvalidCapacity) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -448,7 +449,7 @@ func (h *RoutingHandler) SetCapacity(w http.ResponseWriter, r *http.Request) {
 		writeStorageError(w, "capacity:set", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"applied": true})
+	writeJSON(w, http.StatusOK, result)
 }
 
 // caseInfoResponse mirrors router.CaseInfo -- kept as its own type (rather
