@@ -67,6 +67,19 @@ import (
 // regardless of which endpoint returned it.
 var ErrConversationEnded = errors.New("chat session has already ended for this case")
 
+// ErrCaseAlreadyEnded is returned by Escalate when chat-routing-service
+// reports (via 409 Conflict) that this caseId's chat_conversation has
+// already ended -- mirrors router.ErrCaseAlreadyEnded on the server side.
+// See that error's own doc comment for why Escalate rejects this instead
+// of creating a zombie queue row.
+var ErrCaseAlreadyEnded = errors.New("this case has already ended and cannot be escalated again")
+
+// ErrDuplicateOpenChat is returned by CreateWorkItem when chat-routing-
+// service reports (via 409 Conflict) that this customerEmail + projectId
+// already has another, non-ended live chat in progress -- mirrors
+// router.ErrDuplicateOpenChat on the server side.
+var ErrDuplicateOpenChat = errors.New("this customer already has an open live chat for this project")
+
 // internalTokenHeader must match chat-routing-service/backend's own
 // internal/middleware.InternalTokenHeader.
 const internalTokenHeader = "X-Routing-Service-Token"
@@ -259,7 +272,14 @@ type TimeoutResult struct {
 // header, and on a 2xx response decode into out (if any). Any non-2xx
 // response or transport failure is returned as an error; the routing
 // service never uses redirects, so the 2xx check does not follow any.
-func (c *Client) do(ctx context.Context, method, path string, reqBody, out any) error {
+//
+// conflictErr, when non-nil, is what a 409 response from this specific
+// call is translated to (wrapped, so errors.Is(err, conflictErr) works) --
+// different endpoints mean different things by 409 (Escalate: the case
+// already ended; CreateWorkItem: a duplicate open chat), so this is a
+// per-call choice rather than a single client-wide mapping the way 410 is.
+// Pass nil for any call that has no 409 meaning of its own.
+func (c *Client) do(ctx context.Context, method, path string, reqBody, out any, conflictErr error) error {
 	var bodyReader io.Reader
 	if reqBody != nil {
 		b, err := json.Marshal(reqBody)
@@ -286,8 +306,11 @@ func (c *Client) do(ctx context.Context, method, path string, reqBody, out any) 
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
-		if resp.StatusCode == http.StatusGone {
+		switch {
+		case resp.StatusCode == http.StatusGone:
 			return fmt.Errorf("routingclient: %s %s: %w: %s", method, path, ErrConversationEnded, string(body))
+		case resp.StatusCode == http.StatusConflict && conflictErr != nil:
+			return fmt.Errorf("routingclient: %s %s: %w: %s", method, path, conflictErr, string(body))
 		}
 		return fmt.Errorf("routingclient: %s %s: upstream returned %d: %s", method, path, resp.StatusCode, string(body))
 	}
@@ -305,7 +328,7 @@ func (c *Client) do(ctx context.Context, method, path string, reqBody, out any) 
 // ci to an available engineer or queue it.
 func (c *Client) Escalate(ctx context.Context, ci CaseInfo) (EscalateResult, error) {
 	var out EscalateResult
-	err := c.do(ctx, http.MethodPost, "/route/escalate", ci, &out)
+	err := c.do(ctx, http.MethodPost, "/route/escalate", ci, &out, ErrCaseAlreadyEnded)
 	return out, err
 }
 
@@ -322,7 +345,7 @@ func (c *Client) SetPresence(ctx context.Context, userID string, status Status) 
 		UserID string `json:"userId"`
 		Status Status `json:"status"`
 	}{UserID: userID, Status: status}
-	err := c.do(ctx, http.MethodPost, "/route/presence", body, &out)
+	err := c.do(ctx, http.MethodPost, "/route/presence", body, &out, nil)
 	return out, err
 }
 
@@ -336,7 +359,7 @@ func (c *Client) Completed(ctx context.Context, userID, caseID string) (Complete
 		UserID string `json:"userId"`
 		CaseID string `json:"caseId"`
 	}{UserID: userID, CaseID: caseID}
-	err := c.do(ctx, http.MethodPost, "/route/completed", body, &out)
+	err := c.do(ctx, http.MethodPost, "/route/completed", body, &out, nil)
 	return out, err
 }
 
@@ -348,7 +371,7 @@ func (c *Client) Decline(ctx context.Context, userID, caseID string) (DeclineRes
 		UserID string `json:"userId"`
 		CaseID string `json:"caseId"`
 	}{UserID: userID, CaseID: caseID}
-	err := c.do(ctx, http.MethodPost, "/route/decline", body, &out)
+	err := c.do(ctx, http.MethodPost, "/route/decline", body, &out, nil)
 	return out, err
 }
 
@@ -363,7 +386,7 @@ func (c *Client) Accept(ctx context.Context, userID, caseID string) (AcceptResul
 		UserID string `json:"userId"`
 		CaseID string `json:"caseId"`
 	}{UserID: userID, CaseID: caseID}
-	err := c.do(ctx, http.MethodPost, "/route/accept", body, &out)
+	err := c.do(ctx, http.MethodPost, "/route/accept", body, &out, nil)
 	return out, err
 }
 
@@ -380,7 +403,7 @@ func (c *Client) Accept(ctx context.Context, userID, caseID string) (AcceptResul
 // CreateWorkItem's doc comment). ci.CustomerEmail attributes the work item
 // to the CUSTOMER who escalated, not an engineer.
 func (c *Client) CreateWorkItem(ctx context.Context, ci CaseInfo) error {
-	return c.do(ctx, http.MethodPost, "/route/workitem", ci, nil)
+	return c.do(ctx, http.MethodPost, "/route/workitem", ci, nil, ErrDuplicateOpenChat)
 }
 
 // AddComment calls POST /route/comment -- LOCAL STAND-IN persistence, same
@@ -395,7 +418,7 @@ func (c *Client) AddComment(ctx context.Context, caseID, authorEmail, content st
 		AuthorEmail string `json:"authorEmail"`
 		Content     string `json:"content"`
 	}{CaseID: caseID, AuthorEmail: authorEmail, Content: content}
-	return c.do(ctx, http.MethodPost, "/route/comment", body, nil)
+	return c.do(ctx, http.MethodPost, "/route/comment", body, nil, nil)
 }
 
 // PresenceDetail is GetPresence's result -- the engineer's manual
@@ -423,7 +446,7 @@ type PresenceDetail struct {
 // presence update from (see router.Router.GetPresence).
 func (c *Client) GetPresence(ctx context.Context, userID string) (PresenceDetail, error) {
 	var out PresenceDetail
-	err := c.do(ctx, http.MethodGet, "/route/presence/"+url.PathEscape(userID), nil, &out)
+	err := c.do(ctx, http.MethodGet, "/route/presence/"+url.PathEscape(userID), nil, &out, nil)
 	if err != nil {
 		return PresenceDetail{}, err
 	}
@@ -468,7 +491,7 @@ type SweepResult struct {
 // above.
 func (c *Client) SweepTimeouts(ctx context.Context) (SweepResult, error) {
 	var out SweepResult
-	err := c.do(ctx, http.MethodPost, "/route/sweep-timeouts", nil, &out)
+	err := c.do(ctx, http.MethodPost, "/route/sweep-timeouts", nil, &out, nil)
 	return out, err
 }
 
@@ -498,7 +521,7 @@ func (c *Client) SetMaxConcurrentChats(ctx context.Context, userID string, max i
 		UserID             string `json:"userId"`
 		MaxConcurrentChats int    `json:"maxConcurrentChats"`
 	}{UserID: userID, MaxConcurrentChats: max}
-	err := c.do(ctx, http.MethodPatch, "/route/capacity", body, &out)
+	err := c.do(ctx, http.MethodPatch, "/route/capacity", body, &out, nil)
 	return out, err
 }
 
@@ -506,7 +529,7 @@ func (c *Client) SetMaxConcurrentChats(ctx context.Context, userID string, max i
 // originally-submitted CaseInfo as CreateWorkItem stored it.
 func (c *Client) GetCaseInfo(ctx context.Context, caseID string) (CaseInfo, error) {
 	var out CaseInfo
-	err := c.do(ctx, http.MethodPost, "/route/workitem/"+url.PathEscape(caseID)+"/info", nil, &out)
+	err := c.do(ctx, http.MethodPost, "/route/workitem/"+url.PathEscape(caseID)+"/info", nil, &out, nil)
 	return out, err
 }
 
@@ -528,6 +551,6 @@ func (c *Client) ConvertToCase(ctx context.Context, userID, caseID, entityCaseID
 		CaseID       string `json:"caseId"`
 		EntityCaseID string `json:"entityCaseId"`
 	}{UserID: userID, CaseID: caseID, EntityCaseID: entityCaseID}
-	err := c.do(ctx, http.MethodPost, "/route/convert-to-case", body, &out)
+	err := c.do(ctx, http.MethodPost, "/route/convert-to-case", body, &out, nil)
 	return out, err
 }
