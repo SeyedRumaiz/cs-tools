@@ -19,7 +19,7 @@ import {
   useQueryClient,
   type UseMutationResult,
 } from "@tanstack/react-query";
-import { useBackendApi } from "@api/backend/client";
+import { BackendApiError, useBackendApi } from "@api/backend/client";
 import { ENGINEER_STATUS_QUERY_KEY } from "./useEngineerStatus";
 
 export interface AcceptChatSessionInput {
@@ -52,10 +52,34 @@ export function useAcceptChatSession(): UseMutationResult<
   const queryClient = useQueryClient();
 
   return useMutation<{ message: string }, Error, AcceptChatSessionInput>({
-    mutationFn: ({ caseId, conversationId }) =>
-      api.post(`/chat/sessions/${encodeURIComponent(caseId)}/accept`, {
-        conversationId,
-      }),
+    // TEMPORARY diagnostic logging for the "accepted but no chat appears"
+    // investigation (2026-09) -- captures exact send/response timing per
+    // caseId so it can be lined up against the session_accepted SSE arrival
+    // logged in ChatSessionsContext.tsx. Remove once root-caused.
+    mutationFn: async ({ caseId, conversationId }) => {
+      const sentAt = new Date().toISOString();
+      const t0 = performance.now();
+      // eslint-disable-next-line no-console
+      console.log(`[ACCEPT-DEBUG] POST /accept SENT caseId=${caseId} t=${sentAt}`);
+      try {
+        const result = await api.post<{ conversationId: string }, { message: string }>(
+          `/chat/sessions/${encodeURIComponent(caseId)}/accept`,
+          { conversationId },
+        );
+        // eslint-disable-next-line no-console
+        console.log(
+          `[ACCEPT-DEBUG] POST /accept RESOLVED caseId=${caseId} status=ok elapsedMs=${(performance.now() - t0).toFixed(1)} t=${new Date().toISOString()}`,
+        );
+        return result;
+      } catch (err) {
+        const status = err instanceof BackendApiError ? err.status : undefined;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[ACCEPT-DEBUG] POST /accept FAILED caseId=${caseId} status=${status} elapsedMs=${(performance.now() - t0).toFixed(1)} err=${String(err)} t=${new Date().toISOString()}`,
+        );
+        throw err;
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ENGINEER_STATUS_QUERY_KEY });
     },
