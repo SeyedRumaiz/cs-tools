@@ -364,11 +364,14 @@ type escalateRequest struct {
 // escalation defers real case creation until the assigned engineer
 // explicitly converts the chat (see HandleConvertToCase below and
 // backend-v2's escalation handler's own doc comment). req.CaseID here is
-// chat-routing-service's own provisional case identity (equal to
-// conversationId), not a real entity-service case ID. This handler's only
-// job is to ask the routing service which engineer (if any) should get
-// this case, and deliver it accordingly; it does not call entity-service
-// at all.
+// chat-routing-service's own case identity for this one live-engineer-chat
+// escalation instance -- a fresh UUID minted by backend-v2's HandleEscalate
+// for every new escalation, NOT the same as req.ConversationID (the stable
+// Novera AI-chat conversation this escalation came from -- see
+// router.CaseInfo's own doc comment on why these two are now distinct).
+// Also not a real entity-service case ID. This handler's only job is to
+// ask the routing service which engineer (if any) should get this case,
+// and deliver it accordingly; it does not call entity-service at all.
 func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 	body, ok := readChatBody(w, r)
 	if !ok {
@@ -407,13 +410,38 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 	// live routing decision below still must reach the customer regardless
 	// of whether this bookkeeping call succeeded (a known limitation of the
 	// LOCAL STAND-IN tables, not new: this case just won't count toward the
-	// assigned engineer's capacity until the row exists).
+	// assigned engineer's capacity until the row exists) -- UNLESS the
+	// routing service rejected it outright with ErrDuplicateOpenChat, which
+	// is not a bookkeeping failure at all: it means this customer already
+	// has a live chat in progress for this project, and creating another
+	// one would leave them with two concurrent escalations. That case is
+	// reported to backend-v2 as a real 409 instead of being swallowed --
+	// see this handler's own doc comment on why req.CaseID here is a fresh,
+	// caller-minted UUID (never req.ConversationID) that only this call
+	// makes durable.
 	if err := h.routing.CreateWorkItem(r.Context(), ci); err != nil {
+		if errors.Is(err, routingclient.ErrDuplicateOpenChat) {
+			slog.InfoContext(r.Context(), "chat: escalation rejected, customer already has an open live chat", "caseId", req.CaseID, "conversationId", req.ConversationID, "customerEmail", req.CustomerEmail, "projectId", req.ProjectID)
+			writeError(w, http.StatusConflict, "You already have a live chat in progress for this project. Please continue in that chat, or wait for it to end before starting a new one.")
+			return
+		}
 		slog.WarnContext(r.Context(), "chat: routing service create work item failed (non-blocking)", "caseId", req.CaseID, "err", err)
 	}
 
 	result, err := h.routing.Escalate(r.Context(), ci)
 	if err != nil {
+		if errors.Is(err, routingclient.ErrCaseAlreadyEnded) {
+			// Not a routing-service outage -- a genuine rejection that
+			// must reach the customer as a real failure, not a silent
+			// "escalated successfully" (see this handler's own doc comment
+			// and router.Router.Escalate's ErrCaseAlreadyEnded). Falling
+			// back to broadcast here, like the generic error path below
+			// does, would create exactly the zombie-queue-row situation
+			// this guard exists to prevent.
+			slog.InfoContext(r.Context(), "chat: escalation rejected, case already ended", "caseId", req.CaseID, "conversationId", req.ConversationID)
+			writeError(w, http.StatusConflict, "This chat session has already ended. Please start a new conversation to escalate again.")
+			return
+		}
 		// Routing service unreachable/erroring: fall back to broadcasting
 		// to every connected engineer so this brand-new service being down
 		// does not strand the customer (see the package doc comment and
