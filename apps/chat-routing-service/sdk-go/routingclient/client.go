@@ -472,17 +472,34 @@ func (c *Client) SweepTimeouts(ctx context.Context) (SweepResult, error) {
 	return out, err
 }
 
+// SetCapacityResult mirrors router.SetCapacityResult.
+type SetCapacityResult struct {
+	// AssignedCases is set when raising the limit immediately drained the
+	// waiting queue into this engineer's newly-opened capacity -- same
+	// queue-drain semantics as PresenceResult.AssignedCases (more than one
+	// case can land here at once). Deliver each one to the engineer the
+	// same way a fresh escalation would be.
+	AssignedCases []CaseInfo `json:"assignedCases,omitempty"`
+}
+
 // SetMaxConcurrentChats calls PATCH /route/capacity, setting userID's
 // configurable concurrent-chat capacity (see router.Router.
 // SetMaxConcurrentChats). max must be between 1 and 10 inclusive -- an
 // out-of-range value gets a 400 from that endpoint, surfaced here as a
-// plain error.
-func (c *Client) SetMaxConcurrentChats(ctx context.Context, userID string, max int) error {
+// plain error. Raising the limit while this engineer is AVAILABLE can
+// immediately drain the waiting queue into the newly-opened capacity (see
+// SetCapacityResult.AssignedCases) -- callers must deliver each one to the
+// engineer, the same way HandleSetPresence already does for its own
+// queue-drain (see apps/csm-portal/backend/internal/handler/chat.go's
+// HandleSetMaxConcurrentChats).
+func (c *Client) SetMaxConcurrentChats(ctx context.Context, userID string, max int) (SetCapacityResult, error) {
+	var out SetCapacityResult
 	body := struct {
 		UserID             string `json:"userId"`
 		MaxConcurrentChats int    `json:"maxConcurrentChats"`
 	}{UserID: userID, MaxConcurrentChats: max}
-	return c.do(ctx, http.MethodPatch, "/route/capacity", body, nil)
+	err := c.do(ctx, http.MethodPatch, "/route/capacity", body, &out)
+	return out, err
 }
 
 // GetCaseInfo calls POST /route/workitem/{caseId}/info, returning caseID's

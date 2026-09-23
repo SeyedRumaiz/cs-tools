@@ -179,20 +179,9 @@ func (r *Router) SetPresence(ctx context.Context, userID string, want Status) (P
 			if err != nil {
 				return err
 			}
-			var assigned []CaseInfo
-			for activeCount < maxConcurrent {
-				c, ok, err := claimOldestWaiting(ctx, tx)
-				if err != nil {
-					return err
-				}
-				if !ok {
-					break
-				}
-				if err := assignCaseToEngineer(ctx, tx, userID, c); err != nil {
-					return err
-				}
-				assigned = append(assigned, c)
-				activeCount++
+			assigned, err := drainQueueUpTo(ctx, tx, userID, activeCount, maxConcurrent)
+			if err != nil {
+				return err
 			}
 			result = PresenceResult{Applied: true, AssignedCases: assigned}
 			return nil
@@ -623,6 +612,18 @@ func (r *Router) GetPresence(ctx context.Context, userID string) (PresenceDetail
 // error from Postgres.
 var ErrInvalidCapacity = errors.New("max_concurrent_chats must be between 1 and 10")
 
+// SetCapacityResult is SetMaxConcurrentChats's outcome.
+type SetCapacityResult struct {
+	// AssignedCases is set when raising the limit immediately drained the
+	// waiting queue into this engineer's newly-opened capacity -- same
+	// queue-drain semantics as PresenceResult.AssignedCases (more than one
+	// case can land here at once), gated the same way SetPresence's own
+	// drain is: only while this engineer is chat_status AVAILABLE. Lowering
+	// the limit, or raising it while BUSY/OFFLINE, never claims anything --
+	// see this method's own doc comment.
+	AssignedCases []CaseInfo `json:"assignedCases,omitempty"`
+}
+
 // SetMaxConcurrentChats sets userID's configurable concurrent-chat
 // capacity, creating their row (defaulting to OFFLINE, capacity 1) on
 // first contact just like SetPresence does. This is the admin-facing
@@ -631,29 +632,70 @@ var ErrInvalidCapacity = errors.New("max_concurrent_chats must be between 1 and 
 // db-schema-review-2026-09-07-outcomes.md) -- now exposed so an engineer
 // can set their own limit from the CSM portal's status menu.
 //
-// Deliberately does not touch any case the engineer already holds:
-// lowering the limit below their current active count doesn't drop
-// anything already assigned -- it just stops new work from routing to
-// them (via popAvailableEngineer/SetPresence's queue-drain, both of which
-// compare against this same column) until they fall back under it.
-func (r *Router) SetMaxConcurrentChats(ctx context.Context, userID string, max int) error {
+// Never drops anything already assigned: lowering the limit below the
+// current active count just stops new work from routing to them (via
+// popAvailableEngineer/SetPresence's queue-drain, both of which compare
+// against this same column) until they fall back under it.
+//
+// Raising the limit, however, can open up spare capacity immediately --
+// and unlike a plain column update, this now drains the waiting queue into
+// it right away (same as SetPresence's own transition to AVAILABLE), gated
+// on chat_status already being AVAILABLE: an engineer who is BUSY or
+// OFFLINE takes nothing here no matter how high they raise their limit,
+// consistent with those statuses never claiming anything anywhere else.
+// Without this, a queued customer who escalated while an engineer was at
+// capacity would sit waiting even after that engineer freed up room for
+// them, with nothing to prompt a claim until the engineer's next
+// unrelated state change (going AVAILABLE again, completing another
+// case) happened to trigger one.
+func (r *Router) SetMaxConcurrentChats(ctx context.Context, userID string, max int) (SetCapacityResult, error) {
 	if max < 1 || max > 10 {
-		return ErrInvalidCapacity
+		return SetCapacityResult{}, ErrInvalidCapacity
 	}
-	return r.withTx(ctx, func(tx pgx.Tx) error {
+	var result SetCapacityResult
+	err := r.withTx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO cs_engineer_status (user_id) VALUES ($1)
 			ON CONFLICT (user_id) DO NOTHING
 		`, userID); err != nil {
 			return fmt.Errorf("ensure engineer row: %w", err)
 		}
+
+		// Lock the row before reading chat_status -- same discipline
+		// ensureAndLockEngineer applies for SetPresence, needed here too
+		// since a concurrent presence/completion call must not race this
+		// one's own queue-drain below.
+		var chatStatus Status
+		if err := tx.QueryRow(ctx, `
+			SELECT chat_status FROM cs_engineer_status WHERE user_id = $1 FOR UPDATE
+		`, userID).Scan(&chatStatus); err != nil {
+			return fmt.Errorf("lock engineer row: %w", err)
+		}
+
 		if _, err := tx.Exec(ctx, `
 			UPDATE cs_engineer_status SET max_concurrent_chats = $1, updated_at = now() WHERE user_id = $2
 		`, max, userID); err != nil {
 			return fmt.Errorf("set max_concurrent_chats: %w", err)
 		}
+
+		if chatStatus != StatusAvailable {
+			return nil
+		}
+		activeCount, err := activeCaseCount(ctx, tx, userID)
+		if err != nil {
+			return err
+		}
+		assigned, err := drainQueueUpTo(ctx, tx, userID, activeCount, max)
+		if err != nil {
+			return err
+		}
+		result = SetCapacityResult{AssignedCases: assigned}
 		return nil
 	})
+	if err != nil {
+		return SetCapacityResult{}, err
+	}
+	return result, nil
 }
 
 // pgxQuerier is the subset of *pgxpool.Pool that engineerCases and
@@ -1107,6 +1149,33 @@ func claimOldestWaiting(ctx context.Context, tx pgx.Tx) (CaseInfo, bool, error) 
 	}
 	c.PriorMessages = priorMessages
 	return c, true, nil
+}
+
+// drainQueueUpTo claims and assigns queued cases to userID until either the
+// waiting queue is empty or activeCount reaches maxConcurrent, returning
+// every case assigned this way -- the shared loop body behind both
+// SetPresence's transition to AVAILABLE and SetMaxConcurrentChats's
+// capacity increase, the two places where opening up more than one slot at
+// once is possible. Completed, ConvertToCase, and Decline's reassignment
+// each free or move at most one case, so they claim inline instead of
+// using this.
+func drainQueueUpTo(ctx context.Context, tx pgx.Tx, userID string, activeCount, maxConcurrent int) ([]CaseInfo, error) {
+	var assigned []CaseInfo
+	for activeCount < maxConcurrent {
+		c, ok, err := claimOldestWaiting(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		if err := assignCaseToEngineer(ctx, tx, userID, c); err != nil {
+			return nil, err
+		}
+		assigned = append(assigned, c)
+		activeCount++
+	}
+	return assigned, nil
 }
 
 // requeueWaiting flips conversationID's existing chat_queue row back to

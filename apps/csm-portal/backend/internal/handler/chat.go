@@ -168,8 +168,11 @@ type routingService interface {
 	// SetMaxConcurrentChats lets an engineer set their own configurable
 	// concurrent-chat capacity (see HandleSetMaxConcurrentChats) -- added
 	// alongside the queue-abandonment fix above so raising a specific
-	// engineer's limit no longer requires a manual DB UPDATE.
-	SetMaxConcurrentChats(ctx context.Context, userID string, max int) error
+	// engineer's limit no longer requires a manual DB UPDATE. Returns
+	// AssignedCases when raising the limit immediately drained the waiting
+	// queue into this engineer's newly-opened capacity -- see
+	// routingclient.SetCapacityResult's own doc comment.
+	SetMaxConcurrentChats(ctx context.Context, userID string, max int) (routingclient.SetCapacityResult, error)
 	// CreateWorkItem and AddComment are LOCAL STAND-IN persistence calls
 	// (see routingclient.Client.CreateWorkItem's doc comment and the
 	// project's chat-persistence-mapping-plan.md) -- they exist only until
@@ -863,6 +866,15 @@ const (
 // any case the engineer already holds -- lowering the limit below their
 // current active count just stops new work from routing to them until
 // they fall back under it, it never drops an in-progress chat.
+//
+// Raising the limit, however, can immediately open up spare capacity: if a
+// customer was left waiting in the queue because this engineer was at
+// capacity, they must not go on sitting there once the engineer makes room
+// for them just by raising their own limit. router.Router.
+// SetMaxConcurrentChats now drains the queue into that new capacity the
+// same way going AVAILABLE does, so any case it hands back here is
+// delivered to this engineer exactly like HandleSetPresence already does
+// for its own queue-drain.
 func (h *ChatHandler) HandleSetMaxConcurrentChats(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -884,10 +896,19 @@ func (h *ChatHandler) HandleSetMaxConcurrentChats(w http.ResponseWriter, r *http
 		return
 	}
 
-	if err := h.routing.SetMaxConcurrentChats(r.Context(), user.UserID, req.MaxConcurrentChats); err != nil {
+	result, err := h.routing.SetMaxConcurrentChats(r.Context(), user.UserID, req.MaxConcurrentChats)
+	if err != nil {
 		slog.ErrorContext(r.Context(), "chat: routing service set max concurrent chats failed", "userID", user.UserID, "err", err)
 		writeError(w, http.StatusBadGateway, "Failed to update your chat capacity. Please try again.")
 		return
+	}
+
+	// Raising the limit can immediately drain more than one queued case
+	// into this engineer's newly-opened capacity (see router.Router.
+	// SetMaxConcurrentChats's queue-drain) -- same delivery
+	// HandleSetPresence already does for its own queue-drain.
+	for _, c := range result.AssignedCases {
+		h.publishToEngineer(user.UserID, assignedCaseEvent(c))
 	}
 
 	writeJSON(w, http.StatusOK, []byte(`{"applied":true}`))
