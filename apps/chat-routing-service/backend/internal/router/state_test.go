@@ -124,10 +124,10 @@ func testCaseID(t *testing.T, pool *pgxpool.Pool, tag string) string {
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, "conv-"+caseID); err != nil {
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, caseID); err != nil {
 			t.Logf("cleanup: delete chat_queue row %s: %v", caseID, err)
 		}
-		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue_engineer_assignment WHERE conversation_id = $1`, "conv-"+caseID); err != nil {
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue_engineer_assignment WHERE conversation_id = $1`, caseID); err != nil {
 			t.Logf("cleanup: delete chat_queue_engineer_assignment row %s: %v", caseID, err)
 		}
 	})
@@ -144,7 +144,16 @@ func conversationFixture(t *testing.T, r *Router, pool *pgxpool.Pool, caseID str
 	t.Helper()
 	ci := CaseInfo{
 		CaseID: caseID, ConversationID: "conv-" + caseID,
-		Subject: "test", CustomerEmail: "router-test@example.com",
+		// CustomerEmail is derived from caseID (unique per fixture, see
+		// testCaseID) rather than a shared constant -- since the identity
+		// split's duplicate-open-chat guard (CreateWorkItem,
+		// ErrDuplicateOpenChat) now enforces at most one non-ended live
+		// chat per (customerEmail, projectId), two fixtures sharing one
+		// constant customerEmail (and both leaving projectId empty) would
+		// collide the moment a test creates more than one open fixture at
+		// once -- exactly the scenario several tests in this package
+		// exercise (e.g. abandon_test.go's stale+fresh pair).
+		Subject: "test", CustomerEmail: caseID + "@example.com",
 	}
 	if err := r.CreateWorkItem(context.Background(), ci); err != nil {
 		t.Fatalf("conversationFixture: CreateWorkItem: %v", err)
@@ -259,7 +268,7 @@ func completedSafely(t *testing.T, r *Router, pool *pgxpool.Pool, userID, caseID
 		t.Fatalf("rescue: begin transaction: %v", err)
 	}
 	defer func() { _ = tx.Rollback(rescueCtx) }()
-	if err := requeueWaiting(rescueCtx, tx, result.AssignedCase.ConversationID); err != nil {
+	if err := requeueWaiting(rescueCtx, tx, result.AssignedCase.CaseID); err != nil {
 		t.Fatalf("rescue: re-queue drained case: %v", err)
 	}
 	if _, err := tx.Exec(rescueCtx, `
@@ -461,7 +470,7 @@ func TestSetPresence_AvailableDrainsQueueUpToCapacity(t *testing.T) {
 			cancel()
 			t.Fatalf("rescue: begin transaction: %v", err)
 		}
-		if err := requeueWaiting(rescueCtx, tx, c.ConversationID); err != nil {
+		if err := requeueWaiting(rescueCtx, tx, c.CaseID); err != nil {
 			_ = tx.Rollback(rescueCtx)
 			cancel()
 			t.Fatalf("rescue: re-queue drained case: %v", err)
@@ -502,7 +511,7 @@ func TestAccept_AppliesForTheHeldCase(t *testing.T) {
 	}
 
 	var queueRows int
-	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM chat_queue WHERE chat_conversation_id = $1`, "conv-"+caseID).Scan(&queueRows); err != nil {
+	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM chat_queue WHERE chat_conversation_id = $1`, caseID).Scan(&queueRows); err != nil {
 		t.Fatalf("check queue row removed: %v", err)
 	}
 	if queueRows != 0 {
@@ -621,13 +630,13 @@ func TestEnqueue_WaitingFlipsToAssignedAndKeepsCreatedAt(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, _ = pool.Exec(cleanupCtx, `DELETE FROM chat_queue WHERE chat_conversation_id IN ($1, $2)`, backCase.ConversationID, frontCase.ConversationID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM chat_queue WHERE chat_conversation_id IN ($1, $2)`, backCase.CaseID, frontCase.CaseID)
 	})
 
-	if err := pool.QueryRow(ctx, `SELECT created_at FROM chat_queue WHERE chat_conversation_id = $1`, backCase.ConversationID).Scan(&backCreatedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT created_at FROM chat_queue WHERE chat_conversation_id = $1`, backCase.CaseID).Scan(&backCreatedAt); err != nil {
 		t.Fatalf("read back created_at: %v", err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT created_at FROM chat_queue WHERE chat_conversation_id = $1`, frontCase.ConversationID).Scan(&frontCreatedAt); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT created_at FROM chat_queue WHERE chat_conversation_id = $1`, frontCase.CaseID).Scan(&frontCreatedAt); err != nil {
 		t.Fatalf("read front created_at: %v", err)
 	}
 	if !backCreatedAt.Before(frontCreatedAt) && backCreatedAt != frontCreatedAt {
@@ -640,10 +649,10 @@ func TestEnqueue_WaitingFlipsToAssignedAndKeepsCreatedAt(t *testing.T) {
 	// row rather than via claimOldestWaiting, since the real queue could
 	// claim a different row first.
 	err = r.withTx(ctx, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE chat_queue SET status = 'ASSIGNED' WHERE chat_conversation_id = $1`, backCase.ConversationID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE chat_queue SET status = 'ASSIGNED' WHERE chat_conversation_id = $1`, backCase.CaseID); err != nil {
 			return err
 		}
-		return requeueWaiting(ctx, tx, backCase.ConversationID)
+		return requeueWaiting(ctx, tx, backCase.CaseID)
 	})
 	if err != nil {
 		t.Fatalf("simulate assign+requeue: %v", err)
@@ -651,7 +660,7 @@ func TestEnqueue_WaitingFlipsToAssignedAndKeepsCreatedAt(t *testing.T) {
 
 	var afterCreatedAt time.Time
 	var status queueStatus
-	if err := pool.QueryRow(ctx, `SELECT created_at, status FROM chat_queue WHERE chat_conversation_id = $1`, backCase.ConversationID).Scan(&afterCreatedAt, &status); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT created_at, status FROM chat_queue WHERE chat_conversation_id = $1`, backCase.CaseID).Scan(&afterCreatedAt, &status); err != nil {
 		t.Fatalf("read back row after requeue: %v", err)
 	}
 	if status != queueWaitingForEngineer {

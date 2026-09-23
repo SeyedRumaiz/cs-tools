@@ -48,7 +48,7 @@ func TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer(t *te
 		t.Fatalf("enqueue stale fixture: %v", err)
 	}
 	// Backdate it well past a 30-minute abandon window.
-	if _, err := pool.Exec(ctx, `UPDATE chat_queue SET created_at = now() - interval '1 hour' WHERE chat_conversation_id = $1`, staleCI.ConversationID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE chat_queue SET created_at = now() - interval '1 hour' WHERE chat_conversation_id = $1`, staleCI.CaseID); err != nil {
 		t.Fatalf("backdate stale queue row: %v", err)
 	}
 
@@ -72,7 +72,7 @@ func TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer(t *te
 	// The chat_queue row must be gone -- this is what actually prevents
 	// the ambush (claimOldestWaiting can no longer find it).
 	var queueRows int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM chat_queue WHERE chat_conversation_id = $1`, staleCI.ConversationID).Scan(&queueRows); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM chat_queue WHERE chat_conversation_id = $1`, staleCI.CaseID).Scan(&queueRows); err != nil {
 		t.Fatalf("check queue row removed: %v", err)
 	}
 	if queueRows != 0 {
@@ -122,7 +122,7 @@ func TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer(t *te
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, _ = pool.Exec(cleanupCtx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, freshCI.ConversationID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, freshCI.CaseID)
 		_, _ = pool.Exec(cleanupCtx, `UPDATE chat_conversation SET assignee_id = NULL, accepted_at = NULL WHERE case_id = $1`, freshCI.CaseID)
 	})
 }
@@ -148,7 +148,7 @@ func TestSweepAbandonedQueue_LeavesRecentAndAssignedRowsAlone(t *testing.T) {
 	userID := testUserID(t, r, pool, "abandon-assigned-owner")
 	assignedID := testCaseID(t, pool, "abandon-assigned")
 	assigned := assignFixture(t, r, pool, userID, assignedID)
-	if _, err := pool.Exec(ctx, `UPDATE chat_queue SET created_at = now() - interval '1 hour' WHERE chat_conversation_id = $1`, assigned.ConversationID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE chat_queue SET created_at = now() - interval '1 hour' WHERE chat_conversation_id = $1`, assigned.CaseID); err != nil {
 		t.Fatalf("backdate assigned queue row: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestSweepAbandonedQueue_LeavesRecentAndAssignedRowsAlone(t *testing.T) {
 	}
 
 	var recentRows int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM chat_queue WHERE chat_conversation_id = $1`, recentCI.ConversationID).Scan(&recentRows); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM chat_queue WHERE chat_conversation_id = $1`, recentCI.CaseID).Scan(&recentRows); err != nil {
 		t.Fatalf("check recent row survives: %v", err)
 	}
 	if recentRows != 1 {

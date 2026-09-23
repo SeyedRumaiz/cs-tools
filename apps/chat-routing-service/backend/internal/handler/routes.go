@@ -143,11 +143,14 @@ func (h *RoutingHandler) Escalate(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.router.Escalate(r.Context(), req.toCaseInfo())
 	if err != nil {
-		if errors.Is(err, router.ErrConversationNotFound) {
+		switch {
+		case errors.Is(err, router.ErrConversationNotFound):
 			writeError(w, http.StatusBadRequest, "No chat_conversation row exists for this case -- create the work item (POST /route/workitem) before escalating.")
-			return
+		case errors.Is(err, router.ErrCaseAlreadyEnded):
+			writeError(w, http.StatusConflict, "This chat session has already ended and cannot be escalated again.")
+		default:
+			writeStorageError(w, "escalate", err)
 		}
-		writeStorageError(w, "escalate", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -310,6 +313,10 @@ func (h *RoutingHandler) CreateWorkItem(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := h.router.CreateWorkItem(r.Context(), req.toCaseInfo()); err != nil {
+		if errors.Is(err, router.ErrDuplicateOpenChat) {
+			writeError(w, http.StatusConflict, "This customer already has an open live chat for this project.")
+			return
+		}
 		writeStorageError(w, "workitem:create", err)
 		return
 	}

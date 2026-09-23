@@ -36,7 +36,37 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// ErrDuplicateOpenChat is returned by CreateWorkItem when c.CustomerEmail +
+// c.ProjectID already has another, different-caseId chat_conversation row
+// with session_ended_at IS NULL -- i.e. that customer already has a live
+// chat in progress for this project. Enforced two ways: the plain SELECT
+// check inside CreateWorkItem below (a fast, friendly rejection for the
+// common case) and, as a race-safe backstop for two concurrent escalations
+// arriving at once, the partial unique index added by migration
+// 000021_split_case_and_conversation_identity
+// (uq_chat_conversation_open_customer_project) -- a unique-violation on
+// that index is translated to this same error (see the pgconn.PgError
+// check below), so a caller never has to tell the two enforcement paths
+// apart.
+//
+// Never returned for a retried CreateWorkItem call for the SAME caseId --
+// that is idempotency (see the early case_id lookup below), not a
+// duplicate.
+var ErrDuplicateOpenChat = errors.New("this customer already has an open live chat for this project")
+
+// uqOpenCustomerProjectConstraint is the partial unique index's name --
+// see migration 000021_split_case_and_conversation_identity.
+const uqOpenCustomerProjectConstraint = "uq_chat_conversation_open_customer_project"
+
+// isUniqueViolation reports whether err is a Postgres unique_violation
+// (SQLSTATE 23505) on the named constraint/index.
+func isUniqueViolation(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint
+}
 
 // WorkItem mirrors the interim work_item row.
 type WorkItem struct {
@@ -52,6 +82,12 @@ type WorkItem struct {
 type ChatConversation struct {
 	WorkItemID string `json:"workItemId"`
 	CaseID     string `json:"caseId"`
+	// ConversationID is the stable Novera AI-chat conversation this case
+	// came from -- see migration 000021_split_case_and_conversation_identity
+	// and CaseInfo.ConversationID's own doc comment. Distinct from CaseID
+	// since a single conversation can produce more than one case over its
+	// lifetime (one per escalation).
+	ConversationID string `json:"conversationId"`
 	// AssigneeID is nil until this conversation is assigned to an engineer
 	// (see internal/router/state.go's assignCaseToEngineer) -- set at
 	// assignment time, not at Accept, so a pending-but-unconfirmed
@@ -108,6 +144,16 @@ type WorkItemDetail struct {
 // double call still can't duplicate anything: whichever call loses the
 // race gets a unique-constraint error on the chat_conversation insert
 // (case_id has a UNIQUE INDEX) and its whole transaction rolls back.
+//
+// Also enforces at most one non-ended live chat per (c.CustomerEmail,
+// c.ProjectID): a brand-new caseId (different from any existing row's)
+// for a customer/project that already has an open (session_ended_at IS
+// NULL) chat_conversation row is rejected with ErrDuplicateOpenChat rather
+// than creating a second, competing escalation -- see that error's own doc
+// comment for the two layers this is enforced at. A caseId that IS an
+// existing row's own (the idempotent-retry case above) never reaches this
+// check at all, and a customer whose previous chat has since ended or
+// converted (session_ended_at set) is never blocked by it.
 func (r *Router) CreateWorkItem(ctx context.Context, c CaseInfo) error {
 	caseInfoJSON, err := json.Marshal(c)
 	if err != nil {
@@ -128,6 +174,31 @@ func (r *Router) CreateWorkItem(ctx context.Context, c CaseInfo) error {
 			return fmt.Errorf("check existing chat_conversation: %w", err)
 		}
 
+		// Application-level duplicate-open-chat check -- see this method's
+		// own doc comment and ErrDuplicateOpenChat. c.CustomerEmail/
+		// c.ProjectID are required for this to mean anything; a request
+		// missing either is let through here (nothing to compare against)
+		// but is exactly the kind of malformed record the migration's
+		// COALESCE-to-'' indexing exists to still catch at the database
+		// layer as a defensive backstop.
+		if c.CustomerEmail != "" && c.ProjectID != "" {
+			var exists bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM chat_conversation
+					WHERE case_id != $1
+					  AND session_ended_at IS NULL
+					  AND case_info ->> 'customerEmail' = $2
+					  AND case_info ->> 'projectId' = $3
+				)
+			`, c.CaseID, c.CustomerEmail, c.ProjectID).Scan(&exists); err != nil {
+				return fmt.Errorf("check duplicate open chat: %w", err)
+			}
+			if exists {
+				return fmt.Errorf("%w: customerEmail=%s projectId=%s", ErrDuplicateOpenChat, c.CustomerEmail, c.ProjectID)
+			}
+		}
+
 		var workItemID string
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO work_item (creator_id, subject) VALUES ($1, $2)
@@ -137,9 +208,12 @@ func (r *Router) CreateWorkItem(ctx context.Context, c CaseInfo) error {
 		}
 
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO chat_conversation (work_item_id, case_id, case_info)
-			VALUES ($1, $2, $3::jsonb)
-		`, workItemID, c.CaseID, caseInfoJSON); err != nil {
+			INSERT INTO chat_conversation (work_item_id, case_id, conversation_id, case_info)
+			VALUES ($1, $2, $3, $4::jsonb)
+		`, workItemID, c.CaseID, c.ConversationID, caseInfoJSON); err != nil {
+			if isUniqueViolation(err, uqOpenCustomerProjectConstraint) {
+				return fmt.Errorf("%w: customerEmail=%s projectId=%s", ErrDuplicateOpenChat, c.CustomerEmail, c.ProjectID)
+			}
 			return fmt.Errorf("insert chat_conversation: %w", err)
 		}
 
@@ -330,13 +404,13 @@ func (r *Router) DebugWorkItem(ctx context.Context, caseID string) (WorkItemDeta
 	)
 	err := r.db.QueryRow(ctx, `
 		SELECT w.id, w.creator_id, w.subject, COALESCE(w.work_item_number, ''),
-		       c.work_item_id, c.case_id, c.assignee_id, c.state
+		       c.work_item_id, c.case_id, c.conversation_id, c.assignee_id, c.state
 		FROM chat_conversation c
 		JOIN work_item w ON w.id = c.work_item_id
 		WHERE c.case_id = $1
 	`, caseID).Scan(
 		&detail.WorkItem.ID, &detail.WorkItem.CreatorID, &detail.WorkItem.Subject, &detail.WorkItem.WorkItemNumber,
-		&detail.Conversation.WorkItemID, &detail.Conversation.CaseID, &assigneeID, &detail.Conversation.State,
+		&detail.Conversation.WorkItemID, &detail.Conversation.CaseID, &detail.Conversation.ConversationID, &assigneeID, &detail.Conversation.State,
 	)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):

@@ -149,11 +149,14 @@ func (r *Router) timeoutOne(ctx context.Context, userID, caseID string, timeout 
 		}
 
 		// Audit trail: userID's ping on this conversation is settled as
-		// TIMED_OUT.
+		// TIMED_OUT. Uses caseID (this method's own parameter, already the
+		// right identity), not timedOut.ConversationID -- see state.go's
+		// Decline/Accept for why this column, despite its legacy name, now
+		// holds case identity rather than conversation identity.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO chat_queue_engineer_assignment (conversation_id, engineer_id, status)
 			VALUES ($1, $2, 'TIMED_OUT')
-		`, timedOut.ConversationID, userID); err != nil {
+		`, caseID, userID); err != nil {
 			return fmt.Errorf("record timeout outcome: %w", err)
 		}
 
@@ -170,7 +173,7 @@ func (r *Router) timeoutOne(ctx context.Context, userID, caseID string, timeout 
 			return nil
 		}
 
-		if err := requeueWaiting(ctx, tx, timedOut.ConversationID); err != nil {
+		if err := requeueWaiting(ctx, tx, caseID); err != nil {
 			return err
 		}
 		result = &TimeoutResult{UserID: userID, CaseID: caseID, Requeued: true}
@@ -194,8 +197,12 @@ type AbandonedResult struct {
 // abandonedCandidate is one row from SweepAbandonedQueue's initial,
 // unlocked scan -- re-verified under lock by abandonOne before anything
 // changes, mirroring pendingCandidate/timeoutOne's own pattern.
+//
+// caseID, not conversationID: chat_queue.chat_conversation_id (this
+// column's own legacy name -- see insertQueueRow's doc comment) is keyed
+// by CaseID, so that is what this scan actually reads back.
 type abandonedCandidate struct {
-	conversationID string
+	caseID string
 }
 
 // SweepAbandonedQueue finds every chat_queue row that has been sitting
@@ -234,7 +241,7 @@ func (r *Router) SweepAbandonedQueue(ctx context.Context, timeout time.Duration)
 	var candidates []abandonedCandidate
 	for rows.Next() {
 		var c abandonedCandidate
-		if err := rows.Scan(&c.conversationID); err != nil {
+		if err := rows.Scan(&c.caseID); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("router: scan abandoned queue row: %w", err)
 		}
@@ -246,9 +253,9 @@ func (r *Router) SweepAbandonedQueue(ctx context.Context, timeout time.Duration)
 
 	var results []AbandonedResult
 	for _, c := range candidates {
-		result, err := r.abandonOne(ctx, c.conversationID, timeout)
+		result, err := r.abandonOne(ctx, c.caseID, timeout)
 		if err != nil {
-			return results, fmt.Errorf("router: abandon %s: %w", c.conversationID, err)
+			return results, fmt.Errorf("router: abandon %s: %w", c.caseID, err)
 		}
 		if result != nil {
 			results = append(results, *result)
@@ -263,7 +270,7 @@ func (r *Router) SweepAbandonedQueue(ctx context.Context, timeout time.Duration)
 // accepted in the moment between SweepAbandonedQueue's unlocked scan and
 // this lock, in which case this is a no-op (nil, nil) rather than
 // abandoning a case an engineer is now legitimately holding.
-func (r *Router) abandonOne(ctx context.Context, conversationID string, timeout time.Duration) (*AbandonedResult, error) {
+func (r *Router) abandonOne(ctx context.Context, caseID string, timeout time.Duration) (*AbandonedResult, error) {
 	var result *AbandonedResult
 	err := r.withTx(ctx, func(tx pgx.Tx) error {
 		var (
@@ -275,7 +282,7 @@ func (r *Router) abandonOne(ctx context.Context, conversationID string, timeout 
 			SELECT case_info, status, created_at FROM chat_queue
 			WHERE chat_conversation_id = $1
 			FOR UPDATE
-		`, conversationID).Scan(&caseInfoJSON, &status, &createdAt)
+		`, caseID).Scan(&caseInfoJSON, &status, &createdAt)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			return nil
@@ -293,7 +300,7 @@ func (r *Router) abandonOne(ctx context.Context, conversationID string, timeout 
 			}
 		}
 
-		if _, err := tx.Exec(ctx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, conversationID); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, caseID); err != nil {
 			return fmt.Errorf("delete abandoned queue row: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
@@ -303,7 +310,13 @@ func (r *Router) abandonOne(ctx context.Context, conversationID string, timeout 
 			return fmt.Errorf("mark abandoned conversation ended: %w", err)
 		}
 
-		result = &AbandonedResult{CaseID: c.CaseID, ConversationID: conversationID}
+		// ConversationID comes from the decoded case_info (c.ConversationID),
+		// not the raw queue-key variable (caseID) -- that key is this row's
+		// CaseID (see insertQueueRow), and reusing it here as
+		// AbandonedResult.ConversationID would report the wrong identity
+		// for exactly the reason this whole change exists: the two are no
+		// longer guaranteed equal.
+		result = &AbandonedResult{CaseID: c.CaseID, ConversationID: c.ConversationID}
 		return nil
 	})
 	if err != nil {
