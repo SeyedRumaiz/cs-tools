@@ -117,7 +117,7 @@ func TestEscalate_ErrorsInsteadOfSilentlyNoOpingWhenConversationRowMissing(t *te
 	var queueRowCount int
 	if err := pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM chat_queue WHERE chat_conversation_id = $1
-	`, ci.ConversationID).Scan(&queueRowCount); err != nil {
+	`, ci.CaseID).Scan(&queueRowCount); err != nil {
 		t.Fatalf("count chat_queue rows: %v", err)
 	}
 	if queueRowCount != 0 {

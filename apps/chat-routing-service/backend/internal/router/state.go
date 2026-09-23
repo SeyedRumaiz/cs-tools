@@ -81,6 +81,22 @@ type EscalateResult struct {
 	Position int `json:"position,omitempty"`
 }
 
+// ErrCaseAlreadyEnded is returned by Escalate when c.CaseID's
+// chat_conversation row already has session_ended_at set. Escalate must
+// never create a (zombie) chat_queue row for a case that has already
+// ended -- see the caller-facing origin of this: CreateWorkItem is
+// idempotent by case_id (a deliberate, necessary property for retries),
+// but that idempotency previously let a caller who retried Escalate itself
+// for an already-ended case slip straight through Escalate too, silently
+// creating a queue row pointing at a conversation nothing will ever accept
+// (its chat_conversation row is done). Under the caseId/conversationId
+// identity split, a legitimate re-escalation of the same Novera
+// conversation always mints a brand-new caseId (see customer-portal/
+// backend-v2's HandleEscalate), so a real client should never hit this in
+// practice -- this guard exists as defense in depth against a retry or a
+// bug that reuses an old caseId, not as the normal re-escalation path.
+var ErrCaseAlreadyEnded = errors.New("this case has already ended and cannot be escalated again")
+
 // Escalate assigns c to whichever AVAILABLE engineer with spare concurrent-
 // chat capacity has taken the fewest chats today (ties broken by fewest
 // currently-active chats, then who's been AVAILABLE longest -- see
@@ -92,7 +108,9 @@ type EscalateResult struct {
 // engineer. Requires c's chat_conversation row (see workitem.go's
 // CreateWorkItem) to already exist -- csm-portal/backend creates it before
 // calling this, so assignCaseToEngineer below has a row to record the
-// assignment on.
+// assignment on. Rejects with ErrCaseAlreadyEnded, before touching
+// anything else, if that row's session has already ended -- see that
+// error's own doc comment.
 func (r *Router) Escalate(ctx context.Context, c CaseInfo) (EscalateResult, error) {
 	caseInfoJSON, err := json.Marshal(c)
 	if err != nil {
@@ -101,6 +119,20 @@ func (r *Router) Escalate(ctx context.Context, c CaseInfo) (EscalateResult, erro
 
 	var result EscalateResult
 	err = r.withTx(ctx, func(tx pgx.Tx) error {
+		var sessionEndedAt *time.Time
+		err := tx.QueryRow(ctx, `
+			SELECT session_ended_at FROM chat_conversation WHERE case_id = $1 FOR UPDATE
+		`, c.CaseID).Scan(&sessionEndedAt)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("%w: case_id=%s", ErrConversationNotFound, c.CaseID)
+		case err != nil:
+			return fmt.Errorf("check conversation state: %w", err)
+		}
+		if sessionEndedAt != nil {
+			return fmt.Errorf("%w: case_id=%s", ErrCaseAlreadyEnded, c.CaseID)
+		}
+
 		userID, ok, err := popAvailableEngineer(ctx, tx, "")
 		if err != nil {
 			return err
@@ -469,11 +501,18 @@ func (r *Router) Decline(ctx context.Context, userID, caseID string) (DeclineRes
 		}
 
 		// Audit trail: userID's ping on this conversation is settled as
-		// REJECTED, independent of what happens to the case next.
+		// REJECTED, independent of what happens to the case next. The
+		// column is still named conversation_id (from when case_id and
+		// conversationId were always equal -- see migration
+		// 000014_rename_engineer_status_table), but what every caller here
+		// has on hand, and what identifies a single ping/assignment
+		// instance, is the case, not the underlying Novera conversation --
+		// see conv.CaseID and this file's other chat_queue_engineer_
+		// assignment inserts (Accept, timeout.go's timeoutOne).
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO chat_queue_engineer_assignment (conversation_id, engineer_id, status)
 			VALUES ($1, $2, 'REJECTED')
-		`, conv.ConversationID, userID); err != nil {
+		`, conv.CaseID, userID); err != nil {
 			return fmt.Errorf("record decline outcome: %w", err)
 		}
 
@@ -490,7 +529,7 @@ func (r *Router) Decline(ctx context.Context, userID, caseID string) (DeclineRes
 			return nil
 		}
 
-		if err := requeueWaiting(ctx, tx, conv.ConversationID); err != nil {
+		if err := requeueWaiting(ctx, tx, conv.CaseID); err != nil {
 			return err
 		}
 		result = DeclineResult{Requeued: true}
@@ -540,16 +579,17 @@ func (r *Router) Accept(ctx context.Context, userID, caseID string) (AcceptResul
 			return fmt.Errorf("accept case: %w", err)
 		}
 
-		if err := deleteQueueRow(ctx, tx, conv.ConversationID); err != nil {
+		if err := deleteQueueRow(ctx, tx, conv.CaseID); err != nil {
 			return err
 		}
 
 		// Audit trail: userID's ping on this conversation is settled as
-		// CONNECTED.
+		// CONNECTED. See Decline's own identical insert for why this uses
+		// conv.CaseID despite the column's legacy name.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO chat_queue_engineer_assignment (conversation_id, engineer_id, status)
 			VALUES ($1, $2, 'CONNECTED')
-		`, conv.ConversationID, userID); err != nil {
+		`, conv.CaseID, userID); err != nil {
 			return fmt.Errorf("record accept outcome: %w", err)
 		}
 
@@ -1086,13 +1126,23 @@ func assignCaseToEngineer(ctx context.Context, tx pgx.Tx, userID string, c CaseI
 // it assigned someone immediately. position is c's 1-based place among
 // every currently-waiting row (0 for an ASSIGNED row, since nothing's
 // waiting on it) -- only meaningful for a WAITING_FOR_ENGINEER row.
+//
+// Keyed by c.CaseID, not c.ConversationID: chat_queue.chat_conversation_id
+// (its column name, unchanged since before the caseId/conversationId
+// split -- see migration 000015_redesign_chat_queue) tracks one specific
+// live-chat escalation instance's place in the queue, which is exactly
+// what a case identifies. Keying it by ConversationID instead would have
+// made a customer's second, later escalation (a fresh CaseID but the same
+// stable ConversationID, after their first case ended) collide with -- or
+// silently reuse the row of -- their first, since this column is this
+// table's own PRIMARY KEY.
 func insertQueueRow(ctx context.Context, tx pgx.Tx, c CaseInfo, caseInfoJSON []byte, status queueStatus) (position int, err error) {
 	var createdAt time.Time
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO chat_queue (chat_conversation_id, case_info, status)
 		VALUES ($1, $2::jsonb, $3)
 		RETURNING created_at
-	`, c.ConversationID, caseInfoJSON, status).Scan(&createdAt); err != nil {
+	`, c.CaseID, caseInfoJSON, status).Scan(&createdAt); err != nil {
 		return 0, fmt.Errorf("insert queue row: %w", err)
 	}
 	if status != queueWaitingForEngineer {
@@ -1103,7 +1153,7 @@ func insertQueueRow(ctx context.Context, tx pgx.Tx, c CaseInfo, caseInfoJSON []b
 		SELECT COUNT(*) FROM chat_queue
 		WHERE status = 'WAITING_FOR_ENGINEER'
 		  AND (created_at, chat_conversation_id) <= ($1, $2)
-	`, createdAt, c.ConversationID).Scan(&position); err != nil {
+	`, createdAt, c.CaseID).Scan(&position); err != nil {
 		return 0, fmt.Errorf("compute queue position: %w", err)
 	}
 	return position, nil
@@ -1178,27 +1228,28 @@ func drainQueueUpTo(ctx context.Context, tx pgx.Tx, userID string, activeCount, 
 	return assigned, nil
 }
 
-// requeueWaiting flips conversationID's existing chat_queue row back to
-// WAITING_FOR_ENGINEER -- used by Decline and SweepExpiredPending when no
-// other engineer is free to take the case over immediately. created_at is
-// left untouched, so the case keeps its original place ahead of anything
-// that arrived after it. The row is assumed to already exist: every case
-// gets one at Escalate time, removed only by Accept -- which, by
+// requeueWaiting flips caseID's existing chat_queue row back to
+// WAITING_FOR_ENGINEER -- used by Decline and SweepExpiredPending/
+// SweepAbandonedQueue when no other engineer is free to take the case over
+// immediately. created_at is left untouched, so the case keeps its
+// original place ahead of anything that arrived after it. The row is
+// assumed to already exist: every case gets one at Escalate time (keyed by
+// CaseID -- see insertQueueRow), removed only by Accept -- which, by
 // definition, hasn't happened for a case that's being declined or timed
 // out.
-func requeueWaiting(ctx context.Context, tx pgx.Tx, conversationID string) error {
+func requeueWaiting(ctx context.Context, tx pgx.Tx, caseID string) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE chat_queue SET status = 'WAITING_FOR_ENGINEER' WHERE chat_conversation_id = $1
-	`, conversationID); err != nil {
+	`, caseID); err != nil {
 		return fmt.Errorf("requeue case: %w", err)
 	}
 	return nil
 }
 
-// deleteQueueRow removes conversationID's chat_queue row outright --
-// called only from Accept, the one point where the row should go away.
-func deleteQueueRow(ctx context.Context, tx pgx.Tx, conversationID string) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, conversationID); err != nil {
+// deleteQueueRow removes caseID's chat_queue row outright -- called only
+// from Accept, the one point where the row should go away.
+func deleteQueueRow(ctx context.Context, tx pgx.Tx, caseID string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, caseID); err != nil {
 		return fmt.Errorf("delete queue row: %w", err)
 	}
 	return nil
