@@ -799,11 +799,12 @@ paths:
       summary: Create an incident.
       description: >
         ServiceNow-backed. The request body is forwarded to the entity service
-        verbatim. This operation requires a forwarded end-user identity token
-        on the entity-service side; this service is strictly M2M with no
-        mechanism to supply one, so every call here currently receives a
-        mapped 401. Kept for API-shape completeness, not because it currently
-        succeeds.
+        verbatim. This service is strictly M2M with no mechanism to forward an
+        end-user identity token, but the entity-service operation falls back
+        to a separately-configured M2M ServiceNow credential when no end-user
+        token is present, and only returns 401 if that fallback credential is
+        itself unconfigured in the target environment. A 401 is therefore a
+        possible response, not a guaranteed one.
       operationId: createIncident
       requestBody:
         description: Incident details.
@@ -826,7 +827,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         "401":
-          description: Unauthorized (upstream reported a missing or invalid forwarded identity — always, for this operation, given this service's M2M-only design)
+          description: Unauthorized (upstream may report a missing or invalid forwarded identity if the target ServiceNow environment's M2M credential isn't configured — possible, not guaranteed, given this service's M2M-only design)
           content:
             application/json:
               schema:
@@ -860,11 +861,13 @@ paths:
     post:
       summary: Search incidents.
       description: >
-        ServiceNow-backed, same as POST /incidents. This operation requires a
-        forwarded end-user identity token on the entity-service side; this
-        service is strictly M2M with no mechanism to supply one, so every
-        call here currently receives a mapped 401. Kept for API-shape
-        completeness, not because it currently succeeds.
+        ServiceNow-backed, same as POST /incidents. This service is strictly
+        M2M with no mechanism to forward an end-user identity token, but the
+        entity-service operation falls back to a separately-configured M2M
+        ServiceNow credential when no end-user token is present, and only
+        returns 401 if that fallback credential is itself unconfigured in the
+        target environment. A 401 is therefore a possible response, not a
+        guaranteed one.
       operationId: searchIncidents
       requestBody:
         description: Incident search payload.
@@ -887,7 +890,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         "401":
-          description: Unauthorized (upstream reported a missing or invalid forwarded identity — always, for this operation, given this service's M2M-only design)
+          description: Unauthorized (upstream may report a missing or invalid forwarded identity if the target ServiceNow environment's M2M credential isn't configured — possible, not guaranteed, given this service's M2M-only design)
           content:
             application/json:
               schema:

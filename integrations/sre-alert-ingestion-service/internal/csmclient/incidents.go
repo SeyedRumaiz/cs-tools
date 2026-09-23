@@ -74,26 +74,32 @@ type CreateIncidentResult struct {
 
 // CreateIncident calls POST /incidents on csm-integration-service.
 //
-// Every call currently receives a mapped 401: the upstream entity-service
-// operation this proxies is ServiceNow-backed and requires a forwarded
-// end-user identity token that csm-integration-service, being M2M-only, has
-// no mechanism to supply (see csm-integration-service's own CLAUDE.md,
-// "This service is M2M-only"). This is a known, already-decided limitation
-// this service does not attempt to work around.
+// A 401 is possible here, but it is not an unconditional architectural
+// limitation of this M2M-only service. The upstream entity-service
+// operation this proxies is ServiceNow-backed; if no forwarded end-user
+// identity token is present, it falls back to a separately-configured
+// M2M ServiceNow credential and only 401s if that fallback credential is
+// itself unconfigured in the target environment. A live end-to-end call
+// through this exact chain against wso2sndev on 2026-09-20 succeeded with
+// no 401, creating a real incident (INC0096966). So whether this 401s
+// depends on the target ServiceNow environment's M2M credential
+// configuration, not on csm-integration-service being M2M-only per se.
 //
-// Critically, that 401 must be treated as a *retryable, CSM-side-unavailability*
-// signal by the caller (internal/worker), not as a permanent client error
-// that skips retry — which is the opposite of how a 401 is normally read.
-// The reasoning: this 401 does not mean "this specific alert's payload is
-// invalid" (a real 400 from bad input is the actual permanent-failure case,
-// and is handled separately — see internal/worker's classifyErr). It means
-// "CSM cannot currently accept this incident through this path", which is
-// exactly the condition this whole service exists to buffer through. Once
-// the missing end-user-identity infrastructure exists and this starts
-// succeeding, callers up the chain (SRE's monitoring tools) should see zero
-// behavior change — alerts that used to sit in the buffer until the retry
-// window naturally succeeds should now succeed sooner, not error out
-// differently.
+// Critically, if a 401 does occur, it must still be treated as a
+// *retryable, CSM-side-unavailability* signal by the caller
+// (internal/worker), not as a permanent client error that skips retry —
+// which is the opposite of how a 401 is normally read. The reasoning:
+// this 401 does not mean "this specific alert's payload is invalid" (a
+// real 400 from bad input is the actual permanent-failure case, and is
+// handled separately — see internal/worker's classifyErr). It means "CSM
+// cannot currently accept this incident through this path" (e.g. the
+// target environment's M2M ServiceNow credential isn't configured),
+// which is exactly the condition this whole service exists to buffer
+// through. Once that credential is configured (or reconfigured) and
+// calls start succeeding, callers up the chain (SRE's monitoring tools)
+// should see zero behavior change — alerts that used to sit in the
+// buffer until the retry window naturally succeeds should now succeed
+// sooner, not error out differently.
 func (c *Client) CreateIncident(ctx context.Context, req CreateIncidentRequest) (*CreateIncidentResult, error) {
 	body, err := json.Marshal(req)
 	if err != nil {

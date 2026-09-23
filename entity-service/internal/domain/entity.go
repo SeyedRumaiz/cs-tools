@@ -667,6 +667,9 @@ type Opportunity struct {
 	Account            *EntityRef `json:"account"`
 	EulaVersion        *string    `json:"eulaVersion"`
 	EulaVersionDecimal *string    `json:"eulaVersionDecimal"`
+	// Stage is the opportunity's sales stage (e.g. "50 - Closed Won"), nil when absent
+	// (ServiceNow data source only).
+	Stage *string `json:"stage"`
 }
 
 // SearchOpportunitiesRequest is the input for searching opportunities (ServiceNow data

@@ -8755,6 +8755,9 @@ components:
         eulaVersionDecimal:
           type: string
           nullable: true
+        stage:
+          type: string
+          nullable: true
 
     SearchOpportunitiesResponse:
       type: object
