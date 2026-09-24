@@ -127,7 +127,7 @@ func testCaseID(t *testing.T, pool *pgxpool.Pool, tag string) string {
 		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, caseID); err != nil {
 			t.Logf("cleanup: delete chat_queue row %s: %v", caseID, err)
 		}
-		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue_engineer_assignment WHERE conversation_id = $1`, caseID); err != nil {
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue_engineer_assignment WHERE case_id = $1`, caseID); err != nil {
 			t.Logf("cleanup: delete chat_queue_engineer_assignment row %s: %v", caseID, err)
 		}
 	})

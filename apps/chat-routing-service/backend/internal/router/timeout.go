@@ -150,11 +150,9 @@ func (r *Router) timeoutOne(ctx context.Context, userID, caseID string, timeout 
 
 		// Audit trail: userID's ping on this conversation is settled as
 		// TIMED_OUT. Uses caseID (this method's own parameter, already the
-		// right identity), not timedOut.ConversationID -- see state.go's
-		// Decline/Accept for why this column, despite its legacy name, now
-		// holds case identity rather than conversation identity.
+		// right identity), not timedOut.ConversationID.
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO chat_queue_engineer_assignment (conversation_id, engineer_id, status)
+			INSERT INTO chat_queue_engineer_assignment (case_id, engineer_id, status)
 			VALUES ($1, $2, 'TIMED_OUT')
 		`, caseID, userID); err != nil {
 			return fmt.Errorf("record timeout outcome: %w", err)
