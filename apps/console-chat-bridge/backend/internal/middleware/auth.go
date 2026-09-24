@@ -19,6 +19,7 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -54,6 +55,15 @@ func Auth(v *introspect.Validator) func(http.Handler) http.Handler {
 			}
 			identity, err := v.ValidateBearer(r.Context(), token)
 			if err != nil {
+				// The response to the browser stays generic on purpose (RFC
+				// 7662 introspection failures should never leak detail to
+				// an untrusted caller), but that left this bridge's own
+				// terminal with no way to tell "IS rejected our
+				// introspection client's own credentials", "TLS trust
+				// failure against a self-signed local IS" and "token
+				// genuinely inactive/expired" apart -- log the real reason
+				// here, server-side only.
+				slog.ErrorContext(r.Context(), "auth: token introspection failed", "err", err)
 				writeUnauthorized(w, "Your session could not be verified. Please sign in again.")
 				return
 			}
