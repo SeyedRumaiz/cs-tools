@@ -110,6 +110,10 @@ type caseInfoRequest struct {
 	CaseID         string                `json:"caseId"`
 	ConversationID string                `json:"conversationId"`
 	ProjectID      string                `json:"projectId"`
+	// Source/Channel mirror router.CaseInfo's own fields of the same name
+	// -- see that struct's doc comment. Optional.
+	Source         string                `json:"source,omitempty"`
+	Channel        string                `json:"channel,omitempty"`
 	Subject        string                `json:"subject"`
 	CustomerEmail  string                `json:"customerEmail"`
 	CustomerName   string                `json:"customerName"`
@@ -122,6 +126,8 @@ func (req caseInfoRequest) toCaseInfo() router.CaseInfo {
 		CaseID:         req.CaseID,
 		ConversationID: req.ConversationID,
 		ProjectID:      req.ProjectID,
+		Source:         req.Source,
+		Channel:        req.Channel,
 		Subject:        req.Subject,
 		CustomerEmail:  req.CustomerEmail,
 		CustomerName:   req.CustomerName,
@@ -473,6 +479,12 @@ type caseInfoResponse struct {
 	CaseID         string                `json:"caseId"`
 	ConversationID string                `json:"conversationId"`
 	ProjectID      string                `json:"projectId,omitempty"`
+	// Source/Channel mirror router.CaseInfo's own fields -- see that
+	// struct's doc comment. csm-portal/backend's ChatHandler.sourceForCase
+	// reads Source from exactly this response to route its own downstream
+	// push (see that method's doc comment).
+	Source         string                `json:"source,omitempty"`
+	Channel        string                `json:"channel,omitempty"`
 	Subject        string                `json:"subject,omitempty"`
 	CustomerEmail  string                `json:"customerEmail,omitempty"`
 	CustomerName   string                `json:"customerName,omitempty"`
@@ -485,6 +497,8 @@ func caseInfoToResponse(c router.CaseInfo) caseInfoResponse {
 		CaseID:         c.CaseID,
 		ConversationID: c.ConversationID,
 		ProjectID:      c.ProjectID,
+		Source:         c.Source,
+		Channel:        c.Channel,
 		Subject:        c.Subject,
 		CustomerEmail:  c.CustomerEmail,
 		CustomerName:   c.CustomerName,
