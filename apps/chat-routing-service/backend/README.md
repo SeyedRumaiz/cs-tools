@@ -176,8 +176,18 @@ In their own `chat_routing` schema, separate from `entity-service`'s flat
 |---|---|---|
 | `cs_engineer_status` | `user_id` (PK, the IdP's `userid` claim), `chat_status` (`AVAILABLE`/`BUSY`/`OFFLINE` — a plain manual toggle, see [Presence state machine](#presence-state-machine)), `max_concurrent_chats` (configurable capacity, default `1`, `CHECK` between 1 and 20), `available_since` | `available_since` — oldest-idle-first (assignment-priority tier-3 tie-break) |
 | `chat_conversation` | the LOCAL STAND-IN work-item pairing (see [Integrating from another service](#integrating-from-another-service)) — this is now also the **source of truth for which cases an engineer holds**: `case_id`, `assignee_id` (set at assignment time, not just at Accept), `state` (`OPEN` until `Accept` moves it to `ACTIVE`), `accepted_at`, `session_ended_at`, `case_info` (JSONB) | indexed on `(assignee_id, state)` where `assignee_id IS NOT NULL AND session_ended_at IS NULL` — the "active chats" set every capacity check and the timeout sweep scan |
-| `chat_queue_engineer_assignment` | one append-only row per assignment **outcome**: `conversation_id`, `engineer_id`, `status` (`CONNECTED`/`REJECTED`/`TIMED_OUT`), `occurred_at` | indexed on `(conversation_id, occurred_at)` and `(engineer_id, occurred_at)`; a pure audit trail of accept/decline/timeout outcomes — it isn't written at assignment time, so it can't answer "how many chats was this engineer assigned today" (see [Assignment priority](#assignment-priority)) |
+| `chat_queue_engineer_assignment` | one append-only row per assignment **outcome**: `case_id` (renamed from `conversation_id` in migration `000022` — it always held case identity, never the Novera conversation's, see that migration's own comment), `engineer_id`, `status` (`CONNECTED`/`REJECTED`/`TIMED_OUT`), `occurred_at` | indexed on `(case_id, occurred_at)` and `(engineer_id, occurred_at)`; a pure audit trail of accept/decline/timeout outcomes — it isn't written at assignment time, so it can't answer "how many chats was this engineer assigned today" (see [Assignment priority](#assignment-priority)) |
 | `chat_queue` | one row **per active (unaccepted) escalation**, from `Escalate` until `Accept` — `chat_conversation_id` (PK), `case_info` (JSONB), `status` (`WAITING_FOR_ENGINEER`/`ASSIGNED`) | `(created_at, chat_conversation_id)` ascending among `WAITING_FOR_ENGINEER` rows — a fresh case sorts by arrival time, and a reassigned/requeued row keeps its *original* `created_at` (see [Presence state machine](#presence-state-machine)) since it's only ever updated in place, never deleted and re-inserted |
+
+**Referential integrity, as of migration `000023`:** every same-schema relationship above is now a real, enforced foreign key —
+`chat_conversation.assignee_id -> cs_engineer_status.user_id` (`ON DELETE SET NULL`), `chat_queue.chat_conversation_id -> chat_conversation.case_id`
+(`ON DELETE RESTRICT`), and `chat_queue_engineer_assignment.case_id -> chat_conversation.case_id` (`ON DELETE RESTRICT`). None of these had a real
+reason to stay convention-only — all three tables have always lived in this same schema, and the actual write order (verified against
+`router.Router`'s `CreateWorkItem`/`Escalate`/`Accept`/`Decline`/`timeoutOne`) always creates the referenced row first. `chat_conversation.case_id` and
+`.entity_case_id` remain convention-only on purpose: they identify rows owned by a different service's own schema (`entity-service`/`customer-portal`),
+and enforcing a cross-schema FK there would couple this service's migrations to theirs — see this project's db-schema-review notes on each service
+keeping its own schema. See `migrations/000023_add_missing_chat_routing_foreign_keys.up.sql` for the per-relationship `ON DELETE` reasoning and the
+pre-migration orphan-check queries.
 
 **An engineer no longer has a single `current_case` column** — as of the
 2026-09-10 concurrent-chat-capacity change, `cs_engineer_status.

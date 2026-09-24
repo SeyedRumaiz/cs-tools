@@ -1,0 +1,41 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- Renames chat_queue_engineer_assignment.conversation_id back to case_id.
+--
+-- History: this column started out as case_id (000009), was renamed to
+-- conversation_id in 000014 back when case_id and conversationId were
+-- always the same value -- there was no distinction to preserve, and
+-- "conversation_id" read as the more natural name at the time. Every
+-- INSERT into this table has always populated it with the case's identity
+-- (see router.Router.Accept/Decline/timeoutOne, each of which uses
+-- conv.CaseID or its own caseID parameter, never a Novera conversation
+-- ID) -- that didn't change when 000021 split the two concepts apart, so
+-- this column has been silently holding case_id values under a
+-- conversation_id name ever since. 000021 is what surfaces the mismatch:
+-- now that a single Novera conversation can span more than one caseId,
+-- "conversation_id" on an audit row that actually identifies one specific
+-- case is actively misleading, not just imprecise. Renaming back to
+-- case_id closes that gap and matches every other case-identifying column
+-- in this schema (chat_conversation.case_id, chat_queue.chat_conversation_id
+-- notwithstanding its own legacy name).
+--
+-- Pure rename -- Postgres carries over the column's data, its role in
+-- idx_chat_queue_engineer_assignment_case (created in 000009 against the
+-- then-named case_id column, already renamed once by 000014's own column
+-- rename), and (after the next migration) its new FK, all without a
+-- rewrite.
+ALTER TABLE chat_routing.chat_queue_engineer_assignment RENAME COLUMN conversation_id TO case_id;

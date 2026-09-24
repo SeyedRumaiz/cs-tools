@@ -501,16 +501,9 @@ func (r *Router) Decline(ctx context.Context, userID, caseID string) (DeclineRes
 		}
 
 		// Audit trail: userID's ping on this conversation is settled as
-		// REJECTED, independent of what happens to the case next. The
-		// column is still named conversation_id (from when case_id and
-		// conversationId were always equal -- see migration
-		// 000014_rename_engineer_status_table), but what every caller here
-		// has on hand, and what identifies a single ping/assignment
-		// instance, is the case, not the underlying Novera conversation --
-		// see conv.CaseID and this file's other chat_queue_engineer_
-		// assignment inserts (Accept, timeout.go's timeoutOne).
+		// REJECTED, independent of what happens to the case next.
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO chat_queue_engineer_assignment (conversation_id, engineer_id, status)
+			INSERT INTO chat_queue_engineer_assignment (case_id, engineer_id, status)
 			VALUES ($1, $2, 'REJECTED')
 		`, conv.CaseID, userID); err != nil {
 			return fmt.Errorf("record decline outcome: %w", err)
@@ -584,10 +577,9 @@ func (r *Router) Accept(ctx context.Context, userID, caseID string) (AcceptResul
 		}
 
 		// Audit trail: userID's ping on this conversation is settled as
-		// CONNECTED. See Decline's own identical insert for why this uses
-		// conv.CaseID despite the column's legacy name.
+		// CONNECTED.
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO chat_queue_engineer_assignment (conversation_id, engineer_id, status)
+			INSERT INTO chat_queue_engineer_assignment (case_id, engineer_id, status)
 			VALUES ($1, $2, 'CONNECTED')
 		`, conv.CaseID, userID); err != nil {
 			return fmt.Errorf("record accept outcome: %w", err)
