@@ -29,7 +29,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -50,6 +52,45 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// loadDotEnv reads a .env file and sets any unset environment variables from
+// it. Silently ignored if the file does not exist; logs a warning for any
+// other error. Mirrors csm-portal/backend's own cmd/server/main.go helper of
+// the same name so this service can be run the same way: cp .env.example
+// .env, fill in values, go run ./cmd/server.
+func loadDotEnv(path string) {
+	f, err := os.Open(path) // #nosec G304 -- path is always the hardcoded literal ".env" at the only call site
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("loadDotEnv: failed to open .env file", "err", err)
+		}
+		return
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		// Strip surrounding quotes from value.
+		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
+			v = v[1 : len(v)-1]
+		}
+		if os.Getenv(k) == "" {
+			_ = os.Setenv(k, v)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("loadDotEnv: error reading .env file", "err", err)
+	}
 }
 
 func splitComma(s string) []string {
@@ -76,6 +117,8 @@ func mustEnv(key string) string {
 }
 
 func main() {
+	loadDotEnv(".env")
+
 	validator := introspect.NewValidator(introspect.Config{
 		IssuerBaseURL:             mustEnv("KNOWN_ISSUER_BASE_URL"),
 		IntrospectionClientID:     mustEnv("INTROSPECTION_CLIENT_ID"),
