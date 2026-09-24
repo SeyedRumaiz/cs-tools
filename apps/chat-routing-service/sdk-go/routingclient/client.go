@@ -154,7 +154,18 @@ type CaseInfo struct {
 	CaseID         string `json:"caseId"`
 	ConversationID string `json:"conversationId"`
 	ProjectID      string `json:"projectId,omitempty"`
-	Subject        string `json:"subject,omitempty"`
+	// Source/Channel identify which product/surface raised this case (e.g.
+	// "customer-portal"/"" for the existing Novera "Chat with an Engineer"
+	// flow, "asgardeo"/"ask-ai" for an escalation raised from identity-apps'
+	// Ask AI panel via console-chat-bridge). Persisted as-is in
+	// chat_conversation.case_info (existing jsonb column, no migration) and
+	// echoed back by GetCaseInfo so csm-portal/backend can route its
+	// downstream push to the right service. Optional -- an empty Source
+	// means "customer-portal", the only source that existed before this
+	// field did.
+	Source  string `json:"source,omitempty"`
+	Channel string `json:"channel,omitempty"`
+	Subject string `json:"subject,omitempty"`
 	CustomerEmail  string `json:"customerEmail,omitempty"`
 	CustomerName   string `json:"customerName,omitempty"`
 	Message        string `json:"message,omitempty"`
