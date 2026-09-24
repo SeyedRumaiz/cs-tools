@@ -123,6 +123,7 @@ func main() {
 		IssuerBaseURL:             mustEnv("KNOWN_ISSUER_BASE_URL"),
 		IntrospectionClientID:     mustEnv("INTROSPECTION_CLIENT_ID"),
 		IntrospectionClientSecret: mustEnv("INTROSPECTION_CLIENT_SECRET"),
+		InsecureSkipVerify:        envOrDefault("INTROSPECTION_INSECURE_SKIP_VERIFY", "false") == "true",
 	})
 
 	csmClient := csmchat.NewClient(csmchat.Config{

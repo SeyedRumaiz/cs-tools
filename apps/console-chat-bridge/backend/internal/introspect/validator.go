@@ -37,6 +37,7 @@ package introspect
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -60,7 +61,24 @@ type Config struct {
 	// browser.
 	IntrospectionClientID     string
 	IntrospectionClientSecret string
-	// HTTPClient defaults to a 5s-timeout client when nil.
+	// InsecureSkipVerify disables TLS certificate verification for calls to
+	// IssuerBaseURL's introspection endpoint. LOCAL DEVELOPMENT ONLY: a
+	// locally-installed WSO2 IS (e.g. wso2is-7.3.0 run straight from the
+	// product distribution) serves HTTPS with its default self-signed
+	// server certificate, which Go's default transport will not trust --
+	// every introspection call fails closed with a TLS handshake error,
+	// which ValidateBearer reports as a generic "not active" failure (see
+	// its own doc comment on visibility into this). Since this bridge
+	// already pins IssuerBaseURL to one specific, operator-chosen instance
+	// (see this package's own doc comment), skipping chain-of-trust
+	// verification for calls to that one pinned host is a bounded,
+	// deliberate POC shortcut -- not a general TLS bypass -- but a real
+	// deployment should instead trust that instance's actual CA (or run it
+	// with a certificate issued by one already in the OS trust store) and
+	// leave this false.
+	InsecureSkipVerify bool
+	// HTTPClient defaults to a 5s-timeout client (honouring
+	// InsecureSkipVerify) when nil.
 	HTTPClient *http.Client
 }
 
@@ -100,6 +118,9 @@ func NewValidator(cfg Config) *Validator {
 	hc := cfg.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: 5 * time.Second}
+		if cfg.InsecureSkipVerify {
+			hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} // #nosec G402 -- opt-in, local-dev-only, see Config.InsecureSkipVerify's doc comment
+		}
 	}
 	return &Validator{cfg: cfg, hc: hc}
 }
