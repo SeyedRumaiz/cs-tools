@@ -98,11 +98,46 @@ func main() {
 		ClientSecret: oauth2ClientSecret,
 		Scopes:       splitComma(os.Getenv("CHAT_NOTIFY_SCOPES")),
 	})
+	// chatNotifiers maps a case's Source (see handler.chatEvent's own doc
+	// comment) to the downstream service its events push to.
+	// "customer-portal" (== handler.defaultNotifySource, used for every
+	// case with an empty Source too) is the pre-existing, always-on target.
+	// "asgardeo" is new: identity-apps' Ask AI panel escalates through
+	// console-chat-bridge (see that service's own README), a separate small
+	// backend, not customer-portal/backend-v2 -- only wired up when
+	// CONSOLE_CHAT_BRIDGE_BASE_URL is actually configured, so a deployment
+	// that hasn't set this up yet behaves exactly as before (an
+	// "asgardeo"-sourced case would fall back to the customer-portal
+	// target via notifierFor's own fallback, which is a no-op push to a
+	// service that doesn't know that case -- harmless, logged, matches
+	// this feature's existing best-effort philosophy for every other
+	// notify failure).
+	chatNotifiers := map[string]handler.ChatEventPusher{
+		"customer-portal": chatNotifyClient,
+	}
+	if bridgeBaseURL := os.Getenv("CONSOLE_CHAT_BRIDGE_BASE_URL"); bridgeBaseURL != "" {
+		// Reuses chatnotify.Client as-is: it already POSTs PushEvent's
+		// payload to "{BaseURL}/internal/chat-events", which is exactly the
+		// route shape console-chat-bridge implements for the same reason
+		// backend-v2 does (see that service's internal/handler/chats.go).
+		// CreateCase is also on this interface but console-chat-bridge
+		// does not implement /internal/chat/create-case -- HandleConvertToCase
+		// is not a meaningful action for an Ask AI-originated case (Console
+		// admins don't have entity-service "cases"), so that method is
+		// never expected to be called against this target.
+		chatNotifiers["asgardeo"] = chatnotify.NewClient(chatnotify.Config{
+			BaseURL:      bridgeBaseURL,
+			TokenURL:     envOrDefault("CONSOLE_CHAT_BRIDGE_TOKEN_URL", oauth2TokenURL),
+			ClientID:     envOrDefault("CONSOLE_CHAT_BRIDGE_CLIENT_ID", oauth2ClientID),
+			ClientSecret: envOrDefault("CONSOLE_CHAT_BRIDGE_CLIENT_SECRET", oauth2ClientSecret),
+			Scopes:       splitComma(os.Getenv("CONSOLE_CHAT_BRIDGE_NOTIFY_SCOPES")),
+		})
+	}
 	routingClient := routingclient.NewClient(routingclient.Config{
 		BaseURL:       envOrDefault("ROUTING_SERVICE_BASE_URL", "http://localhost:9096"),
 		InternalToken: os.Getenv("ROUTING_SERVICE_TOKEN"),
 	})
-	chatHandler := handler.NewChatHandler(customerEntityClient, engineerHub, chatNotifyClient, routingClient)
+	chatHandler := handler.NewChatHandler(customerEntityClient, engineerHub, chatNotifiers, routingClient)
 	engineerTimeoutSweepInterval := envDurationSeconds("ENGINEER_TIMEOUT_SWEEP_INTERVAL_SECONDS", 15)
 
 	dashboardHandler := handler.NewDashboardHandler()

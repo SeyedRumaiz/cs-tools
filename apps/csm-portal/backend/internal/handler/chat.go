@@ -114,7 +114,7 @@ func engineerHubKey(userID string) string {
 const maxChatBodyBytes = 64 << 10 // 64 KiB
 
 // chatNotifyTimeout bounds the best-effort push to customer-portal/
-// backend-v2 (see notifyBackendV2) — this must never make an engineer's
+// backend-v2 (see notifyOrigin) — this must never make an engineer's
 // accept/message/complete call hang on backend-v2 being slow or down.
 const chatNotifyTimeout = 5 * time.Second
 
@@ -129,9 +129,9 @@ type entityChatClient interface {
 	PatchCase(ctx context.Context, caseID string, body []byte) ([]byte, error)
 }
 
-// chatEventPusher abstracts internal/chatnotify.Client so tests can fake the
+// ChatEventPusher abstracts internal/chatnotify.Client so tests can fake the
 // backend-v2 push.
-type chatEventPusher interface {
+type ChatEventPusher interface {
 	PushEvent(ctx context.Context, payload []byte) error
 	// CreateCase calls backend-v2's create-case endpoint synchronously
 	// (unlike PushEvent) since the caller needs the new case's ID back.
@@ -196,10 +196,10 @@ type routingService interface {
 
 // ChatHandler implements the live-engineer-chat escalation endpoints.
 type ChatHandler struct {
-	entity  entityChatClient
-	hub     *stream.BroadcastHub
-	notify  chatEventPusher
-	routing routingService
+	entity    entityChatClient
+	hub       *stream.BroadcastHub
+	notifiers map[string]ChatEventPusher
+	routing   routingService
 }
 
 // NewChatHandler creates a ChatHandler. hub must be non-nil — unlike
@@ -210,8 +210,8 @@ type ChatHandler struct {
 // StreamCaseActivities has. routing must also be non-nil: unlike notify
 // (whose failures are all best-effort), HandleEscalate's fallback path
 // still needs a routing client to have attempted and failed, not a nil one.
-func NewChatHandler(entity entityChatClient, hub *stream.BroadcastHub, notify chatEventPusher, routing routingService) *ChatHandler {
-	return &ChatHandler{entity: entity, hub: hub, notify: notify, routing: routing}
+func NewChatHandler(entity entityChatClient, hub *stream.BroadcastHub, notifiers map[string]ChatEventPusher, routing routingService) *ChatHandler {
+	return &ChatHandler{entity: entity, hub: hub, notifiers: notifiers, routing: routing}
 }
 
 // chatEvent is the single JSON envelope used for every event this feature
@@ -223,6 +223,13 @@ type chatEvent struct {
 	CaseID         string `json:"caseId,omitempty"`
 	ConversationID string `json:"conversationId,omitempty"`
 	ProjectID      string `json:"projectId,omitempty"`
+	// Source/Channel identify which product/surface this case originated
+	// from (e.g. "customer-portal"/"" for the existing Novera flow,
+	// "asgardeo"/"ask-ai" for an escalation raised from identity-apps'
+	// Ask AI panel). Also doubles as the notifyOrigin routing key -- see
+	// ChatHandler.notifierFor.
+	Source         string `json:"source,omitempty"`
+	Channel        string `json:"channel,omitempty"`
 	Subject        string `json:"subject,omitempty"`
 	CustomerEmail  string `json:"customerEmail,omitempty"`
 	CustomerName   string `json:"customerName,omitempty"`
@@ -272,22 +279,68 @@ func (h *ChatHandler) publishToEngineer(userID string, evt chatEvent) {
 	h.publish(engineerHubKey(userID), evt)
 }
 
-// notifyBackendV2 pushes evt to customer-portal/backend-v2's
-// /internal/chat-events, best-effort. A failure here is logged, not
-// returned to the caller: the case/comment write this always follows
-// already succeeded, and the customer falls back to their existing
+// defaultNotifySource is the notifiers map key used whenever a case has no
+// Source set -- every case created before this field existed, and every
+// customer-portal-originated case going forward (that flow never sets
+// Source). Keeping this as the fallback means the pre-existing single-
+// target ("always push to backend-v2") behavior is unchanged for every
+// caller that predates this field.
+const defaultNotifySource = "customer-portal"
+
+// notifierFor resolves which downstream service a case's events should be
+// pushed to, keyed by CaseInfo.Source/chatEvent.Source. Falls back to
+// defaultNotifySource for an empty or unrecognized source (e.g. the
+// notifiers map has no entry for it, such as a deployment that hasn't
+// configured the console-chat-bridge target) rather than returning nil,
+// so a misconfigured/unknown source degrades to today's behavior instead
+// of silently dropping the event.
+func (h *ChatHandler) notifierFor(source string) ChatEventPusher {
+	if source != "" {
+		if n, ok := h.notifiers[source]; ok {
+			return n
+		}
+	}
+	return h.notifiers[defaultNotifySource]
+}
+
+// sourceForCase looks up which channel originated caseID (CaseInfo.Source)
+// so a call site that doesn't already have the case's CaseInfo on hand
+// (HandleAcceptSession, HandleEngineerMessage, HandleCompleteSession) can
+// still route notifyOrigin correctly. Best-effort: any lookup failure
+// returns "", which notifierFor treats as defaultNotifySource -- the same
+// target these call sites always used before Source existed.
+func (h *ChatHandler) sourceForCase(ctx context.Context, caseID string) string {
+	ci, err := h.routing.GetCaseInfo(ctx, caseID)
+	if err != nil {
+		slog.WarnContext(ctx, "chat: could not resolve case source, defaulting", "caseID", caseID, "err", err)
+		return ""
+	}
+	return ci.Source
+}
+
+// notifyOrigin pushes evt to whichever downstream service source's cases
+// are pushed to (see notifierFor), best-effort. A failure here is logged,
+// not returned to the caller: the case/comment write this always follows
+// already succeeded, and that surface falls back to its own existing
 // manual-refresh behaviour for this one event rather than seeing an
-// otherwise-successful action reported as failed.
-func (h *ChatHandler) notifyBackendV2(ctx context.Context, evt chatEvent) {
+// otherwise-successful action reported as failed. Renamed from this
+// package's original notifyBackendV2 now that backend-v2 is one of
+// possibly several notify targets rather than the only one -- see
+// ChatHandler.notifiers.
+func (h *ChatHandler) notifyOrigin(ctx context.Context, source string, evt chatEvent) {
+	notifier := h.notifierFor(source)
+	if notifier == nil {
+		return
+	}
 	payload, err := json.Marshal(evt)
 	if err != nil {
-		slog.Error("chat: failed to encode backend-v2 push", "type", evt.Type, "err", err)
+		slog.Error("chat: failed to encode origin push", "type", evt.Type, "err", err)
 		return
 	}
 	pushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatNotifyTimeout)
 	defer cancel()
-	if err := h.notify.PushEvent(pushCtx, payload); err != nil {
-		slog.Error("chat: push to backend-v2 failed", "type", evt.Type, "conversationId", evt.ConversationID, "err", err)
+	if err := notifier.PushEvent(pushCtx, payload); err != nil {
+		slog.Error("chat: push to origin failed", "type", evt.Type, "source", source, "conversationId", evt.ConversationID, "err", err)
 	}
 }
 
@@ -323,6 +376,8 @@ func assignedCaseEvent(ci routingclient.CaseInfo) chatEvent {
 		CaseID:         ci.CaseID,
 		ConversationID: ci.ConversationID,
 		ProjectID:      ci.ProjectID,
+		Source:         ci.Source,
+		Channel:        ci.Channel,
 		Subject:        ci.Subject,
 		CustomerEmail:  ci.CustomerEmail,
 		CustomerName:   ci.CustomerName,
@@ -343,6 +398,13 @@ type escalateRequest struct {
 	CaseID         string `json:"caseId"`
 	ConversationID string `json:"conversationId"`
 	ProjectID      string `json:"projectId"`
+	// Source/Channel identify the originating product/surface (see
+	// chatEvent's own doc comment on these two fields). Optional: an empty
+	// Source is treated as "customer-portal", the only source that existed
+	// before this field did, so every existing caller keeps working
+	// unchanged.
+	Source         string `json:"source,omitempty"`
+	Channel        string `json:"channel,omitempty"`
 	Subject        string `json:"subject"`
 	CustomerEmail  string `json:"customerEmail"`
 	CustomerName   string `json:"customerName"`
@@ -394,6 +456,8 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 		CaseID:         req.CaseID,
 		ConversationID: req.ConversationID,
 		ProjectID:      req.ProjectID,
+		Source:         req.Source,
+		Channel:        req.Channel,
 		Subject:        req.Subject,
 		CustomerEmail:  req.CustomerEmail,
 		CustomerName:   req.CustomerName,
@@ -456,10 +520,12 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 	case result.EngineerUserID != "":
 		h.publishToEngineer(result.EngineerUserID, assignedCaseEvent(ci))
 	case result.Queued:
-		h.notifyBackendV2(r.Context(), chatEvent{
+		h.notifyOrigin(r.Context(), req.Source, chatEvent{
 			Type:           "queued",
 			CaseID:         req.CaseID,
 			ConversationID: req.ConversationID,
+			Source:         req.Source,
+			Channel:        req.Channel,
 			Message:        fmt.Sprintf("You're #%d in the queue. An engineer will be with you shortly.", result.Position),
 			Timestamp:      time.Now().UTC().Format(time.RFC3339),
 		})
@@ -629,7 +695,7 @@ func (h *ChatHandler) HandleAcceptSession(w http.ResponseWriter, r *http.Request
 		EngineerEmail:  user.Email,
 		Timestamp:      now,
 	})
-	h.notifyBackendV2(r.Context(), chatEvent{
+	h.notifyOrigin(r.Context(), h.sourceForCase(r.Context(), caseID), chatEvent{
 		Type:           "engineer_assigned",
 		CaseID:         caseID,
 		ConversationID: req.ConversationID,
@@ -679,7 +745,7 @@ func (h *ChatHandler) HandleEngineerMessage(w http.ResponseWriter, r *http.Reque
 	// Best-effort, matching HandleCustomerMessage's own philosophy for the
 	// other direction of this same transcript (see routingService's doc
 	// comment) -- an engineer's message must still reach the customer over
-	// notifyBackendV2 below even if this LOCAL STAND-IN persistence call
+	// notifyOrigin below even if this LOCAL STAND-IN persistence call
 	// fails. Previously this was a blocking entity.CreateCaseComment call;
 	// moved here so both directions of the conversation land in the same
 	// place (the stand-in comment table) instead of being split across two
@@ -698,7 +764,7 @@ func (h *ChatHandler) HandleEngineerMessage(w http.ResponseWriter, r *http.Reque
 		slog.WarnContext(r.Context(), "chat: routing service add comment failed for engineer chat message (non-blocking)", "userID", user.UserID, "caseID", caseID, "err", err)
 	}
 
-	h.notifyBackendV2(r.Context(), chatEvent{
+	h.notifyOrigin(r.Context(), h.sourceForCase(r.Context(), caseID), chatEvent{
 		Type:           "engineer_message",
 		CaseID:         caseID,
 		ConversationID: req.ConversationID,
@@ -749,7 +815,7 @@ func (h *ChatHandler) HandleCompleteSession(w http.ResponseWriter, r *http.Reque
 		EngineerEmail:  user.Email,
 		Timestamp:      now,
 	})
-	h.notifyBackendV2(r.Context(), chatEvent{
+	h.notifyOrigin(r.Context(), h.sourceForCase(r.Context(), caseID), chatEvent{
 		Type:           "engineer_disconnected",
 		CaseID:         caseID,
 		ConversationID: req.ConversationID,
@@ -764,7 +830,7 @@ func (h *ChatHandler) HandleCompleteSession(w http.ResponseWriter, r *http.Reque
 	// the same way a fresh escalation would arrive. A failure here is
 	// logged, not surfaced to the caller — the session has already ended
 	// successfully from the engineer's point of view, matching this
-	// handler's existing best-effort treatment of notifyBackendV2 above.
+	// handler's existing best-effort treatment of notifyOrigin above.
 	if result, err := h.routing.Completed(r.Context(), user.UserID, caseID); err != nil {
 		slog.ErrorContext(r.Context(), "chat: routing service completed failed", "userID", user.UserID, "err", err)
 	} else if result.AssignedCase != nil {
@@ -1061,7 +1127,7 @@ func (h *ChatHandler) HandleConvertToCase(w http.ResponseWriter, r *http.Request
 	// engineer's own is forwarded instead; the resulting case is
 	// attributed to the engineer, not the original customer.
 	engineerToken := entity.UserIDTokenFromContext(r.Context())
-	respBody, err := h.notify.CreateCase(r.Context(), createPayload, engineerToken)
+	respBody, err := h.notifierFor(ci.Source).CreateCase(r.Context(), createPayload, engineerToken)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "chat: backend-v2 create-case failed converting to case", "userID", user.UserID, "caseID", caseID, "err", err)
 		writeError(w, http.StatusBadGateway, "Failed to create a case for this chat. Please try again.")
@@ -1084,7 +1150,7 @@ func (h *ChatHandler) HandleConvertToCase(w http.ResponseWriter, r *http.Request
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	h.notifyBackendV2(r.Context(), chatEvent{
+	h.notifyOrigin(r.Context(), ci.Source, chatEvent{
 		Type:           "converted_to_case",
 		CaseID:         caseID,
 		ConversationID: ci.ConversationID,
