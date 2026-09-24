@@ -86,14 +86,14 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 	// chat-routing-service's own QUEUE_ABANDON_SECONDS. Nobody on the
 	// engineer side ever saw this case (it was never delivered), so there
 	// is no engineer-facing event to clear here -- only the customer might
-	// still have a tab open waiting on it. Best-effort notify backend-v2 so
+	// still have a tab open waiting on it. Best-effort notify the case's origin so
 	// a still-open customer chat can show a "no engineer was available"
 	// message instead of waiting forever; a customer who already left sees
 	// nothing, which is no worse than today.
 	for _, abandoned := range result.Abandoned {
 		slog.InfoContext(ctx, "chat: abandoned a case that waited too long with no engineer free",
 			"caseId", abandoned.CaseID, "conversationId", abandoned.ConversationID)
-		h.notifyBackendV2(ctx, chatEvent{
+		h.notifyOrigin(ctx, h.sourceForCase(ctx, abandoned.CaseID), chatEvent{
 			Type:           "chat_abandoned",
 			CaseID:         abandoned.CaseID,
 			ConversationID: abandoned.ConversationID,
