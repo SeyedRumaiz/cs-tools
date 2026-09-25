@@ -51,6 +51,18 @@ func workItemFixture(t *testing.T, r *Router, pool *pgxpool.Pool, ci CaseInfo) {
 		if workItemID == "" {
 			return
 		}
+		// chat_queue_engineer_assignment.case_id and chat_queue.
+		// chat_conversation_id both FK to chat_conversation.case_id (added
+		// by migration 000023) -- deleted first so the chat_conversation
+		// delete below doesn't fail against a case that went through
+		// Accept/Decline/timeoutOne (chat_queue_engineer_assignment) or is
+		// still WAITING_FOR_ENGINEER (chat_queue).
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue_engineer_assignment WHERE case_id = $1`, ci.CaseID); err != nil {
+			t.Logf("cleanup: delete chat_queue_engineer_assignment for %s: %v", ci.CaseID, err)
+		}
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, ci.CaseID); err != nil {
+			t.Logf("cleanup: delete chat_queue for %s: %v", ci.CaseID, err)
+		}
 		if _, err := pool.Exec(cleanupCtx, `DELETE FROM comment WHERE work_item_id = $1`, workItemID); err != nil {
 			t.Logf("cleanup: delete comments for %s: %v", ci.CaseID, err)
 		}
@@ -274,6 +286,58 @@ func TestGetCaseInfo_PriorMessagesReflectCommentsTableNotStaleSnapshot(t *testin
 	last := got.PriorMessages[2]
 	if last.Content != "q2" || last.Role != PriorMessageRoleCustomer {
 		t.Errorf("expected the live-added comment last with role customer, got %+v", last)
+	}
+}
+
+// TestGetCaseInfo_LiveEngineerReplyReadsBackWithEngineerRole is the
+// regression test for a live bug reported in CSM Portal: after an engineer
+// replies and the page is refreshed, their own message re-rendered as if it
+// came from the customer/Novera side. Root cause: commentsForWorkItem used
+// to map every created_by that wasn't priorMessageAssistantAuthor to
+// PriorMessageRoleCustomer -- correct for CreateWorkItem's own write path
+// (which, per PriorMessageRole's doc comment, never sees an engineer
+// message), but wrong for this read path, which also covers AddComment's
+// live post-acceptance rows (HandleEngineerMessage in csm-portal/backend
+// appends the engineer's own reply here). See commentsForWorkItem's own doc
+// comment for the fix: created_by is now checked against the case's actual
+// customerEmail, not just "is it Novera or not."
+func TestGetCaseInfo_LiveEngineerReplyReadsBackWithEngineerRole(t *testing.T) {
+	r, pool := newTestRouter(t)
+	caseID := testCaseID(t, pool, "getcaseinfo-engineer-role")
+	customerEmail := "getcaseinfo-engineer-role-customer@example.com"
+	ci := CaseInfo{
+		CaseID: caseID, ConversationID: "conv-" + caseID,
+		Subject: "test", CustomerEmail: customerEmail,
+		PriorMessages: []PriorMessage{
+			{Role: PriorMessageRoleCustomer, Content: "q1"},
+			{Role: PriorMessageRoleAssistant, Content: "a1"},
+		},
+	}
+	workItemFixture(t, r, pool, ci)
+
+	engineerEmail := "getcaseinfo-engineer-role-engineer@example.com"
+	if err := r.AddComment(context.Background(), caseID, customerEmail, "customer follow-up"); err != nil {
+		t.Fatalf("AddComment (customer): %v", err)
+	}
+	if err := r.AddComment(context.Background(), caseID, engineerEmail, "engineer reply"); err != nil {
+		t.Fatalf("AddComment (engineer): %v", err)
+	}
+
+	got, err := r.GetCaseInfo(context.Background(), caseID)
+	if err != nil {
+		t.Fatalf("GetCaseInfo: %v", err)
+	}
+	if len(got.PriorMessages) != 4 {
+		t.Fatalf("expected 4 prior messages (2 original + customer follow-up + engineer reply), got %d: %+v", len(got.PriorMessages), got.PriorMessages)
+	}
+
+	customerFollowUp := got.PriorMessages[2]
+	if customerFollowUp.Content != "customer follow-up" || customerFollowUp.Role != PriorMessageRoleCustomer {
+		t.Errorf("expected the customer's own live message to read back as role customer, got %+v", customerFollowUp)
+	}
+	engineerReply := got.PriorMessages[3]
+	if engineerReply.Content != "engineer reply" || engineerReply.Role != PriorMessageRoleEngineer {
+		t.Errorf("expected the engineer's live reply to read back as role engineer, got %+v", engineerReply)
 	}
 }
 

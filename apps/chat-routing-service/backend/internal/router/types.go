@@ -100,14 +100,20 @@ type CaseInfo struct {
 	PriorMessages []PriorMessage `json:"priorMessages,omitempty"`
 }
 
-// PriorMessageRole says who sent one PriorMessage -- the customer or the
-// Novera AI assistant. Deliberately just these two: a pre-escalation
-// transcript never contains an engineer message (no engineer exists yet).
+// PriorMessageRole says who sent one PriorMessage. CreateWorkItem only ever
+// writes Customer/Assistant (a pre-escalation transcript never contains an
+// engineer message -- no engineer exists yet), but commentsForCase/
+// commentsForWorkItem (workitem.go) read back the SAME chat_routing.comment
+// rows AddComment appends to for the live, post-acceptance conversation too
+// (see HandleEngineerMessage in csm-portal/backend), so Engineer exists for
+// that read path to report correctly -- see those functions' own doc
+// comments for how a row's created_by resolves to one of these three.
 type PriorMessageRole string
 
 const (
 	PriorMessageRoleCustomer  PriorMessageRole = "customer"
 	PriorMessageRoleAssistant PriorMessageRole = "assistant"
+	PriorMessageRoleEngineer  PriorMessageRole = "engineer"
 )
 
 // priorMessageAssistantAuthor is the chat_routing.comment.created_by value

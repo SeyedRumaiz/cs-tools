@@ -166,6 +166,18 @@ func conversationFixture(t *testing.T, r *Router, pool *pgxpool.Pool, caseID str
 		if workItemID == "" {
 			return
 		}
+		// chat_queue_engineer_assignment.case_id and chat_queue.
+		// chat_conversation_id both FK to chat_conversation.case_id (added
+		// by migration 000023) -- deleted first so the chat_conversation
+		// delete below doesn't fail against a case that went through
+		// Accept/Decline/timeoutOne (chat_queue_engineer_assignment) or is
+		// still WAITING_FOR_ENGINEER (chat_queue).
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue_engineer_assignment WHERE case_id = $1`, caseID); err != nil {
+			t.Logf("cleanup: delete chat_queue_engineer_assignment for %s: %v", caseID, err)
+		}
+		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, caseID); err != nil {
+			t.Logf("cleanup: delete chat_queue for %s: %v", caseID, err)
+		}
 		if _, err := pool.Exec(cleanupCtx, `DELETE FROM comment WHERE work_item_id = $1`, workItemID); err != nil {
 			t.Logf("cleanup: delete comments for %s: %v", caseID, err)
 		}
@@ -609,10 +621,18 @@ func TestEnqueue_WaitingFlipsToAssignedAndKeepsCreatedAt(t *testing.T) {
 
 	backID := testCaseID(t, pool, "enqueue-back")
 	frontID := testCaseID(t, pool, "enqueue-front")
-	backCase := CaseInfo{CaseID: backID, ConversationID: "conv-" + backID}
-	frontCase := CaseInfo{CaseID: frontID, ConversationID: "conv-" + frontID}
+	backCase := CaseInfo{CaseID: backID, ConversationID: "conv-" + backID, CustomerEmail: backID + "@example.com"}
+	frontCase := CaseInfo{CaseID: frontID, ConversationID: "conv-" + frontID, CustomerEmail: frontID + "@example.com"}
 	backJSON, _ := json.Marshal(backCase)
 	frontJSON, _ := json.Marshal(frontCase)
+
+	// chat_queue.chat_conversation_id -> chat_conversation.case_id (added by
+	// migration 000023) means a queue row can no longer be inserted without
+	// its chat_conversation row existing first -- exactly what a real
+	// Escalate call already does via CreateWorkItem, so this fixture does
+	// the same rather than inserting the bare queue row this test used to.
+	workItemFixture(t, r, pool, backCase)
+	workItemFixture(t, r, pool, frontCase)
 
 	var backCreatedAt, frontCreatedAt time.Time
 	err := r.withTx(ctx, func(tx pgx.Tx) error {

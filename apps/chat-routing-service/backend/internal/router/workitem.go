@@ -340,32 +340,50 @@ func (r *Router) GetCaseInfo(ctx context.Context, caseID string) (CaseInfo, erro
 // lockPendingConversation/engineerCases in state.go), instead of trusting
 // whatever CreateWorkItem/Escalate originally snapshotted into the
 // case_info JSONB blob -- see CaseInfo.PriorMessages's own doc comment.
-// created_by maps back to Role the same way CreateWorkItem maps Role to
-// created_by on insert: priorMessageAssistantAuthor -> Assistant, anything
-// else (an email, whether the customer's own or an engineer's on a live
-// comment added later) -> Customer. That's safe here even though it can't
-// distinguish a live engineer message from a customer one: PriorMessages
-// is only ever replayed by the frontend for a still-pending (not yet
-// accepted) case, which by construction can't have a live engineer message
-// yet -- no engineer exists to have sent one.
+// Also reads back case_info for its own customerEmail, needed to tell a
+// live engineer reply apart from the customer's own live message -- see
+// commentsForWorkItem's own doc comment on why that distinction matters.
 func commentsForCase(ctx context.Context, q pgxQuerier, caseID string) ([]PriorMessage, error) {
-	var workItemID string
-	err := q.QueryRow(ctx, `SELECT work_item_id FROM chat_conversation WHERE case_id = $1`, caseID).Scan(&workItemID)
+	var (
+		workItemID   string
+		caseInfoJSON []byte
+	)
+	err := q.QueryRow(ctx, `SELECT work_item_id, case_info FROM chat_conversation WHERE case_id = $1`, caseID).Scan(&workItemID, &caseInfoJSON)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return nil, nil
 	case err != nil:
 		return nil, fmt.Errorf("comments for case: resolve work item: %w", err)
 	}
-	return commentsForWorkItem(ctx, q, workItemID)
+	var customerEmail string
+	if caseInfoJSON != nil {
+		var c CaseInfo
+		if err := json.Unmarshal(caseInfoJSON, &c); err == nil {
+			customerEmail = c.CustomerEmail
+		}
+	}
+	return commentsForWorkItem(ctx, q, workItemID, customerEmail)
 }
 
 // commentsForWorkItem is commentsForCase's query, factored out for callers
-// that already have workItemID on hand (avoiding a redundant case_id
-// lookup) -- currently just engineerCases in state.go, which selects
-// work_item_id directly off the same chat_conversation row it's already
-// reading.
-func commentsForWorkItem(ctx context.Context, q pgxQuerier, workItemID string) ([]PriorMessage, error) {
+// that already have workItemID (and customerEmail, off the same decoded
+// CaseInfo) on hand -- currently just engineerCases in state.go.
+//
+// created_by maps back to Role the same way CreateWorkItem maps Role to
+// created_by on insert, PLUS a case CreateWorkItem never has to handle:
+// priorMessageAssistantAuthor -> Assistant; customerEmail (when known and
+// it matches) -> Customer; anything else -> Engineer. That third case is
+// exactly AddComment's other caller, HandleEngineerMessage in csm-portal/
+// backend -- once a case is accepted, the live conversation (customer
+// messages AND engineer replies) is appended to this SAME comment table via
+// AddComment, so this read path has to tell those two apart even though
+// CreateWorkItem's own write path never needs to. A row is only ever
+// classified Engineer when customerEmail is non-empty and genuinely
+// doesn't match -- an empty/unresolved customerEmail (shouldn't normally
+// happen, but see CreateWorkItem's own defensive comments on a malformed
+// record) falls back to Customer rather than mislabeling everything as
+// Engineer.
+func commentsForWorkItem(ctx context.Context, q pgxQuerier, workItemID, customerEmail string) ([]PriorMessage, error) {
 	rows, err := q.Query(ctx, `
 		SELECT content, created_by, created_at FROM comment
 		WHERE work_item_id = $1 ORDER BY created_at ASC
@@ -385,8 +403,11 @@ func commentsForWorkItem(ctx context.Context, q pgxQuerier, workItemID string) (
 			return nil, fmt.Errorf("comments for work item: scan: %w", err)
 		}
 		role := PriorMessageRoleCustomer
-		if createdBy == priorMessageAssistantAuthor {
+		switch {
+		case createdBy == priorMessageAssistantAuthor:
 			role = PriorMessageRoleAssistant
+		case customerEmail != "" && createdBy != customerEmail:
+			role = PriorMessageRoleEngineer
 		}
 		msgs = append(msgs, PriorMessage{
 			Role: role, Content: content, CreatedAt: createdAt.Format(time.RFC3339),
