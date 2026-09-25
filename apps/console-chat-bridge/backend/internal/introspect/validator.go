@@ -51,8 +51,18 @@ type Config struct {
 	// IssuerBaseURL is the pinned, known-good IS instance this bridge
 	// trusts -- e.g. "https://localhost:9444" for this POC. The
 	// introspection endpoint is derived from it
-	// (IssuerBaseURL + "/oauth2/introspect") -- never taken from a request.
+	// (IssuerBaseURL + "/oauth2/introspect") unless IntrospectionURL below
+	// overrides it -- never taken from a request.
 	IssuerBaseURL string
+	// IntrospectionURL, when set, is used verbatim as the introspection
+	// endpoint instead of deriving one from IssuerBaseURL -- some IdPs
+	// (e.g. Asgardeo, whose token issuer and introspection endpoint live
+	// under different paths) don't follow the IssuerBaseURL+"/oauth2/
+	// introspect" convention this bridge's own pinned local WSO2 IS does.
+	// Every existing caller leaves this unset and keeps today's derived
+	// behavior unchanged; only internal/tenant's multi-tenant construction
+	// sets it explicitly.
+	IntrospectionURL string
 	// IntrospectionClientID/Secret authenticate this bridge to the known
 	// instance's introspection endpoint via HTTP Basic auth (RFC 7662
 	// §2.1) -- a small confidential "Standard-Based Application"
@@ -98,6 +108,12 @@ type Identity struct {
 	// that route instead of requiring an end-user identity.
 	ClientID string
 	Scopes   []string
+	// Issuer is the introspection response's own "iss" claim, already
+	// verified (see ValidateBearer) to match this Validator's pinned
+	// IssuerBaseURL -- carried through mainly for
+	// internal/tokenvalidator.Identity, which multi-tenant callers use to
+	// tell which IdP a token actually came from.
+	Issuer string
 }
 
 // Validator introspects opaque access tokens against one pinned IS
@@ -147,9 +163,14 @@ func (v *Validator) ValidateBearer(ctx context.Context, tokenStr string) (Identi
 		return Identity{}, fmt.Errorf("introspect: empty token")
 	}
 
+	introspectionURL := v.cfg.IntrospectionURL
+	if introspectionURL == "" {
+		introspectionURL = strings.TrimRight(v.cfg.IssuerBaseURL, "/") + "/oauth2/introspect"
+	}
+
 	form := url.Values{"token": {tokenStr}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(v.cfg.IssuerBaseURL, "/")+"/oauth2/introspect",
+		introspectionURL,
 		strings.NewReader(form.Encode()))
 	if err != nil {
 		return Identity{}, fmt.Errorf("introspect: build request: %w", err)
@@ -192,5 +213,6 @@ func (v *Validator) ValidateBearer(ctx context.Context, tokenStr string) (Identi
 		Subject:  out.Sub,
 		ClientID: out.ClientID,
 		Scopes:   scopes,
+		Issuer:   out.Iss,
 	}, nil
 }

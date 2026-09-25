@@ -16,7 +16,11 @@
 
 package middleware
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/tenant"
+)
 
 // corsAllowedHeaders: Authorization is what AsgardeoSPAClient actually sets
 // on every request (see copilot-api.ts / this bridge's own README);
@@ -29,21 +33,43 @@ const corsAllowedMethods = "GET, POST, OPTIONS"
 // CORS returns an HTTP middleware handling cross-origin browser requests --
 // copied from csm-portal/backend's identically-named middleware (see that
 // file's own doc comment for the full MUST-wrap-Auth-not-be-wrapped-by-it
-// rationale, which applies here unchanged). Fail-closed: an empty
-// allowedOrigins allows no cross-origin browser request through at all,
-// rather than reflecting any Origin back -- this bridge authenticates via a
+// rationale, which applies here unchanged). Fail-closed: an empty allow-list
+// allows no cross-origin browser request through at all, rather than
+// reflecting any Origin back -- this bridge authenticates via a
 // caller-supplied Authorization bearer header, never cookies, so there is
 // no ambient credential for a browser to attach automatically, but stays
 // fail-closed anyway as defense-in-depth (see the original's own note on
 // why this is safer than defaulting open even so).
-func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
-	allowed := make(map[string]bool, len(allowedOrigins))
-	for _, o := range allowedOrigins {
-		allowed[o] = true
+//
+// Tenant-aware: on every request, this checks tenant.FromContext first --
+// set by the tenant-resolution middleware, which must run OUTSIDE (before)
+// this one for a /v1/{tenant}/... request, even for a bare OPTIONS
+// preflight (see that middleware's own doc comment on why an unknown
+// tenant 404s before CORS ever runs). When a Tenant is present, its own
+// Config.AllowedOrigins is checked instead of defaultAllowedOrigins -- so
+// each tenant gets its own origin allow-list rather than one global union
+// (a global union would let tenant A's configured browser origin send
+// authenticated cross-origin requests against tenant B's data, which the
+// browser's own same-origin policy would otherwise have prevented). A
+// legacy /support/chats request never resolves a tenant at all, so it
+// always falls through to defaultAllowedOrigins -- CORS_ALLOWED_ORIGINS,
+// unchanged from before multi-tenant support existed.
+func CORS(defaultAllowedOrigins []string) func(http.Handler) http.Handler {
+	defaultAllowed := make(map[string]bool, len(defaultAllowedOrigins))
+	for _, o := range defaultAllowedOrigins {
+		defaultAllowed[o] = true
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			allowed := defaultAllowed
+			if t, ok := tenant.FromContext(r.Context()); ok {
+				allowed = make(map[string]bool, len(t.AllowedOrigins))
+				for _, o := range t.AllowedOrigins {
+					allowed[o] = true
+				}
+			}
+
 			origin := r.Header.Get("Origin")
 			if origin != "" {
 				w.Header().Add("Vary", "Origin")

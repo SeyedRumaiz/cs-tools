@@ -76,8 +76,16 @@ type caseRecord struct {
 	customerEmail  string
 	// ownerSubject is the introspected identity (Subject, falling back to
 	// Username) that opened this case -- checked on every later
-	// /messages and /stream call for this caseId.
+	// /messages and /stream call for this caseId. Only ever set by the
+	// legacy /support/chats path's requireOwner -- a /v1 case
+	// (requireTenantCase) authorizes by tenant membership, not caller
+	// identity, so this stays "" on a v1-created record.
 	ownerSubject string
+	// tenantSlug is set only for a case raised through the generic
+	// /v1/{tenant}/... API (see requireTenantCase in chats_v1.go) -- "" for
+	// a legacy /support/chats case, which requireTenantCase would then
+	// correctly refuse to treat as belonging to any tenant.
+	tenantSlug string
 }
 
 // PriorMessage mirrors csm-portal/backend's escalateRequest.PriorMessages
@@ -109,16 +117,21 @@ type escalateBody struct {
 // escalateUpstreamBody matches csm-portal/backend's own escalateRequest
 // (internal/handler/chat.go) field-for-field.
 type escalateUpstreamBody struct {
-	CaseID         string         `json:"caseId"`
-	ConversationID string         `json:"conversationId"`
-	ProjectID      string         `json:"projectId,omitempty"`
-	Source         string         `json:"source,omitempty"`
-	Channel        string         `json:"channel,omitempty"`
-	Subject        string         `json:"subject,omitempty"`
-	CustomerEmail  string         `json:"customerEmail,omitempty"`
-	CustomerName   string         `json:"customerName,omitempty"`
-	Message        string         `json:"message,omitempty"`
-	PriorMessages  []PriorMessage `json:"priorMessages,omitempty"`
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId"`
+	ProjectID      string `json:"projectId,omitempty"`
+	Source         string `json:"source,omitempty"`
+	Channel        string `json:"channel,omitempty"`
+	// TenantSlug is set only by the generic /v1/{tenant}/... API (see
+	// HandleEscalateV1 in chats_v1.go) -- empty for the legacy
+	// HandleEscalate above, matching csm-portal/backend's own
+	// escalateRequest.TenantSlug doc comment.
+	TenantSlug    string         `json:"tenantSlug,omitempty"`
+	Subject       string         `json:"subject,omitempty"`
+	CustomerEmail string         `json:"customerEmail,omitempty"`
+	CustomerName  string         `json:"customerName,omitempty"`
+	Message       string         `json:"message,omitempty"`
+	PriorMessages []PriorMessage `json:"priorMessages,omitempty"`
 }
 
 // consoleProjectID is a fixed sentinel used in place of a real
