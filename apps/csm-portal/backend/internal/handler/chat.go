@@ -192,6 +192,10 @@ type routingService interface {
 	// best-effort like most of this interface's other side-channel methods.
 	GetCaseInfo(ctx context.Context, caseID string) (routingclient.CaseInfo, error)
 	ConvertToCase(ctx context.Context, userID, caseID, entityCaseID string) (routingclient.ConvertToCaseResult, error)
+	// EndByTenant backs HandleCompleteByTenant -- console-chat-bridge's
+	// tenant-initiated (customer-side) session completion, which has no
+	// engineer userID to authorize against the way Completed does.
+	EndByTenant(ctx context.Context, caseID, tenantSlug string) (routingclient.CompletedResult, error)
 }
 
 // ChatHandler implements the live-engineer-chat escalation endpoints.
@@ -228,13 +232,13 @@ type chatEvent struct {
 	// "asgardeo"/"ask-ai" for an escalation raised from identity-apps'
 	// Ask AI panel). Also doubles as the notifyOrigin routing key -- see
 	// ChatHandler.notifierFor.
-	Source         string `json:"source,omitempty"`
-	Channel        string `json:"channel,omitempty"`
-	Subject        string `json:"subject,omitempty"`
-	CustomerEmail  string `json:"customerEmail,omitempty"`
-	CustomerName   string `json:"customerName,omitempty"`
-	EngineerEmail  string `json:"engineerEmail,omitempty"`
-	Message        string `json:"message,omitempty"`
+	Source        string `json:"source,omitempty"`
+	Channel       string `json:"channel,omitempty"`
+	Subject       string `json:"subject,omitempty"`
+	CustomerEmail string `json:"customerEmail,omitempty"`
+	CustomerName  string `json:"customerName,omitempty"`
+	EngineerEmail string `json:"engineerEmail,omitempty"`
+	Message       string `json:"message,omitempty"`
 	// EntityCaseID is set only on a "converted_to_case" event (see
 	// HandleConvertToCase) -- the real entity-service case ID the customer's
 	// browser should point to now that this chat has ended.
@@ -403,12 +407,17 @@ type escalateRequest struct {
 	// Source is treated as "customer-portal", the only source that existed
 	// before this field did, so every existing caller keeps working
 	// unchanged.
-	Source         string `json:"source,omitempty"`
-	Channel        string `json:"channel,omitempty"`
-	Subject        string `json:"subject"`
-	CustomerEmail  string `json:"customerEmail"`
-	CustomerName   string `json:"customerName"`
-	Message        string `json:"message"`
+	Source  string `json:"source,omitempty"`
+	Channel string `json:"channel,omitempty"`
+	// TenantSlug mirrors routingclient.CaseInfo.TenantSlug -- set only by
+	// console-chat-bridge's generic /v1/{tenant}/... API (see that
+	// service's HandleEscalateV1). Optional: empty for every caller that
+	// predates multi-tenant support, exactly like Source/Channel above.
+	TenantSlug    string `json:"tenantSlug,omitempty"`
+	Subject       string `json:"subject"`
+	CustomerEmail string `json:"customerEmail"`
+	CustomerName  string `json:"customerName"`
+	Message       string `json:"message"`
 	// PriorMessages is the customer's AI-chatbot (Novera) transcript up to
 	// the moment of escalation -- see routingclient.PriorMessage. Optional:
 	// omitted or empty just means the engineer's chat starts without that
@@ -458,6 +467,7 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 		ProjectID:      req.ProjectID,
 		Source:         req.Source,
 		Channel:        req.Channel,
+		TenantSlug:     req.TenantSlug,
 		Subject:        req.Subject,
 		CustomerEmail:  req.CustomerEmail,
 		CustomerName:   req.CustomerName,
@@ -1163,4 +1173,112 @@ func (h *ChatHandler) HandleConvertToCase(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSONValue(w, http.StatusOK, createCaseResponseBody{EntityCaseID: created.EntityCaseID})
+}
+
+// caseOwnershipResponse is GET /internal/chat/cases/{caseId}'s response
+// shape. console-chat-bridge's requireTenantCase durable authorization
+// check reads exactly these three fields to confirm a case belongs to the
+// tenant it's being accessed through, and to know which downstream target
+// (Source) its own events should route to.
+type caseOwnershipResponse struct {
+	TenantSlug string `json:"tenantSlug,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Channel    string `json:"channel,omitempty"`
+}
+
+// HandleGetCaseOwnership handles GET /internal/chat/cases/{caseId} — not
+// browser-facing, exempt from middleware.Auth's JWT check like every other
+// /internal/chat/... route (see middleware.m2mExemptRoutes), authenticated
+// instead by an OAuth2 client-credentials token from the calling service.
+// The only caller today is console-chat-bridge's requireTenantCase, which
+// uses this as the durable source of truth for "does this case belong to
+// this tenant" once its own in-memory record is missing or disagrees (see
+// that method's own doc comment for the fast-path/durable-fallback split).
+//
+// Any lookup failure -- case genuinely not found, or the routing service
+// itself unreachable -- responds 404 rather than distinguishing the two:
+// this endpoint only ever backs an authorization decision, so failing
+// closed (reject the case as unrecognized) is the safe default rather than
+// letting a transient routing-service outage look like case ownership
+// confirmed.
+func (h *ChatHandler) HandleGetCaseOwnership(w http.ResponseWriter, r *http.Request) {
+	caseID := r.PathValue("caseId")
+	if caseID == "" {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	ci, err := h.routing.GetCaseInfo(r.Context(), caseID)
+	if err != nil {
+		slog.WarnContext(r.Context(), "chat: get case ownership failed", "caseID", caseID, "err", err)
+		writeError(w, http.StatusNotFound, "No case found for this ID.")
+		return
+	}
+	writeJSONValue(w, http.StatusOK, caseOwnershipResponse{
+		TenantSlug: ci.TenantSlug,
+		Source:     ci.Source,
+		Channel:    ci.Channel,
+	})
+}
+
+// completeByTenantRequest is the body for POST /internal/chat/complete.
+// ConversationID is optional -- only used to populate the session_closed
+// event this handler broadcasts to engineers, itself only a UI refresh
+// trigger (see broadcastHubKey's doc comment), so an empty value here never
+// blocks ending the session.
+type completeByTenantRequest struct {
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId,omitempty"`
+	TenantSlug     string `json:"tenantSlug"`
+}
+
+// HandleCompleteByTenant handles POST /internal/chat/complete — the
+// tenant-initiated counterpart to HandleCompleteSession. console-chat-
+// bridge's POST /v1/{tenant}/chats/{caseId}/complete calls this once its
+// own requireTenantCase check has confirmed caseId belongs to tenantSlug,
+// so a case can be ended from the customer/tenant side of a chat, not just
+// by the engineer holding it. Not browser-facing -- exempt from
+// middleware.Auth like every other /internal/chat/... route, authenticated
+// by an OAuth2 client-credentials token instead.
+//
+// router.Router.EndByTenant itself re-checks tenantSlug at the SQL level
+// (belt-and-suspenders on top of the bridge's own check) before ending
+// anything, so a caller that got tenantSlug wrong ends nothing rather than
+// someone else's case -- result.Ended false covers both that case and a
+// caseId that was already ended, and both are reported as 404 here since
+// this caller has no further action to take either way.
+func (h *ChatHandler) HandleCompleteByTenant(w http.ResponseWriter, r *http.Request) {
+	body, ok := readChatBody(w, r)
+	if !ok {
+		return
+	}
+	var req completeByTenantRequest
+	if err := json.Unmarshal(body, &req); err != nil || req.CaseID == "" || req.TenantSlug == "" {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	result, err := h.routing.EndByTenant(r.Context(), req.CaseID, req.TenantSlug)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "chat: routing service end-by-tenant failed", "caseID", req.CaseID, "tenantSlug", req.TenantSlug, "err", err)
+		writeError(w, http.StatusBadGateway, "Failed to end this chat session. Please try again.")
+		return
+	}
+	if !result.Ended {
+		writeError(w, http.StatusNotFound, "No open chat session found for this case and tenant.")
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	h.publishToEngineers(chatEvent{
+		Type:           "session_closed",
+		CaseID:         req.CaseID,
+		ConversationID: req.ConversationID,
+		Timestamp:      now,
+	})
+	if result.AssignedCase != nil && result.AssignedEngineerID != "" {
+		h.publishToEngineer(result.AssignedEngineerID, assignedCaseEvent(*result.AssignedCase))
+	}
+
+	writeJSON(w, http.StatusOK, []byte(`{"message":"session ended"}`))
 }

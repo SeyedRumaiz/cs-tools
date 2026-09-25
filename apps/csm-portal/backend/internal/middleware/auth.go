@@ -77,18 +77,26 @@ type jwtClaims struct {
 // m2mExemptRoutes lists the routes that skip Auth entirely because they are
 // pure machine-to-machine calls with no end-user identity behind them --
 // customer-portal/backend-v2's internal/csmchat.Client calling
-// POST /internal/chat/escalate and POST /internal/chat/customer-message.
-// Neither receiving handler (ChatHandler.HandleEscalate,
-// ChatHandler.HandleCustomerMessage) ever reads UserInfoFromContext or an
+// POST /internal/chat/escalate and POST /internal/chat/customer-message,
+// and console-chat-bridge's own csmchat.Client calling
+// POST /internal/chat/complete (ChatHandler.HandleCompleteByTenant). Neither
+// receiving handler for any of these ever reads UserInfoFromContext or an
 // entity.WithUserIDToken value, so there is no end-user identity these
 // routes need Auth to establish.
+//
+// GET /internal/chat/cases/{caseId} (ChatHandler.HandleGetCaseOwnership,
+// also called by console-chat-bridge) is exempted separately below, via
+// m2mExemptPathPrefixes rather than this exact-match map -- its path
+// carries a caller-supplied caseId segment, so there is no single literal
+// string to match against r.URL.Path the way every other exempt route's
+// fixed path allows.
 //
 // These are trusted the same way integrations/csm-integration-service
 // trusts its own M2M callers: entirely at Choreo's API Manager gateway
 // (subscription + client-credentials app auth), not validated again here.
 // See that service's CLAUDE.md ("Why no Auth middleware") for the
 // established precedent this follows, and openapi.yaml's
-// oauth2ClientCredentials securityScheme on these two paths for the
+// oauth2ClientCredentials securityScheme on these paths for the
 // corresponding API contract change. This intentionally does NOT reuse the
 // browser-facing x-jwt-assertion/email/userid check: this repo already has
 // a dedicated pattern for pure M2M routes, and requiring an IdP to emit
@@ -97,6 +105,31 @@ type jwtClaims struct {
 var m2mExemptRoutes = map[string]bool{
 	http.MethodPost + " /internal/chat/escalate":         true,
 	http.MethodPost + " /internal/chat/customer-message": true,
+	http.MethodPost + " /internal/chat/complete":         true,
+}
+
+// m2mExemptPathPrefixes lists method+path-prefix pairs that skip Auth the
+// same way m2mExemptRoutes does, for a route whose path carries a variable
+// segment (so no single literal string belongs in that exact-match map).
+// Currently just GET /internal/chat/cases/{caseId} -- see
+// m2mExemptRoutes's own doc comment.
+var m2mExemptPathPrefixes = []string{
+	http.MethodGet + " /internal/chat/cases/",
+}
+
+// isM2MExempt reports whether r's method+path matches m2mExemptRoutes
+// exactly or falls under one of m2mExemptPathPrefixes.
+func isM2MExempt(r *http.Request) bool {
+	key := r.Method + " " + r.URL.Path
+	if m2mExemptRoutes[key] {
+		return true
+	}
+	for _, prefix := range m2mExemptPathPrefixes {
+		if strings.HasPrefix(key, prefix) && len(key) > len(prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // bearerAuthPrefix is the standard "Authorization: Bearer <token>" scheme
@@ -158,7 +191,7 @@ func Auth(cfg Config) func(http.Handler) http.Handler {
 
 			// Skip auth for the M2M-only internal chat routes -- see
 			// m2mExemptRoutes's doc comment.
-			if m2mExemptRoutes[r.Method+" "+r.URL.Path] {
+			if isM2MExempt(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
