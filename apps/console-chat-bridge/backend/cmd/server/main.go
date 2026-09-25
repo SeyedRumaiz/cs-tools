@@ -45,6 +45,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/introspect"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/stream"
+	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/tenant"
 )
 
 func envOrDefault(key, def string) string {
@@ -148,6 +149,34 @@ func main() {
 
 	corsOrigins := splitComma(mustEnv("CORS_ALLOWED_ORIGINS"))
 
+	// tenantTable backs the generic /v1/{tenant}/... API only -- the legacy
+	// /support/chats routes above never consult it, and keep using
+	// validator/corsOrigins exactly as before (see internal/tenant's own
+	// package doc comment). TENANT_REGISTRY unset synthesizes a single
+	// "identity-console" tenant from the same KNOWN_ISSUER_BASE_URL/
+	// INTROSPECTION_*/CORS_ALLOWED_ORIGINS vars validator/corsOrigins
+	// already use, so /v1/identity-console/... works with zero additional
+	// configuration. BRIDGE_ROUTING_SOURCE is every explicit registry
+	// row's default RoutingSource when that row leaves it blank -- see
+	// csm-portal/backend's own dual "asgardeo"/"console-chat-bridge"
+	// chatNotifiers registration, which this default is designed to match.
+	tenantTable, err := tenant.BuildTable(
+		os.Getenv("TENANT_REGISTRY"),
+		envOrDefault("BRIDGE_ROUTING_SOURCE", "console-chat-bridge"),
+		nil,
+		tenant.LegacyConfig{
+			IssuerBaseURL:      os.Getenv("KNOWN_ISSUER_BASE_URL"),
+			ClientID:           os.Getenv("INTROSPECTION_CLIENT_ID"),
+			ClientSecret:       os.Getenv("INTROSPECTION_CLIENT_SECRET"),
+			InsecureSkipVerify: envOrDefault("INTROSPECTION_INSECURE_SKIP_VERIFY", "false") == "true",
+			AllowedOrigins:     corsOrigins,
+		},
+	)
+	if err != nil {
+		slog.Error("failed to build tenant table", "err", err)
+		os.Exit(1)
+	}
+
 	mux := http.NewServeMux()
 
 	browserChain := func(h http.HandlerFunc) http.Handler {
@@ -160,11 +189,31 @@ func main() {
 	mux.Handle("POST /internal/chat-events",
 		middleware.Auth(validator)(middleware.RequireClientID(csmPortalM2MClientID)(http.HandlerFunc(chatsHandler.HandleChatEvents))))
 
+	// v1Chain: TenantAuth (per-tenant validator, resolved into context by
+	// ResolveTenant -- see this middleware chain's own composition below)
+	// then RequireSubject (see that middleware's own doc comment on why
+	// /v1 never falls back to Username the way browserChain's RequireUser
+	// does).
+	v1Chain := func(h http.HandlerFunc) http.Handler {
+		return middleware.TenantAuth()(middleware.RequireSubject(h))
+	}
+	mux.Handle("POST /v1/{tenant}/chats", v1Chain(chatsHandler.HandleEscalateV1))
+	mux.Handle("POST /v1/{tenant}/chats/{caseId}/messages", v1Chain(chatsHandler.HandleSendMessageV1))
+	mux.Handle("GET /v1/{tenant}/chats/{caseId}/events", v1Chain(chatsHandler.HandleStreamV1))
+	mux.Handle("POST /v1/{tenant}/chats/{caseId}/complete", v1Chain(chatsHandler.HandleCompleteV1))
+
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handlerChain := middleware.CORS(corsOrigins)(mux)
+	// ResolveTenant must be OUTSIDE (run before) CORS -- see that
+	// middleware's own doc comment on why an unknown tenant must 404
+	// before CORS or Auth ever run, including for a bare OPTIONS
+	// preflight. It only ever acts on a /v1/... path; every other route
+	// above (legacy, internal, health) passes through it untouched, so
+	// this wrapping is purely additive over today's single
+	// middleware.CORS(corsOrigins)(mux) chain.
+	handlerChain := middleware.ResolveTenant(tenantTable)(middleware.CORS(corsOrigins)(mux))
 
 	addr := ":" + envOrDefault("PORT", "8090")
 	srv := &http.Server{

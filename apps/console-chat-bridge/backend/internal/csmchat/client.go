@@ -16,32 +16,32 @@
 
 // Package csmchat is the outbound HTTP client this bridge uses to call
 // csm-portal/backend's live-engineer-chat endpoints
-// (POST /internal/chat/escalate, POST /internal/chat/customer-message) --
-// deliberately copied from customer-portal/backend-v2's own
-// internal/csmchat/client.go rather than shared, matching this repo's
-// existing convention of duplicating small M2M clients per caller (see that
-// file's own package doc comment for the M2M/gateway-trust rationale this
-// mirrors exactly). Both calls are pure machine-to-machine: this bridge
-// itself already validated the Console admin's identity (see
-// internal/introspect) before ever reaching here, and forwards only what
-// csm-portal/backend's existing escalateRequest/customerMessageRequest
-// shapes already accept -- no new fields, no new route.
+// (POST /internal/chat/escalate, POST /internal/chat/customer-message).
+// Both calls are pure machine-to-machine: this bridge itself already
+// validated the caller's identity (see internal/introspect) before ever
+// reaching here, and forwards only what csm-portal/backend's existing
+// escalateRequest/customerMessageRequest shapes already accept -- no new
+// fields, no new route.
+//
+// Previously this package (and customer-portal/backend-v2's own,
+// independently hand-rolled twin) each implemented the same OAuth2
+// client-credentials HTTP-client plumbing by hand -- this package's own
+// prior doc comment admitted as much ("deliberately copied ... rather than
+// shared"). Both now build on the shared
+// apps/live-chat-sdk/sdk-go/m2mclient package instead; this package keeps
+// its own identity and typed methods (Escalate/SendCustomerMessage), only
+// the transport internals moved.
 package csmchat
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"strings"
-	"time"
+	"net/url"
 
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/clientcredentials"
+	"github.com/wso2-open-operations/cs-tools/apps/live-chat-sdk/sdk-go/m2mclient"
 )
-
-const maxResponseBodyBytes = 64 << 10 // 64 KiB
 
 // Config holds the configuration for the csm-portal/backend internal
 // client.
@@ -63,66 +63,89 @@ type Config struct {
 
 // Client calls csm-portal/backend's internal chat endpoints.
 type Client struct {
-	http    *http.Client
-	baseURL string
+	m2m *m2mclient.Client
 }
 
 // NewClient constructs a Client.
 func NewClient(cfg Config) *Client {
-	cc := clientcredentials.Config{
+	return &Client{m2m: m2mclient.NewClient(m2mclient.Config{
+		BaseURL:      cfg.BaseURL,
+		TokenURL:     cfg.TokenURL,
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
-		TokenURL:     cfg.TokenURL,
 		Scopes:       cfg.Scopes,
-	}
-	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient,
-		&http.Client{Timeout: 10 * time.Second})
-	httpClient := cc.Client(tokenCtx)
-	httpClient.Timeout = 10 * time.Second
-	// Never follow a redirect: refuse rather than let oauth2.Transport
-	// reattach this bearer token to a different host (mirrors
-	// backend-v2's internal/csmchat.Client identical guard).
-	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-
-	return &Client{
-		http:    httpClient,
-		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
-	}
-}
-
-func (c *Client) post(ctx context.Context, path string, payload []byte) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
-	if err != nil {
-		return nil, 0, fmt.Errorf("csmchat: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("csmchat: %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return body, resp.StatusCode, fmt.Errorf("csmchat: %s: upstream returned %d", path, resp.StatusCode)
-	}
-	return body, resp.StatusCode, nil
+	})}
 }
 
 // Escalate POSTs to csm-portal/backend's POST /internal/chat/escalate.
 // Returns the response body and status so the caller (chats.go) can pass
 // csm-portal/backend's own duplicate-open-chat 409 straight through to the
-// Console browser instead of masking it as a generic failure.
+// browser instead of masking it as a generic failure.
 func (c *Client) Escalate(ctx context.Context, payload []byte) ([]byte, int, error) {
-	return c.post(ctx, "/internal/chat/escalate", payload)
+	body, status, err := c.m2m.Do(ctx, http.MethodPost, "/internal/chat/escalate", payload, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("csmchat: escalate: %w", err)
+	}
+	if !m2mclient.Success(status) {
+		return body, status, fmt.Errorf("csmchat: escalate: upstream returned %d", status)
+	}
+	return body, status, nil
 }
 
 // SendCustomerMessage POSTs to csm-portal/backend's
 // POST /internal/chat/customer-message.
 func (c *Client) SendCustomerMessage(ctx context.Context, payload []byte) error {
-	_, _, err := c.post(ctx, "/internal/chat/customer-message", payload)
-	return err
+	body, status, err := c.m2m.Do(ctx, http.MethodPost, "/internal/chat/customer-message", payload, nil)
+	if err != nil {
+		return fmt.Errorf("csmchat: customer-message: %w", err)
+	}
+	if !m2mclient.Success(status) {
+		return fmt.Errorf("csmchat: customer-message: upstream returned %d: %s", status, body)
+	}
+	return nil
+}
+
+// CaseOwnership mirrors csm-portal/backend's caseOwnershipResponse
+// (GET /internal/chat/cases/{caseId}).
+type CaseOwnership struct {
+	TenantSlug string `json:"tenantSlug,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Channel    string `json:"channel,omitempty"`
+}
+
+// GetCaseOwnership calls csm-portal/backend's
+// GET /internal/chat/cases/{caseId} -- the durable source of truth behind
+// this bridge's own requireTenantCase authorization check (see
+// internal/handler's v1 routes). Returns an error for any non-2xx response,
+// including a 404 for an unrecognized case -- the caller treats any error
+// here as "reject", never distinguishing further (see requireTenantCase's
+// own doc comment on why).
+func (c *Client) GetCaseOwnership(ctx context.Context, caseID string) (CaseOwnership, error) {
+	body, status, err := c.m2m.Do(ctx, http.MethodGet, "/internal/chat/cases/"+url.PathEscape(caseID), nil, nil)
+	if err != nil {
+		return CaseOwnership{}, fmt.Errorf("csmchat: get case ownership: %w", err)
+	}
+	if !m2mclient.Success(status) {
+		return CaseOwnership{}, fmt.Errorf("csmchat: get case ownership: upstream returned %d: %s", status, body)
+	}
+	var out CaseOwnership
+	if err := json.Unmarshal(body, &out); err != nil {
+		return CaseOwnership{}, fmt.Errorf("csmchat: get case ownership: decode response: %w", err)
+	}
+	return out, nil
+}
+
+// CompleteByTenant POSTs to csm-portal/backend's
+// POST /internal/chat/complete -- the tenant-initiated (customer-side)
+// session-completion counterpart to the engineer-initiated
+// POST /chat/sessions/{id}/complete (which this bridge never calls).
+func (c *Client) CompleteByTenant(ctx context.Context, payload []byte) error {
+	body, status, err := c.m2m.Do(ctx, http.MethodPost, "/internal/chat/complete", payload, nil)
+	if err != nil {
+		return fmt.Errorf("csmchat: complete: %w", err)
+	}
+	if !m2mclient.Success(status) {
+		return fmt.Errorf("csmchat: complete: upstream returned %d: %s", status, body)
+	}
+	return nil
 }
