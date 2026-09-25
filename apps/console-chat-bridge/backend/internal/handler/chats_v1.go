@@ -34,6 +34,7 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -314,8 +315,27 @@ func (h *ChatsHandler) HandleEscalateV1(w http.ResponseWriter, r *http.Request) 
 		conversationID: conversationID,
 		customerEmail:  customerEmail,
 		tenantSlug:     t.Slug,
+		// The resolved canonical Subject (never Username -- see
+		// canonicalOwner's own doc comment), recorded here even though
+		// requireTenantCase authorizes by tenant membership only, not a
+		// per-caller Subject match (see that function's own doc comment --
+		// unchanged by this). This durably records, in the one place this
+		// codebase already models "who owns this case" (ownerSubject,
+		// otherwise only ever set by the legacy path's requireOwner), that
+		// a v1 case's owner identity really is the IdP's stable Subject
+		// claim, not the customerEmail display field above (which
+		// deliberately still prefers the human-readable Username for
+		// engineer-UI legibility and stays unchanged here).
+		ownerSubject: subject,
 	}
 	h.mu.Unlock()
+
+	// Never logs the bearer token itself -- only the already-validated,
+	// non-sensitive identity claims TokenValidator resolved from it. Useful
+	// to confirm, per tenant, which identity-resolution path actually fired
+	// (introspection's own "sub" vs. the userinfo fallback both land here
+	// identically) without needing a debug endpoint.
+	slog.InfoContext(r.Context(), "v1 chat escalation", "tenant", t.Slug, "caseId", caseID, "ownerSubject", subject)
 
 	writeJSON(w, http.StatusAccepted, v1EscalateResponse{CaseID: caseID, ConversationID: conversationID})
 }

@@ -60,6 +60,14 @@ type Config struct {
 	// required for an IdP (e.g. Asgardeo) whose introspection endpoint
 	// doesn't live under Issuer+"/oauth2/introspect".
 	IntrospectionURL string
+	// UserinfoURL overrides the derived OIDC UserInfo endpoint used by
+	// introspect.Validator's userinfo fallback (see that package's own doc
+	// comment on ValidateBearer) -- required for an IdP whose userinfo
+	// endpoint doesn't live under Issuer+"/oauth2/userinfo". Optional even
+	// for an explicit TENANT_REGISTRY row: left blank, introspect.Validator
+	// derives it from Issuer itself, the same way IntrospectionURL's own
+	// blank case works.
+	UserinfoURL string
 	// JWKSURI/Audience configure a "jwks" tenant -- unused for
 	// "introspection".
 	JWKSURI  string
@@ -115,10 +123,14 @@ func (t Table) Lookup(slug string) (*Tenant, bool) {
 // environment variables.
 type SecretLookup func(slug string) string
 
-// registryFieldCount is exactly how many "|"-delimited fields one
+// registryFieldCountMin/Max bound how many "|"-delimited fields one
 // TENANT_REGISTRY row has -- see BuildTable's own doc comment for the
-// order.
-const registryFieldCount = 12
+// order. Max's one extra field (UserinfoURL) is optional so every row
+// written before it existed keeps parsing unchanged.
+const (
+	registryFieldCountMin = 12
+	registryFieldCountMax = 13
+)
 
 // LegacyConfig carries the pre-multi-tenant env vars /support/chats already
 // uses (cmd/server/main.go's KNOWN_ISSUER_BASE_URL/INTROSPECTION_CLIENT_ID/
@@ -159,10 +171,15 @@ const (
 // separate TENANT_REGISTRY setup on top of what /support/chats already has
 // configured.
 //
-// Row syntax: rows separated by ";", fields by "|", exactly 12 fields per
+// Row syntax: rows separated by ";", fields by "|", 12 or 13 fields per
 // row, in this order:
 //
-//	slug|validationType|issuer|introspectionURL|jwksURI|audience|clientID|insecureSkipVerify|allowedOrigins|routingSource|channel|projectID
+//	slug|validationType|issuer|introspectionURL|jwksURI|audience|clientID|insecureSkipVerify|allowedOrigins|routingSource|channel|projectID|userinfoURL
+//
+// userinfoURL (field 13) is optional -- a 12-field row (every row written
+// before this field existed) parses exactly as before, with UserinfoURL
+// left blank so introspect.Validator derives one from issuer itself (see
+// Config.UserinfoURL's own doc comment).
 //
 // allowedOrigins is itself "," separated when it carries more than one
 // origin (a nested list inside one "|"-delimited field, the same flat-
@@ -199,8 +216,8 @@ func BuildTable(raw, defaultRoutingSource string, secretLookup SecretLookup, leg
 			continue
 		}
 		fields := strings.Split(row, "|")
-		if len(fields) != registryFieldCount {
-			return nil, fmt.Errorf("tenant: TENANT_REGISTRY row %d: expected %d fields, got %d", i+1, registryFieldCount, len(fields))
+		if len(fields) < registryFieldCountMin || len(fields) > registryFieldCountMax {
+			return nil, fmt.Errorf("tenant: TENANT_REGISTRY row %d: expected %d or %d fields, got %d", i+1, registryFieldCountMin, registryFieldCountMax, len(fields))
 		}
 		for j := range fields {
 			fields[j] = strings.TrimSpace(fields[j])
@@ -226,6 +243,10 @@ func BuildTable(raw, defaultRoutingSource string, secretLookup SecretLookup, leg
 		if routingSource == "" {
 			routingSource = defaultRoutingSource
 		}
+		var userinfoURL string
+		if len(fields) == registryFieldCountMax {
+			userinfoURL = fields[12]
+		}
 
 		cfg := Config{
 			Slug:               slug,
@@ -240,6 +261,7 @@ func BuildTable(raw, defaultRoutingSource string, secretLookup SecretLookup, leg
 			RoutingSource:      routingSource,
 			Channel:            fields[10],
 			ProjectID:          fields[11],
+			UserinfoURL:        userinfoURL,
 		}
 
 		validator, err := buildValidator(cfg, secretLookup(slug))
@@ -285,6 +307,7 @@ func buildValidator(cfg Config, secret string) (tokenvalidator.TokenValidator, e
 		v := introspect.NewValidator(introspect.Config{
 			IssuerBaseURL:             cfg.Issuer,
 			IntrospectionURL:          cfg.IntrospectionURL,
+			UserinfoURL:               cfg.UserinfoURL,
 			IntrospectionClientID:     cfg.ClientID,
 			IntrospectionClientSecret: secret,
 			InsecureSkipVerify:        cfg.InsecureSkipVerify,
@@ -308,6 +331,7 @@ func buildLegacyTenant(legacy LegacyConfig) (*Tenant, error) {
 		ValidationType:     "introspection",
 		Issuer:             legacy.IssuerBaseURL,
 		IntrospectionURL:   strings.TrimRight(legacy.IssuerBaseURL, "/") + "/oauth2/introspect",
+		UserinfoURL:        strings.TrimRight(legacy.IssuerBaseURL, "/") + "/oauth2/userinfo",
 		ClientID:           legacy.ClientID,
 		InsecureSkipVerify: legacy.InsecureSkipVerify,
 		AllowedOrigins:     legacy.AllowedOrigins,
@@ -318,6 +342,7 @@ func buildLegacyTenant(legacy LegacyConfig) (*Tenant, error) {
 	v := introspect.NewValidator(introspect.Config{
 		IssuerBaseURL:             cfg.Issuer,
 		IntrospectionURL:          cfg.IntrospectionURL,
+		UserinfoURL:               cfg.UserinfoURL,
 		IntrospectionClientID:     cfg.ClientID,
 		IntrospectionClientSecret: legacy.ClientSecret,
 		InsecureSkipVerify:        cfg.InsecureSkipVerify,
