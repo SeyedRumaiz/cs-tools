@@ -27,12 +27,9 @@
 // csm-portal/backend's own browser-facing routes, so this client follows
 // that service's established M2M pattern instead of the browser-oriented
 // internal/middleware.Auth model: a plain OAuth2 client-credentials token
-// attached as a standard Authorization: Bearer header (via
-// clientcredentials.Config.Client(), the same shape
-// integrations/acp-closure-service/internal/entity/client.go uses against
-// csm-integration-service), trusted entirely at Choreo's API Manager
-// gateway (subscription + client-credentials app auth) rather than
-// validated again in-process. See
+// attached as a standard Authorization: Bearer header, trusted entirely at
+// Choreo's API Manager gateway (subscription + client-credentials app
+// auth) rather than validated again in-process. See
 // integrations/csm-integration-service/CLAUDE.md's "Why no Auth
 // middleware" section for the rationale this mirrors, and
 // csm-portal/backend's own internal/middleware.Auth exemption for these
@@ -48,27 +45,22 @@
 // no end-user identity to supply -- this repo already has an established,
 // gateway-trust pattern for exactly this situation, so that requirement
 // was removed instead of worked around.
+//
+// The HTTP-client plumbing itself (OAuth2 client-credentials, refuse
+// redirects, bound the error body) used to be hand-rolled here and
+// independently re-hand-rolled in console-chat-bridge's own twin of this
+// package; both now build on the shared
+// apps/live-chat-sdk/sdk-go/m2mclient package instead.
 package csmchat
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
-	"strings"
-	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/apierror"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/clientcredentials"
+	"github.com/wso2-open-operations/cs-tools/apps/live-chat-sdk/sdk-go/m2mclient"
 )
-
-// tokenFetchTimeout is the HTTP client timeout for token-endpoint requests.
-var tokenFetchTimeout = 10 * time.Second
-
-// maxResponseBodyBytes bounds how much of a response this client reads.
-const maxResponseBodyBytes = 64 << 10 // 64 KiB
 
 // Config holds the configuration for the csm-portal/backend internal client.
 type Config struct {
@@ -90,54 +82,27 @@ type Config struct {
 
 // Client calls csm-portal/backend's internal chat endpoints.
 type Client struct {
-	http    *http.Client
-	baseURL string
+	m2m *m2mclient.Client
 }
 
 // NewClient constructs a Client.
 func NewClient(cfg Config) *Client {
-	cc := clientcredentials.Config{
+	return &Client{m2m: m2mclient.NewClient(m2mclient.Config{
+		BaseURL:      cfg.BaseURL,
+		TokenURL:     cfg.TokenURL,
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
-		TokenURL:     cfg.TokenURL,
 		Scopes:       cfg.Scopes,
-	}
-	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient,
-		&http.Client{Timeout: tokenFetchTimeout})
-	httpClient := cc.Client(tokenCtx)
-	httpClient.Timeout = 10 * time.Second
-	// oauth2.Transport reattaches the Authorization bearer token to every
-	// request it processes, including a followed redirect to a different
-	// host. Refuse to follow so the token can never leak to wherever
-	// csm-portal/backend says to redirect to (mirrors
-	// integrations/acp-closure-service/internal/entity/client.go's identical
-	// guard against its own M2M target).
-	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-
-	return &Client{
-		http:    httpClient,
-		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
-	}
+	})}
 }
 
 func (c *Client) post(ctx context.Context, path string, payload []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("csmchat: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
+	body, status, err := c.m2m.Do(ctx, http.MethodPost, path, payload, nil)
 	if err != nil {
 		return fmt.Errorf("csmchat: %s: %w", path, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
-		return apierror.NewUpstreamError(resp.StatusCode, body)
+	if !m2mclient.Success(status) {
+		return apierror.NewUpstreamError(status, body)
 	}
 	return nil
 }
