@@ -68,10 +68,11 @@ type Config struct {
 	// instead of deriving one from IssuerBaseURL -- mirrors
 	// IntrospectionURL's own doc comment above, for the same reason: not
 	// every IdP's userinfo endpoint lives at {IssuerBaseURL}/oauth2/
-	// userinfo. Only consulted by ValidateBearer's userinfo fallback (see
-	// that method's own doc comment) -- a token whose introspection
-	// response already carries "sub" never triggers a userinfo call at
-	// all, so this field is irrelevant for that case.
+	// userinfo. Only consulted by ResolveSubjectViaUserinfo (see that
+	// method's own doc comment) -- ValidateBearer itself never calls
+	// userinfo, so a caller that never invokes ResolveSubjectViaUserinfo
+	// (the legacy /support path -- see this package's own doc comment)
+	// never needs this field set at all.
 	UserinfoURL string
 	// IntrospectionClientID/Secret authenticate this bridge to the known
 	// instance's introspection endpoint via HTTP Basic auth (RFC 7662
@@ -105,6 +106,13 @@ type Config struct {
 // Identity is what this bridge trusts about a caller, derived only from the
 // introspection response -- never from any browser-supplied field (e.g. a
 // request body's own "email"/"userId"). See Validator.ValidateBearer.
+// Subject may be empty even for a genuine end-user token: this package's
+// own base validation never enriches it (see ValidateBearer's own doc
+// comment on why) -- a caller that requires a non-empty canonical Subject
+// (the generic /v1 API; never the legacy /support path, which tolerates an
+// empty Subject via its own Username fallback) must call
+// ResolveSubjectViaUserinfo itself when Subject comes back empty. See this
+// package's own doc comment for the full split.
 type Identity struct {
 	// Username/Subject identify an end user (set on a genuine user-session
 	// access token, i.e. the Console browser's own call). Empty on a pure
@@ -168,14 +176,14 @@ type userinfoResponse struct {
 	Sub string `json:"sub"`
 }
 
-// The three ways ValidateBearer's userinfo fallback can fail, kept
-// distinguishable via errors.Is even though every caller today (middleware.
-// Auth/TenantAuth) still just logs the error and returns the same generic
-// 401 to the browser -- see this package's own investigation notes on why
-// this classification matters even without a status-code change: a token
-// this IdP genuinely can't produce a Subject for (ErrUserinfoInsufficient
-// Scope/ErrUserinfoNoSubject) is a caller-facing "your session can't be
-// used here" situation, while ErrUserinfoUnavailable is this bridge's own
+// The three ways ResolveSubjectViaUserinfo can fail, kept distinguishable
+// via errors.Is even though every caller today (tokenvalidator.
+// IntrospectionValidator) still just surfaces the same generic 401 to the
+// browser -- see this package's own investigation notes on why this
+// classification matters even without a status-code change: a token this
+// IdP genuinely can't produce a Subject for (ErrUserinfoInsufficientScope/
+// ErrUserinfoNoSubject) is a caller-facing "your session can't be used
+// here" situation, while ErrUserinfoUnavailable is this bridge's own
 // connectivity to the IdP failing -- operationally very different even
 // though both currently surface the same 401.
 var (
@@ -197,17 +205,26 @@ var (
 	ErrUserinfoUnavailable = errors.New("introspect: userinfo endpoint unavailable")
 )
 
-// resolveSubjectViaUserinfo calls the configured OIDC UserInfo endpoint
-// with the SAME bearer token introspection already confirmed active, and
-// returns its "sub" claim. Only called by ValidateBearer when
-// introspection's own response had no usable Subject for what looks like a
-// genuine end-user token (see that method's own doc comment on the
-// Username-based gate) -- this is a fallback, not the primary path, so a
-// tenant whose IdP already returns "sub" from introspection (e.g. one using
-// JWT-typed access tokens, confirmed via live testing against this
-// bridge's own pinned local WSO2 IS instance to behave exactly this way)
-// never pays this extra call.
-func (v *Validator) resolveSubjectViaUserinfo(ctx context.Context, tokenStr string) (string, error) {
+// ResolveSubjectViaUserinfo calls the configured OIDC UserInfo endpoint
+// with the SAME bearer token, and returns its "sub" claim. This is a
+// separate, opt-in enrichment step -- ValidateBearer itself never calls
+// it (see that method's own doc comment on why): the decision of whether
+// an empty Subject from introspection is acceptable, or must be resolved
+// this way (or rejected outright), belongs to the caller, not to base
+// token validation. Today that caller is tokenvalidator.
+// IntrospectionValidator.Validate, which requires a canonical Subject for
+// the generic /v1 API and calls this whenever introspection's own Subject
+// came back empty for what looks like a genuine end-user token; the
+// legacy /support path's middleware.Auth calls ValidateBearer directly and
+// never calls this at all, so it has no dependency on UserInfo being
+// reachable, matching that path's own long-standing Subject-or-Username
+// tolerance.
+//
+// Confirmed via live testing against this bridge's own pinned local WSO2
+// IS instance that a tenant whose IdP already returns "sub" from
+// introspection (e.g. one using JWT-typed access tokens) never needs this
+// called at all -- introspection's own Subject is always preferred first.
+func (v *Validator) ResolveSubjectViaUserinfo(ctx context.Context, tokenStr string) (string, error) {
 	userinfoURL := v.cfg.UserinfoURL
 	if userinfoURL == "" {
 		userinfoURL = strings.TrimRight(v.cfg.IssuerBaseURL, "/") + "/oauth2/userinfo"
@@ -250,6 +267,21 @@ func (v *Validator) resolveSubjectViaUserinfo(ctx context.Context, tokenStr stri
 // well-formed response whose "iss" doesn't match this bridge's pinned
 // instance (defense in depth against a token being replayed against the
 // wrong bridge, or a misconfigured endpoint).
+//
+// Base validation only -- this is RFC 7662 introspection and nothing else.
+// It deliberately does NOT call the UserInfo endpoint, even when the
+// response carries no "sub": introspection succeeding is the legacy
+// /support path's entire validation contract (its own ownerIdentity()
+// already tolerates an empty Subject via a Username fallback -- see that
+// function's own doc comment), and giving this shared, base-layer method a
+// new dependency on UserInfo availability would make that path fail
+// whenever the IdP's UserInfo endpoint is slow, misconfigured, or down,
+// even though it never needed Subject at all. A caller that DOES require a
+// canonical Subject (the generic /v1 API, via tokenvalidator.
+// IntrospectionValidator.Validate) enriches the Identity this returns by
+// calling ResolveSubjectViaUserinfo itself -- see that method's own doc
+// comment for the full split between base validation and Subject
+// enrichment/requirement.
 func (v *Validator) ValidateBearer(ctx context.Context, tokenStr string) (Identity, error) {
 	if strings.TrimSpace(tokenStr) == "" {
 		return Identity{}, fmt.Errorf("introspect: empty token")
@@ -295,40 +327,20 @@ func (v *Validator) ValidateBearer(ctx context.Context, tokenStr string) (Identi
 		return Identity{}, fmt.Errorf("introspect: token carries no usable identity")
 	}
 
-	subject := out.Sub
-	if subject == "" && out.Username != "" {
-		// Introspection reported this token active and carrying a
-		// Username (i.e. an APPLICATION_USER / end-user token, not a pure
-		// client-credentials one -- Username stays empty for those, see
-		// the no-usable-identity check above), but no "sub". Confirmed via
-		// live testing against this bridge's own pinned local WSO2 IS
-		// instance that this is a real, reproducible product behavior for
-		// an Opaque-type access token (the product-wide default, and this
-		// deployment's actual configured type) -- introspection there
-		// simply never populates "sub" for a non-JWT token. Fall back to
-		// the OIDC UserInfo endpoint with the SAME bearer token: this is
-		// the standards-defined source of "sub" (RFC 7662 itself makes no
-		// promises about it), and never touches Username as a substitute
-		// -- Identity.Subject is only ever written from a genuine "sub"
-		// claim, from introspection or here, never from Username. Skipped
-		// entirely whenever introspection already answered, so a tenant
-		// already on JWT-typed tokens (or any IdP whose introspection
-		// already includes "sub") never pays this extra call.
-		resolved, err := v.resolveSubjectViaUserinfo(ctx, tokenStr)
-		if err != nil {
-			return Identity{}, fmt.Errorf("introspect: resolve subject via userinfo: %w", err)
-		}
-		subject = resolved
-	}
-
 	var scopes []string
 	if out.Scope != "" {
 		scopes = strings.Fields(out.Scope)
 	}
 
+	// Subject is whatever introspection itself returned -- possibly empty,
+	// e.g. for an Opaque access token against this bridge's own pinned
+	// local WSO2 IS instance (confirmed via live testing: that IdP only
+	// populates "sub" on introspection for a JWT-typed token). See this
+	// method's own doc comment for why enriching it is deliberately NOT
+	// this method's job.
 	return Identity{
 		Username: out.Username,
-		Subject:  subject,
+		Subject:  out.Sub,
 		ClientID: out.ClientID,
 		Scopes:   scopes,
 		Issuer:   out.Iss,
