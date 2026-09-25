@@ -25,6 +25,7 @@ package tokenvalidator
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/introspect"
 )
@@ -53,6 +54,15 @@ type TokenValidator interface {
 // internal/tenant.Config) gets its own *introspect.Validator instance,
 // constructed once at startup against that tenant's own Issuer/
 // IntrospectionURL/ClientID/secret, and wrapped here.
+//
+// This is deliberately the layer that owns "the generic /v1 API requires a
+// canonical Subject" -- not introspect.Validator.ValidateBearer itself (see
+// that method's own doc comment on why), and not a route-name check
+// anywhere in chat handler code. TokenValidator is only ever constructed
+// for a /v1 tenant (see internal/tenant.buildValidator) -- the legacy
+// /support path's middleware.Auth calls introspect.Validator.ValidateBearer
+// directly and never goes through a TokenValidator at all, so this
+// enrichment/requirement logic simply never runs for it.
 type IntrospectionValidator struct {
 	v *introspect.Validator
 }
@@ -62,11 +72,36 @@ func NewIntrospectionValidator(v *introspect.Validator) *IntrospectionValidator 
 	return &IntrospectionValidator{v: v}
 }
 
-// Validate introspects token against this validator's pinned IdP instance.
+// Validate introspects token against this validator's pinned IdP instance
+// (base validation, via introspect.Validator.ValidateBearer -- identical to
+// what the legacy /support path itself gets), then enriches the result with
+// a canonical Subject when introspection's own response didn't carry one:
+// see introspect.Validator.ResolveSubjectViaUserinfo for the mechanics.
+// Enrichment is attempted only when the token looks like a genuine end-user
+// token (a non-empty Username -- a pure client-credentials token has none,
+// see introspect.Identity's own doc comment, and has no Subject to resolve
+// in the first place) and introspection's own Subject came back empty; a
+// tenant whose IdP already returns "sub" from introspection (e.g. one using
+// JWT-typed access tokens) never triggers it.
+//
+// Returns an error -- failing this call, not just leaving Subject empty --
+// when enrichment was attempted but didn't produce a usable Subject, since
+// every /v1 caller that reaches this validator requires one (see
+// internal/handler's canonicalOwner/RequireSubject). This keeps the
+// "Subject is mandatory for /v1" decision inside the auth/validator layer,
+// consistent with introspect.ErrUserinfoInsufficientScope/
+// ErrUserinfoNoSubject/ErrUserinfoUnavailable's own classification.
 func (iv *IntrospectionValidator) Validate(ctx context.Context, token string) (*Identity, error) {
 	id, err := iv.v.ValidateBearer(ctx, token)
 	if err != nil {
 		return nil, err
+	}
+	if id.Subject == "" && id.Username != "" {
+		subject, err := iv.v.ResolveSubjectViaUserinfo(ctx, token)
+		if err != nil {
+			return nil, fmt.Errorf("tokenvalidator: resolve canonical subject: %w", err)
+		}
+		id.Subject = subject
 	}
 	return &id, nil
 }
