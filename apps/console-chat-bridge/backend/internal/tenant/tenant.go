@@ -35,6 +35,7 @@ import (
 	"strings"
 
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/introspect"
+	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/scim"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/tokenvalidator"
 )
 
@@ -147,6 +148,28 @@ type LegacyConfig struct {
 	ClientSecret       string
 	InsecureSkipVerify bool
 	AllowedOrigins     []string
+	// SCIM* configure this tenant's SCIM-based canonical-Subject resolver
+	// (see internal/scim and tokenvalidator.IntrospectionValidator.
+	// WithSCIMResolver), used instead of introspect.Validator's UserInfo
+	// fallback whenever introspection alone doesn't carry a Subject.
+	//
+	// SCIMClientID left blank (the default -- these are all optional, and
+	// SCIM is never required) means SCIM is not configured: this tenant
+	// keeps using ResolveSubjectViaUserinfo exactly as before, unaffected.
+	//
+	// Deliberately a SEPARATE, least-privilege client-credentials
+	// registration from ClientID/ClientSecret above (which only ever does
+	// RFC 7662 Basic-auth introspection) -- this one needs a
+	// client-credentials-grant token carrying WSO2 IS's SCIM2-view scope,
+	// nothing else. SCIMBaseURL/SCIMTokenURL default to IssuerBaseURL and
+	// IssuerBaseURL+"/oauth2/token" respectively when left blank, since
+	// SCIM2 and the token endpoint both live on the same WSO2 IS instance
+	// as introspection for every tenant this applies to today.
+	SCIMBaseURL      string
+	SCIMTokenURL     string
+	SCIMClientID     string
+	SCIMClientSecret string
+	SCIMScopes       []string
 }
 
 // legacySlug is the fallback tenant's Slug -- reachable at
@@ -347,7 +370,26 @@ func buildLegacyTenant(legacy LegacyConfig) (*Tenant, error) {
 		IntrospectionClientSecret: legacy.ClientSecret,
 		InsecureSkipVerify:        cfg.InsecureSkipVerify,
 	})
-	return &Tenant{Config: cfg, Validator: tokenvalidator.NewIntrospectionValidator(v)}, nil
+	iv := tokenvalidator.NewIntrospectionValidator(v)
+	if legacy.SCIMClientID != "" {
+		scimBaseURL := legacy.SCIMBaseURL
+		if scimBaseURL == "" {
+			scimBaseURL = legacy.IssuerBaseURL
+		}
+		scimTokenURL := legacy.SCIMTokenURL
+		if scimTokenURL == "" {
+			scimTokenURL = strings.TrimRight(legacy.IssuerBaseURL, "/") + "/oauth2/token"
+		}
+		iv = iv.WithSCIMResolver(scim.NewClient(scim.Config{
+			BaseURL:            scimBaseURL,
+			TokenURL:           scimTokenURL,
+			ClientID:           legacy.SCIMClientID,
+			ClientSecret:       legacy.SCIMClientSecret,
+			Scopes:             legacy.SCIMScopes,
+			InsecureSkipVerify: legacy.InsecureSkipVerify,
+		}))
+	}
+	return &Tenant{Config: cfg, Validator: iv}, nil
 }
 
 type contextKey string

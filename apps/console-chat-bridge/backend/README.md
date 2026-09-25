@@ -52,6 +52,27 @@ assumes one or the other.
 2. Confirm your Console application's own Access Token Type (see above) --
    if it's JWT rather than the default Opaque, see the note above before
    proceeding.
+3. **Optional, but required if your Console application's access tokens are
+   token-binding-bound** (WSO2 IS's own built-in "Console" system app is,
+   by default, and its Access Token Type cannot be changed -- WSO2 IS
+   rejects that update for `isSystemReservedApp` applications). When bound,
+   OIDC UserInfo rejects this bridge's server-side bearer-only call ("Valid
+   token binding value not present in the request"), so a Console admin's
+   opaque token can never resolve a Subject via UserInfo alone -- see
+   `internal/scim`'s own package doc comment for the full mechanics. Fix:
+   register a **second, separate** confidential client-credentials
+   application (e.g. `console-chat-bridge-scim`; grant type
+   `client_credentials` only, no redirect URIs needed), then authorize it
+   against that instance's **"SCIM2 Users API"** resource
+   (`identifier: /scim2/Users`, the **tenant**-scoped one, not the
+   `/o/scim2/Users` organization-scoped one) with only the
+   **`internal_user_mgt_list`** scope ("List Users") -- least privilege for
+   the filtered search this bridge performs (`GET /scim2/Users?filter=
+   userName+eq+"..."`); `internal_user_mgt_view` alone is not sufficient
+   for a filter/search call. Note its Client ID/Secret ->
+   `SCIM_CLIENT_ID`/`SCIM_CLIENT_SECRET` (see `.env.example`). Leaving
+   `SCIM_CLIENT_ID` unset keeps this tenant on UserInfo-based resolution
+   exactly as before -- SCIM is opt-in, never required.
 
 ## One-time setup on csm-portal/backend
 

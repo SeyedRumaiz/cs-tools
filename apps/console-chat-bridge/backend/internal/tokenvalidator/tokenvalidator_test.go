@@ -19,11 +19,13 @@ package tokenvalidator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/introspect"
+	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/scim"
 )
 
 func jsonHandler(status int, body string) http.HandlerFunc {
@@ -153,6 +155,140 @@ func TestValidate_InactiveToken_SkipsUserinfo(t *testing.T) {
 // to resolve -- Validate must not attempt userinfo for it, and must not
 // fail just because Subject is empty (RequireClientID-gated routes never
 // need one).
+// fakeSCIM is a scimResolver test double -- a plain func so each test can
+// assert exactly what it needs (a fixed result, a call counter, a sentinel
+// error) without a real SCIM2 server.
+type fakeSCIM struct {
+	fn      func(ctx context.Context, username string) (string, error)
+	calls   int
+	lastArg string
+}
+
+func (f *fakeSCIM) ResolveUserID(ctx context.Context, username string) (string, error) {
+	f.calls++
+	f.lastArg = username
+	return f.fn(ctx, username)
+}
+
+func TestValidate_IntrospectionHasSub_SkipsSCIM(t *testing.T) {
+	iv := newIntrospectionValidator(t,
+		jsonHandler(http.StatusOK, `{"active":true,"sub":"user-uuid-jwt","username":"jane@example.com","client_id":"c1"}`),
+		failIfCalledHandler(t),
+	)
+	scim := &fakeSCIM{fn: func(context.Context, string) (string, error) {
+		t.Fatal("SCIM resolver was called but introspection already had sub")
+		return "", nil
+	}}
+	iv.WithSCIMResolver(scim)
+
+	id, err := iv.Validate(context.Background(), "tok")
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if id.Subject != "user-uuid-jwt" {
+		t.Errorf("Subject = %q, want %q", id.Subject, "user-uuid-jwt")
+	}
+	if scim.calls != 0 {
+		t.Errorf("SCIM was called %d times, want 0", scim.calls)
+	}
+}
+
+func TestValidate_NoSub_SCIMConfigured_ResolvesSubject(t *testing.T) {
+	iv := newIntrospectionValidator(t,
+		jsonHandler(http.StatusOK, `{"active":true,"username":"admin@carbon.super","client_id":"c1"}`),
+		failIfCalledHandler(t), // userinfo must never be called once SCIM is configured
+	)
+	scim := &fakeSCIM{fn: func(context.Context, string) (string, error) {
+		return "scim-resolved-uuid", nil
+	}}
+	iv.WithSCIMResolver(scim)
+
+	id, err := iv.Validate(context.Background(), "tok")
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if id.Subject != "scim-resolved-uuid" {
+		t.Errorf("Subject = %q, want %q", id.Subject, "scim-resolved-uuid")
+	}
+	if scim.calls != 1 {
+		t.Fatalf("SCIM was called %d times, want 1", scim.calls)
+	}
+	if scim.lastArg != "admin@carbon.super" {
+		t.Errorf("SCIM was called with username %q, want %q", scim.lastArg, "admin@carbon.super")
+	}
+}
+
+func TestValidate_SCIM_NoMatch_FailsClosed(t *testing.T) {
+	iv := newIntrospectionValidator(t,
+		jsonHandler(http.StatusOK, `{"active":true,"username":"nobody@carbon.super","client_id":"c1"}`),
+		failIfCalledHandler(t),
+	)
+	iv.WithSCIMResolver(&fakeSCIM{fn: func(context.Context, string) (string, error) {
+		return "", scim.ErrNoMatch
+	}})
+
+	_, err := iv.Validate(context.Background(), "tok")
+	if !errors.Is(err, scim.ErrNoMatch) {
+		t.Errorf("err = %v, want errors.Is(err, scim.ErrNoMatch)", err)
+	}
+}
+
+func TestValidate_SCIM_Ambiguous_FailsClosed(t *testing.T) {
+	iv := newIntrospectionValidator(t,
+		jsonHandler(http.StatusOK, `{"active":true,"username":"dup@carbon.super","client_id":"c1"}`),
+		failIfCalledHandler(t),
+	)
+	iv.WithSCIMResolver(&fakeSCIM{fn: func(context.Context, string) (string, error) {
+		return "", scim.ErrAmbiguous
+	}})
+
+	_, err := iv.Validate(context.Background(), "tok")
+	if !errors.Is(err, scim.ErrAmbiguous) {
+		t.Errorf("err = %v, want errors.Is(err, scim.ErrAmbiguous)", err)
+	}
+}
+
+func TestValidate_SCIM_Unavailable_FailsSafely(t *testing.T) {
+	iv := newIntrospectionValidator(t,
+		jsonHandler(http.StatusOK, `{"active":true,"username":"admin@carbon.super","client_id":"c1"}`),
+		failIfCalledHandler(t),
+	)
+	iv.WithSCIMResolver(&fakeSCIM{fn: func(context.Context, string) (string, error) {
+		return "", fmt.Errorf("%w: network timeout", scim.ErrUnavailable)
+	}})
+
+	id, err := iv.Validate(context.Background(), "tok")
+	if !errors.Is(err, scim.ErrUnavailable) {
+		t.Errorf("err = %v, want errors.Is(err, scim.ErrUnavailable)", err)
+	}
+	if id != nil {
+		t.Errorf("id = %+v, want nil -- a SCIM failure must not return a partially-populated Identity", id)
+	}
+}
+
+func TestValidate_ClientCredentialsToken_SCIMConfigured_SkipsSCIM(t *testing.T) {
+	iv := newIntrospectionValidator(t,
+		jsonHandler(http.StatusOK, `{"active":true,"client_id":"m2m-client"}`),
+		failIfCalledHandler(t),
+	)
+	scim := &fakeSCIM{fn: func(context.Context, string) (string, error) {
+		t.Fatal("SCIM resolver was called for a client-credentials token with no Username")
+		return "", nil
+	}}
+	iv.WithSCIMResolver(scim)
+
+	id, err := iv.Validate(context.Background(), "tok")
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if id.Subject != "" {
+		t.Errorf("Subject = %q, want empty", id.Subject)
+	}
+	if scim.calls != 0 {
+		t.Errorf("SCIM was called %d times, want 0", scim.calls)
+	}
+}
+
 func TestValidate_ClientCredentialsToken_SkipsUserinfo_NoError(t *testing.T) {
 	iv := newIntrospectionValidator(t,
 		jsonHandler(http.StatusOK, `{"active":true,"client_id":"m2m-client"}`),

@@ -170,6 +170,18 @@ func main() {
 			ClientSecret:       os.Getenv("INTROSPECTION_CLIENT_SECRET"),
 			InsecureSkipVerify: envOrDefault("INTROSPECTION_INSECURE_SKIP_VERIFY", "false") == "true",
 			AllowedOrigins:     corsOrigins,
+			// SCIM_CLIENT_ID unset (the default) leaves SCIM unconfigured --
+			// this tenant keeps resolving Subject via UserInfo exactly as
+			// before. Set all of SCIM_CLIENT_ID/SCIM_CLIENT_SECRET to enable
+			// it (see internal/tenant.LegacyConfig's own doc comment and
+			// README.md's SCIM setup step); SCIM_BASE_URL/SCIM_TOKEN_URL
+			// default to KNOWN_ISSUER_BASE_URL and its own "/oauth2/token"
+			// when left blank.
+			SCIMBaseURL:      os.Getenv("SCIM_BASE_URL"),
+			SCIMTokenURL:     os.Getenv("SCIM_TOKEN_URL"),
+			SCIMClientID:     os.Getenv("SCIM_CLIENT_ID"),
+			SCIMClientSecret: os.Getenv("SCIM_CLIENT_SECRET"),
+			SCIMScopes:       splitComma(envOrDefault("SCIM_SCOPES", "internal_user_mgt_list")),
 		},
 	)
 	if err != nil {
