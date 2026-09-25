@@ -52,6 +52,7 @@ package chatnotify
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -89,6 +90,19 @@ type Config struct {
 	ClientID     string
 	ClientSecret string
 	Scopes       []string
+	// InsecureSkipVerify disables TLS certificate verification for the
+	// TokenURL request. LOCAL DEVELOPMENT ONLY: every other consumer of this
+	// client talks to a real, CA-signed TokenURL (api.asgardeo.io), so this
+	// never mattered before the "asgardeo" notifier target was added
+	// (cmd/server/main.go) — that one points at a locally-installed WSO2 IS
+	// serving its own self-signed certificate, which Go's default transport
+	// won't trust, failing every token fetch (and therefore every push to
+	// console-chat-bridge) with "x509: certificate signed by unknown
+	// authority". Mirrors console-chat-bridge's own
+	// INTROSPECTION_INSECURE_SKIP_VERIFY (internal/introspect.Config) for
+	// the identical reason. A real deployment should instead trust that
+	// instance's actual CA and leave this false.
+	InsecureSkipVerify bool
 }
 
 // Client pushes chat events to customer-portal/backend-v2.
@@ -108,8 +122,11 @@ func NewClient(cfg Config) *Client {
 		TokenURL:     cfg.TokenURL,
 		Scopes:       cfg.Scopes,
 	}
-	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient,
-		&http.Client{Timeout: tokenFetchTimeout})
+	tokenHTTPClient := &http.Client{Timeout: tokenFetchTimeout}
+	if cfg.InsecureSkipVerify {
+		tokenHTTPClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} // #nosec G402 -- opt-in, local-dev-only, see Config.InsecureSkipVerify's doc comment
+	}
+	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, tokenHTTPClient)
 	httpClient := cc.Client(tokenCtx)
 	httpClient.Timeout = 10 * time.Second
 	// oauth2.Transport reattaches the Authorization bearer token to every

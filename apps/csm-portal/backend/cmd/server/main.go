@@ -131,6 +131,13 @@ func main() {
 			ClientID:     envOrDefault("CONSOLE_CHAT_BRIDGE_CLIENT_ID", oauth2ClientID),
 			ClientSecret: envOrDefault("CONSOLE_CHAT_BRIDGE_CLIENT_SECRET", oauth2ClientSecret),
 			Scopes:       splitComma(os.Getenv("CONSOLE_CHAT_BRIDGE_NOTIFY_SCOPES")),
+			// Local-dev-only: CONSOLE_CHAT_BRIDGE_TOKEN_URL points at a
+			// locally-installed WSO2 IS's self-signed certificate in that
+			// setup -- see chatnotify.Config.InsecureSkipVerify's own doc
+			// comment, and console-chat-bridge's identical
+			// INTROSPECTION_INSECURE_SKIP_VERIFY for the same issue on the
+			// other leg of this same integration.
+			InsecureSkipVerify: envOrDefault("CONSOLE_CHAT_BRIDGE_TOKEN_INSECURE_SKIP_VERIFY", "false") == "true",
 		})
 	}
 	routingClient := routingclient.NewClient(routingclient.Config{
