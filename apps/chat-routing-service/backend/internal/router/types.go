@@ -82,10 +82,19 @@ type CaseInfo struct {
 	// field did.
 	Source  string `json:"source,omitempty"`
 	Channel string `json:"channel,omitempty"`
-	Subject string `json:"subject,omitempty"`
-	CustomerEmail  string `json:"customerEmail,omitempty"`
-	CustomerName   string `json:"customerName,omitempty"`
-	Message        string `json:"message,omitempty"`
+	// TenantSlug identifies which console-chat-bridge tenant (see that
+	// service's internal/tenant package) raised this case through the
+	// generic /v1/{tenant}/... API -- empty for a case raised through the
+	// existing customer-portal flow or console-chat-bridge's legacy
+	// /support/chats compatibility path (both predate multi-tenant
+	// support). Persisted as-is in chat_conversation.case_info, same as
+	// Source/Channel, and used by Router.EndByTenant to scope a
+	// tenant-initiated completeChat to only that tenant's own case.
+	TenantSlug    string `json:"tenantSlug,omitempty"`
+	Subject       string `json:"subject,omitempty"`
+	CustomerEmail string `json:"customerEmail,omitempty"`
+	CustomerName  string `json:"customerName,omitempty"`
+	Message       string `json:"message,omitempty"`
 	// PriorMessages is the customer's AI-chatbot (Novera) conversation
 	// history, visible in Customer Portal at the moment "Chat with an
 	// Engineer" was clicked -- see PriorMessage. Sent by the frontend

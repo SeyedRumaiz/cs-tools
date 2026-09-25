@@ -107,18 +107,21 @@ func isValidStatus(s string) bool {
 // is identical -- role/content/createdAt -- and this package already
 // depends on the router package for everything else here.
 type caseInfoRequest struct {
-	CaseID         string                `json:"caseId"`
-	ConversationID string                `json:"conversationId"`
-	ProjectID      string                `json:"projectId"`
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId"`
+	ProjectID      string `json:"projectId"`
 	// Source/Channel mirror router.CaseInfo's own fields of the same name
 	// -- see that struct's doc comment. Optional.
-	Source         string                `json:"source,omitempty"`
-	Channel        string                `json:"channel,omitempty"`
-	Subject        string                `json:"subject"`
-	CustomerEmail  string                `json:"customerEmail"`
-	CustomerName   string                `json:"customerName"`
-	Message        string                `json:"message"`
-	PriorMessages  []router.PriorMessage `json:"priorMessages,omitempty"`
+	Source  string `json:"source,omitempty"`
+	Channel string `json:"channel,omitempty"`
+	// TenantSlug mirrors router.CaseInfo.TenantSlug -- see that field's own
+	// doc comment. Optional.
+	TenantSlug    string                `json:"tenantSlug,omitempty"`
+	Subject       string                `json:"subject"`
+	CustomerEmail string                `json:"customerEmail"`
+	CustomerName  string                `json:"customerName"`
+	Message       string                `json:"message"`
+	PriorMessages []router.PriorMessage `json:"priorMessages,omitempty"`
 }
 
 func (req caseInfoRequest) toCaseInfo() router.CaseInfo {
@@ -128,6 +131,7 @@ func (req caseInfoRequest) toCaseInfo() router.CaseInfo {
 		ProjectID:      req.ProjectID,
 		Source:         req.Source,
 		Channel:        req.Channel,
+		TenantSlug:     req.TenantSlug,
 		Subject:        req.Subject,
 		CustomerEmail:  req.CustomerEmail,
 		CustomerName:   req.CustomerName,
@@ -476,20 +480,21 @@ func (h *RoutingHandler) SetCapacity(w http.ResponseWriter, r *http.Request) {
 // drop it on the floor -- the same gap caseInfoRequest had before it grew a
 // PriorMessages field for the request side.
 type caseInfoResponse struct {
-	CaseID         string                `json:"caseId"`
-	ConversationID string                `json:"conversationId"`
-	ProjectID      string                `json:"projectId,omitempty"`
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId"`
+	ProjectID      string `json:"projectId,omitempty"`
 	// Source/Channel mirror router.CaseInfo's own fields -- see that
 	// struct's doc comment. csm-portal/backend's ChatHandler.sourceForCase
 	// reads Source from exactly this response to route its own downstream
 	// push (see that method's doc comment).
-	Source         string                `json:"source,omitempty"`
-	Channel        string                `json:"channel,omitempty"`
-	Subject        string                `json:"subject,omitempty"`
-	CustomerEmail  string                `json:"customerEmail,omitempty"`
-	CustomerName   string                `json:"customerName,omitempty"`
-	Message        string                `json:"message,omitempty"`
-	PriorMessages  []router.PriorMessage `json:"priorMessages,omitempty"`
+	Source        string                `json:"source,omitempty"`
+	Channel       string                `json:"channel,omitempty"`
+	TenantSlug    string                `json:"tenantSlug,omitempty"`
+	Subject       string                `json:"subject,omitempty"`
+	CustomerEmail string                `json:"customerEmail,omitempty"`
+	CustomerName  string                `json:"customerName,omitempty"`
+	Message       string                `json:"message,omitempty"`
+	PriorMessages []router.PriorMessage `json:"priorMessages,omitempty"`
 }
 
 func caseInfoToResponse(c router.CaseInfo) caseInfoResponse {
@@ -499,6 +504,7 @@ func caseInfoToResponse(c router.CaseInfo) caseInfoResponse {
 		ProjectID:      c.ProjectID,
 		Source:         c.Source,
 		Channel:        c.Channel,
+		TenantSlug:     c.TenantSlug,
 		Subject:        c.Subject,
 		CustomerEmail:  c.CustomerEmail,
 		CustomerName:   c.CustomerName,
@@ -578,4 +584,53 @@ func (h *RoutingHandler) ConvertToCase(w http.ResponseWriter, r *http.Request) {
 		resp.AssignedCase = &ci
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// endByTenantRequest is the body for POST /route/end-by-tenant.
+type endByTenantRequest struct {
+	CaseID     string `json:"caseId"`
+	TenantSlug string `json:"tenantSlug"`
+}
+
+// completedResponse mirrors router.CompletedResult -- reused as-is for both
+// POST /route/completed (which just marshals the result directly, so this
+// type only formalizes that existing shape) and POST /route/end-by-tenant
+// below.
+type completedResponse struct {
+	Ended              bool              `json:"ended,omitempty"`
+	AssignedCase       *caseInfoResponse `json:"assignedCase,omitempty"`
+	AssignedEngineerID string            `json:"assignedEngineerId,omitempty"`
+}
+
+func completedToResponse(result router.CompletedResult) completedResponse {
+	resp := completedResponse{Ended: result.Ended, AssignedEngineerID: result.AssignedEngineerID}
+	if result.AssignedCase != nil {
+		ci := caseInfoToResponse(*result.AssignedCase)
+		resp.AssignedCase = &ci
+	}
+	return resp
+}
+
+// EndByTenant handles POST /route/end-by-tenant -- ends caseId's chat
+// session on behalf of tenantSlug rather than a specific engineer (see
+// router.Router.EndByTenant). Used by console-chat-bridge's tenant-scoped
+// completeChat route for a customer-initiated session end, where there is
+// no engineer userId to authorize against -- tenantSlug itself is the
+// authorization scope.
+func (h *RoutingHandler) EndByTenant(w http.ResponseWriter, r *http.Request) {
+	var req endByTenantRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.CaseID == "" || req.TenantSlug == "" {
+		writeError(w, http.StatusBadRequest, "caseId and tenantSlug are required.")
+		return
+	}
+
+	result, err := h.router.EndByTenant(r.Context(), req.CaseID, req.TenantSlug)
+	if err != nil {
+		writeStorageError(w, "end-by-tenant", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, completedToResponse(result))
 }
