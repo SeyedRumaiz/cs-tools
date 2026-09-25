@@ -165,10 +165,15 @@ type CaseInfo struct {
 	// field did.
 	Source  string `json:"source,omitempty"`
 	Channel string `json:"channel,omitempty"`
-	Subject string `json:"subject,omitempty"`
-	CustomerEmail  string `json:"customerEmail,omitempty"`
-	CustomerName   string `json:"customerName,omitempty"`
-	Message        string `json:"message,omitempty"`
+	// TenantSlug mirrors router.CaseInfo.TenantSlug -- which console-chat-
+	// bridge tenant raised this case through the generic /v1/{tenant}/...
+	// API. Empty for a case raised through the existing customer-portal
+	// flow or console-chat-bridge's legacy /support/chats path.
+	TenantSlug    string `json:"tenantSlug,omitempty"`
+	Subject       string `json:"subject,omitempty"`
+	CustomerEmail string `json:"customerEmail,omitempty"`
+	CustomerName  string `json:"customerName,omitempty"`
+	Message       string `json:"message,omitempty"`
 	// PriorMessages mirrors router.CaseInfo.PriorMessages -- the customer's
 	// AI-chatbot (Novera) conversation history, snapshotted at the moment
 	// of escalation. See PriorMessage below.
@@ -243,6 +248,11 @@ type CompletedResult struct {
 	// AssignedCase is set when ending this conversation freed a slot that
 	// was immediately backfilled from the waiting queue.
 	AssignedCase *CaseInfo `json:"assignedCase,omitempty"`
+	// AssignedEngineerID mirrors router.CompletedResult.AssignedEngineerID
+	// -- the engineer AssignedCase was just assigned to. Only meaningful
+	// (and only ever populated) alongside EndByTenant, whose caller has no
+	// other way to know which engineer to deliver AssignedCase to.
+	AssignedEngineerID string `json:"assignedEngineerId,omitempty"`
 }
 
 // DeclineResult mirrors router.DeclineResult.
@@ -563,5 +573,23 @@ func (c *Client) ConvertToCase(ctx context.Context, userID, caseID, entityCaseID
 		EntityCaseID string `json:"entityCaseId"`
 	}{UserID: userID, CaseID: caseID, EntityCaseID: entityCaseID}
 	err := c.do(ctx, http.MethodPost, "/route/convert-to-case", body, &out, nil)
+	return out, err
+}
+
+// EndByTenant calls POST /route/end-by-tenant, ending caseID's chat session
+// on behalf of tenantSlug rather than a specific engineer -- used by
+// console-chat-bridge's tenant-scoped POST /v1/{tenant}/chats/{caseId}/
+// complete route (see router.Router.EndByTenant for the full lifecycle:
+// same engineer-capacity backfill as Completed when the case was assigned,
+// or a plain queue-row removal when it was still queued/unassigned). A
+// no-op (Ended: false) if caseID isn't currently an open conversation
+// belonging to tenantSlug.
+func (c *Client) EndByTenant(ctx context.Context, caseID, tenantSlug string) (CompletedResult, error) {
+	var out CompletedResult
+	body := struct {
+		CaseID     string `json:"caseId"`
+		TenantSlug string `json:"tenantSlug"`
+	}{CaseID: caseID, TenantSlug: tenantSlug}
+	err := c.do(ctx, http.MethodPost, "/route/end-by-tenant", body, &out, nil)
 	return out, err
 }

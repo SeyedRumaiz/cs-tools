@@ -261,6 +261,14 @@ type CompletedResult struct {
 	// AssignedCase is set when ending this conversation freed a slot that
 	// was immediately backfilled from the waiting queue.
 	AssignedCase *CaseInfo `json:"assignedCase,omitempty"`
+	// AssignedEngineerID is the IdP "userid" claim of the engineer
+	// AssignedCase was just assigned to -- always the same engineer whose
+	// slot was freed (Completed's own caller already knows this is
+	// themselves; EndByTenant's caller does not, since it authenticates by
+	// tenantSlug rather than engineer userID, so this field exists for that
+	// caller to know who to deliver AssignedCase to). Empty whenever
+	// AssignedCase is nil.
+	AssignedEngineerID string `json:"assignedEngineerId,omitempty"`
 }
 
 // Completed ends userID's session on caseID: marks that specific
@@ -277,65 +285,143 @@ type CompletedResult struct {
 func (r *Router) Completed(ctx context.Context, userID, caseID string) (CompletedResult, error) {
 	var result CompletedResult
 	err := r.withTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `
+		var freedAssignee *string
+		err := tx.QueryRow(ctx, `
 			UPDATE chat_conversation
 			SET session_ended_at = now(), updated_at = now()
 			WHERE case_id = $1 AND assignee_id = $2 AND session_ended_at IS NULL
-		`, caseID, userID)
-		if err != nil {
-			return fmt.Errorf("end session: %w", err)
-		}
-		if tag.RowsAffected() == 0 {
-			result = CompletedResult{}
-			return nil
-		}
-		result = CompletedResult{Ended: true}
-
-		var (
-			chatStatus    Status
-			maxConcurrent int
-		)
-		err = tx.QueryRow(ctx, `
-			SELECT chat_status, max_concurrent_chats FROM cs_engineer_status WHERE user_id = $1 FOR UPDATE
-		`, userID).Scan(&chatStatus, &maxConcurrent)
+			RETURNING assignee_id
+		`, caseID, userID).Scan(&freedAssignee)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
-			// No engineer row is unexpected (Completed only applies to a
-			// case that WAS assigned to this engineer), but not a reason to
-			// fail this call -- the session end above already succeeded.
+			result = CompletedResult{}
 			return nil
 		case err != nil:
-			return fmt.Errorf("lock engineer: %w", err)
-		}
-		if chatStatus != StatusAvailable {
-			return nil
+			return fmt.Errorf("end session: %w", err)
 		}
 
-		activeCount, err := activeCaseCount(ctx, tx, userID)
-		if err != nil {
-			return err
-		}
-		if activeCount >= maxConcurrent {
-			return nil
-		}
-
-		c, ok, err := claimOldestWaiting(ctx, tx)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return nil
-		}
-		if err := assignCaseToEngineer(ctx, tx, userID, c); err != nil {
-			return err
-		}
-		assigned := c
-		result.AssignedCase = &assigned
-		return nil
+		var err2 error
+		result, err2 = endSessionAndBackfill(ctx, tx, freedAssignee)
+		return err2
 	})
 	if err != nil {
 		return CompletedResult{}, err
 	}
+	return result, nil
+}
+
+// EndByTenant ends the session on caseID on behalf of tenantSlug (a
+// customer/tenant-initiated completeChat, via console-chat-bridge's
+// POST /v1/{tenant}/chats/{caseId}/complete -- see that route's
+// requireTenantCase authorization, which this SQL-level tenantSlug scoping
+// backs up belt-and-suspenders) rather than a specific engineer userID
+// (contrast Completed, which scopes by assignee_id). Shares every other
+// side effect with Completed via endSessionAndBackfill.
+//
+// Unlike Completed, the ended case may never have been assigned to anyone
+// at all -- a customer can cancel a still-queued chat. When that's so,
+// freedAssignee comes back NULL: endSessionAndBackfill skips the
+// engineer-capacity backfill entirely and this method instead removes the
+// case's chat_queue row (mirroring Accept's own deleteQueueRow), so it
+// stops being eligible for a future claim.
+func (r *Router) EndByTenant(ctx context.Context, caseID, tenantSlug string) (CompletedResult, error) {
+	var result CompletedResult
+	err := r.withTx(ctx, func(tx pgx.Tx) error {
+		var freedAssignee *string
+		err := tx.QueryRow(ctx, `
+			UPDATE chat_conversation
+			SET session_ended_at = now(), updated_at = now()
+			WHERE case_id = $1 AND case_info ->> 'tenantSlug' = $2 AND session_ended_at IS NULL
+			RETURNING assignee_id
+		`, caseID, tenantSlug).Scan(&freedAssignee)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			result = CompletedResult{}
+			return nil
+		case err != nil:
+			return fmt.Errorf("end session by tenant: %w", err)
+		}
+
+		if freedAssignee == nil {
+			// Never assigned -- nothing to backfill, just remove the queue
+			// row so an abandoned/cancelled queued case can't later be
+			// claimed by a draining engineer.
+			if err := deleteQueueRow(ctx, tx, caseID); err != nil {
+				return err
+			}
+			result = CompletedResult{Ended: true}
+			return nil
+		}
+
+		var err2 error
+		result, err2 = endSessionAndBackfill(ctx, tx, freedAssignee)
+		return err2
+	})
+	if err != nil {
+		return CompletedResult{}, err
+	}
+	return result, nil
+}
+
+// endSessionAndBackfill runs every side effect Completed and EndByTenant
+// share, given the case_id has already been matched and ended by the
+// caller's own authorization-scoped UPDATE (which also returned the freed
+// assignee_id). freedAssignee is non-nil here -- EndByTenant handles its
+// own NULL case (an unassigned, still-queued case) itself, before ever
+// calling this.
+//
+// Locks that engineer's cs_engineer_status row and, if they're still
+// chat_status AVAILABLE and now under their configured
+// max_concurrent_chats, claims the oldest waiting case and assigns it to
+// them -- identical to Completed's pre-refactor inline logic.
+func endSessionAndBackfill(ctx context.Context, tx pgx.Tx, freedAssignee *string) (CompletedResult, error) {
+	result := CompletedResult{Ended: true}
+	if freedAssignee == nil {
+		return result, nil
+	}
+	userID := *freedAssignee
+
+	var (
+		chatStatus    Status
+		maxConcurrent int
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT chat_status, max_concurrent_chats FROM cs_engineer_status WHERE user_id = $1 FOR UPDATE
+	`, userID).Scan(&chatStatus, &maxConcurrent)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// No engineer row is unexpected (this case WAS assigned to this
+		// engineer), but not a reason to fail this call -- the session end
+		// already succeeded.
+		return result, nil
+	case err != nil:
+		return CompletedResult{}, fmt.Errorf("lock engineer: %w", err)
+	}
+	if chatStatus != StatusAvailable {
+		return result, nil
+	}
+
+	activeCount, err := activeCaseCount(ctx, tx, userID)
+	if err != nil {
+		return CompletedResult{}, err
+	}
+	if activeCount >= maxConcurrent {
+		return result, nil
+	}
+
+	c, ok, err := claimOldestWaiting(ctx, tx)
+	if err != nil {
+		return CompletedResult{}, err
+	}
+	if !ok {
+		return result, nil
+	}
+	if err := assignCaseToEngineer(ctx, tx, userID, c); err != nil {
+		return CompletedResult{}, err
+	}
+	assigned := c
+	result.AssignedCase = &assigned
+	result.AssignedEngineerID = userID
 	return result, nil
 }
 

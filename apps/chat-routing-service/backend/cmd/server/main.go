@@ -104,6 +104,8 @@ func main() {
 	mux.HandleFunc("POST /route/sweep-timeouts", h.SweepTimeouts)
 	// chat-first escalation: engineer-initiated conversion to a real case
 	mux.HandleFunc("POST /route/convert-to-case", h.ConvertToCase)
+	// tenant-scoped (customer-initiated) session end -- see router.Router.EndByTenant
+	mux.HandleFunc("POST /route/end-by-tenant", h.EndByTenant)
 
 	// /health sits outside the InternalToken gate below -- ServeMux matches
 	// the exact "GET /health" pattern before falling through to "/", so
