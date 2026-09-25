@@ -97,6 +97,36 @@ type Config struct {
 	RoutingSource string
 	Channel       string
 	ProjectID     string
+	// SCIM* configure this tenant's SCIM-based canonical-Subject resolver
+	// (see internal/scim and tokenvalidator.IntrospectionValidator.
+	// WithSCIMResolver), used instead of introspect.Validator's UserInfo
+	// fallback whenever introspection alone doesn't carry a Subject --
+	// needed for an IdP application whose access tokens are token-binding-
+	// bound to the browser (see internal/scim's own package doc comment),
+	// since UserInfo then rejects this bridge's bearer-only server-side
+	// call.
+	//
+	// SCIMClientID left blank (the default -- every field here is optional,
+	// and SCIM is never required) means SCIM is not configured for this
+	// tenant: it keeps using ResolveSubjectViaUserinfo exactly as before,
+	// unaffected. A per-tenant capability, not a legacy-tenant-only one --
+	// any explicit TENANT_REGISTRY row can configure it exactly the same
+	// way the identity-console fallback tenant does (see BuildTable's own
+	// doc comment for the row syntax).
+	//
+	// Deliberately a SEPARATE, least-privilege client-credentials
+	// registration from ClientID (which only ever does RFC 7662 Basic-auth
+	// introspection) -- this one needs a client-credentials-grant token
+	// carrying WSO2 IS's SCIM2-view scope, nothing else. The matching
+	// secret is never stored here -- see BuildTable's own doc comment on
+	// why, and its scimSecretLookup parameter. SCIMBaseURL/SCIMTokenURL
+	// default to Issuer and Issuer+"/oauth2/token" respectively when left
+	// blank, since SCIM2 and the token endpoint both live on the same IdP
+	// instance as introspection for every tenant this applies to today.
+	SCIMBaseURL  string
+	SCIMTokenURL string
+	SCIMClientID string
+	SCIMScopes   []string
 }
 
 // Tenant pairs a Config with the TokenValidator built from it, constructed
@@ -124,13 +154,18 @@ func (t Table) Lookup(slug string) (*Tenant, bool) {
 // environment variables.
 type SecretLookup func(slug string) string
 
-// registryFieldCountMin/Max bound how many "|"-delimited fields one
-// TENANT_REGISTRY row has -- see BuildTable's own doc comment for the
-// order. Max's one extra field (UserinfoURL) is optional so every row
-// written before it existed keeps parsing unchanged.
+// registryFieldCountBase/Userinfo/SCIM are the only valid "|"-delimited
+// field counts for one TENANT_REGISTRY row -- see BuildTable's own doc
+// comment for the field order. Each is a strict superset of the previous,
+// appending optional trailing fields, so every row written before a given
+// extension existed keeps parsing unchanged: Userinfo adds UserinfoURL,
+// SCIM adds SCIMClientID/SCIMBaseURL/SCIMTokenURL/SCIMScopes as one atomic
+// block (a row is never 14-16 fields -- SCIM config is all four fields or
+// none, keeping the format unambiguous).
 const (
-	registryFieldCountMin = 12
-	registryFieldCountMax = 13
+	registryFieldCountBase     = 12
+	registryFieldCountUserinfo = 13
+	registryFieldCountSCIM     = 17
 )
 
 // LegacyConfig carries the pre-multi-tenant env vars /support/chats already
@@ -194,15 +229,24 @@ const (
 // separate TENANT_REGISTRY setup on top of what /support/chats already has
 // configured.
 //
-// Row syntax: rows separated by ";", fields by "|", 12 or 13 fields per
-// row, in this order:
+// Row syntax: rows separated by ";", fields by "|", 12, 13, or 17 fields
+// per row, in this order:
 //
-//	slug|validationType|issuer|introspectionURL|jwksURI|audience|clientID|insecureSkipVerify|allowedOrigins|routingSource|channel|projectID|userinfoURL
+//	slug|validationType|issuer|introspectionURL|jwksURI|audience|clientID|insecureSkipVerify|allowedOrigins|routingSource|channel|projectID|userinfoURL|scimClientID|scimBaseURL|scimTokenURL|scimScopes
 //
 // userinfoURL (field 13) is optional -- a 12-field row (every row written
 // before this field existed) parses exactly as before, with UserinfoURL
 // left blank so introspect.Validator derives one from issuer itself (see
 // Config.UserinfoURL's own doc comment).
+//
+// scimClientID/scimBaseURL/scimTokenURL/scimScopes (fields 14-17) are
+// likewise optional, but as one atomic block -- a row is 12, 13, or 17
+// fields, never 14-16 -- appended after userinfoURL (present, even if
+// blank, whenever SCIM fields are). A blank scimClientID (the 12- and
+// 13-field cases, and a 17-field row that still leaves it blank) means
+// this tenant has no SCIM resolver configured, exactly as before this
+// extension existed (see Config's own doc comment on its SCIM* fields).
+// scimScopes is "," separated like allowedOrigins.
 //
 // allowedOrigins is itself "," separated when it carries more than one
 // origin (a nested list inside one "|"-delimited field, the same flat-
@@ -214,13 +258,18 @@ const (
 //
 // Client secrets are never in this registry -- Choreo's config UI and this
 // registry's own row-based design are both a poor fit for a value that
-// must stay confidential, so each row's secret is instead resolved via
-// secretLookup(slug), which defaults to reading
-// TENANT_<SLUG_UPPER_SNAKE>_CLIENT_SECRET from the process environment when
-// nil.
-func BuildTable(raw, defaultRoutingSource string, secretLookup SecretLookup, legacy LegacyConfig) (Table, error) {
+// must stay confidential, so each row's introspection secret is instead
+// resolved via secretLookup(slug) (defaults to reading
+// TENANT_<SLUG_UPPER_SNAKE>_CLIENT_SECRET when nil) and its SCIM secret via
+// scimSecretLookup(slug) (defaults to reading
+// TENANT_<SLUG_UPPER_SNAKE>_SCIM_CLIENT_SECRET when nil) -- two separate
+// lookups for two separate, least-privilege credentials.
+func BuildTable(raw, defaultRoutingSource string, secretLookup, scimSecretLookup SecretLookup, legacy LegacyConfig) (Table, error) {
 	if secretLookup == nil {
 		secretLookup = EnvSecretLookup
+	}
+	if scimSecretLookup == nil {
+		scimSecretLookup = EnvSCIMSecretLookup
 	}
 
 	if strings.TrimSpace(raw) == "" {
@@ -239,8 +288,9 @@ func BuildTable(raw, defaultRoutingSource string, secretLookup SecretLookup, leg
 			continue
 		}
 		fields := strings.Split(row, "|")
-		if len(fields) < registryFieldCountMin || len(fields) > registryFieldCountMax {
-			return nil, fmt.Errorf("tenant: TENANT_REGISTRY row %d: expected %d or %d fields, got %d", i+1, registryFieldCountMin, registryFieldCountMax, len(fields))
+		n := len(fields)
+		if n != registryFieldCountBase && n != registryFieldCountUserinfo && n != registryFieldCountSCIM {
+			return nil, fmt.Errorf("tenant: TENANT_REGISTRY row %d: expected %d, %d, or %d fields, got %d", i+1, registryFieldCountBase, registryFieldCountUserinfo, registryFieldCountSCIM, n)
 		}
 		for j := range fields {
 			fields[j] = strings.TrimSpace(fields[j])
@@ -254,21 +304,22 @@ func BuildTable(raw, defaultRoutingSource string, secretLookup SecretLookup, leg
 			return nil, fmt.Errorf("tenant: TENANT_REGISTRY row %d: duplicate slug %q", i+1, slug)
 		}
 
-		var allowedOrigins []string
-		if fields[8] != "" {
-			for _, o := range strings.Split(fields[8], ",") {
-				if o = strings.TrimSpace(o); o != "" {
-					allowedOrigins = append(allowedOrigins, o)
-				}
-			}
-		}
+		allowedOrigins := splitCommaList(fields[8])
 		routingSource := fields[9]
 		if routingSource == "" {
 			routingSource = defaultRoutingSource
 		}
 		var userinfoURL string
-		if len(fields) == registryFieldCountMax {
+		if n >= registryFieldCountUserinfo {
 			userinfoURL = fields[12]
+		}
+		var scimClientID, scimBaseURL, scimTokenURL string
+		var scimScopes []string
+		if n == registryFieldCountSCIM {
+			scimClientID = fields[13]
+			scimBaseURL = fields[14]
+			scimTokenURL = fields[15]
+			scimScopes = splitCommaList(fields[16])
 		}
 
 		cfg := Config{
@@ -285,9 +336,13 @@ func BuildTable(raw, defaultRoutingSource string, secretLookup SecretLookup, leg
 			Channel:            fields[10],
 			ProjectID:          fields[11],
 			UserinfoURL:        userinfoURL,
+			SCIMBaseURL:        scimBaseURL,
+			SCIMTokenURL:       scimTokenURL,
+			SCIMClientID:       scimClientID,
+			SCIMScopes:         scimScopes,
 		}
 
-		validator, err := buildValidator(cfg, secretLookup(slug))
+		validator, err := buildValidator(cfg, secretLookup(slug), scimSecretLookup(slug))
 		if err != nil {
 			return nil, fmt.Errorf("tenant: TENANT_REGISTRY row %d (%s): %w", i+1, slug, err)
 		}
@@ -299,6 +354,22 @@ func BuildTable(raw, defaultRoutingSource string, secretLookup SecretLookup, leg
 	return table, nil
 }
 
+// splitCommaList splits a "," separated field into its trimmed, non-empty
+// parts (nil if s has none) -- shared by allowedOrigins and scimScopes,
+// the registry's two nested comma-delimited fields.
+func splitCommaList(s string) []string {
+	var out []string
+	if s == "" {
+		return out
+	}
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 // EnvSecretLookup is BuildTable's default SecretLookup: reads
 // TENANT_<SLUG_UPPER_SNAKE>_CLIENT_SECRET from the process environment,
 // upper-casing slug and replacing every character outside [A-Z0-9] with
@@ -306,6 +377,14 @@ func BuildTable(raw, defaultRoutingSource string, secretLookup SecretLookup, leg
 // TENANT_ACME_CORP_CLIENT_SECRET).
 func EnvSecretLookup(slug string) string {
 	return os.Getenv("TENANT_" + envSlug(slug) + "_CLIENT_SECRET")
+}
+
+// EnvSCIMSecretLookup is BuildTable's default scimSecretLookup: reads
+// TENANT_<SLUG_UPPER_SNAKE>_SCIM_CLIENT_SECRET from the process
+// environment -- the SCIM-client counterpart to EnvSecretLookup, kept as a
+// separate env var since it's a separate, least-privilege credential.
+func EnvSCIMSecretLookup(slug string) string {
+	return os.Getenv("TENANT_" + envSlug(slug) + "_SCIM_CLIENT_SECRET")
 }
 
 func envSlug(slug string) string {
@@ -321,7 +400,18 @@ func envSlug(slug string) string {
 	}, slug)
 }
 
-func buildValidator(cfg Config, secret string) (tokenvalidator.TokenValidator, error) {
+// buildValidator constructs cfg's TokenValidator. secret authenticates
+// introspection (RFC 7662 Basic auth); scimSecret authenticates cfg's own
+// SCIM resolver's client-credentials grant, when cfg.SCIMClientID
+// configures one (see Config's own doc comment) -- both are passed in
+// rather than read from cfg itself, since Config never stores secrets (see
+// BuildTable's own doc comment on why). SCIM attachment is per-tenant, not
+// legacy-tenant-specific: this is the only place either construction path
+// (BuildTable's per-row loop and buildLegacyTenant) builds a validator, so
+// a tenant configured via an explicit TENANT_REGISTRY row gets exactly the
+// same SCIM-or-UserInfo behavior the identity-console fallback tenant
+// does.
+func buildValidator(cfg Config, secret, scimSecret string) (tokenvalidator.TokenValidator, error) {
 	switch cfg.ValidationType {
 	case "", "introspection":
 		if cfg.Issuer == "" {
@@ -335,7 +425,26 @@ func buildValidator(cfg Config, secret string) (tokenvalidator.TokenValidator, e
 			IntrospectionClientSecret: secret,
 			InsecureSkipVerify:        cfg.InsecureSkipVerify,
 		})
-		return tokenvalidator.NewIntrospectionValidator(v), nil
+		iv := tokenvalidator.NewIntrospectionValidator(v)
+		if cfg.SCIMClientID != "" {
+			scimBaseURL := cfg.SCIMBaseURL
+			if scimBaseURL == "" {
+				scimBaseURL = cfg.Issuer
+			}
+			scimTokenURL := cfg.SCIMTokenURL
+			if scimTokenURL == "" {
+				scimTokenURL = strings.TrimRight(cfg.Issuer, "/") + "/oauth2/token"
+			}
+			iv = iv.WithSCIMResolver(scim.NewClient(scim.Config{
+				BaseURL:            scimBaseURL,
+				TokenURL:           scimTokenURL,
+				ClientID:           cfg.SCIMClientID,
+				ClientSecret:       scimSecret,
+				Scopes:             cfg.SCIMScopes,
+				InsecureSkipVerify: cfg.InsecureSkipVerify,
+			}))
+		}
+		return iv, nil
 	case "jwks":
 		return tokenvalidator.NewJWKSValidator(tokenvalidator.JWKSValidatorConfig{
 			JWKSURI: cfg.JWKSURI, Issuer: cfg.Issuer, Audience: cfg.Audience,
@@ -345,6 +454,12 @@ func buildValidator(cfg Config, secret string) (tokenvalidator.TokenValidator, e
 	}
 }
 
+// buildLegacyTenant synthesizes the identity-console fallback tenant from
+// legacy -- only Config construction (this tenant's fixed slug/routing
+// tags and legacy's env-var-sourced fields) is specific to it; the
+// validator itself is built by the exact same buildValidator every
+// explicit TENANT_REGISTRY row goes through, so this tenant's SCIM-or-
+// UserInfo behavior has never been special-cased relative to any other.
 func buildLegacyTenant(legacy LegacyConfig) (*Tenant, error) {
 	if legacy.IssuerBaseURL == "" {
 		return nil, errors.New("tenant: TENANT_REGISTRY is unset and KNOWN_ISSUER_BASE_URL is empty -- cannot build the identity-console fallback tenant")
@@ -361,35 +476,16 @@ func buildLegacyTenant(legacy LegacyConfig) (*Tenant, error) {
 		RoutingSource:      legacyRoutingSource,
 		Channel:            legacyChannel,
 		ProjectID:          legacyProjectID,
+		SCIMBaseURL:        legacy.SCIMBaseURL,
+		SCIMTokenURL:       legacy.SCIMTokenURL,
+		SCIMClientID:       legacy.SCIMClientID,
+		SCIMScopes:         legacy.SCIMScopes,
 	}
-	v := introspect.NewValidator(introspect.Config{
-		IssuerBaseURL:             cfg.Issuer,
-		IntrospectionURL:          cfg.IntrospectionURL,
-		UserinfoURL:               cfg.UserinfoURL,
-		IntrospectionClientID:     cfg.ClientID,
-		IntrospectionClientSecret: legacy.ClientSecret,
-		InsecureSkipVerify:        cfg.InsecureSkipVerify,
-	})
-	iv := tokenvalidator.NewIntrospectionValidator(v)
-	if legacy.SCIMClientID != "" {
-		scimBaseURL := legacy.SCIMBaseURL
-		if scimBaseURL == "" {
-			scimBaseURL = legacy.IssuerBaseURL
-		}
-		scimTokenURL := legacy.SCIMTokenURL
-		if scimTokenURL == "" {
-			scimTokenURL = strings.TrimRight(legacy.IssuerBaseURL, "/") + "/oauth2/token"
-		}
-		iv = iv.WithSCIMResolver(scim.NewClient(scim.Config{
-			BaseURL:            scimBaseURL,
-			TokenURL:           scimTokenURL,
-			ClientID:           legacy.SCIMClientID,
-			ClientSecret:       legacy.SCIMClientSecret,
-			Scopes:             legacy.SCIMScopes,
-			InsecureSkipVerify: legacy.InsecureSkipVerify,
-		}))
+	validator, err := buildValidator(cfg, legacy.ClientSecret, legacy.SCIMClientSecret)
+	if err != nil {
+		return nil, err
 	}
-	return &Tenant{Config: cfg, Validator: iv}, nil
+	return &Tenant{Config: cfg, Validator: validator}, nil
 }
 
 type contextKey string
