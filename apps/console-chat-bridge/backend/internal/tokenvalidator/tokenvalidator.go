@@ -64,25 +64,60 @@ type TokenValidator interface {
 // directly and never goes through a TokenValidator at all, so this
 // enrichment/requirement logic simply never runs for it.
 type IntrospectionValidator struct {
-	v *introspect.Validator
+	v    *introspect.Validator
+	scim scimResolver
 }
 
-// NewIntrospectionValidator wraps v.
+// scimResolver is implemented by *internal/scim.Client. Declared as a
+// narrow local interface (rather than importing internal/scim's concrete
+// type) so this package stays generic and tests can supply a fake without a
+// real SCIM2 server -- the same reason introspect.Validator itself never
+// imports anything WSO2-specific beyond RFC 7662/OIDC UserInfo.
+type scimResolver interface {
+	ResolveUserID(ctx context.Context, username string) (string, error)
+}
+
+// NewIntrospectionValidator wraps v. SCIM-based Subject resolution is not
+// configured by default -- see WithSCIMResolver.
 func NewIntrospectionValidator(v *introspect.Validator) *IntrospectionValidator {
 	return &IntrospectionValidator{v: v}
+}
+
+// WithSCIMResolver configures iv to resolve Subject via scim (an immutable
+// WSO2 SCIM user id) instead of introspect.Validator's own UserInfo-based
+// fallback, whenever introspection alone doesn't carry a Subject. Returns
+// iv for chaining at construction time (see internal/tenant.buildLegacyTenant).
+//
+// Optional and WSO2-specific: a tenant/IdP that never calls this keeps
+// today's UserInfo-only enrichment unchanged -- SCIM is never required, and
+// nothing here assumes every IdP has a SCIM2 endpoint to call.
+//
+// Exists specifically for IdPs whose access tokens are token-binding-bound
+// to the browser (see internal/scim's own package doc comment for the full
+// mechanics) -- UserInfo then rejects this bridge's bearer-only
+// server-side call (no binding cookie to present), while a SCIM lookup
+// authenticated with this bridge's own separate client-credentials grant is
+// unaffected by that restriction entirely.
+func (iv *IntrospectionValidator) WithSCIMResolver(scim scimResolver) *IntrospectionValidator {
+	iv.scim = scim
+	return iv
 }
 
 // Validate introspects token against this validator's pinned IdP instance
 // (base validation, via introspect.Validator.ValidateBearer -- identical to
 // what the legacy /support path itself gets), then enriches the result with
 // a canonical Subject when introspection's own response didn't carry one:
-// see introspect.Validator.ResolveSubjectViaUserinfo for the mechanics.
-// Enrichment is attempted only when the token looks like a genuine end-user
-// token (a non-empty Username -- a pure client-credentials token has none,
-// see introspect.Identity's own doc comment, and has no Subject to resolve
-// in the first place) and introspection's own Subject came back empty; a
-// tenant whose IdP already returns "sub" from introspection (e.g. one using
-// JWT-typed access tokens) never triggers it.
+// via iv.scim.ResolveUserID (username -> immutable SCIM user id) when a
+// SCIM resolver is configured (see WithSCIMResolver), otherwise via
+// introspect.Validator.ResolveSubjectViaUserinfo exactly as before. Either
+// way, username is used ONLY as a lookup key -- the resolved value becomes
+// Subject, username itself never does. Enrichment is attempted only when
+// the token looks like a genuine end-user token (a non-empty Username -- a
+// pure client-credentials token has none, see introspect.Identity's own
+// doc comment, and has no Subject to resolve in the first place) and
+// introspection's own Subject came back empty; a tenant whose IdP already
+// returns "sub" from introspection (e.g. one using JWT-typed access
+// tokens) never triggers either path.
 //
 // Returns an error -- failing this call, not just leaving Subject empty --
 // when enrichment was attempted but didn't produce a usable Subject, since
@@ -90,14 +125,20 @@ func NewIntrospectionValidator(v *introspect.Validator) *IntrospectionValidator 
 // internal/handler's canonicalOwner/RequireSubject). This keeps the
 // "Subject is mandatory for /v1" decision inside the auth/validator layer,
 // consistent with introspect.ErrUserinfoInsufficientScope/
-// ErrUserinfoNoSubject/ErrUserinfoUnavailable's own classification.
+// ErrUserinfoNoSubject/ErrUserinfoUnavailable's own classification, and
+// with internal/scim.ErrNoMatch/ErrAmbiguous/ErrUnavailable's.
 func (iv *IntrospectionValidator) Validate(ctx context.Context, token string) (*Identity, error) {
 	id, err := iv.v.ValidateBearer(ctx, token)
 	if err != nil {
 		return nil, err
 	}
 	if id.Subject == "" && id.Username != "" {
-		subject, err := iv.v.ResolveSubjectViaUserinfo(ctx, token)
+		var subject string
+		if iv.scim != nil {
+			subject, err = iv.scim.ResolveUserID(ctx, id.Username)
+		} else {
+			subject, err = iv.v.ResolveSubjectViaUserinfo(ctx, token)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("tokenvalidator: resolve canonical subject: %w", err)
 		}
