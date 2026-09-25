@@ -125,7 +125,7 @@ func main() {
 		// is not a meaningful action for an Ask AI-originated case (Console
 		// admins don't have entity-service "cases"), so that method is
 		// never expected to be called against this target.
-		chatNotifiers["asgardeo"] = chatnotify.NewClient(chatnotify.Config{
+		bridgeNotifier := chatnotify.NewClient(chatnotify.Config{
 			BaseURL:      bridgeBaseURL,
 			TokenURL:     envOrDefault("CONSOLE_CHAT_BRIDGE_TOKEN_URL", oauth2TokenURL),
 			ClientID:     envOrDefault("CONSOLE_CHAT_BRIDGE_CLIENT_ID", oauth2ClientID),
@@ -139,6 +139,16 @@ func main() {
 			// other leg of this same integration.
 			InsecureSkipVerify: envOrDefault("CONSOLE_CHAT_BRIDGE_TOKEN_INSECURE_SKIP_VERIFY", "false") == "true",
 		})
+		// One HTTP client, two routing aliases: "asgardeo" is the legacy
+		// Source every case raised through console-chat-bridge's compat
+		// /support/chats path still carries; "console-chat-bridge" is the
+		// new default RoutingSource every /v1/{tenant}/... tenant uses
+		// unless it overrides one explicitly (see console-chat-bridge's
+		// internal/tenant package). Registering both keys against the same
+		// notifier here, once, means no future tenant needs a csm-portal/
+		// backend code change to have its events routed correctly.
+		chatNotifiers["asgardeo"] = bridgeNotifier
+		chatNotifiers["console-chat-bridge"] = bridgeNotifier
 	}
 	routingClient := routingclient.NewClient(routingclient.Config{
 		BaseURL:       envOrDefault("ROUTING_SERVICE_BASE_URL", "http://localhost:9096"),
@@ -395,6 +405,11 @@ func main() {
 	mux.HandleFunc("GET /chat/alerts/stream", chatHandler.StreamEngineerAlerts)
 	mux.HandleFunc("POST /internal/chat/escalate", chatHandler.HandleEscalate)
 	mux.HandleFunc("POST /internal/chat/customer-message", chatHandler.HandleCustomerMessage)
+	// Tenant-ownership + tenant-initiated completion -- called by
+	// console-chat-bridge's requireTenantCase and completeChat route
+	// respectively (see middleware.m2mExemptRoutes/m2mExemptPathPrefixes).
+	mux.HandleFunc("GET /internal/chat/cases/{caseId}", chatHandler.HandleGetCaseOwnership)
+	mux.HandleFunc("POST /internal/chat/complete", chatHandler.HandleCompleteByTenant)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
