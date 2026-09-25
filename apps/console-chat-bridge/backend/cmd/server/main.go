@@ -164,6 +164,7 @@ func main() {
 		os.Getenv("TENANT_REGISTRY"),
 		envOrDefault("BRIDGE_ROUTING_SOURCE", "console-chat-bridge"),
 		nil,
+		nil,
 		tenant.LegacyConfig{
 			IssuerBaseURL:      os.Getenv("KNOWN_ISSUER_BASE_URL"),
 			ClientID:           os.Getenv("INTROSPECTION_CLIENT_ID"),
