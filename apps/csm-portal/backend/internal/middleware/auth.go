@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -120,7 +121,19 @@ var m2mExemptPathPrefixes = []string{
 // isM2MExempt reports whether r's method+path matches m2mExemptRoutes
 // exactly or falls under one of m2mExemptPathPrefixes.
 func isM2MExempt(r *http.Request) bool {
-	key := r.Method + " " + r.URL.Path
+	// path.Clean before matching -- this runs outermost, ahead of net/http.
+	// ServeMux's own path-cleaning redirect (Mux sits behind Auth in the
+	// chain: SecurityHeaders -> CorrelationID -> Auth -> Logger -> Mux), so
+	// comparing against the raw, unnormalized r.URL.Path let a dirty path
+	// like "/internal/chat/cases/../../../users/me" satisfy
+	// m2mExemptPathPrefixes' literal string prefix even though it
+	// canonicalizes to an unrelated route ("/users/me") -- confirmed via a
+	// live probe: the exempt check passed on the dirty path, and only the
+	// ServeMux redirect this Auth bypass exposed the request to caught it
+	// before anything unauthorized actually ran. Cleaning first makes this
+	// check match on the same path ServeMux will ultimately route on.
+	cleanPath := path.Clean(r.URL.Path)
+	key := r.Method + " " + cleanPath
 	if m2mExemptRoutes[key] {
 		return true
 	}

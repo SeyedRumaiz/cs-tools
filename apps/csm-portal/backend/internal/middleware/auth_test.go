@@ -209,6 +209,8 @@ func TestAuth_M2MExemptRoutes(t *testing.T) {
 	}{
 		{http.MethodPost, "/internal/chat/escalate"},
 		{http.MethodPost, "/internal/chat/customer-message"},
+		{http.MethodPost, "/internal/chat/complete"},
+		{http.MethodGet, "/internal/chat/cases/11111111-1111-1111-1111-111111111111"},
 	}
 	for _, tc := range exempt {
 		t.Run(tc.method+" "+tc.path+" skips auth with no token", func(t *testing.T) {
@@ -227,6 +229,8 @@ func TestAuth_M2MExemptRoutes(t *testing.T) {
 	}{
 		{"GET on an exempt path still requires auth", http.MethodGet, "/internal/chat/escalate"},
 		{"unrelated internal-looking path still requires auth", http.MethodPost, "/internal/chat/escalate-typo"},
+		{"bare case-lookup prefix with no caseId segment still requires auth", http.MethodGet, "/internal/chat/cases/"},
+		{"bare case-lookup prefix with no trailing slash at all still requires auth", http.MethodGet, "/internal/chat/cases"},
 	}
 	for _, tc := range notExempt {
 		t.Run(tc.name, func(t *testing.T) {
@@ -234,6 +238,32 @@ func TestAuth_M2MExemptRoutes(t *testing.T) {
 			w := serve(r)
 			if w.Code != http.StatusUnauthorized {
 				t.Errorf("status = %d, want 401 (not an exempt route)", w.Code)
+			}
+		})
+	}
+}
+
+// TestAuth_M2MExemptRoutes_PathTraversal is a regression test for a bug a
+// live E2E probe found: isM2MExempt originally compared against the raw,
+// unnormalized r.URL.Path, so a dirty path like
+// "/internal/chat/cases/../../../users/me" satisfied
+// m2mExemptPathPrefixes' literal string prefix even though it
+// canonicalizes (the same way net/http.ServeMux's own routing eventually
+// would) to an unrelated, non-exempt route. isM2MExempt must clean the
+// path before matching so this can never skip Auth for anything but a
+// genuine case-lookup request.
+func TestAuth_M2MExemptRoutes_PathTraversal(t *testing.T) {
+	dirty := []string{
+		"/internal/chat/cases/../../../users/me",
+		"/internal/chat/cases/../../users/me",
+		"/internal/chat/cases/foo/../../../cases/search",
+	}
+	for _, p := range dirty {
+		t.Run(p, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, p, nil)
+			w := serve(r)
+			if w.Code == http.StatusOK {
+				t.Errorf("status = %d, want anything but 200 -- a dirty path must never be treated as the exempt case-lookup route", w.Code)
 			}
 		})
 	}
