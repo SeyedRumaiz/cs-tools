@@ -777,7 +777,7 @@ func engineerCases(ctx context.Context, q pgxQuerier, userID string) ([]CaseStat
 				return nil, fmt.Errorf("decode case info: %w", err)
 			}
 		}
-		priorMessages, err := commentsForWorkItem(ctx, q, workItemID)
+		priorMessages, err := commentsForWorkItem(ctx, q, workItemID, c.CustomerEmail)
 		if err != nil {
 			return nil, fmt.Errorf("engineer cases: %w", err)
 		}

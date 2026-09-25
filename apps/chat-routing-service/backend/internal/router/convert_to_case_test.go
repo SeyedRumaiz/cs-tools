@@ -188,6 +188,8 @@ func TestGetCaseInfo_ReturnsStoredCaseInfo(t *testing.T) {
 		var workItemID string
 		_ = pool.QueryRow(context.Background(), `SELECT work_item_id FROM chat_conversation WHERE case_id = $1`, caseID).Scan(&workItemID)
 		if workItemID != "" {
+			_, _ = pool.Exec(context.Background(), `DELETE FROM chat_queue_engineer_assignment WHERE case_id = $1`, caseID)
+			_, _ = pool.Exec(context.Background(), `DELETE FROM chat_queue WHERE chat_conversation_id = $1`, caseID)
 			_, _ = pool.Exec(context.Background(), `DELETE FROM comment WHERE work_item_id = $1`, workItemID)
 			_, _ = pool.Exec(context.Background(), `DELETE FROM chat_conversation WHERE work_item_id = $1`, workItemID)
 			_, _ = pool.Exec(context.Background(), `DELETE FROM work_item WHERE id = $1`, workItemID)
