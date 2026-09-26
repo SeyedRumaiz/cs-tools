@@ -28,27 +28,43 @@ function caseUrl(config: LiveChatClientConfig, caseId: string, suffix: string): 
 }
 
 /** Shared POST-JSON request plumbing for startChat/sendMessage/completeChat.
- * Fetches a fresh access token for every call -- see
+ * Uses config.requestTransport when given (see that field's own doc
+ * comment); otherwise fetches a fresh access token for every call -- see
  * LiveChatClientConfig.getAccessToken's own doc comment on why this SDK
  * never caches one. Never logs the token or includes it in any thrown
  * error. */
 async function postJson(config: LiveChatClientConfig, url: string, body: unknown): Promise<unknown> {
-  const token = await config.getAccessToken();
+  let status: number;
+  let rawBody: string;
 
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-  } catch (err) {
-    throw new LiveChatError(err instanceof Error && err.message ? err.message : "A network error occurred.");
+  if (config.requestTransport) {
+    try {
+      ({ status, text: rawBody } = await config.requestTransport.postJson(url, body));
+    } catch (err) {
+      throw new LiveChatError(err instanceof Error && err.message ? err.message : "A network error occurred.");
+    }
+  } else {
+    if (typeof config.getAccessToken !== "function") {
+      throw new LiveChatError("getAccessToken or requestTransport is required.");
+    }
+    const token = await config.getAccessToken();
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+    } catch (err) {
+      throw new LiveChatError(err instanceof Error && err.message ? err.message : "A network error occurred.");
+    }
+    status = response.status;
+    rawBody = await response.text();
   }
 
-  const rawBody = await response.text();
-  if (!response.ok) {
-    throw errorFromResponse(response.status, rawBody);
+  if (status < 200 || status >= 300) {
+    throw errorFromResponse(status, rawBody);
   }
   if (rawBody.trim() === "") {
     return undefined;
@@ -56,7 +72,7 @@ async function postJson(config: LiveChatClientConfig, url: string, body: unknown
   try {
     return JSON.parse(rawBody) as unknown;
   } catch {
-    throw new LiveChatError("The server returned a malformed response.", { status: response.status });
+    throw new LiveChatError("The server returned a malformed response.", { status });
   }
 }
 
@@ -100,8 +116,15 @@ async function startChat(config: LiveChatClientConfig, req: StartChatRequest): P
 
 function subscribe(config: LiveChatClientConfig, caseId: string, onEvent: (event: LiveChatEvent) => void): () => void {
   requireNonEmpty(caseId, "caseId");
+  if (!config.streamTransport && typeof config.getAccessToken !== "function") {
+    throw new LiveChatError("getAccessToken or streamTransport is required.");
+  }
   return openEventStream(
-    { url: caseUrl(config, caseId, "/events"), getAccessToken: config.getAccessToken },
+    {
+      url: caseUrl(config, caseId, "/events"),
+      getAccessToken: config.getAccessToken,
+      streamTransport: config.streamTransport
+    },
     onEvent
   );
 }
@@ -119,12 +142,21 @@ async function completeChat(config: LiveChatClientConfig, caseId: string): Promi
 
 /** Creates a {@link LiveChatClient} bound to config. Validates baseUrl/tenant
  * once, up front -- every other input is validated per call (see each
- * method's own requireNonEmpty checks). */
+ * method's own requireNonEmpty checks), since getAccessToken/
+ * requestTransport/streamTransport are each only required by the calls
+ * that actually need them (see subscribe's own check for the streaming
+ * case, and postJson's for the request case) -- a consumer that only ever
+ * calls startChat/sendMessage/completeChat need not supply a
+ * streamTransport, and vice versa. */
 export function createLiveChatClient(config: LiveChatClientConfig): LiveChatClient {
   requireNonEmpty(config.baseUrl, "baseUrl");
   requireNonEmpty(config.tenant, "tenant");
-  if (typeof config.getAccessToken !== "function") {
-    throw new LiveChatError("getAccessToken is required.");
+  if (
+    typeof config.getAccessToken !== "function" &&
+    !config.requestTransport &&
+    !config.streamTransport
+  ) {
+    throw new LiveChatError("getAccessToken, requestTransport, or streamTransport is required.");
   }
 
   return {

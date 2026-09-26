@@ -253,3 +253,61 @@ describe("openEventStream", () => {
     }).not.toThrow();
   });
 });
+
+describe("openEventStream with streamTransport", () => {
+  it("uses streamTransport instead of fetch when provided", async () => {
+    const { response, push } = controlledStream();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const openStream = vi.fn().mockResolvedValue(response.body);
+    const onEvent = vi.fn();
+    const unsubscribe = openEventStream(
+      { url: "https://x.test/events", streamTransport: { openStream } },
+      onEvent
+    );
+    await flush();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(openStream).toHaveBeenCalledTimes(1);
+    const [url, signal] = openStream.mock.calls[0] as [string, AbortSignal];
+    expect(url).toBe("https://x.test/events");
+    expect(signal).toBeInstanceOf(AbortSignal);
+
+    push('data: {"type":"engineer_assigned","engineerEmail":"eng@example.com"}\n\n');
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1));
+    expect(onEvent).toHaveBeenCalledWith({ type: "assigned", engineerEmail: "eng@example.com" });
+
+    unsubscribe();
+  });
+
+  it("aborts streamTransport's signal on unsubscribe", async () => {
+    const { response } = controlledStream();
+    let openedSignal: AbortSignal | undefined;
+    const openStream = vi.fn().mockImplementation(async (_url: string, signal: AbortSignal) => {
+      openedSignal = signal;
+
+      return response.body;
+    });
+
+    const unsubscribe = openEventStream(
+      { url: "https://x.test/events", streamTransport: { openStream } },
+      vi.fn()
+    );
+    await flush();
+
+    expect(openedSignal?.aborted).toBe(false);
+    unsubscribe();
+    expect(openedSignal?.aborted).toBe(true);
+  });
+
+  it("reports an error event when streamTransport rejects", async () => {
+    const openStream = vi.fn().mockRejectedValue(new Error("no network"));
+    const onEvent = vi.fn();
+
+    openEventStream({ url: "https://x.test/events", streamTransport: { openStream } }, onEvent);
+
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1));
+    expect(onEvent).toHaveBeenCalledWith({ type: "error", message: "no network" });
+  });
+});

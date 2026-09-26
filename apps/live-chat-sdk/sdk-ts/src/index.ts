@@ -79,6 +79,8 @@ export type {
   LiveChatClient,
   LiveChatClientConfig,
   LiveChatEvent,
+  LiveChatRequestTransport,
+  LiveChatStreamTransport,
   StartChatRequest,
   StartChatResult
 } from "./types.js";

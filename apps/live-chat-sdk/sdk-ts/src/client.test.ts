@@ -230,4 +230,83 @@ describe("createLiveChatClient config validation", () => {
   it("throws synchronously for an empty tenant", () => {
     expect(() => createLiveChatClient(baseConfig({ tenant: "" }))).toThrow(LiveChatError);
   });
+
+  it("throws when none of getAccessToken/requestTransport/streamTransport are given", () => {
+    expect(() =>
+      createLiveChatClient({
+        baseUrl: "https://support.example.com",
+        tenant: "my-product"
+      })
+    ).toThrow(LiveChatError);
+  });
+
+  it("does not throw when only requestTransport is given (no getAccessToken)", () => {
+    expect(() =>
+      createLiveChatClient({
+        baseUrl: "https://support.example.com",
+        tenant: "my-product",
+        requestTransport: { postJson: async () => ({ status: 202, text: "{}" }) }
+      })
+    ).not.toThrow();
+  });
+
+  it("does not throw when only streamTransport is given (no getAccessToken)", () => {
+    expect(() =>
+      createLiveChatClient({
+        baseUrl: "https://support.example.com",
+        tenant: "my-product",
+        streamTransport: { openStream: async () => new ReadableStream() }
+      })
+    ).not.toThrow();
+  });
+});
+
+describe("requestTransport", () => {
+  it("uses requestTransport instead of fetch when provided", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const postJson = vi.fn().mockResolvedValue({
+      status: 202,
+      text: JSON.stringify({ caseId: "c1", conversationId: "conv1" })
+    });
+
+    const client = createLiveChatClient(
+      baseConfig({ getAccessToken: undefined, requestTransport: { postJson } })
+    );
+    const result = await client.startChat({ message: "hi" });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(postJson).toHaveBeenCalledTimes(1);
+    const [url, body] = postJson.mock.calls[0] as [string, unknown];
+    expect(url).toBe("https://support.example.com/v1/my-product/chats");
+    expect(body).toMatchObject({ message: "hi" });
+    expect(result).toEqual({ caseId: "c1", conversationId: "conv1" });
+  });
+
+  it("turns a non-2xx requestTransport status into a LiveChatError", async () => {
+    const postJson = vi.fn().mockResolvedValue({
+      status: 409,
+      text: JSON.stringify({ message: "You already have an open chat." })
+    });
+
+    const client = createLiveChatClient(
+      baseConfig({ getAccessToken: undefined, requestTransport: { postJson } })
+    );
+
+    await expect(client.startChat({ message: "hi" })).rejects.toMatchObject({
+      status: 409,
+      message: "You already have an open chat."
+    });
+  });
+
+  it("wraps a rejected requestTransport call in a LiveChatError", async () => {
+    const postJson = vi.fn().mockRejectedValue(new Error("no network"));
+
+    const client = createLiveChatClient(
+      baseConfig({ getAccessToken: undefined, requestTransport: { postJson } })
+    );
+
+    await expect(client.startChat({ message: "hi" })).rejects.toThrow(LiveChatError);
+  });
 });
