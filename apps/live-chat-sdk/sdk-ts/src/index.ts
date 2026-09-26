@@ -59,28 +59,17 @@
  *   Subject only (never falling back to a Username claim the way the
  *   legacy Ask AI integration does) -- a token whose introspection/JWKS
  *   validation yields no Subject is rejected with 401 regardless of what
- *   other claims it carries. This is a known, currently-unresolved
- *   integration gap for at least one real deployment (see "Known issue"
- *   below); it is not something this SDK works around.
+ *   other claims it carries. This is not something this SDK works around
+ *   client-side; it's entirely a bridge/IdP-configuration concern -- see
+ *   console-chat-bridge's own tenant onboarding doc (`docs/
+ *   TENANT_ONBOARDING.md`) for exactly what a tenant's IdP needs to
+ *   provide, including the JWT-introspection fast path and the optional
+ *   UserInfo/SCIM resolution paths for an opaque-token IdP that doesn't
+ *   put `sub` on introspection directly.
  * - **React integration is intentionally separate.** A future
  *   `@wso2/live-chat-react` package (hooks, providers) is meant to sit on
  *   top of this client, not inside it -- this package has zero React (or
  *   any other framework) dependency.
- *
- * ## Known issue: IdP Subject claim
- *
- * Live verification against a real local WSO2 IS instance found that its
- * RFC 7662 token introspection response never includes a `sub` claim
- * (only `username` -- `/oauth2/userinfo` does return `sub`, but that's a
- * different endpoint console-chat-bridge does not call). Since `/v1`
- * requires a canonical Subject, a genuine end-user token from that
- * specific IdP configuration is currently rejected by every `/v1` route.
- * This is an IdP/TokenValidator integration-design issue, not a bug in
- * this SDK -- the SDK was built and tested against the real, working
- * `/v1` contract (via a token source that does supply a Subject). Anyone
- * migrating a product onto this SDK must confirm their own IdP's
- * introspection (or JWKS) response actually carries a Subject claim
- * first.
  */
 
 export { createLiveChatClient } from "./client.js";

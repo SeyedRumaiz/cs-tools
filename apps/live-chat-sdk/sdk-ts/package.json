@@ -3,6 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "description": "Framework-agnostic TypeScript client for the generic live-engineer-chat API (console-chat-bridge's /v1/{tenant}/... endpoints).",
+  "keywords": [
+    "live-chat",
+    "console-chat-bridge",
+    "wso2"
+  ],
+  "license": "Apache-2.0",
+  "author": "WSO2 LLC. (https://www.wso2.com)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wso2-open-operations/cs-tools.git",
+    "directory": "apps/live-chat-sdk/sdk-ts"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
