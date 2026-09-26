@@ -1,6 +1,6 @@
 import { describeTransportError, isAbortError, parseErrorBody } from "./errors.js";
 import { normalizeWireEvent } from "./events.js";
-import type { LiveChatEvent } from "./types.js";
+import type { LiveChatEvent, LiveChatStreamTransport } from "./types.js";
 
 /** One SSE frame is a "\n\n"-terminated block; extractSseFrames splits a
  * growing buffer into every complete frame plus whatever incomplete tail
@@ -31,7 +31,12 @@ export function extractSseData(frame: string): string | null {
 
 export interface EventStreamTarget {
   url: string;
-  getAccessToken: () => Promise<string> | string;
+  /** Required unless streamTransport is given -- see that field. */
+  getAccessToken?: () => Promise<string> | string;
+  /** See LiveChatStreamTransport's own doc comment (types.ts). When
+   * given, used instead of this module's own fetch()+getAccessToken()
+   * connection open. */
+  streamTransport?: LiveChatStreamTransport;
 }
 
 /**
@@ -63,31 +68,43 @@ export function openEventStream(target: EventStreamTarget, onEvent: (event: Live
   void run();
 
   async function run(): Promise<void> {
-    let response: Response;
-    try {
-      const token = await target.getAccessToken();
-      response = await fetch(target.url, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
-        signal: controller.signal
-      });
-    } catch (err) {
-      reportUnlessClosed(err);
-      return;
+    let body: ReadableStream<Uint8Array>;
+
+    if (target.streamTransport) {
+      try {
+        body = await target.streamTransport.openStream(target.url, controller.signal);
+      } catch (err) {
+        reportUnlessClosed(err);
+        return;
+      }
+    } else {
+      let response: Response;
+      try {
+        const token = await target.getAccessToken?.();
+        response = await fetch(target.url, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
+          signal: controller.signal
+        });
+      } catch (err) {
+        reportUnlessClosed(err);
+        return;
+      }
+
+      if (!response.ok) {
+        const rawBody = await response.text().catch(() => "");
+        const { message } = parseErrorBody(rawBody, `Failed to open the event stream (status ${response.status}).`);
+        onEvent({ type: "error", message });
+        return;
+      }
+      if (!response.body) {
+        onEvent({ type: "error", message: "The server did not return a readable stream." });
+        return;
+      }
+      body = response.body;
     }
 
-    if (!response.ok) {
-      const rawBody = await response.text().catch(() => "");
-      const { message } = parseErrorBody(rawBody, `Failed to open the event stream (status ${response.status}).`);
-      onEvent({ type: "error", message });
-      return;
-    }
-    if (!response.body) {
-      onEvent({ type: "error", message: "The server did not return a readable stream." });
-      return;
-    }
-
-    reader = response.body.getReader();
+    reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
 

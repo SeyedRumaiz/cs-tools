@@ -87,6 +87,48 @@ export type LiveChatEvent =
    * attempt, a non-2xx response, or the stream ending unexpectedly). */
   | { type: "error"; message: string };
 
+/**
+ * Escape hatch for a consumer whose auth storage strategy makes a raw
+ * bearer token string unobtainable in the calling context -- e.g. Asgardeo
+ * SPA SDK's `storage: "webWorker"` mode, which deliberately keeps the
+ * access token inside a dedicated worker and never returns it to
+ * main-thread code (see `@asgardeo/auth-spa`'s own `getAccessToken()` doc
+ * comment). When {@link LiveChatClientConfig.requestTransport} is
+ * provided, the SDK calls it instead of building its own
+ * `fetch()` + `Authorization: Bearer <token>` request for every
+ * POST-JSON call (startChat/sendMessage/completeChat) -- wire it to
+ * whatever your app's own authenticated HTTP client already does (e.g.
+ * `AsgardeoSPAClient.getInstance().httpRequest`).
+ */
+export interface LiveChatRequestTransport {
+  /**
+   * Performs an authenticated POST of `body` as JSON to `url` and
+   * resolves with the raw response status and body text -- never throws
+   * for a non-2xx response (the SDK itself turns that into a
+   * {@link LiveChatError}); only reject for a genuine transport failure
+   * (e.g. no network).
+   */
+  postJson(url: string, body: unknown): Promise<{ status: number; text: string }>;
+}
+
+/**
+ * The streaming counterpart to {@link LiveChatRequestTransport}, for
+ * {@link LiveChatClient.subscribe}'s SSE connection. When
+ * {@link LiveChatClientConfig.streamTransport} is provided, the SDK calls
+ * it instead of its own `fetch()`-based SSE open.
+ */
+export interface LiveChatStreamTransport {
+  /**
+   * Opens an authenticated GET of `url` and resolves with the response
+   * body as a byte stream, already positioned to read from the start.
+   * `signal` aborts when the caller's `unsubscribe()` fires -- honor it so
+   * the underlying connection actually closes. Reject for anything that
+   * prevents a usable stream (a non-2xx response, no body, a transport
+   * failure); the SDK surfaces that as an `{ type: "error" }` event.
+   */
+  openStream(url: string, signal: AbortSignal): Promise<ReadableStream<Uint8Array>>;
+}
+
 /** Configuration for {@link createLiveChatClient}. */
 export interface LiveChatClientConfig {
   /** console-chat-bridge's base URL, e.g. "https://support.example.com". */
@@ -96,12 +138,25 @@ export interface LiveChatClientConfig {
   tenant: string;
   /**
    * Returns the caller's own current access token. May be sync or async.
-   * Called fresh before every request (including once per subscribe()
-   * call, since a bearer token can only be attached at SSE connection
-   * time, not per-frame) -- this SDK never caches a token across calls,
-   * so token refresh is entirely the caller's responsibility.
+   * Called fresh before every request this SDK builds itself (including
+   * once per subscribe() call, since a bearer token can only be attached
+   * at SSE connection time, not per-frame) -- this SDK never caches a
+   * token across calls, so token refresh is entirely the caller's
+   * responsibility.
+   *
+   * Required unless both {@link requestTransport} and
+   * {@link streamTransport} are provided (in which case this SDK never
+   * needs a raw token string at all, and this is ignored if given).
    */
-  getAccessToken: () => Promise<string> | string;
+  getAccessToken?: () => Promise<string> | string;
+  /** See {@link LiveChatRequestTransport}'s own doc comment. Covers
+   * startChat/sendMessage/completeChat; does not affect subscribe() --
+   * see {@link streamTransport} for that. */
+  requestTransport?: LiveChatRequestTransport;
+  /** See {@link LiveChatStreamTransport}'s own doc comment. Covers only
+   * subscribe(); does not affect startChat/sendMessage/completeChat --
+   * see {@link requestTransport} for those. */
+  streamTransport?: LiveChatStreamTransport;
 }
 
 /** The public client. See index.ts's module doc comment for a usage example. */
