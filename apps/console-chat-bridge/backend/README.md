@@ -1,14 +1,25 @@
 # console-chat-bridge
 
-Lets identity-apps' Console "Chat with an Engineer" button (in the Ask AI
-panel, `features/admin.copilot.v1`) escalate into the existing cs-tools
-live-engineer-chat framework (`chat-routing-service` / `csm-portal/backend`)
-without the Console's browser ever calling either directly, and without any
-`chat-routing-service`/`csm-portal` credential ever reaching the browser.
+Lets a product's "Chat with an Engineer" feature escalate into the existing
+cs-tools live-engineer-chat framework (`chat-routing-service` /
+`csm-portal/backend`) without that product's browser ever calling either
+directly, and without any `chat-routing-service`/`csm-portal` credential
+ever reaching the browser.
+
+Started as a single-purpose bridge for identity-apps' Console "Chat with an
+Engineer" button (`features/admin.copilot.v1`); the sections below on
+**Why this exists** and **Token type** describe that original, still-fully-
+supported legacy integration. It has since grown into a genuinely
+**multi-tenant** gateway — see "Multi-tenant `/v1` API" below and
+[`docs/TENANT_ONBOARDING.md`](docs/TENANT_ONBOARDING.md) for onboarding any
+other product, and
+[`../../live-chat-sdk/ARCHITECTURE.md`](../../live-chat-sdk/ARCHITECTURE.md)
+for how the whole framework fits together.
 
 See the project's `console-ask-ai-engineer-escalation-investigation.md` for
-the full investigation this implements, and the follow-up plan message for
-the auth/session-model decisions this POC makes concrete.
+the full investigation the original legacy integration implements, and the
+follow-up plan message for the auth/session-model decisions that POC made
+concrete.
 
 ## Why this exists (in one paragraph)
 
@@ -93,6 +104,9 @@ assumes one or the other.
 
 ## Routes
 
+**Legacy, single-tenant** (predates multi-tenancy; see "Multi-tenant `/v1`
+API" below for what every new integration should use instead):
+
 | Method | Path | Caller | Auth |
 |---|---|---|---|
 | POST | `/support/chats` | Console browser | bearer token, introspected against the known instance, must resolve to a real user |
@@ -100,10 +114,40 @@ assumes one or the other.
 | GET | `/support/chats/{caseId}/stream` | Console browser | same |
 | POST | `/internal/chat-events` | csm-portal/backend | bearer token, introspected against the known instance, `client_id` must equal `CSM_PORTAL_PUSH_CLIENT_ID` |
 
-## Known POC limitations (see the investigation doc for the full list)
+**Multi-tenant** (generic, what `@wso2/live-chat-client` actually calls):
 
-- Single known IS instance only -- not multi-tenant.
+| Method | Path | Caller | Auth |
+|---|---|---|---|
+| POST | `/v1/{tenant}/chats` | any onboarded product's browser | bearer token, validated against that tenant's own IdP, must resolve to a canonical Subject |
+| POST | `/v1/{tenant}/chats/{caseId}/messages` | same | same, plus `caseId` must belong to `{tenant}` |
+| GET | `/v1/{tenant}/chats/{caseId}/events` | same | same |
+| POST | `/v1/{tenant}/chats/{caseId}/complete` | same | same |
+
+See [`docs/TENANT_ONBOARDING.md`](docs/TENANT_ONBOARDING.md) for how to
+add a new tenant (required config fields, auth modes, CORS, tenant
+isolation, secret handling, and a full onboarding checklist), and
+[`../../live-chat-sdk/ARCHITECTURE.md`](../../live-chat-sdk/ARCHITECTURE.md)
+for how this bridge fits into the wider framework.
+
+## Multi-tenant `/v1` API
+
+This bridge is genuinely multi-tenant today: each product gets its own
+`TENANT_REGISTRY` row (its own IdP, CORS origins, routing tags, and
+optional SCIM-based Subject resolution), selected at request time by the
+`{tenant}` URL segment — not compiled in, not a per-deployment fork. Two
+independent products (identity-apps' Console, via the `identity-console`
+tenant, and `apps/live-chat-demo`, a minimal reference consumer, via the
+`live-chat-demo` tenant) run through this same deployment side by side,
+each fully isolated from the other's cases, origins, and credentials. See
+`docs/TENANT_ONBOARDING.md` for everything needed to add another one.
+
+## Known POC limitations
+
 - `internal/stream.Hub` and `ChatsHandler`'s case-ownership map are
   in-memory, single-process, lost on restart.
 - No persistence beyond what csm-portal/backend/chat-routing-service
   already durably store -- this bridge itself keeps no database.
+- JWKS/JWT-signature validation (`validationType: "jwks"` in a
+  `TENANT_REGISTRY` row) is accepted at config-parse time but not actually
+  implemented yet -- every request to a `jwks`-type tenant currently
+  fails; only `introspection` works today.
