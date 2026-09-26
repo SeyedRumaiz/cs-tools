@@ -78,9 +78,12 @@ function handleEvent(event: LiveChatEvent): void {
       state.log("engineer message");
       break;
     case "disconnected":
+      state.status = "ended";
+      state.log(`ended by ${event.engineerEmail}`);
+      break;
     case "converted":
       state.status = "ended";
-      state.log("ended");
+      state.log(`converted to case ${event.entityCaseId} by ${event.engineerEmail}`);
       break;
     case "expired":
       state.status = "idle";
