@@ -1119,6 +1119,21 @@ func (h *ChatHandler) HandleConvertToCase(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Case conversion creates a real entity-service case, which only makes
+	// sense for a customer-portal-originated chat -- there's a customer
+	// account and project behind it to attach the case to. A chat from any
+	// other Source (e.g. "asgardeo"/"console-chat-bridge", Identity
+	// Console's Ask AI escalation) has neither, and console-chat-bridge
+	// deliberately does not implement /internal/chat/create-case (see
+	// cmd/server/main.go's own comment on chatNotifiers) -- checked here,
+	// before calling it, so this fails fast with a clear, non-retryable
+	// message instead of a misleading 502 "try again" from a wasted call to
+	// an endpoint that will never exist.
+	if ci.Source != "" && ci.Source != defaultNotifySource {
+		writeError(w, http.StatusConflict, "This chat can't be converted into a case — it didn't originate from the customer portal.")
+		return
+	}
+
 	createPayload, err := json.Marshal(createCaseRequestBody{
 		CaseID:         ci.CaseID,
 		ConversationID: ci.ConversationID,
