@@ -1,15 +1,8 @@
 /**
- * Public types for @wso2/live-chat-client.
- *
- * These mirror console-chat-bridge's generic `/v1/{tenant}/...` API
- * exactly as implemented (see apps/console-chat-bridge/backend/internal/
- * handler/chats_v1.go's v1EscalateRequest/v1EscalateResponse/
- * v1MessageRequest), not an idealized sketch of it -- a few field names/
- * optionality differ from an earlier illustrative design note, and this
- * file follows the real backend. Deliberately excluded: source, channel,
- * tenant, tenantSlug, projectId -- these are authoritative, derived
- * server-side from the resolved tenant's own configuration, never
- * client-supplied (see tenant.Config in the bridge).
+ * Public types for @wso2/live-chat-client, mirroring console-chat-bridge's
+ * generic `/v1/{tenant}/...` API. Deliberately excluded: source, channel,
+ * tenant, tenantSlug, projectId -- these are derived server-side from the
+ * resolved tenant's own configuration, never client-supplied.
  */
 
 /**
