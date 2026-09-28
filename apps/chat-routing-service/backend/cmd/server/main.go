@@ -72,9 +72,7 @@ func main() {
 	r := router.NewRouter(pool)
 
 	// how long an engineer can sit PENDING before sweep-timeouts reassigns
-	// the case (their own chat_status is untouched -- see the 2026-09-10
-	// concurrent-chat-capacity change; this comment used to say it also
-	// marked the engineer OFFLINE, which stopped being true then)
+	// the case
 	pendingTimeout := envDurationSeconds("PENDING_TIMEOUT_SECONDS", 90)
 	// how long a case can sit WAITING_FOR_ENGINEER (never assigned to
 	// anyone at all -- every engineer OFFLINE/BUSY/at capacity when it
