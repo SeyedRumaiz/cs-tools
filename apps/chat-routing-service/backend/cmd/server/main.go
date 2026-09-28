@@ -119,7 +119,7 @@ func main() {
 	))
 
 	addr := ":" + mustPort("ROUTING_SERVICE_PORT", "9096")
-	srv := &http.Server{Addr: addr, Handler: topMux}
+	srv := &http.Server{Addr: addr, Handler: topMux, ReadHeaderTimeout: 10 * time.Second}
 
 	go func() {
 		slog.Info("Chat Routing Service started", "addr", addr)
