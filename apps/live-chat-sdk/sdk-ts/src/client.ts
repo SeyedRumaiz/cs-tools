@@ -141,13 +141,10 @@ async function completeChat(config: LiveChatClientConfig, caseId: string): Promi
 }
 
 /** Creates a {@link LiveChatClient} bound to config. Validates baseUrl/tenant
- * once, up front -- every other input is validated per call (see each
- * method's own requireNonEmpty checks), since getAccessToken/
- * requestTransport/streamTransport are each only required by the calls
- * that actually need them (see subscribe's own check for the streaming
- * case, and postJson's for the request case) -- a consumer that only ever
- * calls startChat/sendMessage/completeChat need not supply a
- * streamTransport, and vice versa. */
+ * once, up front. getAccessToken/requestTransport/streamTransport are
+ * validated lazily instead, by the calls that actually need them -- a
+ * consumer that only calls startChat/sendMessage/completeChat need not
+ * supply a streamTransport, and vice versa. */
 export function createLiveChatClient(config: LiveChatClientConfig): LiveChatClient {
   requireNonEmpty(config.baseUrl, "baseUrl");
   requireNonEmpty(config.tenant, "tenant");
