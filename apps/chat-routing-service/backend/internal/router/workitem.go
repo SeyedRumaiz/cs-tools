@@ -297,6 +297,17 @@ func (r *Router) AddComment(ctx context.Context, caseID, authorEmail, content st
 		`, workItemID, content, authorEmail); err != nil {
 			return fmt.Errorf("insert comment: %w", err)
 		}
+
+		// Also bumps chat_conversation.updated_at so a message counts as
+		// activity for SweepStaleAcceptedSessions -- without this, an
+		// accepted session's updated_at only ever reflected the last state
+		// transition (Accept), so a genuinely active conversation with many
+		// recent messages would look idle to that sweep.
+		if _, err := tx.Exec(ctx, `
+			UPDATE chat_conversation SET updated_at = now() WHERE case_id = $1
+		`, caseID); err != nil {
+			return fmt.Errorf("bump conversation activity: %w", err)
+		}
 		return nil
 	})
 }

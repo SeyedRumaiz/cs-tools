@@ -33,10 +33,16 @@ type RoutingHandler struct {
 	router              *router.Router
 	pendingTimeout      time.Duration
 	queueAbandonTimeout time.Duration
+	staleSessionTimeout time.Duration
 }
 
-func NewRoutingHandler(r *router.Router, pendingTimeout, queueAbandonTimeout time.Duration) *RoutingHandler {
-	return &RoutingHandler{router: r, pendingTimeout: pendingTimeout, queueAbandonTimeout: queueAbandonTimeout}
+func NewRoutingHandler(r *router.Router, pendingTimeout, queueAbandonTimeout, staleSessionTimeout time.Duration) *RoutingHandler {
+	return &RoutingHandler{
+		router:              r,
+		pendingTimeout:      pendingTimeout,
+		queueAbandonTimeout: queueAbandonTimeout,
+		staleSessionTimeout: staleSessionTimeout,
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -365,10 +371,20 @@ func (h *RoutingHandler) SweepTimeouts(w http.ResponseWriter, r *http.Request) {
 		abandoned = []router.AbandonedResult{}
 	}
 
+	stale, err := h.router.SweepStaleAcceptedSessions(r.Context(), h.staleSessionTimeout)
+	if err != nil {
+		writeStorageError(w, "sweep-timeouts:stale", err)
+		return
+	}
+	if stale == nil {
+		stale = []router.StaleSessionResult{}
+	}
+
 	writeJSON(w, http.StatusOK, struct {
-		Results   []router.TimeoutResult   `json:"results"`
-		Abandoned []router.AbandonedResult `json:"abandoned"`
-	}{Results: results, Abandoned: abandoned})
+		Results   []router.TimeoutResult      `json:"results"`
+		Abandoned []router.AbandonedResult    `json:"abandoned"`
+		Stale     []router.StaleSessionResult `json:"stale"`
+	}{Results: results, Abandoned: abandoned, Stale: stale})
 }
 
 // capacityRequest is the body for PATCH /route/capacity.

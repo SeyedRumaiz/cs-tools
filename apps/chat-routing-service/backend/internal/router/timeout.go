@@ -297,3 +297,132 @@ func (r *Router) abandonOne(ctx context.Context, caseID string, timeout time.Dur
 	}
 	return result, nil
 }
+
+// StaleSessionResult is one accepted session SweepStaleAcceptedSessions
+// force-ended for going idle too long.
+type StaleSessionResult struct {
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId"`
+	// AssigneeID is the engineer who was holding the session -- their
+	// capacity is freed the same way an explicit Completed call frees it.
+	AssigneeID string `json:"assigneeId"`
+	// AssignedCase is set when freeing that capacity immediately drained
+	// the waiting queue into it, same semantics as CompletedResult's own
+	// field of this name.
+	AssignedCase *CaseInfo `json:"assignedCase,omitempty"`
+}
+
+type staleCandidate struct {
+	caseID string
+}
+
+// SweepStaleAcceptedSessions ends every accepted session (state = 'ACTIVE')
+// that's had no activity -- no message sent, no state change -- for at
+// least timeout, freeing the assigned engineer's capacity and backfilling
+// from the queue the same way an explicit Completed call would.
+//
+// SweepExpiredPending and SweepAbandonedQueue both only ever catch a case
+// before an engineer confirms it; once accepted, nothing previously timed
+// a session out again. A session an engineer forgot to complete -- browser
+// closed, crashed, or simply never clicked Complete -- stayed open
+// indefinitely, silently blocking that same customer's next escalation for
+// the same project via CreateWorkItem's own duplicate-open-chat check.
+func (r *Router) SweepStaleAcceptedSessions(ctx context.Context, timeout time.Duration) ([]StaleSessionResult, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT case_id FROM chat_conversation
+		WHERE state = 'ACTIVE' AND accepted_at IS NOT NULL AND session_ended_at IS NULL
+		  AND updated_at < now() - make_interval(secs => $1)
+	`, timeout.Seconds())
+	if err != nil {
+		return nil, fmt.Errorf("router: scan stale accepted sessions: %w", err)
+	}
+	var candidates []staleCandidate
+	for rows.Next() {
+		var c staleCandidate
+		if err := rows.Scan(&c.caseID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("router: scan stale accepted session row: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("router: scan stale accepted sessions: %w", err)
+	}
+
+	var results []StaleSessionResult
+	for _, c := range candidates {
+		result, err := r.staleSessionOne(ctx, c.caseID, timeout)
+		if err != nil {
+			return results, fmt.Errorf("router: end stale session %s: %w", c.caseID, err)
+		}
+		if result != nil {
+			results = append(results, *result)
+		}
+	}
+	return results, nil
+}
+
+// staleSessionOne re-verifies and applies a single session's staleness
+// inside its own transaction, the same re-check-under-lock pattern
+// timeoutOne/abandonOne use: the session may have gotten a new message,
+// been completed, or reassigned in the moment between
+// SweepStaleAcceptedSessions's own unlocked scan and this lock, in which
+// case this is a no-op (nil, nil) rather than force-ending a session
+// that's no longer actually stale.
+func (r *Router) staleSessionOne(ctx context.Context, caseID string, timeout time.Duration) (*StaleSessionResult, error) {
+	var result *StaleSessionResult
+	err := r.withTx(ctx, func(tx pgx.Tx) error {
+		var (
+			caseInfoJSON []byte
+			assigneeID   *string
+			state        string
+			acceptedAt   *time.Time
+			updatedAt    time.Time
+		)
+		err := tx.QueryRow(ctx, `
+			SELECT case_info, assignee_id, state, accepted_at, updated_at
+			FROM chat_conversation WHERE case_id = $1 AND session_ended_at IS NULL
+			FOR UPDATE
+		`, caseID).Scan(&caseInfoJSON, &assigneeID, &state, &acceptedAt, &updatedAt)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return nil
+		case err != nil:
+			return fmt.Errorf("lock conversation: %w", err)
+		}
+		if assigneeID == nil || state != "ACTIVE" || acceptedAt == nil || time.Since(updatedAt) < timeout {
+			return nil
+		}
+
+		var c CaseInfo
+		if caseInfoJSON != nil {
+			if err := json.Unmarshal(caseInfoJSON, &c); err != nil {
+				return fmt.Errorf("decode case info: %w", err)
+			}
+		}
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE chat_conversation SET session_ended_at = now(), updated_at = now()
+			WHERE case_id = $1
+		`, caseID); err != nil {
+			return fmt.Errorf("mark stale session ended: %w", err)
+		}
+
+		completed, err := endSessionAndBackfill(ctx, tx, assigneeID)
+		if err != nil {
+			return err
+		}
+
+		result = &StaleSessionResult{
+			CaseID:         caseID,
+			ConversationID: c.ConversationID,
+			AssigneeID:     *assigneeID,
+			AssignedCase:   completed.AssignedCase,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
