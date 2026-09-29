@@ -18,9 +18,8 @@
 // for the live-engineer-chat routing feature. Each engineer has a manual
 // chat_status -- AVAILABLE, BUSY (do-not-disturb; still holds whatever
 // cases they already have, but takes no new ones), or OFFLINE -- plus a
-// configurable concurrent-chat capacity (max_concurrent_chats, default 1,
-// confirmed via the mentor 2026-09-10 -- see the project's
-// db-schema-review-2026-09-07-outcomes.md). An escalation goes to whichever
+// configurable concurrent-chat capacity (max_concurrent_chats, default 1).
+// An escalation goes to whichever
 // AVAILABLE engineer with spare capacity has taken the fewest chats today
 // (ties broken by fewest currently-active chats, then who's been AVAILABLE
 // longest), or gets queued FIFO if nobody qualifies; a completed session

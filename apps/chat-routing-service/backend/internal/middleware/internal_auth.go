@@ -34,9 +34,7 @@ type authErrorBody struct {
 
 // InternalToken returns middleware that requires InternalTokenHeader to
 // equal expected, using a constant-time comparison so the check doesn't
-// leak the token through timing. An empty expected always rejects rather
-// than disabling the check -- main.go exits at startup if the token env
-// var isn't set, so this shouldn't come up in practice.
+// leak the token through timing.
 func InternalToken(expected string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -48,9 +48,6 @@ func TestSetMaxConcurrentChats_CreatesRowOnFirstContact(t *testing.T) {
 		_, _ = pool.Exec(ctx, `DELETE FROM cs_engineer_status WHERE user_id = $1`, userID)
 	})
 
-	// Unlike testUserID's fixtures, this engineer has never called
-	// SetPresence -- SetMaxConcurrentChats must still work, same
-	// first-contact behavior as ensureAndLockEngineer.
 	if _, err := r.SetMaxConcurrentChats(ctx, userID, 3); err != nil {
 		t.Fatalf("SetMaxConcurrentChats on unseen engineer: %v", err)
 	}
@@ -71,18 +68,13 @@ func TestSetMaxConcurrentChats_RejectsOutOfRange(t *testing.T) {
 	r, pool := newTestRouter(t)
 	userID := testUserID(t, r, pool, "capacity-range")
 
-	// 11 is the first value above the ceiling (lowered from 20 to 10 by
-	// 000020_lower_max_concurrent_chats -- Sajith confirmed 10 as the
-	// intended maximum); 100 stays as a clearly-out-of-range case above
-	// that boundary too.
 	for _, n := range []int{0, -1, 11, 100} {
 		if _, err := r.SetMaxConcurrentChats(context.Background(), userID, n); !errors.Is(err, ErrInvalidCapacity) {
 			t.Errorf("SetMaxConcurrentChats(%d): expected ErrInvalidCapacity, got %v", n, err)
 		}
 	}
 
-	// A rejected call must not have partially applied -- capacity stays at
-	// whatever it was (1, from testUserID's own first-contact default).
+	// A rejected call must not have partially applied
 	detail, err := r.GetPresence(context.Background(), userID)
 	if err != nil {
 		t.Fatalf("GetPresence: %v", err)
@@ -92,12 +84,6 @@ func TestSetMaxConcurrentChats_RejectsOutOfRange(t *testing.T) {
 	}
 }
 
-// TestSetMaxConcurrentChats_BoundaryValues directly exercises the four
-// boundary cases around the 1-10 range enforced by both this method's own
-// max<1||max>10 check and cs_engineer_status's CHECK constraint
-// (chk_max_concurrent_chats, see migrations/000020_lower_max_concurrent_chats):
-// 1 and 10 must be accepted (the inclusive endpoints), 0 and 11 must be
-// rejected (one below, one above).
 func TestSetMaxConcurrentChats_BoundaryValues(t *testing.T) {
 	r, pool := newTestRouter(t)
 
@@ -135,10 +121,6 @@ func TestSetMaxConcurrentChats_LoweringDoesNotDropExistingCases(t *testing.T) {
 	caseID := testCaseID(t, pool, "capacity-lower-case")
 	assignFixture(t, r, pool, userID, caseID)
 
-	// Lower the cap below the current active count (1 active, capacity
-	// dropped to... well, minimum is 1, so use this to prove a lowered-but-
-	// still-sufficient cap leaves the case alone, and that future capacity
-	// checks use the new value.)
 	if _, err := r.SetMaxConcurrentChats(context.Background(), userID, 1); err != nil {
 		t.Fatalf("SetMaxConcurrentChats: %v", err)
 	}
@@ -161,14 +143,6 @@ func TestSetMaxConcurrentChats_LoweringDoesNotDropExistingCases(t *testing.T) {
 	}
 }
 
-// TestSetMaxConcurrentChats_DrainsQueueOnIncrease is the regression test for
-// the bug this method's queue-drain was added to fix: an engineer at
-// capacity with a customer queued behind them used to see nothing happen
-// when they raised their own limit -- the queued customer just sat there
-// until some unrelated event (the engineer going AVAILABLE again,
-// completing a different case) happened to trigger a drain. Confirms
-// raising the limit now claims the waiting case immediately and reports it
-// back via AssignedCases, the same way SetPresence(AVAILABLE) already does.
 func TestSetMaxConcurrentChats_DrainsQueueOnIncrease(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -178,9 +152,6 @@ func TestSetMaxConcurrentChats_DrainsQueueOnIncrease(t *testing.T) {
 		t.Fatalf("SetPresence(AVAILABLE): %v", err)
 	}
 
-	// Fill the engineer's default capacity (1) directly, bypassing
-	// Escalate's own engineer-selection -- same fixture pattern
-	// TestSetMaxConcurrentChats_LoweringDoesNotDropExistingCases uses.
 	firstID := testCaseID(t, pool, "capacity-drain-first")
 	assignFixture(t, r, pool, userID, firstID)
 
@@ -218,12 +189,6 @@ func TestSetMaxConcurrentChats_DrainsQueueOnIncrease(t *testing.T) {
 	}
 }
 
-// TestSetMaxConcurrentChats_NoDrainWhenNotAvailable confirms the drain added
-// alongside TestSetMaxConcurrentChats_DrainsQueueOnIncrease is gated on
-// chat_status, matching SetPresence's own AVAILABLE-only queue-drain: an
-// engineer who is BUSY or OFFLINE must not have a case pushed onto them
-// just because they raised their configured limit -- they haven't
-// signaled they're actually ready to take new work.
 func TestSetMaxConcurrentChats_NoDrainWhenNotAvailable(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()

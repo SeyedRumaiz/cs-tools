@@ -14,10 +14,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package handler implements the HTTP surface over internal/router.Router.
-// Every route here is server-to-server only (see internal/middleware.
-// InternalToken) — csm-portal/backend is the only real caller, via its own
-// internal/routingclient package.
 package handler
 
 import (
@@ -30,8 +26,6 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/backend/internal/router"
 )
 
-// maxBodyBytes bounds request bodies — generous for these small JSON
-// payloads while still capping memory use.
 const maxBodyBytes = 64 << 10 // 64 KiB
 
 // RoutingHandler adapts HTTP requests to router.Router calls.
@@ -41,14 +35,6 @@ type RoutingHandler struct {
 	queueAbandonTimeout time.Duration
 }
 
-// NewRoutingHandler constructs a RoutingHandler over r. pendingTimeout is
-// how long a conversation can sit assigned-but-unconfirmed before
-// SweepTimeouts reassigns/requeues it -- see router.Router.
-// SweepExpiredPending and cmd/server/main.go's PENDING_TIMEOUT_SECONDS.
-// queueAbandonTimeout is how long a case can sit WAITING_FOR_ENGINEER
-// (never assigned to anyone at all) before SweepTimeouts gives up on it --
-// see router.Router.SweepAbandonedQueue and cmd/server/main.go's
-// QUEUE_ABANDON_SECONDS.
 func NewRoutingHandler(r *router.Router, pendingTimeout, queueAbandonTimeout time.Duration) *RoutingHandler {
 	return &RoutingHandler{router: r, pendingTimeout: pendingTimeout, queueAbandonTimeout: queueAbandonTimeout}
 }
@@ -65,8 +51,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 // writeStorageError logs the underlying Postgres/pool error (never sent to
 // the caller) and responds 502 — the routing service's own state store is
-// unavailable, matching how csm-portal/backend already treats a routing
-// service failure (see internal/handler/chat.go's HandleSetPresence).
+// unavailable.
 func writeStorageError(w http.ResponseWriter, route string, err error) {
 	slog.Error("routing store error", "route", route, "err", err)
 	writeError(w, http.StatusBadGateway, "Routing state store is unavailable.")
@@ -82,9 +67,7 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 // isValidStatus reports whether s is a chat_status an engineer can
-// directly request -- AVAILABLE, BUSY (do-not-disturb), or OFFLINE. There
-// is no PENDING here: pending is a per-case fact (see router.CaseStatus),
-// never something requested for an engineer as a whole.
+// directly request.
 func isValidStatus(s string) bool {
 	switch router.Status(s) {
 	case router.StatusAvailable, router.StatusBusy, router.StatusOffline:
@@ -95,33 +78,19 @@ func isValidStatus(s string) bool {
 }
 
 // caseInfoRequest is the body shape shared by POST /route/escalate and
-// POST /route/workitem -- one field per router.CaseInfo field.
-//
-// PriorMessages only actually does anything on POST /route/workitem (see
-// router.Router.CreateWorkItem) -- Escalate's own caseInfoRequest is
-// decoded through the exact same struct only because the two routes have
-// always shared one body shape, but by the time Escalate runs, the
-// chat_conversation row (and, if any, its persisted prior messages) already
-// exists from the preceding CreateWorkItem call. Reusing router.PriorMessage
-// directly (rather than a separate request-only type) since the wire shape
-// is identical -- role/content/createdAt -- and this package already
-// depends on the router package for everything else here.
+// POST /route/workitem - one field per router.CaseInfo field.
 type caseInfoRequest struct {
-	CaseID         string `json:"caseId"`
-	ConversationID string `json:"conversationId"`
-	ProjectID      string `json:"projectId"`
-	// Source/Channel mirror router.CaseInfo's own fields of the same name
-	// -- see that struct's doc comment. Optional.
-	Source  string `json:"source,omitempty"`
-	Channel string `json:"channel,omitempty"`
-	// TenantSlug mirrors router.CaseInfo.TenantSlug -- see that field's own
-	// doc comment. Optional.
-	TenantSlug    string                `json:"tenantSlug,omitempty"`
-	Subject       string                `json:"subject"`
-	CustomerEmail string                `json:"customerEmail"`
-	CustomerName  string                `json:"customerName"`
-	Message       string                `json:"message"`
-	PriorMessages []router.PriorMessage `json:"priorMessages,omitempty"`
+	CaseID         string                `json:"caseId"`
+	ConversationID string                `json:"conversationId"`
+	ProjectID      string                `json:"projectId"`
+	Source         string                `json:"source,omitempty"`
+	Channel        string                `json:"channel,omitempty"`
+	TenantSlug     string                `json:"tenantSlug,omitempty"`
+	Subject        string                `json:"subject"`
+	CustomerEmail  string                `json:"customerEmail"`
+	CustomerName   string                `json:"customerName"`
+	Message        string                `json:"message"`
+	PriorMessages  []router.PriorMessage `json:"priorMessages,omitempty"`
 }
 
 func (req caseInfoRequest) toCaseInfo() router.CaseInfo {
@@ -166,9 +135,7 @@ func (h *RoutingHandler) Escalate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// presenceRequest is the body for POST /route/presence. UserID is the
-// IdP's stable per-account "userid" claim -- cs_engineer_status is keyed
-// by it directly, so nothing else is needed to create a first-contact row.
+// presenceRequest is the body for POST /route/presence.
 type presenceRequest struct {
 	UserID string `json:"userId"`
 	Status string `json:"status"`
@@ -252,8 +219,7 @@ type acceptRequest struct {
 }
 
 // Accept handles POST /route/accept -- confirms userId is accepting caseId
-// (OPEN -> ACTIVE for that one conversation). See router.Router.Accept's
-// own doc comment for when Applied comes back false instead of erroring.
+// (OPEN -> ACTIVE for that one conversation).
 func (h *RoutingHandler) Accept(w http.ResponseWriter, r *http.Request) {
 	var req acceptRequest
 	if !decodeBody(w, r, &req) {
@@ -272,20 +238,13 @@ func (h *RoutingHandler) Accept(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// presenceResponse is GetPresence's response shape -- chat_status plus
-// capacity/load and every case currently held (pending or accepted alike),
-// so a caller whose own UI state was lost can rehydrate all of it. See
-// router.PresenceDetail.
 type presenceResponse struct {
-	ChatStatus         router.Status       `json:"chatStatus"`
-	ActiveChats        int                 `json:"activeChats"`
-	MaxConcurrentChats int                 `json:"maxConcurrentChats"`
-	AtCapacity         bool                `json:"atCapacity"`
-	Cases              []router.CaseStatus `json:"cases,omitempty"`
-	// PendingTimeoutSeconds is this service's own configured threshold for
-	// any pending case in Cases -- always included since it's a constant,
-	// not per-engineer state.
-	PendingTimeoutSeconds int `json:"pendingTimeoutSeconds"`
+	ChatStatus            router.Status       `json:"chatStatus"`
+	ActiveChats           int                 `json:"activeChats"`
+	MaxConcurrentChats    int                 `json:"maxConcurrentChats"`
+	AtCapacity            bool                `json:"atCapacity"`
+	Cases                 []router.CaseStatus `json:"cases,omitempty"`
+	PendingTimeoutSeconds int                 `json:"pendingTimeoutSeconds"`
 }
 
 // GetPresence handles GET /route/presence/{userId}.
@@ -307,11 +266,7 @@ func (h *RoutingHandler) GetPresence(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// CreateWorkItem handles POST /route/workitem -- LOCAL STAND-IN endpoint,
-// see router/workitem.go's package doc comment. Called once per escalation
-// from csm-portal/backend's HandleEscalate, BEFORE Escalate itself (see
-// router.Router.CreateWorkItem's own doc comment for why the order
-// matters now).
+// CreateWorkItem handles POST /route/workitem
 func (h *RoutingHandler) CreateWorkItem(w http.ResponseWriter, r *http.Request) {
 	var req caseInfoRequest
 	if !decodeBody(w, r, &req) {
@@ -333,23 +288,14 @@ func (h *RoutingHandler) CreateWorkItem(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusCreated, map[string]bool{"created": true})
 }
 
-// commentRequest is the body for POST /route/comment -- see
-// router.Router.AddComment.
+// commentRequest is the body for POST /route/comment
 type commentRequest struct {
 	CaseID      string `json:"caseId"`
 	AuthorEmail string `json:"authorEmail"`
 	Content     string `json:"content"`
 }
 
-// AddComment handles POST /route/comment -- LOCAL STAND-IN endpoint, see
-// router/workitem.go's package doc comment. Called for both directions of
-// a live chat message (customer and engineer) -- see csm-portal/backend's
-// HandleCustomerMessage and HandleEngineerMessage.
-//
-// router.ErrConversationEnded gets its own 410 Gone rather than falling
-// into writeStorageError's generic 502 -- callers (routingclient.AddComment)
-// need to tell "the session already ended" apart from "the store is down"
-// so they can react correctly instead of just logging and moving on.
+// AddComment handles POST /route/comment
 func (h *RoutingHandler) AddComment(w http.ResponseWriter, r *http.Request) {
 	var req commentRequest
 	if !decodeBody(w, r, &req) {
@@ -371,9 +317,7 @@ func (h *RoutingHandler) AddComment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]bool{"added": true})
 }
 
-// DebugWorkItem handles GET /route/debug/workitem/{caseId} -- LOCAL
-// STAND-IN endpoint, verification-only, mirroring DebugState's own reason
-// for existing.
+// DebugWorkItem handles GET /route/debug/workitem/{caseId}
 func (h *RoutingHandler) DebugWorkItem(w http.ResponseWriter, r *http.Request) {
 	caseID := r.PathValue("caseId")
 	if caseID == "" {
@@ -388,8 +332,7 @@ func (h *RoutingHandler) DebugWorkItem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, detail)
 }
 
-// DebugState handles GET /route/debug/state — see router.DebugState's own
-// doc comment on why this exists.
+// DebugState handles GET /route/debug/state
 func (h *RoutingHandler) DebugState(w http.ResponseWriter, r *http.Request) {
 	state, err := h.router.DebugState(r.Context())
 	if err != nil {
@@ -403,15 +346,6 @@ func (h *RoutingHandler) DebugState(w http.ResponseWriter, r *http.Request) {
 // csm-portal/backend rather than run as this process's own ticker, so the
 // component that owns the engineer SSE hub is also the one deciding when
 // to look and delivering whatever this returns.
-//
-// Runs both maintenance sweeps in one call, one tick apart from the other:
-// SweepExpiredPending (an assigned-but-unconfirmed case, per-engineer) and
-// SweepAbandonedQueue (a case never assigned to anyone at all, sitting in
-// the waiting queue -- see that method's own doc comment on why this
-// exists). Combined into the existing poll rather than a second endpoint/
-// ticker, since csm-portal/backend already polls this one every
-// ENGINEER_TIMEOUT_SWEEP_INTERVAL_SECONDS and abandonment is just another
-// flavor of "something has been sitting too long."
 func (h *RoutingHandler) SweepTimeouts(w http.ResponseWriter, r *http.Request) {
 	results, err := h.router.SweepExpiredPending(r.Context(), h.pendingTimeout)
 	if err != nil {
@@ -443,10 +377,8 @@ type capacityRequest struct {
 	MaxConcurrentChats int    `json:"maxConcurrentChats"`
 }
 
-// SetCapacity handles PATCH /route/capacity -- lets an engineer set their
-// own configurable concurrent-chat capacity (see router.Router.
-// SetMaxConcurrentChats), replacing the manual `UPDATE cs_engineer_status`
-// this previously required.
+// SetCapacity handles PATCH /route/capacity - lets an engineer set their
+// own configurable concurrent-chat capacity.
 func (h *RoutingHandler) SetCapacity(w http.ResponseWriter, r *http.Request) {
 	var req capacityRequest
 	if !decodeBody(w, r, &req) {
@@ -472,29 +404,18 @@ func (h *RoutingHandler) SetCapacity(w http.ResponseWriter, r *http.Request) {
 // caseInfoResponse mirrors router.CaseInfo -- kept as its own type (rather
 // than encoding router.CaseInfo directly) so this endpoint's wire shape can
 // diverge from the router's internal one if it ever needs to.
-//
-// PriorMessages is included here mainly for GetCaseInfo (POST
-// /route/workitem/{caseId}/info): the router.CaseInfo it's given always has
-// PriorMessages populated fresh from chat_routing.comment by that point
-// (see router.Router.GetCaseInfo), so this response would otherwise silently
-// drop it on the floor -- the same gap caseInfoRequest had before it grew a
-// PriorMessages field for the request side.
 type caseInfoResponse struct {
-	CaseID         string `json:"caseId"`
-	ConversationID string `json:"conversationId"`
-	ProjectID      string `json:"projectId,omitempty"`
-	// Source/Channel mirror router.CaseInfo's own fields -- see that
-	// struct's doc comment. csm-portal/backend's ChatHandler.sourceForCase
-	// reads Source from exactly this response to route its own downstream
-	// push (see that method's doc comment).
-	Source        string                `json:"source,omitempty"`
-	Channel       string                `json:"channel,omitempty"`
-	TenantSlug    string                `json:"tenantSlug,omitempty"`
-	Subject       string                `json:"subject,omitempty"`
-	CustomerEmail string                `json:"customerEmail,omitempty"`
-	CustomerName  string                `json:"customerName,omitempty"`
-	Message       string                `json:"message,omitempty"`
-	PriorMessages []router.PriorMessage `json:"priorMessages,omitempty"`
+	CaseID         string                `json:"caseId"`
+	ConversationID string                `json:"conversationId"`
+	ProjectID      string                `json:"projectId,omitempty"`
+	Source         string                `json:"source,omitempty"`
+	Channel        string                `json:"channel,omitempty"`
+	TenantSlug     string                `json:"tenantSlug,omitempty"`
+	Subject        string                `json:"subject,omitempty"`
+	CustomerEmail  string                `json:"customerEmail,omitempty"`
+	CustomerName   string                `json:"customerName,omitempty"`
+	Message        string                `json:"message,omitempty"`
+	PriorMessages  []router.PriorMessage `json:"priorMessages,omitempty"`
 }
 
 func caseInfoToResponse(c router.CaseInfo) caseInfoResponse {
@@ -545,7 +466,7 @@ type convertToCaseRequest struct {
 
 // convertToCaseResponse is ConvertToCase's response shape. AssignedCase is
 // present only when converting freed a slot that immediately backfilled
-// from the waiting queue -- see router.ConvertToCaseResult.
+// from the waiting queue
 type convertToCaseResponse struct {
 	AssignedCase *caseInfoResponse `json:"assignedCase,omitempty"`
 }
@@ -611,12 +532,8 @@ func completedToResponse(result router.CompletedResult) completedResponse {
 	return resp
 }
 
-// EndByTenant handles POST /route/end-by-tenant -- ends caseId's chat
-// session on behalf of tenantSlug rather than a specific engineer (see
-// router.Router.EndByTenant). Used by console-chat-bridge's tenant-scoped
-// completeChat route for a customer-initiated session end, where there is
-// no engineer userId to authorize against -- tenantSlug itself is the
-// authorization scope.
+// EndByTenant handles POST /route/end-by-tenant, which ends caseId's chat
+// session on behalf of tenantSlug rather than a specific engineer.
 func (h *RoutingHandler) EndByTenant(w http.ResponseWriter, r *http.Request) {
 	var req endByTenantRequest
 	if !decodeBody(w, r, &req) {

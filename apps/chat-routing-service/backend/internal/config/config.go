@@ -14,9 +14,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package config loads this service's PostgreSQL connection settings from
-// the environment. This service usually shares a database with
-// entity-service, kept separate via its own schema (see Schema).
 package config
 
 import (
@@ -25,7 +22,7 @@ import (
 	"os"
 )
 
-// Schema is the Postgres schema this service's tables live in. NewPool
+// Schema is the PostgreSQL schema this service's tables live in. NewPool
 // sets it as each connection's search_path via AfterConnect rather than a
 // DSN parameter, since pgx's URI parser rejects a bare "search_path" query
 // param. That lets queries use unqualified table names.
@@ -77,8 +74,7 @@ func (c DBConfig) Validate() error {
 	return nil
 }
 
-// DSN constructs a PostgreSQL connection string from c. Doesn't set
-// search_path -- see NewPool for how Schema gets applied instead.
+// DSN constructs a PostgreSQL connection string from c.
 func (c DBConfig) DSN() string {
 	u := &url.URL{
 		Scheme: "postgres",

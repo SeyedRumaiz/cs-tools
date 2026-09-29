@@ -43,8 +43,6 @@ type TimeoutResult struct {
 	AssignedCase *CaseInfo `json:"assignedCase,omitempty"`
 }
 
-// pendingCandidate is one row from SweepExpiredPending's initial, unlocked
-// scan -- re-verified under lock by timeoutOne before anything changes.
 type pendingCandidate struct {
 	userID string
 	caseID string
@@ -54,19 +52,7 @@ type pendingCandidate struct {
 // to an engineer for at least timeout without being confirmed via Accept,
 // and treats each one like an explicit Decline: reassign to the next
 // available engineer with spare capacity, excluding the unresponsive one,
-// or flip the case back to WAITING_FOR_ENGINEER. Unlike the old single-
-// case model, the unresponsive engineer's chat_status is left completely
-// alone -- they may well be mid-conversation on a different concurrent
-// case at the same time, and a timeout on one case is not a reason to pull
-// them off everything else. They simply stop being a candidate for this
-// one specific case; SetPresence/Escalate's own capacity check already
-// keeps them from being handed more work than they can handle.
-//
-// Meant to be called periodically by a caller that also owns delivering
-// the result (see csm-portal/backend's ChatHandler.StartTimeoutSweeper) --
-// this package has no background loop of its own. Each call is a
-// snapshot; a conversation that crosses the timeout between two calls is
-// simply picked up on the next one.
+// or flip the case back to WAITING_FOR_ENGINEER.
 func (r *Router) SweepExpiredPending(ctx context.Context, timeout time.Duration) ([]TimeoutResult, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT assignee_id, case_id FROM chat_conversation
@@ -148,9 +134,6 @@ func (r *Router) timeoutOne(ctx context.Context, userID, caseID string, timeout 
 			return fmt.Errorf("clear timed-out conversation: %w", err)
 		}
 
-		// Audit trail: userID's ping on this conversation is settled as
-		// TIMED_OUT. Uses caseID (this method's own parameter, already the
-		// right identity), not timedOut.ConversationID.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO chat_queue_engineer_assignment (case_id, engineer_id, status)
 			VALUES ($1, $2, 'TIMED_OUT')
@@ -203,31 +186,23 @@ type abandonedCandidate struct {
 	caseID string
 }
 
-// SweepAbandonedQueue finds every chat_queue row that has been sitting
-// WAITING_FOR_ENGINEER (i.e. never handed to any engineer at all) for at
-// least timeout, and gives up on each one: its chat_queue row is deleted
-// and the underlying chat_conversation is marked session_ended_at, so it
-// can never be silently claimed later.
+// SweepAbandonedQueue gives up on every chat_queue row that's sat
+// WAITING_FOR_ENGINEER (never assigned to anyone) past timeout: deletes
+// the queue row and marks the conversation ended, so it can't be claimed
+// later.
 //
-// This closes a real gap the PENDING-timeout sweep (SweepExpiredPending)
-// doesn't cover: that one only handles a case that WAS assigned to a
-// specific engineer and never confirmed. A case that was never assigned to
-// anyone in the first place (every engineer was OFFLINE/BUSY/at capacity
-// when it arrived) had no expiry at all before this -- it would sit in the
-// queue indefinitely, and whichever engineer next went AVAILABLE would
-// silently claim it via SetPresence's own queue-drain. From that
-// engineer's point of view this looks exactly like a fresh
-// "customer_escalation" event despite no customer having done anything
-// just now, and it also consumes one unit of their concurrent-chat
-// capacity -- which is why a customer escalating for real right after
-// could end up queued instead of routed directly to an apparently-idle
-// AVAILABLE engineer. See TestRepro_StaleQueuedCaseAmbushesNextAvailable
-// Engineer for a reproduction of exactly this against a real database.
+// SweepExpiredPending only catches a case that WAS assigned and never
+// confirmed -- a case nobody was ever free to take had no expiry before
+// this. Left alone, the next engineer to go AVAILABLE would silently
+// claim it, mistaking it for a fresh escalation and losing a unit of
+// their real capacity to it. See
+// TestRepro_StaleQueuedCaseAmbushesNextAvailableEngineer for a
+// reproduction.
 //
-// Meant to be polled periodically alongside SweepExpiredPending (see
-// csm-portal/backend's ChatHandler.StartTimeoutSweeper) -- this package
-// has no background loop of its own. Each call is a snapshot; a case that
-// crosses the timeout between two calls is simply picked up next time.
+// Polled alongside SweepExpiredPending (see csm-portal/backend's
+// StartTimeoutSweeper) -- no background loop of its own. Each call is a
+// snapshot; a case crossing the timeout between calls is picked up next
+// time.
 func (r *Router) SweepAbandonedQueue(ctx context.Context, timeout time.Duration) ([]AbandonedResult, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT chat_conversation_id FROM chat_queue

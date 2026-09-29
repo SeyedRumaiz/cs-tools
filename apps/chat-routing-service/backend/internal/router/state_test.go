@@ -14,29 +14,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// These are integration tests: Router is backed by a real *pgxpool.Pool,
-// not an interface with a fake, so there's no way to exercise its SQL
-// without a real Postgres database. newTestRouter connects using this
-// service's own normal DB_* environment variables, so run these the same
-// way you'd run the server itself:
-//
-//	set -a && source .env && set +a && go test ./...
-//
-// Without those env vars set, every test here calls t.Skip rather than
-// failing -- that's the expected state anywhere Postgres isn't reachable
-// (CI, a laptop without the dev DB set up), not a test failure.
-//
-// These run against the same chat_routing schema the real dev database
-// uses -- there's no isolated test schema yet. That's safe because every
-// test here only touches engineer user IDs and case IDs it generates
-// itself (see testUserID/testCaseID) and cleans up via t.Cleanup, so it
-// can never collide with a real account or a real queued case. What this
-// deliberately does not test is Escalate's own engineer-selection ranking
-// or queue position, since both depend on every other row in the shared
-// database, which an isolated test can't control. Fixtures call
-// assignCaseToEngineer/insertQueueRow directly instead of going through
-// Escalate, so a test that needs "engineer X is pending on case Y" can
-// build exactly that without picking a real engineer out of the pool.
 package router
 
 import (
@@ -104,7 +81,7 @@ func testUserID(t *testing.T, r *Router, pool *pgxpool.Pool, tag string) string 
 
 // setMaxConcurrent overrides userID's concurrent-chat capacity directly --
 // the only way to get a non-default value in a test, since there's no
-// admin endpoint yet (see the project's db-schema-review doc).
+// admin endpoint yet.
 func setMaxConcurrent(t *testing.T, pool *pgxpool.Pool, userID string, n int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -135,24 +112,11 @@ func testCaseID(t *testing.T, pool *pgxpool.Pool, tag string) string {
 }
 
 // conversationFixture creates caseID's chat_conversation row (via
-// CreateWorkItem, exercising the real LOCAL STAND-IN persistence path) and
-// registers cleanup of the work_item/chat_conversation/comment rows it
-// creates. Every fixture case must go through this before
-// assignCaseToEngineer -- see that function's own doc comment on why the
-// row must already exist.
+// CreateWorkItem, which also creates a work_item row).
 func conversationFixture(t *testing.T, r *Router, pool *pgxpool.Pool, caseID string) CaseInfo {
 	t.Helper()
 	ci := CaseInfo{
 		CaseID: caseID, ConversationID: "conv-" + caseID,
-		// CustomerEmail is derived from caseID (unique per fixture, see
-		// testCaseID) rather than a shared constant -- since the identity
-		// split's duplicate-open-chat guard (CreateWorkItem,
-		// ErrDuplicateOpenChat) now enforces at most one non-ended live
-		// chat per (customerEmail, projectId), two fixtures sharing one
-		// constant customerEmail (and both leaving projectId empty) would
-		// collide the moment a test creates more than one open fixture at
-		// once -- exactly the scenario several tests in this package
-		// exercise (e.g. abandon_test.go's stale+fresh pair).
 		Subject: "test", CustomerEmail: caseID + "@example.com",
 	}
 	if err := r.CreateWorkItem(context.Background(), ci); err != nil {
@@ -166,12 +130,6 @@ func conversationFixture(t *testing.T, r *Router, pool *pgxpool.Pool, caseID str
 		if workItemID == "" {
 			return
 		}
-		// chat_queue_engineer_assignment.case_id and chat_queue.
-		// chat_conversation_id both FK to chat_conversation.case_id (added
-		// by migration 000023) -- deleted first so the chat_conversation
-		// delete below doesn't fail against a case that went through
-		// Accept/Decline/timeoutOne (chat_queue_engineer_assignment) or is
-		// still WAITING_FOR_ENGINEER (chat_queue).
 		if _, err := pool.Exec(cleanupCtx, `DELETE FROM chat_queue_engineer_assignment WHERE case_id = $1`, caseID); err != nil {
 			t.Logf("cleanup: delete chat_queue_engineer_assignment for %s: %v", caseID, err)
 		}
@@ -252,15 +210,6 @@ func getChatStatus(t *testing.T, pool *pgxpool.Pool, userID string) Status {
 	return status
 }
 
-// completedSafely calls Router.Completed for userID/caseID, and, if that
-// drained a case off the shared chat_queue (result.AssignedCase != nil),
-// immediately puts it back and clears the fixture engineer off it via SQL.
-// None of this file's fixtures ever leave a WAITING_FOR_ENGINEER row
-// behind, so a non-nil AssignedCase here can only be a real, pre-existing
-// case from the shared dev database's queue -- not test data. Without
-// this, a fixture engineer freeing capacity could silently steal a real
-// customer's queued escalation and then lose it once the fixture's row is
-// deleted at cleanup.
 func completedSafely(t *testing.T, r *Router, pool *pgxpool.Pool, userID, caseID string) CompletedResult {
 	t.Helper()
 	ctx := context.Background()
@@ -295,7 +244,7 @@ func completedSafely(t *testing.T, r *Router, pool *pgxpool.Pool, userID, caseID
 	return result
 }
 
-// TestIsPending is a pure unit test -- isPending takes no database
+// TestIsPending is a pure unit test. isPending takes no database
 // connection, so it actually runs anywhere `go test` runs.
 func TestIsPending(t *testing.T) {
 	now := time.Now()
@@ -354,8 +303,6 @@ func TestCompleted_EndsSessionWithoutTouchingChatStatus(t *testing.T) {
 	if row.SessionEndedAt == nil {
 		t.Errorf("expected session_ended_at to be set after Completed, got %+v", row)
 	}
-	// chat_status must be untouched by Completed -- it's a pure manual
-	// toggle now, independent of case load (see SetPresence's doc comment).
 	if status := getChatStatus(t, pool, userID); status != StatusAvailable {
 		t.Errorf("expected Completed to leave chat_status alone (still AVAILABLE), got %s", status)
 	}
@@ -395,12 +342,6 @@ func TestConcurrentCapacity_SecondCaseAssignedWithoutQueueingWhenCapacityTwo(t *
 		t.Fatalf("Accept first: %v", err)
 	}
 
-	// A second, independent case handed straight to this same engineer
-	// (bypassing popAvailableEngineer's own ranking, which could otherwise
-	// pick a different real engineer in the shared dev database) --
-	// exercises exactly the capacity check assignCaseToEngineer/
-	// activeCaseCount are responsible for: with capacity 2 and one active
-	// case, this must succeed and both must coexist.
 	secondID := testCaseID(t, pool, "capacity-two-second")
 	second := assignFixture(t, r, pool, userID, secondID)
 
@@ -606,15 +547,6 @@ func TestDecline_NoOpForStaleCaseID(t *testing.T) {
 	}
 }
 
-// Decline's reassignment path (as opposed to the no-op tested above) is
-// deliberately not exercised here: it can hand the declined case to
-// whichever OTHER engineer is currently AVAILABLE with spare capacity in
-// the shared dev database, which could be a real account -- polluting that
-// real engineer's live assignment with a fake test case is a worse outcome
-// than the coverage gap. That path was exercised manually via curl during
-// this feature's own testing instead (see the project's
-// live-engineer-chat-escalation-summary.md).
-
 func TestEnqueue_WaitingFlipsToAssignedAndKeepsCreatedAt(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -626,11 +558,6 @@ func TestEnqueue_WaitingFlipsToAssignedAndKeepsCreatedAt(t *testing.T) {
 	backJSON, _ := json.Marshal(backCase)
 	frontJSON, _ := json.Marshal(frontCase)
 
-	// chat_queue.chat_conversation_id -> chat_conversation.case_id (added by
-	// migration 000023) means a queue row can no longer be inserted without
-	// its chat_conversation row existing first -- exactly what a real
-	// Escalate call already does via CreateWorkItem, so this fixture does
-	// the same rather than inserting the bare queue row this test used to.
 	workItemFixture(t, r, pool, backCase)
 	workItemFixture(t, r, pool, frontCase)
 
@@ -663,11 +590,6 @@ func TestEnqueue_WaitingFlipsToAssignedAndKeepsCreatedAt(t *testing.T) {
 		t.Fatalf("expected backCase to have been enqueued before frontCase, got back=%v front=%v", backCreatedAt, frontCreatedAt)
 	}
 
-	// requeueWaiting must flip a claimed row back to WAITING_FOR_ENGINEER
-	// without touching created_at, so it keeps its original place ahead of
-	// anything that arrives later. Exercised directly against backCase's own
-	// row rather than via claimOldestWaiting, since the real queue could
-	// claim a different row first.
 	err = r.withTx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `UPDATE chat_queue SET status = 'ASSIGNED' WHERE chat_conversation_id = $1`, backCase.CaseID); err != nil {
 			return err
@@ -691,14 +613,6 @@ func TestEnqueue_WaitingFlipsToAssignedAndKeepsCreatedAt(t *testing.T) {
 	}
 }
 
-// TestTimeoutOne_ReassignsWithoutTouchingChatStatus is the regression test
-// for concurrency's own timeout behavior change: a timed-out conversation
-// must be reassigned/requeued on its own, without forcing the unresponsive
-// engineer's chat_status to OFFLINE the way the old single-case model did
-// (see timeout.go's own doc comment on why that would be wrong once an
-// engineer can hold several concurrent cases). Backdates updated_at via
-// SQL instead of waiting out a real timeout, and calls timeoutOne directly
-// (not the full sweep) so this only ever touches its own fixture case.
 func TestTimeoutOne_ReassignsWithoutTouchingChatStatus(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -720,9 +634,6 @@ func TestTimeoutOne_ReassignsWithoutTouchingChatStatus(t *testing.T) {
 		t.Fatalf("expected timeoutOne to fire for a conversation past the timeout")
 	}
 	if result.ReassignedTo != "" {
-		// Might be a real engineer in the shared dev database -- rescue them
-		// exactly like completedSafely does elsewhere in this file, so this
-		// test can never leave a real account holding fake test data.
 		reassignedTo := result.ReassignedTo
 		t.Cleanup(func() {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -740,14 +651,8 @@ func TestTimeoutOne_ReassignsWithoutTouchingChatStatus(t *testing.T) {
 	if row.AssigneeID != nil && *row.AssigneeID == userID {
 		t.Errorf("expected the timed-out case to no longer be assigned to the unresponsive engineer, got %+v", row)
 	}
-	// The regression this guards against: the old model forced chat_status
-	// to OFFLINE here, which would have also silently hidden any OTHER
-	// concurrent case this same engineer was handling just fine.
+
 	if status := getChatStatus(t, pool, userID); status != StatusOffline {
-		// testUserID seeds OFFLINE and this test never changes it, so this
-		// is really asserting "still whatever it was," not "still OFFLINE
-		// specifically" -- documented via the message below rather than
-		// re-deriving chat_status's start value here.
 		t.Errorf("expected timeoutOne to leave chat_status exactly as the engineer set it (untouched by this call), got %s", status)
 	}
 }

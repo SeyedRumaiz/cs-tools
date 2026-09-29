@@ -31,21 +31,12 @@ import (
 )
 
 // identityFixtureCustomer returns a (customerEmail, projectId) pair unique
-// to this call, for tests that specifically need to control (not just
-// avoid colliding on) those two fields -- unlike conversationFixture's
-// default of a caseID-derived email and empty projectId.
+// to this call, for tests that specifically need to control.
 func identityFixtureCustomer(tag string) (email, projectID string) {
 	now := time.Now().UnixNano()
 	return fmt.Sprintf("identity-%s-%d@example.com", tag, now), fmt.Sprintf("proj-%s-%d", tag, now)
 }
 
-// TestCreateWorkItem_CaseIDAndConversationIDAreStoredDistinctly is the
-// baseline check for the whole identity split: a CaseInfo with different
-// CaseID and ConversationID values round-trips through CreateWorkItem and
-// DebugWorkItem without either field being silently coerced to match the
-// other (the exact assumption this feature replaces -- see backend-v2's
-// old HandleEscalate, before this change, which forced CaseID =
-// ConversationID at the point of origin).
 func TestCreateWorkItem_CaseIDAndConversationIDAreStoredDistinctly(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -83,12 +74,6 @@ func TestCreateWorkItem_CaseIDAndConversationIDAreStoredDistinctly(t *testing.T)
 	}
 }
 
-// TestCreateWorkItem_RejectsSecondOpenChatForSameCustomerAndProject is the
-// application-level half of the duplicate-open-chat guard (see
-// ErrDuplicateOpenChat's own doc comment): a brand-new caseId for a
-// customerEmail+projectId that already has a non-ended chat_conversation
-// row must be rejected, not silently create a second, competing
-// escalation.
 func TestCreateWorkItem_RejectsSecondOpenChatForSameCustomerAndProject(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -135,11 +120,6 @@ func TestCreateWorkItem_RejectsSecondOpenChatForSameCustomerAndProject(t *testin
 	}
 }
 
-// TestCreateWorkItem_AllowsNewChatAfterPreviousOneEnded makes sure the
-// duplicate-open-chat guard is scoped to WHERE session_ended_at IS NULL:
-// once a customer's previous live chat for a project has ended, a brand
-// new caseId for the same customer+project must succeed, not be treated
-// as a duplicate.
 func TestCreateWorkItem_AllowsNewChatAfterPreviousOneEnded(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -167,11 +147,6 @@ func TestCreateWorkItem_AllowsNewChatAfterPreviousOneEnded(t *testing.T) {
 		t.Fatalf("end first chat: %v", err)
 	}
 
-	// Same conversationId (this is the SAME Novera conversation continuing
-	// after the customer talks to the AI again), but a brand-new caseId --
-	// exactly scenario 8 from the identity-split design (re-escalation
-	// after end must succeed with a genuinely different caseId, same
-	// stable conversationId).
 	secondCaseID := testCaseID(t, pool, "identity-reescalate-second")
 	second := CaseInfo{
 		CaseID: secondCaseID, ConversationID: "conv-shared-" + firstCaseID,
@@ -201,10 +176,6 @@ func TestCreateWorkItem_AllowsNewChatAfterPreviousOneEnded(t *testing.T) {
 	}
 }
 
-// TestEscalate_RejectsAlreadyEndedCase covers Escalate's own guard (queue
-// safety, item 5 of the identity-split design): Escalate must reject an
-// already-ended caseId with ErrCaseAlreadyEnded rather than creating a
-// zombie chat_queue row nothing will ever accept.
 func TestEscalate_RejectsAlreadyEndedCase(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -224,8 +195,6 @@ func TestEscalate_RejectsAlreadyEndedCase(t *testing.T) {
 		t.Fatalf("expected errors.Is(err, ErrCaseAlreadyEnded), got: %v", err)
 	}
 
-	// No zombie chat_queue row -- the whole transaction must have rolled
-	// back before ever reaching insertQueueRow.
 	var queueRows int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM chat_queue WHERE chat_conversation_id = $1`, caseID).Scan(&queueRows); err != nil {
 		t.Fatalf("count chat_queue rows: %v", err)
@@ -235,11 +204,6 @@ func TestEscalate_RejectsAlreadyEndedCase(t *testing.T) {
 	}
 }
 
-// TestReEscalation_SameConversationIDDifferentCaseIDBothAccept exercises
-// the full "MUST work" scenario from the identity-split design end to end:
-// escalate (caseId X) -> accept -> end; then, still the same Novera
-// conversation, escalate again (caseId Y) -> accept. X and Y must differ;
-// the conversationId must not.
 func TestReEscalation_SameConversationIDDifferentCaseIDBothAccept(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -283,10 +247,6 @@ func TestReEscalation_SameConversationIDDifferentCaseIDBothAccept(t *testing.T) 
 		t.Fatalf("Completed(X): %v", err)
 	}
 
-	// Second escalation, same Novera conversation, must get a genuinely
-	// different caseId (Y) -- minted by the caller in production
-	// (backend-v2's HandleEscalate), simulated here by simply using a
-	// second, distinct test case ID.
 	caseY := testCaseID(t, pool, "identity-full-cycle-y")
 	if caseY == caseX {
 		t.Fatal("test fixture bug: expected distinct case IDs")
@@ -344,15 +304,6 @@ func TestReEscalation_SameConversationIDDifferentCaseIDBothAccept(t *testing.T) 
 	}
 }
 
-// TestEscalate_ConcurrentDuplicateEscalationIsRejected simulates scenario 9
-// from the identity-split design: two escalation attempts for the same
-// customer+project racing CreateWorkItem at once. The partial unique index
-// (uq_chat_conversation_open_customer_project) must be the backstop that
-// catches whichever request loses the race even if it somehow got past the
-// plain SELECT check -- exercised here directly by calling CreateWorkItem
-// twice with pre-existing rows already committed (the same end state a
-// race converges to), asserting the loser gets ErrDuplicateOpenChat and
-// never a raw, untranslated unique-violation error.
 func TestEscalate_ConcurrentDuplicateEscalationIsRejected(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -396,19 +347,12 @@ func TestEscalate_ConcurrentDuplicateEscalationIsRejected(t *testing.T) {
 		t.Fatalf("expected no chat_conversation row for the rejected loser, found %d", count)
 	}
 
-	// Sanity: the pool connection used for the losing call must still be
-	// usable afterwards -- a failed transaction that wasn't cleanly rolled
-	// back would otherwise poison the pool for every later test.
 	var pingResult int
 	if err := pool.QueryRow(ctx, `SELECT 1`).Scan(&pingResult); err != nil {
 		t.Fatalf("pool unusable after rejected CreateWorkItem: %v", err)
 	}
 }
 
-// TestGetPresence_CasesCarryDistinctCaseAndConversationIDs makes sure the
-// read path an engineer's own UI rehydrates from (GetPresence, used by
-// csm-portal's chat handlers) reports CaseID and ConversationID as the two
-// distinct values they were escalated with, not silently collapsed to one.
 func TestGetPresence_CasesCarryDistinctCaseAndConversationIDs(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -438,9 +382,6 @@ func TestGetPresence_CasesCarryDistinctCaseAndConversationIDs(t *testing.T) {
 	}
 }
 
-// Ensures json.Marshal/Unmarshal round-trips both ID fields independently
-// -- a pure unit test (no database) guarding the wire shape every service
-// boundary in this feature depends on.
 func TestCaseInfo_JSONRoundTripKeepsBothIDsDistinct(t *testing.T) {
 	ci := CaseInfo{CaseID: "case-1", ConversationID: "conv-1", ProjectID: "proj-1"}
 	raw, err := json.Marshal(ci)
@@ -456,15 +397,6 @@ func TestCaseInfo_JSONRoundTripKeepsBothIDsDistinct(t *testing.T) {
 	}
 }
 
-// TestCreateWorkItem_MissingCustomerEmailOrProjectIDSkipsAppLevelCheck
-// documents current behavior at the application-level check: a request
-// missing either field is let through the SELECT-based check in
-// CreateWorkItem (nothing meaningful to compare), relying on the partial
-// unique index's COALESCE-to-” behavior as the real backstop for that
-// case -- see the migration's own doc comment. This is not a scenario a
-// real caller should ever produce (csm-portal/backend's HandleEscalate
-// requires CustomerEmail before calling CreateWorkItem at all), so this
-// test only pins today's documented behavior, not a requirement.
 func TestCreateWorkItem_MissingProjectIDSkipsAppLevelCheck(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -487,10 +419,6 @@ func TestCreateWorkItem_MissingProjectIDSkipsAppLevelCheck(t *testing.T) {
 	secondID := testCaseID(t, pool, "identity-missing-project-second")
 	second := CaseInfo{CaseID: secondID, ConversationID: "conv-" + secondID, Subject: "test", CustomerEmail: email}
 	err := r.CreateWorkItem(ctx, second)
-	// Both have ProjectID == "", so the database-level partial unique
-	// index (COALESCE(...,'')) still catches this pair even though the
-	// application-level check above skipped it -- see this test's own doc
-	// comment.
 	if err == nil {
 		t.Fatal("expected the database-level unique index to reject this pair even without ProjectID, got nil error")
 	}

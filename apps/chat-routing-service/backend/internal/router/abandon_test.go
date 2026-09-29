@@ -25,15 +25,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer is
-// the regression test for the reported bug: an engineer going AVAILABLE
-// with an empty real queue got a "customer_escalation" notification anyway
-// (no real escalation behind it), and a customer escalating right after
-// found that same engineer already at capacity and got queued instead of
-// routed directly. Both were caused by the same root cause -- an old
-// WAITING_FOR_ENGINEER row that nothing ever expired. This first proves
-// the bug reproduces without SweepAbandonedQueue, then proves running the
-// sweep first prevents both symptoms.
 func TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -52,9 +43,6 @@ func TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer(t *te
 		t.Fatalf("backdate stale queue row: %v", err)
 	}
 
-	// Sweep with the configured abandon timeout (1800s in production,
-	// exercised here as a literal duration) -- this must clear the row
-	// before any engineer goes AVAILABLE.
 	abandoned, err := r.SweepAbandonedQueue(ctx, 30*time.Minute)
 	if err != nil {
 		t.Fatalf("SweepAbandonedQueue: %v", err)
@@ -69,8 +57,6 @@ func TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer(t *te
 		t.Fatalf("expected the stale case to be abandoned, got %+v", abandoned)
 	}
 
-	// The chat_queue row must be gone -- this is what actually prevents
-	// the ambush (claimOldestWaiting can no longer find it).
 	var queueRows int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM chat_queue WHERE chat_conversation_id = $1`, staleCI.CaseID).Scan(&queueRows); err != nil {
 		t.Fatalf("check queue row removed: %v", err)
@@ -86,8 +72,6 @@ func TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer(t *te
 		t.Errorf("expected the abandoned conversation to have session_ended_at set, got %+v", row)
 	}
 
-	// Bug 2, fixed: an engineer going AVAILABLE now claims nothing (their
-	// own fixture queue is empty; abandonment happened above).
 	userID := testUserID(t, r, pool, "abandon-ambush")
 	presenceResult, err := r.SetPresence(ctx, userID, StatusAvailable)
 	if err != nil {
@@ -99,9 +83,6 @@ func TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer(t *te
 		}
 	}
 
-	// Bug 3, fixed: capacity was never silently consumed, so a genuinely
-	// fresh escalation right after routes directly to this AVAILABLE,
-	// actually-idle engineer instead of queueing.
 	freshID := testCaseID(t, pool, "abandon-fresh")
 	freshCI := conversationFixture(t, r, pool, freshID)
 	escResult, err := r.Escalate(ctx, freshCI)
@@ -112,10 +93,6 @@ func TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer(t *te
 		t.Fatalf("expected the fresh escalation to route directly to the idle AVAILABLE engineer, got queued: %+v", escResult)
 	}
 	if escResult.EngineerUserID != userID {
-		// The shared dev database can have other real AVAILABLE engineers
-		// with spare capacity too -- what matters for this regression is
-		// only that it did NOT queue. Log rather than fail if a different
-		// (real) engineer won the ranking.
 		t.Logf("fresh escalation routed to %s instead of the fixture engineer %s (fine -- both are real spare capacity, not a queue)", escResult.EngineerUserID, userID)
 	}
 
@@ -127,10 +104,6 @@ func TestSweepAbandonedQueue_StaleWaitingCaseAmbushesNextAvailableEngineer(t *te
 	})
 }
 
-// TestSweepAbandonedQueue_LeavesRecentAndAssignedRowsAlone makes sure the
-// sweep doesn't over-fire: a WAITING_FOR_ENGINEER row younger than the
-// timeout, and an ASSIGNED row (however old -- that's SweepExpiredPending's
-// job, not this one), must both survive a sweep untouched.
 func TestSweepAbandonedQueue_LeavesRecentAndAssignedRowsAlone(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()

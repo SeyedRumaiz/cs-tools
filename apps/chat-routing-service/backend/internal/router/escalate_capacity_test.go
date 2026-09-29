@@ -22,14 +22,6 @@ import (
 	"testing"
 )
 
-// TestEscalate_FourRealEscalationsLandOnCapacityFourEngineer exercises the
-// full concurrent-capacity path end to end through the real Escalate()
-// entry point (not the assignFixture shortcut used by
-// TestConcurrentCapacity_SecondCaseAssignedWithoutQueueingWhenCapacityTwo),
-// at a capacity higher than the 2 already covered elsewhere. An engineer
-// configured for max_concurrent_chats = 4 must actually receive all 4
-// escalations directly (no queueing), and a 5th, over-capacity escalation
-// must not land on them.
 func TestEscalate_FourRealEscalationsLandOnCapacityFourEngineer(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()
@@ -75,16 +67,6 @@ func TestEscalate_FourRealEscalationsLandOnCapacityFourEngineer(t *testing.T) {
 	}
 }
 
-// TestEscalate_ErrorsInsteadOfSilentlyNoOpingWhenConversationRowMissing
-// guards against the exact gap a live manual walkthrough caught (see the
-// project's db-schema-review-2026-09-07-outcomes.md, "Manual capacity
-// walkthrough" section): a caller that reaches Escalate without first
-// creating the case's chat_conversation row (e.g. csm-portal/backend's
-// CreateWorkItem call failed or was skipped) used to get back a
-// success-shaped EscalateResult{EngineerUserID: ...} while
-// assignCaseToEngineer silently updated zero rows -- the case was never
-// actually recorded as assigned to anyone. Escalate must now surface
-// ErrConversationNotFound instead of pretending it worked.
 func TestEscalate_ErrorsInsteadOfSilentlyNoOpingWhenConversationRowMissing(t *testing.T) {
 	r, pool := newTestRouter(t)
 	ctx := context.Background()

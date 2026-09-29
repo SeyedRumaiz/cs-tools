@@ -72,8 +72,6 @@ func TestConvertToCase_EndsSessionAndRecordsEntityCaseID(t *testing.T) {
 		t.Error("expected session_ended_at to be set, exactly like Completed sets it")
 	}
 
-	// activeCaseCount takes a pgx.Tx, not a pool -- query the same condition
-	// directly against the pool instead of opening a throwaway transaction.
 	var activeCount int
 	if err := pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM chat_conversation
@@ -137,7 +135,6 @@ func TestConvertToCase_RejectsWhenNotYetAccepted(t *testing.T) {
 	ctx := context.Background()
 	userID := testUserID(t, r, pool, "convert-not-accepted")
 	caseID := testCaseID(t, pool, "convert-not-accepted")
-	// Assigned but never Accept()-ed -- still state OPEN.
 	assignFixture(t, r, pool, userID, caseID)
 
 	_, err := r.ConvertToCase(ctx, userID, caseID, "CS-0001")

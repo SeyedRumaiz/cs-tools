@@ -746,9 +746,8 @@ type SetCapacityResult struct {
 // capacity, creating their row (defaulting to OFFLINE, capacity 1) on
 // first contact just like SetPresence does. This is the admin-facing
 // counterpart to the manual `UPDATE cs_engineer_status` every engineer's
-// capacity change went through before this existed (see the project's
-// db-schema-review-2026-09-07-outcomes.md) -- now exposed so an engineer
-// can set their own limit from the CSM portal's status menu.
+// capacity change went through before this existed -- now exposed so an
+// engineer can set their own limit from the CSM portal's status menu.
 //
 // Never drops anything already assigned: lowering the limit below the
 // current active count just stops new work from routing to them (via
@@ -1167,11 +1166,9 @@ func popAvailableEngineer(ctx context.Context, tx pgx.Tx, exclude string) (userI
 // already required to exist when it entered the queue (SetPresence's and
 // Completed's drain). Previously this was a silent no-op: Escalate still
 // reported a successful assignment even though nothing was actually
-// persisted, which is exactly the gap a real end-to-end walkthrough caught
-// (see the project's db-schema-review-2026-09-07-outcomes.md, "Manual
-// capacity walkthrough" section) -- a request missing customerEmail never
-// created a chat_conversation row, so the follow-on Escalate call "succeeded"
-// while quietly assigning nothing.
+// persisted -- a request missing customerEmail never created a
+// chat_conversation row, so the follow-on Escalate call "succeeded" while
+// quietly assigning nothing.
 var ErrConversationNotFound = errors.New("chat_conversation row not found for this case")
 
 // assignCaseToEngineer records userID as c's assignee, reserving one unit
