@@ -16,11 +16,17 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  buildEscalationPriorMessages,
   displayTextFromConversationContent,
   getFinalMessageFromPayload,
   sanitizeStreamToken,
   splitTokenForTyping,
 } from "@features/support/utils/chat";
+import {
+  ChatSender,
+  type Message,
+} from "@features/support/types/conversations";
+import { NOVERA_WELCOME_MESSAGE_ID } from "@features/support/constants/chatConstants";
 
 describe("splitTokenForTyping", () => {
   it("splits text into equal chunks up to max chars", () => {
@@ -57,5 +63,119 @@ describe("getFinalMessageFromPayload", () => {
         message: { message: "Nested content" },
       }),
     ).toBe("Nested content");
+  });
+});
+
+describe("buildEscalationPriorMessages", () => {
+  const baseTimestamp = new Date("2026-01-01T00:00:00.000Z");
+
+  function makeMessage(
+    overrides: Partial<Message> & Pick<Message, "id" | "text" | "sender">,
+  ): Message {
+    return { timestamp: baseTimestamp, ...overrides };
+  }
+
+  it("includes both customer and assistant messages, in their existing chronological order", () => {
+    const messages: Message[] = [
+      makeMessage({
+        id: NOVERA_WELCOME_MESSAGE_ID,
+        text: "Hi! I'm Novera...",
+        sender: ChatSender.BOT,
+      }),
+      makeMessage({ id: "m1", text: "my build is failing", sender: ChatSender.USER }),
+      makeMessage({ id: "m2", text: "have you tried X?", sender: ChatSender.BOT }),
+      makeMessage({ id: "m3", text: "yes, still failing", sender: ChatSender.USER }),
+    ];
+
+    expect(buildEscalationPriorMessages(messages)).toEqual([
+      {
+        role: "customer",
+        content: "my build is failing",
+        createdAt: baseTimestamp.toISOString(),
+      },
+      {
+        role: "assistant",
+        content: "have you tried X?",
+        createdAt: baseTimestamp.toISOString(),
+      },
+      {
+        role: "customer",
+        content: "yes, still failing",
+        createdAt: baseTimestamp.toISOString(),
+      },
+    ]);
+  });
+
+  it("excludes the welcome message and any UI-only loading/streaming/human-message artifact, but keeps an errored turn's final text", () => {
+    const messages: Message[] = [
+      makeMessage({
+        id: NOVERA_WELCOME_MESSAGE_ID,
+        text: "Hi! I'm Novera...",
+        sender: ChatSender.BOT,
+      }),
+      makeMessage({ id: "m1", text: "real question", sender: ChatSender.USER }),
+      makeMessage({
+        id: "m2",
+        text: "Novera is analyzing your request...",
+        sender: ChatSender.BOT,
+        isLoading: true,
+      }),
+      makeMessage({
+        id: "m3",
+        text: "Something went wrong",
+        sender: ChatSender.BOT,
+        isError: true,
+      }),
+      makeMessage({
+        id: "m4",
+        text: "partial ans",
+        sender: ChatSender.BOT,
+        isStreaming: true,
+      }),
+      makeMessage({
+        id: "m5",
+        text: "an engineer's reply",
+        sender: ChatSender.BOT,
+        isHumanMessage: true,
+      }),
+      makeMessage({ id: "m6", text: "real answer", sender: ChatSender.BOT }),
+    ];
+
+    expect(buildEscalationPriorMessages(messages)).toEqual([
+      { role: "customer", content: "real question", createdAt: baseTimestamp.toISOString() },
+      {
+        role: "assistant",
+        content: "Something went wrong",
+        createdAt: baseTimestamp.toISOString(),
+      },
+      { role: "assistant", content: "real answer", createdAt: baseTimestamp.toISOString() },
+    ]);
+  });
+
+  it("prefers createdOnRaw over the local timestamp when present", () => {
+    const messages: Message[] = [
+      makeMessage({
+        id: "m1",
+        text: "with raw timestamp",
+        sender: ChatSender.USER,
+        createdOnRaw: "2026-02-02T12:00:00Z",
+      }),
+    ];
+
+    expect(buildEscalationPriorMessages(messages)).toEqual([
+      { role: "customer", content: "with raw timestamp", createdAt: "2026-02-02T12:00:00Z" },
+    ]);
+  });
+
+  it("returns an empty array for a conversation with nothing worth persisting", () => {
+    const messages: Message[] = [
+      makeMessage({
+        id: NOVERA_WELCOME_MESSAGE_ID,
+        text: "Hi! I'm Novera...",
+        sender: ChatSender.BOT,
+      }),
+    ];
+
+    expect(buildEscalationPriorMessages(messages)).toEqual([]);
   });
 });

@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/aichatagent"
+	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/csmchat"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/entity"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/handler"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/middleware"
@@ -48,9 +49,9 @@ func main() {
 	loadDotEnv(".env")
 	middleware.ConfigureLogger()
 
-	// entity-service, the updates service, and SCIM all authenticate as the
-	// same OAuth2 client-credentials app; only each service's base URL and
-	// scopes differ.
+	// entity-service, the updates service, SCIM, and chatnotify's csmchat
+	// client below all authenticate as the same OAuth2 client-credentials
+	// app; only each service's base URL and scopes differ.
 	oauth2ClientID := os.Getenv("OAUTH2_CLIENT_ID")
 	oauth2ClientSecret := os.Getenv("OAUTH2_CLIENT_SECRET")
 	oauth2TokenURL := optionalURL("OAUTH2_TOKEN_URL", "http", "https")
@@ -165,6 +166,12 @@ func main() {
 	// One validator, shared by the REST middleware chain and the WebSocket
 	// listener, so the JWKS is fetched and refreshed once per process.
 	tokenValidator := middleware.NewTokenValidator(authCfg)
+	// Built once and reused on both the main REST chain and the two
+	// internal live-engineer-chat routes registered on wsMux below — same
+	// reasoning as sharing tokenValidator itself: constructing it twice
+	// would gain nothing since every caller validates the exact same
+	// tokens the exact same way.
+	// authMiddleware := middleware.AuthWithValidator(tokenValidator)
 
 	userHandler := handler.NewUserHandler(entityClient, scimClient)
 	projectHandler := handler.NewProjectHandler(entityClient)
@@ -187,6 +194,24 @@ func main() {
 	instanceHandler := handler.NewInstanceHandler(entityClient)
 	registryHandler := handler.NewRegistryHandler(entityClient, registryClient, adminRole)
 	contactHandler := handler.NewContactHandler(entityClient, userManagementClient)
+
+	// Live-engineer-chat escalation feature (Novera chat "Talk to a live
+	// engineer" button). This backend owns case creation (it has the
+	// deployment/deployed-product context a case requires) and relays
+	// to/from csm-portal/backend's own live-engineer-chat endpoints for the
+	// engineer side. csmChatClient authenticates as the same shared OAuth2
+	// client-credentials app as entity/updates/scim above; only its base
+	// URL and scopes differ. See .env.example for the corresponding env
+	// vars.
+	csmChatClient := csmchat.NewClient(csmchat.Config{
+		BaseURL:      envOrDefault("CSM_PORTAL_INTERNAL_BASE_URL", "http://localhost:8080"),
+		TokenURL:     oauth2TokenURL,
+		ClientID:     oauth2ClientID,
+		ClientSecret: oauth2ClientSecret,
+		Scopes:       splitComma(os.Getenv("CSM_CHAT_SCOPES")),
+	})
+	chatEscalationHandler := handler.NewChatEscalationHandler(entityClient, csmChatClient)
+	chatEventsHandler := handler.NewChatEventsHandler(webSocketHandler)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -336,6 +361,10 @@ func main() {
 	mux.HandleFunc("GET /updates/product-update-levels", updatesHandler.GetProductUpdateLevels)
 	mux.HandleFunc("POST /updates/levels/search", updatesHandler.SearchUpdatesBetweenUpdateLevels)
 
+	// Live-engineer-chat: customer-facing escalate/message endpoints.
+	mux.HandleFunc("POST /projects/{id}/support/chat/escalate", chatEscalationHandler.HandleEscalate)
+	mux.HandleFunc("POST /projects/{id}/support/chat/{conversationId}/message", chatEscalationHandler.HandleSendMessage)
+
 	addr := ":" + mustPort("PORT", "8080")
 
 	ln, err := net.Listen("tcp", addr)
@@ -387,6 +416,34 @@ func main() {
 	// .choreo/component.yaml.
 	wsMux := http.NewServeMux()
 	wsMux.HandleFunc("GET /ws", webSocketHandler.HandleWebSocket)
+
+	// Live-engineer-chat: internal service-to-service receivers for
+	// csm-portal/backend's outbound calls (chatnotify.Client). Registered on
+	// this same listener as GET /ws purely because that's where this
+	// backend's own internal/service-facing surface already lives, NOT
+	// because these two routes share GET /ws's browser-can't-set-headers
+	// constraint -- a backend-to-backend HTTP client can set any header it
+	// likes.
+	//
+	// Unlike every route on the main REST API above, these two are NOT
+	// wrapped in authMiddleware: neither handler (ChatEventsHandler.Handle,
+	// ChatEscalationHandler.HandleCreateCase) ever reads an end-user
+	// identity out of the request -- HandleCreateCase takes the accepting
+	// engineer's x-user-id-token as a plain forwarded header instead (see
+	// that handler). They are pure M2M calls from csm-portal/backend's
+	// chatnotify.Client, trusted the same way
+	// integrations/csm-integration-service trusts its own M2M callers:
+	// entirely at Choreo's API Manager gateway (subscription +
+	// client-credentials app auth), not validated again here. See that
+	// service's CLAUDE.md ("Why no Auth middleware") for the established
+	// precedent this follows. This intentionally does NOT reuse
+	// authMiddleware's browser-facing x-jwt-assertion/email/userid check:
+	// this repo already has a dedicated pattern for pure M2M routes, and
+	// requiring an IdP to emit synthetic end-user claims on a
+	// client-credentials token merely to satisfy that check would be
+	// inventing a second, weaker way to do the same thing.
+	wsMux.HandleFunc("POST /internal/chat-events", chatEventsHandler.Handle)
+	wsMux.HandleFunc("POST /internal/chat/create-case", chatEscalationHandler.HandleCreateCase)
 
 	wsAddr := ":" + mustPort("WS_PORT", "8081")
 	// ctx here covers only the listen operation itself (address resolution and

@@ -556,6 +556,8 @@ export type ChatMessageListProps = {
   onSolutionWorked?: () => void;
   /** When provided, usage-limit error bubbles show a "request token increase" CTA. */
   onRequestTokenIncrease?: () => void;
+  /** When provided, a completed Novera reply shows a "Chat with an Engineer" CTA. */
+  onRequestEngineerEscalation?: () => void;
 };
 
 export type ChatMessageBubbleProps = {
@@ -568,4 +570,6 @@ export type ChatMessageBubbleProps = {
   onSolutionWorked?: () => void;
   /** When provided, usage-limit error bubbles show a "request token increase" CTA. */
   onRequestTokenIncrease?: () => void;
+  /** When provided, a completed Novera reply shows a "Chat with an Engineer" CTA. */
+  onRequestEngineerEscalation?: () => void;
 };

@@ -233,6 +233,16 @@ export type Message = {
   thinkingLabel?: string | null;
   isStreaming?: boolean;
   actions?: NoveraAction[];
+  /**
+   * True for a message delivered by a live engineer during an accepted
+   * live-engineer-chat session, as opposed to Novera (the AI agent) or the
+   * customer. Rendered with the engineer's identity instead of Novera's
+   * name/avatar (see ChatMessageBubble) but otherwise shares the bot
+   * message layout — sender stays ChatSender.BOT.
+   */
+  isHumanMessage?: boolean;
+  /** Display name/email of the engineer who sent this message. Only set when isHumanMessage is true. */
+  engineerName?: string;
 };
 
 // Model type for chat navigation state.
@@ -259,6 +269,18 @@ export type ChatWebSocketPayload =
       conversationId: string;
       message: string;
       envProducts: Record<string, string[]>;
+    }
+  | {
+      // Keepalive frame -- see NoveraChatPage's heartbeat effect and
+      // HUMAN_CHAT_WS_HEARTBEAT_INTERVAL_MS's own doc comment for why this
+      // is sent periodically during a live-engineer chat. conversationId is
+      // included (not just the bare "ping" string backend-v2 also accepts)
+      // so the server's handleMessage re-registers this connection for
+      // PushEvent delivery on every tick, not just resets its read
+      // deadline -- see backend-v2's own registerConn call, which runs
+      // before its isPing check and keys off exactly this field.
+      type: "ping";
+      conversationId?: string;
     }
   | {
       type: "token_increase_request";
