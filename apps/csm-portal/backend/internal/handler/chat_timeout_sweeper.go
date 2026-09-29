@@ -81,8 +81,8 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 		}
 	}
 
-	// Queue-abandonment results (2026-09-10 fix): a case that sat
-	// WAITING_FOR_ENGINEER -- never assigned to anyone at all -- past
+	// Queue-abandonment results: a case that sat WAITING_FOR_ENGINEER --
+	// never assigned to anyone at all -- past
 	// chat-routing-service's own QUEUE_ABANDON_SECONDS. Nobody on the
 	// engineer side ever saw this case (it was never delivered), so there
 	// is no engineer-facing event to clear here -- only the customer might

@@ -14,60 +14,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package handler — this file implements the live-engineer-chat escalation
-// feature: a customer in the Novera AI chat (customer-portal) asks for a
-// human, and an available engineer here (csm-portal) picks it up.
-//
-// Design, and why it looks the way it does:
-//
-//   - A "chat message" during a live session is persisted via LOCAL
-//     STAND-IN routing-service tables (work_item/chat_conversation/comment
-//     inside chat-routing-service's own database — see routingService's
-//     AddComment/CreateWorkItem and that service's internal/router/
-//     workitem.go) rather than entity-service, since entity-service's real
-//     generic work-item schema isn't ready yet (see the project's
-//     chat-persistence-mapping-plan.md doc) and entity's CreateCaseComment
-//     never worked for the customer's half of the conversation anyway (no
-//     x-user-id-token on that internal call). See HandleCustomerMessage/
-//     HandleEngineerMessage.
-//   - "Accepting" a session is just PATCH /cases/{id} with assigneeEmail —
-//     no separate claim/lock table, no SELECT ... FOR UPDATE SKIP LOCKED.
-//     First engineer to click Accept wins via a normal update. At this
-//     project's current scale (a handful of engineers) the race this could
-//     lose to essentially never happens; if it ever matters, atomic claiming
-//     is a small, isolated follow-up.
-//   - Which case a browser message belongs to travels as an explicit
-//     conversationId/caseId pair on every request — this handler keeps no
-//     server-side session table mapping one to the other. customer-portal's
-//     escalate call already knows both: no entity-service case exists yet
-//     under chat-first escalation, so it sends its own conversationId as
-//     caseId too (the two stay equal until conversion — see
-//     HandleConvertToCase and backend-v2's own escalation handler). Every
-//     subsequent engineer-side call carries the conversationId the original
-//     SSE alert included.
-//   - Engineer presence for "is anyone connected at all" still has no
-//     heartbeat/presence table — that's still derived from who has
-//     GET /chat/alerts/stream open (see chat_stream.go). What an engineer's
-//     dropdown shows (Available/Busy/Offline), though, is now real state,
-//     owned by the standalone chat-routing-service (see
-//     internal/routingclient) rather than inferred.
-//
-// Delivery of a routed event to a specific engineer, and the broadcast
-// fallback:
-//
-//   - Customer → engineers: an escalation is routed to exactly one engineer
-//     by the routing service (internal/routingclient.Client.Escalate) and
-//     delivered over that engineer's own SSE subscription key (see
-//     engineerHubKey, chat_stream.go). If the routing service is down or
-//     errors, HandleEscalate falls back to the pre-routing behavior —
-//     publishing on the shared broadcastHubKey every connected engineer's
-//     stream also subscribes to (see StreamEngineerAlerts's dual
-//     registration) — so a routing-service outage doesn't strand the
-//     customer with nobody ever seeing their request.
-//   - Engineer → customer: relayed by pushing into customer-portal/
-//     backend-v2's already-open per-conversation WebSocket (see
-//     internal/chatnotify), because that connection already exists for the
-//     life of the chat — there is no reason to also fan this out over SSE.
 package handler
 
 import (
@@ -120,11 +66,9 @@ const chatNotifyTimeout = 5 * time.Second
 
 // entityChatClient is the subset of the entity client this feature needs.
 // customerEntityClient (cmd/server/main.go) already implements this — see
-// internal/entity/customer.go's PatchCase. CreateCaseComment used to be
-// part of this (both message directions persisted through it) but both
-// HandleCustomerMessage and HandleEngineerMessage now go through the LOCAL
-// STAND-IN routingService.AddComment instead (see that interface's own doc
-// comment) -- entity's CreateCaseComment is no longer called by this file.
+// internal/entity/customer.go's PatchCase. Message persistence goes
+// through the LOCAL STAND-IN routingService.AddComment instead (see that
+// interface's own doc comment), not entity's CreateCaseComment.
 type entityChatClient interface {
 	PatchCase(ctx context.Context, caseID string, body []byte) ([]byte, error)
 }
@@ -150,9 +94,8 @@ type routingService interface {
 	// chat-routing-service's migrations/000014_rename_engineer_status_table
 	// for why this switched from an email.
 	SetPresence(ctx context.Context, userID string, status routingclient.Status) (routingclient.PresenceResult, error)
-	// Completed takes caseID because an engineer can now hold several
-	// concurrent conversations at once (see the 2026-09-10
-	// concurrent-chat-capacity change) -- ending one must say which.
+	// Completed takes caseID because an engineer can hold several
+	// concurrent conversations at once -- ending one must say which.
 	Completed(ctx context.Context, userID, caseID string) (routingclient.CompletedResult, error)
 	Decline(ctx context.Context, userID, caseID string) (routingclient.DeclineResult, error)
 	Accept(ctx context.Context, userID, caseID string) (routingclient.AcceptResult, error)
@@ -160,17 +103,15 @@ type routingService interface {
 	// SweepTimeouts is polled periodically by ChatHandler.StartTimeoutSweeper
 	// (see that method's doc comment) -- not called from any HTTP handler in
 	// this file directly. Returns both PENDING-accept timeouts and
-	// queue-abandonment results (see routingclient.SweepResult) -- the
-	// 2026-09-10 fix for stale, never-assigned escalations sitting in the
-	// queue forever and later ambushing whichever engineer next went
-	// AVAILABLE (see that type's own doc comment).
+	// queue-abandonment results (see routingclient.SweepResult), catching
+	// stale, never-assigned escalations that would otherwise sit in the
+	// queue forever and later ambush whichever engineer next went
+	// AVAILABLE.
 	SweepTimeouts(ctx context.Context) (routingclient.SweepResult, error)
 	// SetMaxConcurrentChats lets an engineer set their own configurable
-	// concurrent-chat capacity (see HandleSetMaxConcurrentChats) -- added
-	// alongside the queue-abandonment fix above so raising a specific
-	// engineer's limit no longer requires a manual DB UPDATE. Returns
+	// concurrent-chat capacity (see HandleSetMaxConcurrentChats). Returns
 	// AssignedCases when raising the limit immediately drained the waiting
-	// queue into this engineer's newly-opened capacity -- see
+	// queue into the newly-opened capacity -- see
 	// routingclient.SetCapacityResult's own doc comment.
 	SetMaxConcurrentChats(ctx context.Context, userID string, max int) (routingclient.SetCapacityResult, error)
 	// CreateWorkItem and AddComment are LOCAL STAND-IN persistence calls
@@ -834,12 +775,11 @@ func (h *ChatHandler) HandleCompleteSession(w http.ResponseWriter, r *http.Reque
 	})
 
 	// Best-effort: release this engineer's routing-service capacity for
-	// this specific case (they may still hold other concurrent chats, see
-	// the 2026-09-10 concurrent-chat-capacity change) and, if that
-	// immediately drained the waiting queue, deliver the next case to them
-	// the same way a fresh escalation would arrive. A failure here is
-	// logged, not surfaced to the caller — the session has already ended
-	// successfully from the engineer's point of view, matching this
+	// this specific case (they may still hold other concurrent chats) and,
+	// if that immediately drained the waiting queue, deliver the next case
+	// to them the same way a fresh escalation would arrive. A failure here
+	// is logged, not surfaced to the caller — the session already ended
+	// successfully as far as the engineer is concerned, matching this
 	// handler's existing best-effort treatment of notifyOrigin above.
 	if result, err := h.routing.Completed(r.Context(), user.UserID, caseID); err != nil {
 		slog.ErrorContext(r.Context(), "chat: routing service completed failed", "userID", user.UserID, "err", err)
@@ -881,9 +821,8 @@ func (h *ChatHandler) HandleSetPresence(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
 		return
 	}
-	// AVAILABLE, BUSY, and OFFLINE are all requestable directly now (see
-	// the 2026-09-10 concurrent-chat-capacity change): chat_status is a
-	// plain manual toggle independent of case load, and BUSY is a real
+	// AVAILABLE, BUSY, and OFFLINE are all requestable directly: chat_status
+	// is a plain manual toggle independent of case load, and BUSY is a real
 	// do-not-disturb an engineer can set without dropping any case they
 	// already hold (see router.Router.SetPresence's doc comment). There is
 	// still no PENDING here -- that's a per-case fact, never a top-level
@@ -965,11 +904,10 @@ const (
 // concurrent-chat capacity (see internal/routingclient.Client.
 // SetMaxConcurrentChats and chat-routing-service's router.Router.
 // SetMaxConcurrentChats), replacing the manual pgAdmin `UPDATE
-// cs_engineer_status` this previously required (see the project's
-// db-schema-review-2026-09-07-outcomes.md). Deliberately does not disturb
-// any case the engineer already holds -- lowering the limit below their
-// current active count just stops new work from routing to them until
-// they fall back under it, it never drops an in-progress chat.
+// cs_engineer_status` this previously required. Deliberately does not
+// disturb any case the engineer already holds -- lowering the limit below
+// their current active count just stops new work from routing to them
+// until they fall back under it, it never drops an in-progress chat.
 //
 // Raising the limit, however, can immediately open up spare capacity: if a
 // customer was left waiting in the queue because this engineer was at
