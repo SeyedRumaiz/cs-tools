@@ -595,7 +595,8 @@ describe("CsmIncidentDetailPage — Create change request entry point", () => {
     mockQueryResult({ data: BASE_INCIDENT });
     renderPage();
 
-    fireEvent.click(screen.getByRole("button", { name: /create change request/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^create$/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /create change request/i }));
 
     expect(navigateMock).toHaveBeenCalledWith("/operations/change-requests/new", {
       state: {

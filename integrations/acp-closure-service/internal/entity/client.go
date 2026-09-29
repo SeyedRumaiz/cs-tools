@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/integrations/acp-closure-service/internal/apierror"
+	"github.com/wso2-open-operations/cs-tools/integrations/acp-closure-service/internal/httpsec"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 )
@@ -97,7 +98,19 @@ type Client struct {
 // NewClient constructs a Client that authenticates against
 // csm-integration-service using the OAuth2 client credentials grant type,
 // mirroring csm-integration-service's own internal/entity/client.go.
-func NewClient(cfg Config) *Client {
+// Returns an error if TokenURL or BaseURL isn't https:// — the token request
+// carries the real ClientSecret, and every API call carries the bearer token
+// and real customer data, none of which should ever travel in cleartext.
+// Same checks as internal/emailservice.NewClient, via the shared
+// internal/httpsec.
+func NewClient(cfg Config) (*Client, error) {
+	if err := httpsec.RequireHTTPS("TokenURL", cfg.TokenURL); err != nil {
+		return nil, fmt.Errorf("entity: %w", err)
+	}
+	if err := httpsec.RequireHTTPS("BaseURL", cfg.BaseURL); err != nil {
+		return nil, fmt.Errorf("entity: %w", err)
+	}
+
 	cc := clientcredentials.Config{
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
@@ -105,8 +118,14 @@ func NewClient(cfg Config) *Client {
 		Scopes:       cfg.Scopes,
 	}
 
-	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient,
-		&http.Client{Timeout: tokenFetchTimeout})
+	// The token client is the one that actually POSTs the client secret to
+	// TokenURL, so it needs its own redirect guard — the one set on
+	// httpClient below only covers regular API calls.
+	tokenHTTPClient := &http.Client{
+		Timeout:       tokenFetchTimeout,
+		CheckRedirect: httpsec.RefuseRedirects,
+	}
+	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, tokenHTTPClient)
 	httpClient := cc.Client(tokenCtx)
 	httpClient.Timeout = 25 * time.Second
 	// oauth2.Transport reattaches the Authorization bearer token to every
@@ -114,14 +133,12 @@ func NewClient(cfg Config) *Client {
 	// host. Refuse to follow so the token can never leak to wherever
 	// csm-integration-service says to redirect to; the 3xx response is
 	// surfaced through the normal non-2xx error path in do() instead.
-	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
+	httpClient.CheckRedirect = httpsec.RefuseRedirects
 
 	return &Client{
 		http:    httpClient,
 		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
-	}
+	}, nil
 }
 
 // do executes an authenticated HTTP request against csm-integration-service

@@ -1526,6 +1526,10 @@ components:
           type: string
           nullable: true
           description: Short classification code (e.g. "CL").
+        sfId:
+          type: string
+          nullable: true
+          description: Salesforce record ID linked to this invoice, if any.
 
     SearchInvoicesResponse:
       type: object

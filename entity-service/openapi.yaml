@@ -7008,6 +7008,12 @@ components:
           type: string
         key:
           type: string
+        sfId:
+          type: string
+          nullable: true
+          description: >
+            Salesforce id. Null when the backing data source has no value
+            recorded for this project.
         subscriptionType:
           type: string
           enum:
@@ -8828,6 +8834,10 @@ components:
           type: string
           nullable: true
           description: Short classification code (e.g. "CL").
+        sfId:
+          type: string
+          nullable: true
+          description: Salesforce record ID linked to this invoice, if any.
 
     SearchInvoicesResponse:
       type: object
@@ -11901,6 +11911,10 @@ components:
             - business_service
             - technology_management_service
             - application_service
+        supportGroup:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/EntityRef'
 
     SearchITServicesResponse:
       type: object

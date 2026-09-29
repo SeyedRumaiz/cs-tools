@@ -101,6 +101,14 @@ Like Change requests, this tab has its own **Saved views** button for
 naming and reapplying a filter combination — scoped to this tab, on this
 device/browser.
 
+A **Create incident** button (or a case's own **Create incident from case…**
+action) opens a form for Caller, Service, and a classification (category,
+subcategory, contact type, impact, urgency — Priority is computed live from
+impact × urgency and not itself editable). **Assignment group** is not a
+manual pick here: it's shown read-only, auto-filled from the selected
+Service's ServiceNow support group, and blank with a hint if that service
+has none set in ServiceNow.
+
 The detail page shows:
 
 - An **overview** card: caller, assignment group, assigned to, opened date,

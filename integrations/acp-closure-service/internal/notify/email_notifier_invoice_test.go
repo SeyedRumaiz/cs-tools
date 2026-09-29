@@ -59,6 +59,8 @@ func TestEmailNotifier_Send_InternalInvoiceNoticeNestsInvoiceFields(t *testing.T
 	_, err := n.Send(context.Background(), Notice{
 		Subject: "subject",
 		Body:    invoiceReminderBody(),
+		// Real invoice notices carry one entry per invoice; "" = no sfId.
+		InvoiceSfIDs: []string{""},
 		Recipients: Recipients{
 			AccountOwner: recipients.Contact{Email: "am@wso2.com"},
 		},

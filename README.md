@@ -36,6 +36,8 @@ See the [CSM Portal README](./apps/csm-portal/README.md) for full setup and usag
 
 ### Customer Portal (`apps/customer-portal/`)
 
+> **⚠️ Deprecation Notice:** The Ballerina backend (v1) for the Customer Portal is deprecated. It will be replaced by a Go based v2 backend. New feature development should target the Go backend instead.
+
 An open-source solution for customer success operations built with a modular architecture. It enables teams to manage customer-facing workflows, project visibility, and support experiences through a unified platform.
 
 Delivered through two frontend experiences alongside a shared backend:

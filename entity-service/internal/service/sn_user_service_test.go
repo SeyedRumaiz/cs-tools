@@ -30,12 +30,13 @@ import (
 var testCallerSysid = sysid32('9')
 
 // snUserMeJSON is a minimal upstream GET /users/me payload for the given
-// caller sys_id.
-func snUserMeJSON(id string) string {
+// caller sys_id and userType.
+func snUserMeJSON(id, userType string) string {
 	return `{
 		"id": "` + id + `",
 		"email": "agent@example.com",
 		"lastName": "Agent",
+		"userType": "` + userType + `",
 		"roles": ["wso2_agent"]
 	}`
 }
@@ -64,7 +65,7 @@ func TestSNUserService_GetMe_ReturnsCallerGroups(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(snUserMeJSON(testCallerSysid)))
+		_, _ = w.Write([]byte(snUserMeJSON(testCallerSysid, "internal")))
 	})
 	mux.HandleFunc("/group-members/search", func(w http.ResponseWriter, r *http.Request) {
 		capturedBody, _ = io.ReadAll(r.Body)
@@ -114,7 +115,7 @@ func TestSNUserService_GetMe_NoMemberships(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(snUserMeJSON(testCallerSysid)))
+		_, _ = w.Write([]byte(snUserMeJSON(testCallerSysid, "internal")))
 	})
 	mux.HandleFunc("/group-members/search", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -140,7 +141,7 @@ func TestSNUserService_GetMe_GroupMembershipCallErrors_IdentityStillReturned(t *
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(snUserMeJSON(testCallerSysid)))
+		_, _ = w.Write([]byte(snUserMeJSON(testCallerSysid, "internal")))
 	})
 	mux.HandleFunc("/group-members/search", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -157,6 +158,165 @@ func TestSNUserService_GetMe_GroupMembershipCallErrors_IdentityStillReturned(t *
 	}
 	if len(got.Groups) != 0 {
 		t.Fatalf("Groups = %+v, want empty when the membership call errors", got.Groups)
+	}
+}
+
+// TestSNUserService_GetMe_ExternalUser_SkipsGroupLookup verifies that GetMe
+// never calls group-members/search for an external (customer) caller -- the
+// upstream ACL rejects that lookup for them, exactly as it does on GetUser.
+func TestSNUserService_GetMe_ExternalUser_SkipsGroupLookup(t *testing.T) {
+	groupLookupCalled := false
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(snUserMeJSON(testCallerSysid, "external")))
+	})
+	mux.HandleFunc("/group-members/search", func(w http.ResponseWriter, _ *http.Request) {
+		groupLookupCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(membershipsJSON(testCallerSysid, "")))
+	})
+
+	svc := NewServiceNowUserService(newTestSNClient(t, mux))
+
+	got, err := svc.GetMe(contextWithUserIDToken("token"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if groupLookupCalled {
+		t.Fatalf("group-members/search was called for an external caller; it must be skipped")
+	}
+	if got.Groups == nil || len(got.Groups) != 0 {
+		t.Fatalf("Groups = %+v, want an empty non-nil slice", got.Groups)
+	}
+	if got.UserType != domain.UserTypeExternal {
+		t.Fatalf("UserType = %q, want %q", got.UserType, domain.UserTypeExternal)
+	}
+}
+
+// TestSNUserService_GetMe_InternalUser_CallsGroupLookup verifies the existing
+// behaviour is unchanged for internal (staff) callers: the group membership
+// lookup still runs and populates Groups.
+func TestSNUserService_GetMe_InternalUser_CallsGroupLookup(t *testing.T) {
+	groupLookupCalled := false
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/me", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(snUserMeJSON(testCallerSysid, "internal")))
+	})
+	mux.HandleFunc("/group-members/search", func(w http.ResponseWriter, _ *http.Request) {
+		groupLookupCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(membershipsJSON(testCallerSysid, "Alpha Team")))
+	})
+
+	svc := NewServiceNowUserService(newTestSNClient(t, mux))
+
+	got, err := svc.GetMe(contextWithUserIDToken("token"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !groupLookupCalled {
+		t.Fatalf("group-members/search was not called for an internal caller; it must still run")
+	}
+	if len(got.Groups) != 1 || got.Groups[0].Name != "Alpha Team" {
+		t.Fatalf("Groups = %+v, want the caller's one membership", got.Groups)
+	}
+	if got.UserType != domain.UserTypeInternal {
+		t.Fatalf("UserType = %q, want %q", got.UserType, domain.UserTypeInternal)
+	}
+}
+
+// snUserSearchJSON builds a minimal upstream POST /users/search response with
+// a single user of the given sys_id and userType.
+func snUserSearchJSON(id, userType string) string {
+	return `{
+		"users": [{
+			"id": "` + id + `",
+			"userName": "customer1",
+			"name": "Customer One",
+			"email": "customer@example.com",
+			"userType": "` + userType + `",
+			"active": true,
+			"lockedOut": false,
+			"createdOn": "2026-01-01 00:00:00",
+			"updatedOn": "2026-01-01 00:00:00",
+			"roles": []
+		}],
+		"totalRecords": 1,
+		"offset": 0,
+		"limit": 1
+	}`
+}
+
+// TestSNUserService_GetUser_ExternalUser_SkipsGroupLookup verifies that GetUser
+// never calls group-members/search for an external (customer) user -- the
+// upstream ACL rejects that lookup for them, so making it wastes a call and
+// logs a spurious failure on every request.
+func TestSNUserService_GetUser_ExternalUser_SkipsGroupLookup(t *testing.T) {
+	targetSysid := sysid32('5')
+	groupLookupCalled := false
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/search", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(snUserSearchJSON(targetSysid, "external")))
+	})
+	mux.HandleFunc("/group-members/search", func(w http.ResponseWriter, _ *http.Request) {
+		groupLookupCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(membershipsJSON(targetSysid, "")))
+	})
+	mux.HandleFunc("/project-contacts/search", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"contacts": [], "totalRecords": 0}`))
+	})
+
+	svc := NewServiceNowUserService(newTestSNClient(t, mux))
+
+	got, err := svc.GetUser(contextWithUserIDToken("token"), sysidToUUID(targetSysid))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if groupLookupCalled {
+		t.Fatalf("group-members/search was called for an external user; it must be skipped")
+	}
+	if got.Groups == nil || len(got.Groups) != 0 {
+		t.Fatalf("Groups = %+v, want an empty non-nil slice", got.Groups)
+	}
+}
+
+// TestSNUserService_GetUser_InternalUser_CallsGroupLookup verifies the
+// existing behaviour is unchanged for internal (staff) users: the group
+// membership lookup still runs and populates Groups.
+func TestSNUserService_GetUser_InternalUser_CallsGroupLookup(t *testing.T) {
+	targetSysid := sysid32('6')
+	groupLookupCalled := false
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/search", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(snUserSearchJSON(targetSysid, "internal")))
+	})
+	mux.HandleFunc("/group-members/search", func(w http.ResponseWriter, _ *http.Request) {
+		groupLookupCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(membershipsJSON(targetSysid, "Alpha Team")))
+	})
+
+	svc := NewServiceNowUserService(newTestSNClient(t, mux))
+
+	got, err := svc.GetUser(contextWithUserIDToken("token"), sysidToUUID(targetSysid))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !groupLookupCalled {
+		t.Fatalf("group-members/search was not called for an internal user; it must still run")
+	}
+	if len(got.Groups) != 1 || got.Groups[0].Name != "Alpha Team" {
+		t.Fatalf("Groups = %+v, want the caller's one membership", got.Groups)
 	}
 }
 

@@ -191,3 +191,23 @@ func TestCustomerInvoiceNoticeBody(t *testing.T) {
 		}
 	})
 }
+
+// TestInternalInvoiceNoticeBody_LineBreaksInValuesDontAddInvoiceGroups
+// (CodeRabbit, PR #2085): the notify renderer counts blank-line-separated
+// paragraphs to find invoice groups, so a line break inside an invoice value
+// (opportunity name, invoice number) must not create extra paragraphs, or a
+// Salesforce link could land beside the wrong invoice.
+func TestInternalInvoiceNoticeBody_LineBreaksInValuesDontAddInvoiceGroups(t *testing.T) {
+	invoice := testDueInvoice()
+	invoice.Listed = []invoiceLine{
+		{Number: "US1\n\nX", Opportunity: "Opp\n\nA\r\n\r\nB", DueDate: invoice.DueDate},
+		{Number: "US2", Opportunity: "Opp Two", DueDate: invoice.DueDate},
+	}
+	proj := project{Name: "Acme - Subscription", ProjectKey: "ACMESUB"}
+
+	body := internalInvoiceNoticeBody(closure.NoticeWindow7, proj, "Jordan Perera", invoice)
+
+	if got, want := len(strings.Split(body, "\n\n")), 12+3; got != want {
+		t.Errorf("body has %d paragraphs, want %d (two invoice groups exactly)\nbody: %s", got, want, body)
+	}
+}

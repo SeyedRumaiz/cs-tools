@@ -216,12 +216,16 @@ type SearchSNUsersResponse struct {
 
 // GetUserMeResponse is the response for GET /users/me from the ServiceNow data source.
 type GetUserMeResponse struct {
-	ID        string   `json:"id"`
-	Email     string   `json:"email"`
-	FirstName *string  `json:"firstName,omitempty"`
-	LastName  string   `json:"lastName"`
-	TimeZone  *string  `json:"timeZone,omitempty"`
-	Roles     []string `json:"roles"`
+	ID        string  `json:"id"`
+	Email     string  `json:"email"`
+	FirstName *string `json:"firstName,omitempty"`
+	LastName  string  `json:"lastName"`
+	TimeZone  *string `json:"timeZone,omitempty"`
+	// UserType distinguishes staff from customer/partner contacts, matching SNUser's own
+	// field. Exposed for the same reason it is on SNUser -- a caller may need to tell them
+	// apart -- and also drives whether Groups below is populated.
+	UserType UserType `json:"userType,omitempty"`
+	Roles    []string `json:"roles"`
 	// Groups is every group the caller belongs to, which is what a caller
 	// holding the team registry needs to resolve their team. Empty when the
 	// membership lookup failed — it is best-effort and never fails the
@@ -618,6 +622,9 @@ type ProjectView struct {
 	Name             string           `json:"name"`
 	Key              string           `json:"key"`
 	SubscriptionType SubscriptionType `json:"subscriptionType"`
+	// SfID is the project's Salesforce id, nil when the backing data source
+	// has no value recorded for this project (ServiceNow data source only).
+	SfID *string `json:"sfId"`
 	// StartDate is the start of the project's current renewed period, and is nil
 	// when the backing data source has no start date recorded for this project
 	// (e.g. ServiceNow leaves it blank).
@@ -709,6 +716,8 @@ type Invoice struct {
 	Opportunity *EntityRef `json:"opportunity"`
 	// Classification is a short code (e.g. "CL"), nil when not set.
 	Classification *string `json:"classification"`
+	// SfID is the Salesforce record id for this invoice, nil when not linked.
+	SfID *string `json:"sfId"`
 }
 
 // SearchInvoicesRequest is the input for searching invoices (ServiceNow data source only).
@@ -2190,8 +2199,12 @@ type UpdateCaseRequest struct {
 	// accepted and resolved to emails for CSM callers. It is a pointer so an
 	// absent field and an explicitly empty list are distinguishable: nil leaves
 	// the watch list untouched, while an empty list clears it.
-	WatchList      *[]string           `json:"watchList"`
-	AssigneeEmail  *string             `json:"assigneeEmail"`
+	WatchList *[]string `json:"watchList"`
+	// AssigneeEmail uses json.RawMessage to preserve three states: nil/empty = omit,
+	// "null" = clear (unassign), `"value"` = set -- mirroring
+	// UpdateAttachmentRequest.Description, since a plain *string cannot tell an omitted
+	// field apart from an explicit null.
+	AssigneeEmail  json.RawMessage     `json:"assigneeEmail"`
 	ResolutionCode *CaseResolutionCode `json:"resolutionCode"`
 	Cause          *CaseCause          `json:"cause"`
 	CloseNotes     *string             `json:"closeNotes"`
@@ -3800,6 +3813,7 @@ type ITService struct {
 	Class                 *string                `json:"class"`
 	BusinessCriticality   *BusinessCriticality   `json:"businessCriticality"`
 	ServiceClassification *ServiceClassification `json:"serviceClassification"`
+	SupportGroup          *EntityRef             `json:"supportGroup"`
 }
 
 // ConfigurationItem is a single CMDB configuration item returned in a search response.

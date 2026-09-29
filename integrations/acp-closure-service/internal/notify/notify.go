@@ -24,7 +24,9 @@ package notify
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wso2-open-operations/cs-tools/integrations/acp-closure-service/internal/closure"
 	"github.com/wso2-open-operations/cs-tools/integrations/acp-closure-service/internal/recipients"
@@ -54,9 +56,26 @@ type Notice struct {
 	ProjectID   string
 	ProjectName string
 	ProjectKey  string
-	StartDate   time.Time
-	EndDate     time.Time
-	Window      closure.NoticeWindow
+	// ProjectSfID is the project's Salesforce record ID, when known — used
+	// only by EmailNotifier to render the internal notice's "Project Name"
+	// field as a hyperlink to https://wso2.my.salesforce.com/{ProjectSfID},
+	// matching a real reference email. Empty when absent (no Salesforce ID
+	// on file), in which case that field renders as plain text like every
+	// other field row — never used for customer-facing notices, which
+	// don't get this link at all (confirmed absent from the real
+	// customer-facing reference email).
+	ProjectSfID string
+	// InvoiceSfIDs are the listed invoices' own Salesforce record IDs (a0I...
+	// IDs, distinct from ProjectSfID), one per invoice box in Body and in
+	// the same order, set only on the internal invoice notice. EmailNotifier
+	// renders each as that box's "Open in Salesforce" link, matching the real
+	// reference email. An empty entry, or a missing one, means no link for
+	// that box — and customer-facing notices never carry any (customers have
+	// no Salesforce access).
+	InvoiceSfIDs []string
+	StartDate    time.Time
+	EndDate      time.Time
+	Window       closure.NoticeWindow
 	// Subject is the notice's title line — one of five templates depending
 	// on notice type and window (see sweep.go's internalNoticeSubject/
 	// customerNoticeSubject for the exact wording): the internal day-count
@@ -85,6 +104,11 @@ type Notice struct {
 }
 
 // LoggingNotifier logs what would have been sent instead of sending it.
+// The log shows the full notice (subject, body, who it's for) so a dry run
+// can be reviewed, but every email address and the customer's name are
+// masked (maskEmail/maskName): log-only mode must never write a customer's
+// personal details, or any full address, to the logs. The customer-facing
+// body itself names no one.
 type LoggingNotifier struct {
 	Logger *slog.Logger
 }
@@ -101,16 +125,16 @@ func (n *LoggingNotifier) Send(ctx context.Context, notice Notice) (bool, error)
 		"projectKey", notice.ProjectKey,
 		"startDate", notice.StartDate,
 		"endDate", notice.EndDate,
-		"accountOwner", notice.Recipients.AccountOwner.Email,
+		"accountOwner", maskEmail(notice.Recipients.AccountOwner.Email),
 		"accountOwnerName", notice.Recipients.AccountOwner.Name,
-		"renewalManager", notice.Recipients.RenewalManager.Email,
+		"renewalManager", maskEmail(notice.Recipients.RenewalManager.Email),
 		"renewalManagerName", notice.Recipients.RenewalManager.Name,
-		"technicalOwner", notice.Recipients.TechnicalOwner.Email,
+		"technicalOwner", maskEmail(notice.Recipients.TechnicalOwner.Email),
 		"technicalOwnerName", notice.Recipients.TechnicalOwner.Name,
 		"resolvedVia", notice.ResolvedVia,
 	}
 	if notice.Recipients.Customer != nil {
-		attrs = append(attrs, "customer", notice.Recipients.Customer.Email, "customerName", notice.Recipients.Customer.Name)
+		attrs = append(attrs, "customer", maskEmail(notice.Recipients.Customer.Email), "customerName", maskName(notice.Recipients.Customer.Name))
 	}
 	if notice.Body != "" {
 		attrs = append(attrs, "body", notice.Body)
@@ -118,4 +142,30 @@ func (n *LoggingNotifier) Send(ctx context.Context, notice Notice) (bool, error)
 
 	n.Logger.InfoContext(ctx, "notice", attrs...)
 	return false, nil
+}
+
+// maskEmail keeps an address's first character and its domain and stars the
+// rest of the local part ("paraparan@wso2.com" -> "p********@wso2.com"), so
+// the log still shows whether a recipient is internal or external without
+// revealing who. Anything that isn't a plain local@domain (exactly one "@",
+// something on both sides) is starred entirely: with more than one "@",
+// keeping everything after the first would leak an embedded address.
+func maskEmail(email string) string {
+	local, domain, ok := strings.Cut(email, "@")
+	if !ok || strings.Count(email, "@") != 1 || local == "" || domain == "" {
+		return strings.Repeat("*", utf8.RuneCountInString(email))
+	}
+	first, size := utf8.DecodeRuneInString(local)
+	return string(first) + strings.Repeat("*", utf8.RuneCountInString(local[size:])) + "@" + domain
+}
+
+// maskName keeps the first letter of each word and stars the rest
+// ("Jordan Perera" -> "J***** P*****").
+func maskName(name string) string {
+	words := strings.Fields(name)
+	for i, w := range words {
+		first, size := utf8.DecodeRuneInString(w)
+		words[i] = string(first) + strings.Repeat("*", utf8.RuneCountInString(w[size:]))
+	}
+	return strings.Join(words, " ")
 }

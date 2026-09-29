@@ -134,6 +134,9 @@ func TestSNInvoiceService_GetInvoiceByID_MissingKeysDoNotPanic(t *testing.T) {
 	if got.Opportunity != nil {
 		t.Errorf("Opportunity = %v, want nil", got.Opportunity)
 	}
+	if got.SfID != nil {
+		t.Errorf("SfID = %v, want nil", got.SfID)
+	}
 }
 
 // TestSNInvoiceService_GetInvoiceByID_DatesParse verifies the four date-only fields
@@ -151,7 +154,8 @@ func TestSNInvoiceService_GetInvoiceByID_DatesParse(t *testing.T) {
 			"invoicedPaidDate": "2026-02-01",
 			"invoicedDueDate": "2026-02-15",
 			"invoiceOriginalDueDate": "2026-02-01",
-			"classification": "CL"
+			"classification": "CL",
+			"sfId": "a0IE200000ArqsLMAR"
 		}`))
 	})
 
@@ -170,6 +174,9 @@ func TestSNInvoiceService_GetInvoiceByID_DatesParse(t *testing.T) {
 	}
 	if got.Classification == nil || *got.Classification != "CL" {
 		t.Errorf("Classification = %v, want \"CL\"", got.Classification)
+	}
+	if got.SfID == nil || *got.SfID != "a0IE200000ArqsLMAR" {
+		t.Errorf("SfID = %v, want \"a0IE200000ArqsLMAR\"", got.SfID)
 	}
 }
 

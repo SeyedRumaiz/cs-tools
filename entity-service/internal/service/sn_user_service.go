@@ -35,6 +35,7 @@ type snUserMeResponse struct {
 	FirstName *string  `json:"firstName"`
 	LastName  string   `json:"lastName"`
 	TimeZone  *string  `json:"timeZone"`
+	UserType  string   `json:"userType"`
 	Roles     []string `json:"roles"`
 }
 
@@ -478,9 +479,14 @@ func (s *snUserService) GetUser(ctx context.Context, id string) (domain.SNUserDe
 	// The enrichments are best-effort: each degrades to empty on upstream failure rather
 	// than failing the whole profile, matching how the caller's own team is resolved on
 	// GET /users/me.
-	detail.Groups = s.resolveUserGroups(ctx, token, sysID)
+	//
+	// Group membership is internal-only: the upstream ACL rejects this lookup for external
+	// (customer) users, so skip the call entirely rather than making a request known to fail.
 	if detail.UserType == domain.UserTypeExternal {
+		detail.Groups = []domain.UserGroupRef{}
 		detail.ProjectAccess = s.resolveProjectAccess(ctx, token, u.Email)
+	} else {
+		detail.Groups = s.resolveUserGroups(ctx, token, sysID)
 	}
 
 	return detail, nil
@@ -550,6 +556,11 @@ func (s *snUserService) resolveProjectAccess(
 	return access
 }
 
+// GetMe handles GET /users/me.
+//
+// Group membership is internal-only, exactly as it is for GetUser: the upstream ACL rejects
+// this lookup for external (customer) users, so skip the call entirely for them rather than
+// making a request known to fail.
 func (s *snUserService) GetMe(ctx context.Context) (domain.GetUserMeResponse, error) {
 	token := middleware.UserIDTokenFromContext(ctx)
 
@@ -568,15 +579,25 @@ func (s *snUserService) GetMe(ctx context.Context) (domain.GetUserMeResponse, er
 		roles = []string{}
 	}
 
-	return domain.GetUserMeResponse{
+	userType := domain.UserType(snResp.UserType)
+
+	resp := domain.GetUserMeResponse{
 		ID:        sysidToUUID(snResp.ID),
 		Email:     snResp.Email,
 		FirstName: snResp.FirstName,
 		LastName:  snResp.LastName,
 		TimeZone:  snResp.TimeZone,
+		UserType:  userType,
 		Roles:     roles,
-		Groups:    s.resolveUserGroups(ctx, token, snResp.ID),
-	}, nil
+	}
+
+	if userType == domain.UserTypeExternal {
+		resp.Groups = []domain.UserGroupRef{}
+	} else {
+		resp.Groups = s.resolveUserGroups(ctx, token, snResp.ID)
+	}
+
+	return resp, nil
 }
 
 func (s *snUserService) PatchMe(ctx context.Context, req domain.PatchUserMeRequest) (domain.PatchUserMeResponse, error) {

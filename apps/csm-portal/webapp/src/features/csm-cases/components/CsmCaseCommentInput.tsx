@@ -116,10 +116,14 @@ function fileSignature(f: File): string {
   return `${f.name}-${f.size}-${f.lastModified}`;
 }
 
-// Mirrors the BE request-body cap for POST /cases/{id}/comments
-// (handler `maxCommentBodyBytes = 10 << 20`). Comments carry inline images as
-// base64 data URIs, so the body can get large; the BE returns 413 past this.
-const MAX_COMMENT_BODY_BYTES = 10 * 1024 * 1024;
+// Deliberately stricter than the BE's own request-body cap for
+// POST /cases/{id}/comments (handler `maxCommentBodyBytes = 10 << 20`, i.e.
+// 10 MiB). Comments carry inline images as base64 data URIs, so the body can
+// get large fast; this FE-only ceiling nudges users toward attachments well
+// before they'd hit the BE's much larger 413 threshold, and matches the same
+// 1 MiB guard applied to the customer-portal webapp for consistency across
+// both portals.
+const MAX_COMMENT_BODY_BYTES = 1 * 1024 * 1024;
 // Reserve headroom for the JSON envelope ({ type, content }) + string escaping
 // so the FE blocks before the BE rejects with 413.
 const MAX_COMMENT_CONTENT_BYTES = MAX_COMMENT_BODY_BYTES - 1024;
@@ -353,7 +357,7 @@ export default function CsmCaseCommentInput({
   const sizeError = overSizeLimit
     ? `Comment is too large (${formatBytes(bodyBytes)}). Maximum is ${formatBytes(
         MAX_COMMENT_BODY_BYTES,
-      )} — remove or shrink inline images.`
+      )} — upload large images as attachments instead of embedding them inline.`
     : null;
 
   const submit = useCallback(async () => {
@@ -668,30 +672,40 @@ export default function CsmCaseCommentInput({
                 ? "Output is sent as-is. Use this to fix paste-formatting or insert tables."
                 : "Ctrl/Cmd + Enter to send.")}
         </Typography>
-        <Button
-          variant="contained"
-          color="primary"
-          size="small"
-          startIcon={internal ? <Lock size={16} /> : <Send size={16} />}
-          disabled={
-            disabled ||
-            submitting ||
-            (isEmpty(html) && attachments.length === 0) ||
-            overSizeLimit ||
-            // Safety net: a public reply with text while replies are locked.
-            // Normally unreachable — the toggle is forced to work-note mode.
-            (!internal && publicReplyLocked && !isEmpty(html))
+        <Tooltip
+          title={
+            overSizeLimit
+              ? "Comment is too large — upload large images as attachments instead of embedding them inline."
+              : ""
           }
-          onClick={() => {
-            void submit();
-          }}
         >
-          {submitting
-            ? "Sending…"
-            : internal
-              ? "Save work note"
-              : "Send to customer"}
-        </Button>
+          <span>
+            <Button
+              variant="contained"
+              color="primary"
+              size="small"
+              startIcon={internal ? <Lock size={16} /> : <Send size={16} />}
+              disabled={
+                disabled ||
+                submitting ||
+                (isEmpty(html) && attachments.length === 0) ||
+                overSizeLimit ||
+                // Safety net: a public reply with text while replies are locked.
+                // Normally unreachable — the toggle is forced to work-note mode.
+                (!internal && publicReplyLocked && !isEmpty(html))
+              }
+              onClick={() => {
+                void submit();
+              }}
+            >
+              {submitting
+                ? "Sending…"
+                : internal
+                  ? "Save work note"
+                  : "Send to customer"}
+            </Button>
+          </span>
+        </Tooltip>
       </Box>
     </Box>
   );

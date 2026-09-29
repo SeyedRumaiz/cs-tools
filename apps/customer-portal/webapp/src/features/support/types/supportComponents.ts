@@ -22,6 +22,7 @@ import type {
   CaseAttachment,
   CaseComment,
   CaseDetails,
+  CaseDetailsClosedBy,
   CaseListItem,
   CaseMetadataResponse,
 } from "@features/support/types/cases";
@@ -226,6 +227,8 @@ export type CaseDetailsActivityPanelProps = {
   caseCreatedOn?: string | null;
   focusMode?: boolean;
   caseStatus?: string | null;
+  closedOn?: string | null;
+  closedBy?: CaseDetailsClosedBy | null;
 };
 
 export type ActivityCommentInputProps = {

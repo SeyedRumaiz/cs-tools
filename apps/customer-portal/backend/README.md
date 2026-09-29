@@ -2,6 +2,8 @@
 
 Ballerina backend service for the Customer Portal application.
 
+> **⚠️ Deprecation Notice:** This Ballerina backend (v1) is deprecated. It will be replaced by a Go based v2 backend. New feature development should target the Go backend instead.
+
 ## Quick Start
 
 ```bash

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"net/url"
 	"strings"
 )
 
@@ -95,18 +96,23 @@ const internalEmailHTMLTemplate = `<div style="background-color:#f2f2f2;padding:
 // (Invoice Id/Opportunity/Due Date), confirmed against real reference
 // examples (actual_90_days_invoice_email.png, actual_0_days_invoice_email.html)
 // — those three fields render visually nested under the project fields, not
-// as three more flat rows in the same box. Seven placeholders in order:
-// greeting, intro, project fields' inner HTML, invoice fields' inner HTML,
-// closing, sign-off, wso2LogoURL. Built by renderInternalInvoiceEmailHTML.
+// as three more flat rows in the same box. The invoice box is split into two
+// equal halves like the reference: fields on the left, the "Open in
+// Salesforce" link at the start of the right half (empty when the invoice
+// has no Salesforce ID). A project with several due invoices gets one such
+// box per invoice, stacked, as in the real legacy email
+// (actual_invoice_email.png). A table rather than the reference's
+// display:flex, since flex isn't reliable across email clients. Seven
+// placeholders in order: greeting, intro, project fields' inner HTML, the
+// invoice boxes' HTML (invoiceBoxHTML, one per invoice), closing, sign-off,
+// wso2LogoURL. Built by renderInternalInvoiceEmailHTML.
 const internalInvoiceEmailHTMLTemplate = `<div style="background-color:#f2f2f2;padding:24px 16px;font-family:Arial,Helvetica,sans-serif;">
   <div style="background-color:#ffffff;border:1px solid #dadce0;border-radius:8px;padding:24px 32px;box-sizing:border-box;">
     <p style="color:#1a56db;font-size:16px;line-height:1.6;margin:0 0 16px 0;">%s</p>
     <p style="color:#1a56db;font-size:16px;line-height:1.6;margin:0 0 16px 0;">%s</p>
     <div style="border:1px solid #e0e0e0;border-radius:4px;background-color:#f2f2f2;padding:16px 20px;margin:0 0 16px 0;">
       %s
-      <div style="border:1px solid #e0e0e0;border-radius:4px;background-color:#ffffff;padding:12px 16px;margin-top:8px;">
-        %s
-      </div>
+      %s
     </div>
     <p style="color:#333333;font-size:14px;line-height:1.6;margin:0 0 16px 0;">%s</p>
     <p style="color:#333333;font-size:14px;line-height:1.6;margin:0;">%s</p>
@@ -197,6 +203,21 @@ type EmailNotifier struct {
 	// production environment, once that's a deliberate decision — not
 	// something to flip casually to "make a test work".
 	AllowNonWSO2Recipients bool
+	// StandingCC is a fixed list of addresses cc'd on every notice this
+	// component sends — internal, customer-facing, and the
+	// no-business-contact nudge alike, subscription and invoice cascades
+	// alike, since none of this varies by notice shape. Confirmed against
+	// every real reference email this project has (both internal and
+	// customer-facing): each one cc's customer-lifecycle-notification@wso2.com
+	// and billing@wso2.com, which this port never sent until this field was
+	// added — a real gap, not a documented simplification. Configurable
+	// (STANDING_CC_RECIPIENTS in main.go) rather than a hardcoded constant
+	// specifically so staging can leave it empty — these are real
+	// production distribution lists that must not receive test traffic,
+	// the same reasoning behind AllowNonWSO2Recipients defaulting false.
+	// Entries still pass through filterRecipients like any other recipient;
+	// this is additive cc, not a bypass of the WSO2-only staging safeguard.
+	StandingCC []string
 }
 
 // Send builds the to/cc recipient lists, converts Body to simple HTML, and
@@ -215,6 +236,7 @@ type EmailNotifier struct {
 // kind.
 func (n *EmailNotifier) Send(ctx context.Context, notice Notice) (bool, error) {
 	to, cc := recipientsToToCC(notice.Recipients)
+	cc = append(cc, n.StandingCC...)
 	to = n.filterRecipients(to)
 	cc = n.filterRecipients(cc)
 
@@ -237,7 +259,7 @@ func (n *EmailNotifier) Send(ctx context.Context, notice Notice) (bool, error) {
 	// fragment with no real block-level container was also the likely
 	// cause of a real symptom seen in a live test: the trailing "WSO2
 	// Team" signature line visually missing in the received email.
-	htmlBody := renderInternalEmailHTML(notice.Body)
+	htmlBody := renderInternalEmailHTML(notice.Body, notice.ProjectSfID, notice.InvoiceSfIDs)
 	if notice.Recipients.Customer != nil {
 		htmlBody = renderEmailHTML(notice.Body)
 	}
@@ -308,12 +330,20 @@ func renderEmailHTML(body string) string {
 // structured layout when a body has exactly this shape.
 const internalBodyParagraphCount = 9
 
-// internalInvoiceBodyParagraphCount is the exact paragraph count of the
-// invoice-based internal notice's body shape: greeting, intro, the same 5
-// project fields the subscription-based notice has, then 3 more
+// internalInvoiceBodyParagraphCount is the paragraph count of the
+// invoice-based internal notice body for a single invoice: greeting, intro,
+// the same 5 project fields the subscription-based notice has, then 3
 // invoice-specific fields (Invoice Id/Opportunity/Due Date), then closing,
-// sign-off.
+// sign-off. Each additional listed invoice adds another 3 fields
+// (isInvoiceBodyShape).
 const internalInvoiceBodyParagraphCount = 12
+
+// isInvoiceBodyShape reports whether a body of n paragraphs is the
+// invoice-based internal notice listing one or more invoices: the
+// single-invoice count plus a whole number of extra 3-field invoice groups.
+func isInvoiceBodyShape(n int) bool {
+	return n >= internalInvoiceBodyParagraphCount && (n-internalInvoiceBodyParagraphCount)%3 == 0
+}
 
 // noBusinessContactBodyParagraphCount is the exact paragraph count of
 // sweep.go's noBusinessContactBodyTemplate: heading, intro, warning
@@ -331,27 +361,38 @@ const noBusinessContactBodyParagraphCount = 5
 // (noBusinessContactBodyParagraphCount) — each dispatched to its matching
 // renderer below. Anything else falls back to internalEmailFallbackTemplate
 // — same card styling, without assuming a shape that doesn't hold for it.
-func renderInternalEmailHTML(body string) string {
+// projectSfID is threaded through to whichever renderer handles the "Project Name"
+// field row — see projectNameFieldRowHTML. invoiceSfIDs only matter to the
+// invoice-shaped body; see openInSalesforceLinkHTML.
+func renderInternalEmailHTML(body, projectSfID string, invoiceSfIDs []string) string {
 	paragraphs := strings.Split(body, "\n\n")
-	switch len(paragraphs) {
-	case internalInvoiceBodyParagraphCount:
-		return renderInternalInvoiceEmailHTML(paragraphs)
-	case internalBodyParagraphCount:
-		return renderInternalSubscriptionEmailHTML(paragraphs)
-	case noBusinessContactBodyParagraphCount:
-		return renderNoBusinessContactEmailHTML(paragraphs)
+	switch n := len(paragraphs); {
+	// Invoice notices always carry one InvoiceSfIDs entry per invoice (even
+	// an empty one), subscription notices none. Checking that as well as the
+	// paragraph count stops a subscription body whose project name contains
+	// blank lines from matching an invoice shape (CodeRabbit, PR #2085).
+	case len(invoiceSfIDs) > 0 && isInvoiceBodyShape(n):
+		return renderInternalInvoiceEmailHTML(paragraphs, projectSfID, invoiceSfIDs)
+	case n == internalBodyParagraphCount:
+		return renderInternalSubscriptionEmailHTML(paragraphs, projectSfID)
+	case n == noBusinessContactBodyParagraphCount:
+		return renderNoBusinessContactEmailHTML(paragraphs, projectSfID)
 	default:
 		return fmt.Sprintf(internalEmailFallbackTemplate, plainTextToHTML(body), wso2LogoURL)
 	}
 }
 
 // renderInternalSubscriptionEmailHTML builds the subscription-based
-// internal notice's HTML from its already-validated 9-paragraph body.
-func renderInternalSubscriptionEmailHTML(paragraphs []string) string {
+// internal notice's HTML from its already-validated 9-paragraph body. The
+// first project field (paragraphs[2]) is always "Project Name: X" — see
+// internalReminderBodyTemplate/internalSuspensionBodyTemplate — so it's the
+// one row rendered via projectNameFieldRowHTML instead of fieldRowHTML.
+func renderInternalSubscriptionEmailHTML(paragraphs []string, projectSfID string) string {
 	greeting := plainTextToHTML(paragraphs[0])
 	intro := plainTextToHTML(paragraphs[1])
 	var fields strings.Builder
-	for _, p := range paragraphs[2:7] {
+	fields.WriteString(projectNameFieldRowHTML(paragraphs[2], projectSfID))
+	for _, p := range paragraphs[3:7] {
 		fields.WriteString(fieldRowHTML(p))
 	}
 	closing := plainTextToHTML(paragraphs[7])
@@ -361,24 +402,63 @@ func renderInternalSubscriptionEmailHTML(paragraphs []string) string {
 }
 
 // renderInternalInvoiceEmailHTML builds the invoice-based internal notice's
-// HTML from its already-validated 12-paragraph body — the 5 project fields
-// render in the main detail box same as the subscription-based notice, the
-// 3 invoice fields render in their own nested box inside it.
-func renderInternalInvoiceEmailHTML(paragraphs []string) string {
+// HTML from an already-validated body (isInvoiceBodyShape): the 5 project
+// fields render in the main detail box same as the subscription-based notice
+// (paragraphs[2], "Project Name: X", again rendered via
+// projectNameFieldRowHTML), then each listed invoice's 3 fields render in
+// their own nested box (the fields themselves never linked), with that
+// invoice's "Open in Salesforce" link beside them when its entry in
+// invoiceSfIDs is set.
+func renderInternalInvoiceEmailHTML(paragraphs []string, projectSfID string, invoiceSfIDs []string) string {
 	greeting := plainTextToHTML(paragraphs[0])
 	intro := plainTextToHTML(paragraphs[1])
 	var projectFields strings.Builder
-	for _, p := range paragraphs[2:7] {
+	projectFields.WriteString(projectNameFieldRowHTML(paragraphs[2], projectSfID))
+	for _, p := range paragraphs[3:7] {
 		projectFields.WriteString(fieldRowHTML(p))
 	}
-	var invoiceFields strings.Builder
-	for _, p := range paragraphs[7:10] {
-		invoiceFields.WriteString(fieldRowHTML(p))
+	invoiceCount := (len(paragraphs)-internalInvoiceBodyParagraphCount)/3 + 1
+	var boxes strings.Builder
+	for i := 0; i < invoiceCount; i++ {
+		var fields strings.Builder
+		for _, p := range paragraphs[7+3*i : 10+3*i] {
+			fields.WriteString(fieldRowHTML(p))
+		}
+		sfID := ""
+		if i < len(invoiceSfIDs) {
+			sfID = invoiceSfIDs[i]
+		}
+		boxes.WriteString(invoiceBoxHTML(fields.String(), openInSalesforceLinkHTML(sfID)))
 	}
-	closing := plainTextToHTML(paragraphs[10])
-	signoff := plainTextToHTML(paragraphs[11])
+	closing := plainTextToHTML(paragraphs[len(paragraphs)-2])
+	signoff := plainTextToHTML(paragraphs[len(paragraphs)-1])
 
-	return fmt.Sprintf(internalInvoiceEmailHTMLTemplate, greeting, intro, projectFields.String(), invoiceFields.String(), closing, signoff, wso2LogoURL)
+	return fmt.Sprintf(internalInvoiceEmailHTMLTemplate, greeting, intro, projectFields.String(), boxes.String(), closing, signoff, wso2LogoURL)
+}
+
+// invoiceBoxHTML is one invoice's nested box: its fields on the left half and
+// its "Open in Salesforce" link (or nothing) at the start of the right half.
+func invoiceBoxHTML(fieldsHTML, linkHTML string) string {
+	return fmt.Sprintf(`<div style="border:1px solid #e0e0e0;border-radius:4px;background-color:#ffffff;padding:12px 16px;margin-top:8px;">
+        <table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0" style="width:100%%;"><tr>
+          <td width="50%%" style="width:50%%;vertical-align:top;">%s</td>
+          <td width="50%%" style="width:50%%;vertical-align:top;text-align:left;">%s</td>
+        </tr></table>
+      </div>`, fieldsHTML, linkHTML)
+}
+
+// openInSalesforceLinkHTML renders the invoice box's "Open in Salesforce"
+// link to the invoice's own Salesforce record, styled like the Project Name
+// link. Returns "" when invoiceSfID is empty, so an invoice with no
+// Salesforce ID gets no link rather than a broken one. The reference email's
+// small external-link icon after the text is deliberately left out, same as
+// for the Project Name link.
+func openInSalesforceLinkHTML(invoiceSfID string) string {
+	if invoiceSfID == "" {
+		return ""
+	}
+	return fmt.Sprintf(`<a href="%s" style="color:#2c66bd;font-weight:700;text-decoration:none;" target="_blank">Open in Salesforce</a>`,
+		html.EscapeString(salesforceRecordURL(invoiceSfID)))
 }
 
 // renderNoBusinessContactEmailHTML builds the no-business-contact notice's
@@ -389,23 +469,28 @@ func renderInternalInvoiceEmailHTML(paragraphs []string) string {
 // the plain-text body's prose — only the project name (pulled from the
 // structured "Project Name: X" field line, the same reliable source the
 // field box itself uses) and the field values are genuinely dynamic here.
-func renderNoBusinessContactEmailHTML(paragraphs []string) string {
+// Only the structured field row is ever linked via projectSfID — the warning
+// paragraph's own bolded project-name mention stays plain text.
+func renderNoBusinessContactEmailHTML(paragraphs []string, projectSfID string) string {
 	intro := plainTextToHTML(paragraphs[1])
 
 	fieldLines := strings.Split(paragraphs[4], "\n")
 	var fields strings.Builder
 	var projectName string
 	for _, line := range fieldLines {
-		fields.WriteString(fieldRowHTML(line))
-		if label, value, ok := strings.Cut(line, ": "); ok && label == "Project Name" {
+		label, value, ok := strings.Cut(line, ": ")
+		if ok && label == "Project Name" {
 			projectName = value
+			fields.WriteString(projectNameFieldRowHTML(line, projectSfID))
+			continue
 		}
+		fields.WriteString(fieldRowHTML(line))
 	}
 
 	return fmt.Sprintf(noBusinessContactEmailHTMLTemplate, intro, html.EscapeString(projectName), wso2BusinessContactDocURL, fields.String(), wso2LogoURL)
 }
 
-// fieldRowHTML renders one "Label: value" paragraph (e.g. "Project Name:
+// fieldRowHTML renders one "Label: value" paragraph (e.g. "Project Key:
 // X") as its own styled row inside the internal template's detail box,
 // bolding the value. Falls back to a plain escaped line if a paragraph
 // doesn't have the expected "Label: value" shape, rather than dropping it.
@@ -416,6 +501,41 @@ func fieldRowHTML(paragraph string) string {
 	}
 	return fmt.Sprintf(`<p style="margin:0 0 8px 0;color:#333333;font-size:14px;">%s: <strong>%s</strong></p>`,
 		html.EscapeString(label), html.EscapeString(value))
+}
+
+// wso2SalesforceBaseURL is Salesforce's generic record-redirect URL for
+// WSO2's org — https://<mydomain>.my.salesforce.com/<recordId> resolves to
+// the record regardless of object type. Confirmed against a real reference
+// email (local-docs/actual_0_days_invoice_email.html): the internal
+// notice's "Project Name" value links exactly this way, using the
+// project's own Salesforce ID.
+const wso2SalesforceBaseURL = "https://wso2.my.salesforce.com/"
+
+// salesforceRecordURL builds a Salesforce record link for sfID.
+// url.PathEscape is cheap insurance, not a response to any observed
+// problem — real Salesforce IDs are always plain alphanumeric.
+func salesforceRecordURL(sfID string) string {
+	return wso2SalesforceBaseURL + url.PathEscape(sfID)
+}
+
+// projectNameFieldRowHTML renders the "Project Name: X" row exactly like
+// fieldRowHTML, except the value becomes a hyperlink to the project's
+// Salesforce record (salesforceRecordURL) when projectSfID is non-empty — this is
+// the one field row that links in the real reference emails; every other
+// field (Project Key, Invoice Id, ...) always stays fieldRowHTML's plain
+// bolded text. Falls back to fieldRowHTML's plain rendering when projectSfID is
+// empty (no Salesforce ID on file for this project) or the paragraph
+// doesn't have the expected "Label: value" shape.
+func projectNameFieldRowHTML(paragraph, projectSfID string) string {
+	if projectSfID == "" {
+		return fieldRowHTML(paragraph)
+	}
+	label, value, ok := strings.Cut(paragraph, ": ")
+	if !ok {
+		return fieldRowHTML(paragraph)
+	}
+	return fmt.Sprintf(`<p style="margin:0 0 8px 0;color:#333333;font-size:14px;">%s: <a href="%s" style="color:#2c66bd;font-weight:700;text-decoration:none;" target="_blank">%s</a></p>`,
+		html.EscapeString(label), html.EscapeString(salesforceRecordURL(projectSfID)), html.EscapeString(value))
 }
 
 // plainTextToHTML converts a plain-text notice Body (every existing

@@ -39,6 +39,99 @@ func tokenServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// mustNewClient builds a Client for tests whose subject isn't NewClient's
+// own URL validation, failing the test immediately if construction errors.
+func mustNewClient(t *testing.T, cfg Config) *Client {
+	t.Helper()
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v, want nil", err)
+	}
+	return client
+}
+
+// TestNewClient_RejectsInsecureTokenURL verifies NewClient refuses to
+// construct a Client whose TokenURL isn't https:// — the token request
+// carries the real ClientSecret, and an http:// endpoint would send it in
+// cleartext. Same check internal/emailservice.NewClient already has.
+func TestNewClient_RejectsInsecureTokenURL(t *testing.T) {
+	_, err := NewClient(Config{
+		BaseURL:      "https://csm-integration.example",
+		TokenURL:     "http://csm-integration.example/token",
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		Scopes:       RequiredScopes,
+	})
+	if err == nil {
+		t.Fatal("NewClient() error = nil, want non-nil for an http:// TokenURL")
+	}
+}
+
+// TestNewClient_RejectsInsecureBaseURL mirrors the same check for BaseURL —
+// the bearer token and real customer data flow over every request against
+// this address.
+func TestNewClient_RejectsInsecureBaseURL(t *testing.T) {
+	_, err := NewClient(Config{
+		BaseURL:      "http://csm-integration.example",
+		TokenURL:     "https://csm-integration.example/token",
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		Scopes:       RequiredScopes,
+	})
+	if err == nil {
+		t.Fatal("NewClient() error = nil, want non-nil for an http:// BaseURL")
+	}
+}
+
+// TestNewClient_AcceptsHTTPSURLs is the green counterpart — confirms the
+// validation doesn't false-positive on the correct, real configuration.
+func TestNewClient_AcceptsHTTPSURLs(t *testing.T) {
+	_, err := NewClient(Config{
+		BaseURL:      "https://csm-integration.example",
+		TokenURL:     "https://csm-integration.example/token",
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		Scopes:       RequiredScopes,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v, want nil for valid https:// URLs", err)
+	}
+}
+
+// TestTokenFetchRejectsRedirects verifies the token request itself — which
+// POSTs the real client secret — never follows a redirect. TestDoRejectsRedirects
+// covers only the client used for regular API calls; the token fetch runs on
+// a separate client (the one embedded in tokenCtx) that needs its own guard.
+func TestTokenFetchRejectsRedirects(t *testing.T) {
+	var redirectTargetHit bool
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectTargetHit = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"test-token","token_type":"bearer","expires_in":3600}`))
+	}))
+	defer redirectTarget.Close()
+
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL, http.StatusTemporaryRedirect)
+	}))
+	defer tokenSrv.Close()
+
+	client := mustNewClient(t, Config{
+		BaseURL:      "https://unused.invalid",
+		TokenURL:     tokenSrv.URL,
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		Scopes:       RequiredScopes,
+	})
+
+	if _, err := client.SearchProjects(context.Background(), []byte(`{}`)); err == nil {
+		t.Fatal("expected error for a redirected token request, got nil")
+	}
+	if redirectTargetHit {
+		t.Error("redirect target was contacted; want the token fetch to never follow the redirect")
+	}
+}
+
 // TestTokenFetchTimeout verifies that a stalled token endpoint fails requests
 // within the configured timeout rather than blocking indefinitely.
 func TestTokenFetchTimeout(t *testing.T) {
@@ -50,7 +143,7 @@ func TestTokenFetchTimeout(t *testing.T) {
 	tokenFetchTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { tokenFetchTimeout = 10 * time.Second })
 
-	client := NewClient(Config{
+	client := mustNewClient(t, Config{
 		BaseURL:      tokenSrv.URL,
 		TokenURL:     tokenSrv.URL + "/token",
 		ClientID:     "test-client",
@@ -82,7 +175,7 @@ func TestDoSuccess(t *testing.T) {
 	defer upstream.Close()
 
 	tokenSrv := tokenServer(t)
-	client := NewClient(Config{
+	client := mustNewClient(t, Config{
 		BaseURL:      upstream.URL,
 		TokenURL:     tokenSrv.URL,
 		ClientID:     "test-client",
@@ -115,7 +208,7 @@ func TestDoUpstreamError(t *testing.T) {
 	defer upstream.Close()
 
 	tokenSrv := tokenServer(t)
-	client := NewClient(Config{
+	client := mustNewClient(t, Config{
 		BaseURL:      upstream.URL,
 		TokenURL:     tokenSrv.URL,
 		ClientID:     "test-client",
@@ -153,7 +246,7 @@ func TestDoForwardsCorrelationID(t *testing.T) {
 	defer upstream.Close()
 
 	tokenSrv := tokenServer(t)
-	client := NewClient(Config{
+	client := mustNewClient(t, Config{
 		BaseURL:      upstream.URL,
 		TokenURL:     tokenSrv.URL,
 		ClientID:     "test-client",
@@ -182,7 +275,7 @@ func TestDoWithoutCorrelationIDOmitsHeader(t *testing.T) {
 	defer upstream.Close()
 
 	tokenSrv := tokenServer(t)
-	client := NewClient(Config{
+	client := mustNewClient(t, Config{
 		BaseURL:      upstream.URL,
 		TokenURL:     tokenSrv.URL,
 		ClientID:     "test-client",
@@ -220,7 +313,7 @@ func TestDoRejectsRedirects(t *testing.T) {
 	defer upstream.Close()
 
 	tokenSrv := tokenServer(t)
-	client := NewClient(Config{
+	client := mustNewClient(t, Config{
 		BaseURL:      upstream.URL,
 		TokenURL:     tokenSrv.URL,
 		ClientID:     "test-client",
@@ -269,7 +362,7 @@ func TestNewClientRequestsConfiguredScopes(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	client := NewClient(Config{
+	client := mustNewClient(t, Config{
 		BaseURL:      upstream.URL,
 		TokenURL:     tokenSrv.URL,
 		ClientID:     "test-client",

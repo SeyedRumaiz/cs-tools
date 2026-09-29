@@ -18,6 +18,7 @@ package sweep
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/integrations/acp-closure-service/internal/closure"
@@ -30,14 +31,24 @@ import (
 // tested now, independent of that. Whatever eventually resolves this from
 // the real API is expected to populate it.
 type dueInvoice struct {
+	// ID is what the notice shows as "Invoice Id": the invoice number (its
+	// name), not the internal record ID. See invoiceNumber.
 	ID          string
 	Opportunity string
+	// SfID is the invoice's own Salesforce record ID, for the internal
+	// notice's "Open in Salesforce" link. Empty when not on file.
+	SfID string
 	// DueDate is the invoice's own due date — always what's shown in the
 	// "Due Date:" field, in both the internal and customer-facing bodies,
 	// regardless of any grace period.
 	DueDate time.Time
+	// Listed is every due invoice for the project, earliest due first (this
+	// invoice included, as the first), which the internal notice lists one
+	// box each, as legacy does. Timing always comes from this invoice alone.
+	// Empty means list just this invoice.
+	Listed []invoiceLine
 	// SuspendDate is the actual date the invoice cascade suspends on —
-	// closure.invoiceSuspendDate's result, which can be later than DueDate
+	// closure.InvoiceSuspendDate's result, which can be later than DueDate
 	// under the EULA-3.3-style 60-day grace period. Equals DueDate when no
 	// grace period applies. Only the customer-facing suspended (0-day)
 	// body's prose references this — the internal body and the "Due Date:"
@@ -65,9 +76,10 @@ func customerInvoiceNoticeSubject(window closure.NoticeWindow, projectName strin
 // internalInvoiceReminderBodyTemplate is the day-count (90/60/30/15/7)
 // invoice-based internal notice body, confirmed verbatim against
 // actual_90_days_invoice_email.png. Same project fields as
-// internalReminderBodyTemplate (%[1]s-%[5]s), plus 3 invoice-specific
-// fields (%[6]s-%[8]s) that notify.renderInternalInvoiceEmailHTML renders
-// in their own nested box.
+// internalReminderBodyTemplate (%[1]s-%[5]s), plus the invoice fields
+// (%[6]s: Invoice Id/Opportunity/Due Date for each listed invoice, built by
+// internalInvoiceNoticeBody) that notify.renderInternalInvoiceEmailHTML
+// renders one nested box per invoice.
 const internalInvoiceReminderBodyTemplate = `Dear %[1]s
 
 The following project has an upcoming due invoice. Please find the details below.
@@ -82,11 +94,7 @@ Start Date: %[4]s
 
 End Date: %[5]s
 
-Invoice Id: %[6]s
-
-Opportunity: %[7]s
-
-Due Date: %[8]s
+%[6]s
 
 Since projects need to be due on the due date of each invoice, kindly take the remedial actions to avoid any disruptions of subscription support. We appreciate your understanding and your prompt attention to this matter.
 
@@ -111,16 +119,39 @@ Start Date: %[4]s
 
 End Date: %[5]s
 
-Invoice Id: %[6]s
-
-Opportunity: %[7]s
-
-Due Date: %[8]s
+%[6]s
 
 Since the project is suspended, kindly take the remedial actions to reinstate the subscription support. We appreciate your prompt attention to this matter.
 
 Best Regards,
 WSO2 Team`
+
+// invoiceLine is one invoice as the internal notice lists it.
+type invoiceLine struct {
+	Number      string
+	Opportunity string
+	DueDate     time.Time
+	SfID        string
+}
+
+// sfIDs returns the listed invoices' Salesforce IDs, one per line in the
+// same order, for the internal notice's "Open in Salesforce" links.
+func (d dueInvoice) sfIDs() []string {
+	var ids []string
+	for _, l := range d.lines() {
+		ids = append(ids, l.SfID)
+	}
+	return ids
+}
+
+// lines returns the invoices the internal notice lists: Listed, or just this
+// invoice when Listed is empty.
+func (d dueInvoice) lines() []invoiceLine {
+	if len(d.Listed) > 0 {
+		return d.Listed
+	}
+	return []invoiceLine{{Number: d.ID, Opportunity: d.Opportunity, DueDate: d.DueDate, SfID: d.SfID}}
+}
 
 // internalInvoiceNoticeBody builds the invoice-based internal notice body.
 // The internal subject line needs no invoice-specific variant — confirmed
@@ -131,9 +162,14 @@ func internalInvoiceNoticeBody(window closure.NoticeWindow, proj project, accoun
 	if window.IsTerminal() {
 		template = internalInvoiceSuspensionBodyTemplate
 	}
+	var fields []string
+	for _, l := range invoice.lines() {
+		due := l.DueDate
+		fields = append(fields, fmt.Sprintf("Invoice Id: %s\n\nOpportunity: %s\n\nDue Date: %s", oneLine(l.Number), oneLine(l.Opportunity), formatDate(&due)))
+	}
 	return fmt.Sprintf(template,
 		accountOwnerName, proj.Name, proj.ProjectKey, formatDate(proj.StartDate), formatDate(proj.EndDate),
-		invoice.ID, invoice.Opportunity, formatDate(&invoice.DueDate))
+		strings.Join(fields, "\n\n"))
 }
 
 // customerInvoicePaymentReminderBodyTemplate is the 15/7-day customer-facing
@@ -172,4 +208,16 @@ func customerInvoiceNoticeBody(window closure.NoticeWindow, proj project, invoic
 		return fmt.Sprintf(customerInvoiceSuspendedBodyTemplate, proj.Name, proj.ProjectKey, formatDateUS(&invoice.SuspendDate))
 	}
 	return fmt.Sprintf(customerInvoicePaymentReminderBodyTemplate, proj.Name, formatDateUS(&invoice.DueDate))
+}
+
+// lineBreaks matches every kind of line break an upstream value might carry.
+var lineBreaks = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
+
+// oneLine flattens line breaks in an upstream value to spaces. The notify
+// renderer finds each invoice group by counting blank-line-separated
+// paragraphs, so a value containing blank lines would otherwise create extra
+// groups and put a Salesforce link beside the wrong invoice (CodeRabbit,
+// PR #2085).
+func oneLine(s string) string {
+	return lineBreaks.Replace(s)
 }
