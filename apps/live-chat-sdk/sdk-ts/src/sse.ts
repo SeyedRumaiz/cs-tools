@@ -31,7 +31,7 @@ export function extractSseData(frame: string): string | null {
 
 export interface EventStreamTarget {
   url: string;
-  /** Required unless streamTransport is given -- see that field. */
+  /** Required unless streamTransport is given — see that field. */
   getAccessToken?: () => Promise<string> | string;
   /** See LiveChatStreamTransport's own doc comment (types.ts). When
    * given, used instead of this module's own fetch()+getAccessToken()
@@ -41,7 +41,7 @@ export interface EventStreamTarget {
 
 /**
  * Opens GET {target.url} as an SSE stream (fetch + ReadableStream, not
- * native EventSource -- EventSource cannot send an Authorization header,
+ * native EventSource — EventSource cannot send an Authorization header,
  * and this API requires a bearer token on every request, including the
  * stream itself) and delivers every normalized event to onEvent until the
  * returned function is called.
@@ -61,7 +61,7 @@ export function openEventStream(target: EventStreamTarget, onEvent: (event: Live
     closed = true;
     controller.abort();
     void reader?.cancel().catch(() => {
-      /* stream already closed/errored -- nothing further to release */
+      /* stream already closed/errored — nothing further to release */
     });
   };
 
@@ -130,7 +130,7 @@ export function openEventStream(target: EventStreamTarget, onEvent: (event: Live
           try {
             parsed = JSON.parse(dataStr);
           } catch {
-            continue; // malformed JSON -- skip this one frame, not the stream
+            continue; // malformed JSON — skip this one frame, not the stream
           }
 
           const event = normalizeWireEvent(parsed);

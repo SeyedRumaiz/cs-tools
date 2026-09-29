@@ -29,7 +29,7 @@ function caseUrl(config: LiveChatClientConfig, caseId: string, suffix: string): 
 
 /** Shared POST-JSON request plumbing for startChat/sendMessage/completeChat.
  * Uses config.requestTransport when given (see that field's own doc
- * comment); otherwise fetches a fresh access token for every call -- see
+ * comment); otherwise fetches a fresh access token for every call — see
  * LiveChatClientConfig.getAccessToken's own doc comment on why this SDK
  * never caches one. Never logs the token or includes it in any thrown
  * error. */
@@ -80,7 +80,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Validates and narrows startChat's raw JSON response -- never a blind
+/** Validates and narrows startChat's raw JSON response — never a blind
  * cast, since this is untrusted network input regardless of what the
  * backend's own contract promises. */
 function parseStartChatResult(raw: unknown): StartChatResult {
@@ -142,7 +142,7 @@ async function completeChat(config: LiveChatClientConfig, caseId: string): Promi
 
 /** Creates a {@link LiveChatClient} bound to config. Validates baseUrl/tenant
  * once, up front. getAccessToken/requestTransport/streamTransport are
- * validated lazily instead, by the calls that actually need them -- a
+ * validated lazily instead, by the calls that actually need them — a
  * consumer that only calls startChat/sendMessage/completeChat need not
  * supply a streamTransport, and vice versa. */
 export function createLiveChatClient(config: LiveChatClientConfig): LiveChatClient {

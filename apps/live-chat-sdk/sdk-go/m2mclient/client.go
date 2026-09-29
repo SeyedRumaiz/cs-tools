@@ -28,7 +28,7 @@
 //
 // Every call here is pure machine-to-machine, trusted entirely at Choreo's
 // API Manager gateway (subscription + client-credentials app auth) rather
-// than validated again in-process by the receiving service -- see any of
+// than validated again in-process by the receiving service — see any of
 // the three wrapping packages' own doc comments for the full rationale this
 // mirrors.
 package m2mclient
@@ -56,7 +56,7 @@ var TokenFetchTimeout = 10 * time.Second
 const requestTimeout = 10 * time.Second
 
 // MaxResponseBodyBytes bounds how much of a response this client reads into
-// memory -- matches all three original clients' own identical constant.
+// memory — matches all three original clients' own identical constant.
 const MaxResponseBodyBytes = 64 << 10 // 64 KiB
 
 // Config configures a Client's OAuth2 client-credentials grant and target.
@@ -71,7 +71,7 @@ type Config struct {
 	ClientSecret string
 	Scopes       []string
 	// InsecureSkipVerify disables TLS certificate verification for the
-	// TokenURL request. LOCAL DEVELOPMENT ONLY -- e.g. a target IdP that is
+	// TokenURL request. LOCAL DEVELOPMENT ONLY — e.g. a target IdP that is
 	// a locally-installed instance serving its own self-signed certificate,
 	// which Go's default transport won't trust. Mirrors
 	// console-chat-bridge's own introspect.Config.InsecureSkipVerify for
@@ -86,7 +86,7 @@ type Client struct {
 	baseURL string
 }
 
-// NewClient constructs a Client. Does not validate connectivity -- the
+// NewClient constructs a Client. Does not validate connectivity — the
 // first Do call surfaces a dial failure; every current caller of this
 // package treats that as best-effort (logged, not fatal to the request
 // that triggered it).
@@ -99,7 +99,7 @@ func NewClient(cfg Config) *Client {
 	}
 	tokenHTTPClient := &http.Client{Timeout: TokenFetchTimeout}
 	if cfg.InsecureSkipVerify {
-		tokenHTTPClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} // #nosec G402 -- opt-in, local-dev-only, see Config.InsecureSkipVerify's doc comment
+		tokenHTTPClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} // #nosec G402 — opt-in, local-dev-only, see Config.InsecureSkipVerify's doc comment
 	}
 	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, tokenHTTPClient)
 	httpClient := cc.Client(tokenCtx)
@@ -123,7 +123,7 @@ func NewClient(cfg Config) *Client {
 // Content-Type (so a caller can override it, though none currently do).
 // Returns the response body, status code, and a non-nil error only for a
 // transport-level failure (dial/timeout/etc.) or a failure to read the
-// response body -- an HTTP-level non-2xx status is returned as a normal
+// response body — an HTTP-level non-2xx status is returned as a normal
 // (body, status, nil) result, since what counts as "failure" differs per
 // caller (e.g. one path passes a specific 409 straight through instead of
 // treating it as an error).
@@ -154,7 +154,7 @@ func (c *Client) Do(ctx context.Context, method, path string, payload []byte, he
 	return respBody, resp.StatusCode, nil
 }
 
-// Success reports whether status is a 2xx -- a small shared helper so every
+// Success reports whether status is a 2xx — a small shared helper so every
 // wrapper package's own "is this an error" check reads the same way.
 func Success(status int) bool {
 	return status >= http.StatusOK && status < http.StatusMultipleChoices

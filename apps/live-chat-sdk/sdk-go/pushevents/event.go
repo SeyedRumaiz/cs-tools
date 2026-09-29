@@ -25,14 +25,14 @@
 // console-chat-bridge's anonymous decode) independently hand-copied this
 // shape. csm-portal/backend's version had already grown fields
 // (ProjectID/Source/Channel/Subject/CustomerEmail/CustomerName/
-// PriorMessages) that backend-v2's own struct never declared -- Go's
+// PriorMessages) that backend-v2's own struct never declared — Go's
 // encoding/json silently drops a field the receiving struct doesn't know
 // about, so that drift was invisible until read closely. Importing this one
 // type from every sender and receiver closes that gap outright instead of
 // relying on the two copies being kept in sync by convention.
 package pushevents
 
-// Type is the value of ChatEvent.Type -- see the const block below for the
+// Type is the value of ChatEvent.Type — see the const block below for the
 // full, confirmed vocabulary (every literal actually used across
 // csm-portal/backend's internal/handler/{chat.go,chat_timeout_sweeper.go},
 // enumerated and traced to its push mechanism during the SDK-extraction
@@ -40,7 +40,7 @@ package pushevents
 type Type string
 
 const (
-	// Pushed via notifyOrigin -- these cross to whichever product/tenant
+	// Pushed via notifyOrigin — these cross to whichever product/tenant
 	// originated the case (customer-portal/backend-v2, console-chat-bridge,
 	// or a future target). This is the vocabulary a live-chat client SDK's
 	// own public event union maps onto 1:1.
@@ -51,12 +51,12 @@ const (
 	TypeConvertedToCase      Type = "converted_to_case"
 	// TypeChatAbandoned fires when a case sat WAITING_FOR_ENGINEER, never
 	// assigned to anyone at all, past chat-routing-service's own
-	// QUEUE_ABANDON_SECONDS -- a genuinely terminal, customer-facing state
+	// QUEUE_ABANDON_SECONDS — a genuinely terminal, customer-facing state
 	// (nobody was ever connected, distinct from TypeEngineerDisconnected's
 	// "an engineer connected then left" semantics).
 	TypeChatAbandoned Type = "chat_abandoned"
 
-	// Pushed via publishToEngineers/publishToEngineer -- CSM-internal only,
+	// Pushed via publishToEngineers/publishToEngineer — CSM-internal only,
 	// an engineer's own case-list/alert UI. Never reaches a tenant/product's
 	// own client.
 	TypeCustomerEscalation Type = "customer_escalation"
@@ -64,18 +64,18 @@ const (
 	TypeSessionAccepted    Type = "session_accepted"
 	TypeSessionClosed      Type = "session_closed"
 	// TypeSessionClosedByCustomer is the engineer-facing twin of a
-	// tenant/customer-initiated completeChat (see EndByTenant) -- mirrors
+	// tenant/customer-initiated completeChat (see EndByTenant) — mirrors
 	// TypeSessionClosed's own role for an engineer-initiated "End session",
 	// so a stale "accepted" alert clears the same way either direction.
 	TypeSessionClosedByCustomer Type = "session_closed_by_customer"
 	// TypeCaseTimedOut fires when an assigned-but-unconfirmed case exceeds
-	// PENDING_TIMEOUT_SECONDS -- the case gets reassigned to a different
+	// PENDING_TIMEOUT_SECONDS — the case gets reassigned to a different
 	// engineer, so it is NOT terminal from the customer's point of view and
 	// deliberately never crosses notifyOrigin (unlike TypeChatAbandoned).
 	TypeCaseTimedOut Type = "case_timed_out"
 )
 
-// PriorMessageRole says who sent one PriorMessage -- duplicated from
+// PriorMessageRole says who sent one PriorMessage — duplicated from
 // chat-routing-service/sdk-go/routingclient.PriorMessageRole rather than
 // imported, matching that module's own stated philosophy (its HTTP API is
 // the only coupling point between independently-versioned SDKs, see its own
@@ -88,7 +88,7 @@ const (
 	PriorMessageRoleAssistant PriorMessageRole = "assistant"
 	// PriorMessageRoleEngineer is only ever produced reading a live,
 	// post-acceptance transcript back (see commentsForWorkItem in
-	// chat-routing-service) -- never written for a pre-escalation message.
+	// chat-routing-service) — never written for a pre-escalation message.
 	PriorMessageRoleEngineer PriorMessageRole = "engineer"
 )
 
@@ -114,17 +114,17 @@ type ChatEvent struct {
 	// from (e.g. "customer-portal"/"" for the existing Novera flow,
 	// "asgardeo"/"ask-ai" for identity-apps' legacy Ask AI escalation path).
 	// Source also doubles as csm-portal/backend's notifyOrigin routing key
-	// -- see ChatHandler.notifierFor. Once console-chat-bridge is
+	// — see ChatHandler.notifierFor. Once console-chat-bridge is
 	// multi-tenant, Source stops varying per tenant (every tenant sharing
 	// one bridge deployment shares the same routing Source); a case's own
-	// tenant identity is carried separately -- see TenantSlug.
+	// tenant identity is carried separately — see TenantSlug.
 	Source  string `json:"source,omitempty"`
 	Channel string `json:"channel,omitempty"`
 	// TenantSlug is the tenant/product config identity a case belongs to
-	// (e.g. "identity-console", "acme-portal") -- distinct from Source
+	// (e.g. "identity-console", "acme-portal") — distinct from Source
 	// (the physical push-target routing key) and Channel (the interaction
 	// channel within a tenant). Server-stamped only, from the resolved
-	// tenant config at escalate time -- never caller-supplied. Used for
+	// tenant config at escalate time — never caller-supplied. Used for
 	// tenant-isolation checks on every case-scoped operation, not for
 	// notifyOrigin routing.
 	TenantSlug    string `json:"tenantSlug,omitempty"`
@@ -133,11 +133,11 @@ type ChatEvent struct {
 	CustomerName  string `json:"customerName,omitempty"`
 	EngineerEmail string `json:"engineerEmail,omitempty"`
 	Message       string `json:"message,omitempty"`
-	// EntityCaseID is set only on a converted_to_case event -- the real
+	// EntityCaseID is set only on a converted_to_case event — the real
 	// entity-service case ID the customer's browser should point to now
 	// that this chat has ended.
 	EntityCaseID string `json:"entityCaseId,omitempty"`
-	// PriorMessages is set only on customer_escalation -- the customer's
+	// PriorMessages is set only on customer_escalation — the customer's
 	// AI-chatbot transcript snapshotted at escalation time, so the
 	// receiving engineer's browser can seed the chat with that context
 	// instead of starting cold.

@@ -1,12 +1,12 @@
 /**
  * Public types for @wso2/live-chat-client, mirroring console-chat-bridge's
  * generic `/v1/{tenant}/...` API. Deliberately excluded: source, channel,
- * tenant, tenantSlug, projectId -- these are derived server-side from the
+ * tenant, tenantSlug, projectId — these are derived server-side from the
  * resolved tenant's own configuration, never client-supplied.
  */
 
 /**
- * One prior message given as context when starting a chat -- e.g. an
+ * One prior message given as context when starting a chat — e.g. an
  * existing AI-chatbot transcript. Never "engineer": a pre-escalation
  * transcript predates any engineer being involved (mirrors
  * router.PriorMessageRole on the backend, minus the read-only "engineer"
@@ -16,23 +16,23 @@
 export interface ChatMessage {
   role: "customer" | "assistant";
   content: string;
-  /** RFC 3339 timestamp. Optional -- omitted messages are timestamped by
+  /** RFC 3339 timestamp. Optional — omitted messages are timestamped by
    * the backend at ingestion time. */
   createdAt?: string;
 }
 
 /** Request body for {@link LiveChatClient.startChat}. */
 export interface StartChatRequest {
-  /** The message that starts the chat. Required -- mirrors the backend's
+  /** The message that starts the chat. Required — mirrors the backend's
    * own required `message` field. */
   message: string;
   /** A stable per-session id the caller already has (e.g. an existing
-   * AI-chatbot conversation this escalates from). Optional -- the backend
+   * AI-chatbot conversation this escalates from). Optional — the backend
    * mints one from the new session's caseId when omitted, so caseId and
    * conversationId start out equal. */
   conversationId?: string;
   subject?: string;
-  /** Display name only -- never used for authorization or attribution.
+  /** Display name only — never used for authorization or attribution.
    * The caller's own identity (from the access token) is what the backend
    * actually attributes the chat to. */
   customerName?: string;
@@ -42,7 +42,7 @@ export interface StartChatRequest {
   /** Arbitrary tenant-supplied key/value data. Subject to the backend's
    * own limits (at most 20 keys, 64 bytes/key, 500 bytes/value) and
    * reserved/sensitive-key rejection (e.g. "tenantSlug", any key
-   * containing "token"/"secret"/"password"/"credential"/"apikey") -- this
+   * containing "token"/"secret"/"password"/"credential"/"apikey") — this
    * SDK does not duplicate those checks client-side; a violation surfaces
    * as a 400 {@link LiveChatError} from startChat. */
   metadata?: Record<string, string>;
@@ -50,7 +50,7 @@ export interface StartChatRequest {
 
 /** Result of {@link LiveChatClient.startChat}. */
 export interface StartChatResult {
-  /** This session's case id -- pass to subscribe/sendMessage/completeChat. */
+  /** This session's case id — pass to subscribe/sendMessage/completeChat. */
   caseId: string;
   /** Echoes back the conversation id (client-supplied or backend-minted). */
   conversationId: string;
@@ -60,7 +60,7 @@ export interface StartChatResult {
  * Normalized live-chat event, delivered via {@link LiveChatClient.subscribe}.
  * Each variant's fields are exactly what the backend guarantees for that
  * wire event today (see events.ts's own doc comment for the verified
- * wire -> public mapping) -- nothing here is speculative optionality.
+ * wire -> public mapping) — nothing here is speculative optionality.
  *
  * Deliberately NOT collapsed into one generic "completed"/"ended" event:
  * "converted" (the chat became a real support case), "disconnected" (the
@@ -75,28 +75,28 @@ export type LiveChatEvent =
   | { type: "disconnected"; engineerEmail: string }
   | { type: "converted"; engineerEmail: string; entityCaseId: string }
   | { type: "expired"; message: string }
-  /** Client/transport-level only -- never a wire event from the backend.
+  /** Client/transport-level only — never a wire event from the backend.
    * See sse.ts for exactly when this is raised (a failed connection
    * attempt, a non-2xx response, or the stream ending unexpectedly). */
   | { type: "error"; message: string };
 
 /**
  * Escape hatch for a consumer whose auth storage strategy makes a raw
- * bearer token string unobtainable in the calling context -- e.g. Asgardeo
+ * bearer token string unobtainable in the calling context — e.g. Asgardeo
  * SPA SDK's `storage: "webWorker"` mode, which deliberately keeps the
  * access token inside a dedicated worker and never returns it to
  * main-thread code (see `@asgardeo/auth-spa`'s own `getAccessToken()` doc
  * comment). When {@link LiveChatClientConfig.requestTransport} is
  * provided, the SDK calls it instead of building its own
  * `fetch()` + `Authorization: Bearer <token>` request for every
- * POST-JSON call (startChat/sendMessage/completeChat) -- wire it to
+ * POST-JSON call (startChat/sendMessage/completeChat) — wire it to
  * whatever your app's own authenticated HTTP client already does (e.g.
  * `AsgardeoSPAClient.getInstance().httpRequest`).
  */
 export interface LiveChatRequestTransport {
   /**
    * Performs an authenticated POST of `body` as JSON to `url` and
-   * resolves with the raw response status and body text -- never throws
+   * resolves with the raw response status and body text — never throws
    * for a non-2xx response (the SDK itself turns that into a
    * {@link LiveChatError}); only reject for a genuine transport failure
    * (e.g. no network).
@@ -114,7 +114,7 @@ export interface LiveChatStreamTransport {
   /**
    * Opens an authenticated GET of `url` and resolves with the response
    * body as a byte stream, already positioned to read from the start.
-   * `signal` aborts when the caller's `unsubscribe()` fires -- honor it so
+   * `signal` aborts when the caller's `unsubscribe()` fires — honor it so
    * the underlying connection actually closes. Reject for anything that
    * prevents a usable stream (a non-2xx response, no body, a transport
    * failure); the SDK surfaces that as an `{ type: "error" }` event.
@@ -133,7 +133,7 @@ export interface LiveChatClientConfig {
    * Returns the caller's own current access token. May be sync or async.
    * Called fresh before every request this SDK builds itself (including
    * once per subscribe() call, since a bearer token can only be attached
-   * at SSE connection time, not per-frame) -- this SDK never caches a
+   * at SSE connection time, not per-frame) — this SDK never caches a
    * token across calls, so token refresh is entirely the caller's
    * responsibility.
    *
@@ -162,7 +162,7 @@ export interface LiveChatClient {
    * GET /v1/{tenant}/chats/{caseId}/events.
    *
    * Returns an unsubscribe function. Calling it aborts the underlying
-   * connection immediately -- no further onEvent calls happen after it
+   * connection immediately — no further onEvent calls happen after it
    * returns, and no reader/connection is left open.
    */
   subscribe(caseId: string, onEvent: (event: LiveChatEvent) => void): () => void;

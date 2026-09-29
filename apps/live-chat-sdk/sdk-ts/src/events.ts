@@ -6,7 +6,7 @@ import type { LiveChatEvent } from "./types.js";
  * be surfaced to the consumer at all.
  *
  * The wire -> public mapping (verified against the actual code paths that
- * push each event, not just the design doc -- see
+ * push each event, not just the design doc — see
  * apps/csm-portal/backend/internal/handler/chat.go's notifyOrigin call
  * sites and chat_timeout_sweeper.go):
  *
@@ -19,7 +19,7 @@ import type { LiveChatEvent } from "./types.js";
  *
  * Every field above is unconditionally set by the backend at every call
  * site that emits that event type (confirmed by reading each one, not
- * assumed) -- this normalizer validates that at runtime anyway (raw JSON
+ * assumed) — this normalizer validates that at runtime anyway (raw JSON
  * over the wire is untrusted input regardless of what the server is
  * supposed to guarantee) and returns null if a required field is missing
  * or the wrong type, rather than constructing a LiveChatEvent with a
@@ -28,7 +28,7 @@ import type { LiveChatEvent } from "./types.js";
  * Every other wire type (case_timed_out, customer_escalation,
  * customer_message, session_accepted, session_closed) is CSM-internal
  * only and is never pushed to a case's origin/SDK stream in the first
- * place -- but if one somehow arrived here (a future backend change, a
+ * place — but if one somehow arrived here (a future backend change, a
  * misconfigured relay), or a type this SDK version simply doesn't know
  * about yet arrives, the default case below ignores it silently rather
  * than surfacing a public "error" event or throwing. This SDK's "error"

@@ -1,7 +1,7 @@
 /**
  * The error type every rejected {@link LiveChatClient} promise throws.
  * Consumers should never need to parse an English message to branch on
- * what went wrong -- check `status` instead (e.g. 403 for a cross-tenant
+ * what went wrong — check `status` instead (e.g. 403 for a cross-tenant
  * case, 409 for "you already have an open chat", 401 for an expired/
  * invalid token).
  *
@@ -15,10 +15,10 @@
 export class LiveChatError extends Error {
   /** HTTP status code, when this error came from an HTTP response. */
   readonly status?: number;
-  /** Always undefined today -- see this class's own doc comment. */
+  /** Always undefined today — see this class's own doc comment. */
   readonly code?: string;
   /** The parsed response body, when the server returned one and it was
-   * valid JSON -- for forward-compatible access to any extra fields a
+   * valid JSON — for forward-compatible access to any extra fields a
    * future backend response might add. Never contains a token: this SDK
    * never sends one in a body, and the backend's own error responses
    * never echo one back. */
@@ -41,7 +41,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Extracts a safe error message from a response body, falling back to
  * fallback when the body isn't the `{"message": string}` shape the
- * backend always sends on an error (or isn't valid JSON at all -- e.g. an
+ * backend always sends on an error (or isn't valid JSON at all — e.g. an
  * intermediary proxy's own HTML error page). Returns the parsed body too,
  * for LiveChatError.details, when it did parse as JSON.
  */
@@ -68,14 +68,14 @@ export function errorFromResponse(status: number, rawBody: string): LiveChatErro
 }
 
 /** True for the DOMException a fetch()/reader.read() raises when its
- * AbortSignal fires -- used to distinguish a deliberate unsubscribe() from
+ * AbortSignal fires — used to distinguish a deliberate unsubscribe() from
  * a genuine transport failure. */
 export function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
 
 /** A safe, non-throwing description of a caught transport-level error
- * (a network failure, not an HTTP response) -- never includes the access
+ * (a network failure, not an HTTP response) — never includes the access
  * token, since it only ever reads err.message. */
 export function describeTransportError(err: unknown): string {
   if (err instanceof Error && err.message) {
