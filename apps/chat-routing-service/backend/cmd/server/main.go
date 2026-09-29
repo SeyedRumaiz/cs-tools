@@ -75,8 +75,8 @@ func main() {
 	// the case
 	pendingTimeout := envDurationSeconds("PENDING_TIMEOUT_SECONDS", 90)
 	// how long a case can sit WAITING_FOR_ENGINEER (never assigned to
-	// anyone at all -- every engineer OFFLINE/BUSY/at capacity when it
-	// arrived) before sweep-timeouts gives up on it -- see router.Router.
+	// anyone at all — every engineer OFFLINE/BUSY/at capacity when it
+	// arrived) before sweep-timeouts gives up on it — see router.Router.
 	// SweepAbandonedQueue's own doc comment for why this exists. Default
 	// of 30 minutes is deliberately much longer than PENDING_TIMEOUT_
 	// SECONDS: that one bounds a single engineer's accept window, this one
@@ -102,10 +102,10 @@ func main() {
 	mux.HandleFunc("POST /route/sweep-timeouts", h.SweepTimeouts)
 	// chat-first escalation: engineer-initiated conversion to a real case
 	mux.HandleFunc("POST /route/convert-to-case", h.ConvertToCase)
-	// tenant-scoped (customer-initiated) session end -- see router.Router.EndByTenant
+	// tenant-scoped (customer-initiated) session end — see router.Router.EndByTenant
 	mux.HandleFunc("POST /route/end-by-tenant", h.EndByTenant)
 
-	// /health sits outside the InternalToken gate below -- ServeMux matches
+	// /health sits outside the InternalToken gate below — ServeMux matches
 	// the exact "GET /health" pattern before falling through to "/", so
 	// liveness checks don't need the shared secret.
 	topMux := http.NewServeMux()
@@ -123,7 +123,7 @@ func main() {
 
 	go func() {
 		slog.Info("Chat Routing Service started", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) { // #nosec G114 -- local prototype service, no external exposure
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) { // #nosec G114 — local prototype service, no external exposure
 			slog.Error("server error", "err", err)
 			os.Exit(1)
 		}
@@ -188,7 +188,7 @@ func mustPort(key, def string) string {
 // loadDotEnv reads a .env file and sets any unset environment variables
 // from it. A missing file is fine; any other read error just gets logged.
 func loadDotEnv(path string) {
-	f, err := os.Open(path) // #nosec G304 -- path is always the hardcoded literal ".env" at the only call site
+	f, err := os.Open(path) // #nosec G304 — path is always the hardcoded literal ".env" at the only call site
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("loadDotEnv: failed to open .env file", "err", err)

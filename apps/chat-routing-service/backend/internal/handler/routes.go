@@ -218,7 +218,7 @@ type acceptRequest struct {
 	CaseID string `json:"caseId"`
 }
 
-// Accept handles POST /route/accept -- confirms userId is accepting caseId
+// Accept handles POST /route/accept — confirms userId is accepting caseId
 // (OPEN -> ACTIVE for that one conversation).
 func (h *RoutingHandler) Accept(w http.ResponseWriter, r *http.Request) {
 	var req acceptRequest
@@ -401,7 +401,7 @@ func (h *RoutingHandler) SetCapacity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// caseInfoResponse mirrors router.CaseInfo -- kept as its own type (rather
+// caseInfoResponse mirrors router.CaseInfo — kept as its own type (rather
 // than encoding router.CaseInfo directly) so this endpoint's wire shape can
 // diverge from the router's internal one if it ever needs to.
 type caseInfoResponse struct {
@@ -471,7 +471,7 @@ type convertToCaseResponse struct {
 	AssignedCase *caseInfoResponse `json:"assignedCase,omitempty"`
 }
 
-// ConvertToCase handles POST /route/convert-to-case -- ends caseId's chat
+// ConvertToCase handles POST /route/convert-to-case — ends caseId's chat
 // session and records entityCaseId against it. userId must be the engineer
 // currently holding caseId in an accepted (ACTIVE) session.
 func (h *RoutingHandler) ConvertToCase(w http.ResponseWriter, r *http.Request) {
@@ -513,7 +513,7 @@ type endByTenantRequest struct {
 	TenantSlug string `json:"tenantSlug"`
 }
 
-// completedResponse mirrors router.CompletedResult -- reused as-is for both
+// completedResponse mirrors router.CompletedResult — reused as-is for both
 // POST /route/completed (which just marshals the result directly, so this
 // type only formalizes that existing shape) and POST /route/end-by-tenant
 // below.

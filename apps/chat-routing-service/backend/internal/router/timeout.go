@@ -30,7 +30,7 @@ import (
 // exactly one of ReassignedTo (with AssignedCase) or Requeued applies,
 // mirroring DeclineResult's shape: a timed-out case is handled the same
 // way as an explicit Decline, just triggered by a sweep instead of a
-// click. Only the timed-out conversation is affected -- the unresponsive
+// click. Only the timed-out conversation is affected — the unresponsive
 // engineer's other concurrent cases, if any, and their own chat_status,
 // are untouched (see the package doc comment on why chat_status is now a
 // pure manual toggle).
@@ -166,7 +166,7 @@ func (r *Router) timeoutOne(ctx context.Context, userID, caseID string, timeout 
 	return result, nil
 }
 
-// AbandonedResult is one case SweepAbandonedQueue gave up on -- it sat in
+// AbandonedResult is one case SweepAbandonedQueue gave up on — it sat in
 // chat_queue as WAITING_FOR_ENGINEER (never assigned to anyone at all,
 // unlike TimeoutResult's PENDING-but-unconfirmed case) for longer than the
 // configured abandon timeout.
@@ -176,11 +176,11 @@ type AbandonedResult struct {
 }
 
 // abandonedCandidate is one row from SweepAbandonedQueue's initial,
-// unlocked scan -- re-verified under lock by abandonOne before anything
+// unlocked scan — re-verified under lock by abandonOne before anything
 // changes, mirroring pendingCandidate/timeoutOne's own pattern.
 //
 // caseID, not conversationID: chat_queue.chat_conversation_id (this
-// column's own legacy name -- see insertQueueRow's doc comment) is keyed
+// column's own legacy name — see insertQueueRow's doc comment) is keyed
 // by CaseID, so that is what this scan actually reads back.
 type abandonedCandidate struct {
 	caseID string
@@ -192,7 +192,7 @@ type abandonedCandidate struct {
 // later.
 //
 // SweepExpiredPending only catches a case that WAS assigned and never
-// confirmed -- a case nobody was ever free to take had no expiry before
+// confirmed — a case nobody was ever free to take had no expiry before
 // this. Left alone, the next engineer to go AVAILABLE would silently
 // claim it, mistaking it for a fresh escalation and losing a unit of
 // their real capacity to it. See
@@ -200,7 +200,7 @@ type abandonedCandidate struct {
 // reproduction.
 //
 // Polled alongside SweepExpiredPending (see csm-portal/backend's
-// StartTimeoutSweeper) -- no background loop of its own. Each call is a
+// StartTimeoutSweeper) — no background loop of its own. Each call is a
 // snapshot; a case crossing the timeout between calls is picked up next
 // time.
 func (r *Router) SweepAbandonedQueue(ctx context.Context, timeout time.Duration) ([]AbandonedResult, error) {
@@ -284,7 +284,7 @@ func (r *Router) abandonOne(ctx context.Context, caseID string, timeout time.Dur
 		}
 
 		// ConversationID comes from the decoded case_info (c.ConversationID),
-		// not the raw queue-key variable (caseID) -- that key is this row's
+		// not the raw queue-key variable (caseID) — that key is this row's
 		// CaseID (see insertQueueRow), and reusing it here as
 		// AbandonedResult.ConversationID would report the wrong identity
 		// for exactly the reason this whole change exists: the two are no

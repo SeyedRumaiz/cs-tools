@@ -60,7 +60,7 @@ import (
 )
 
 // ErrConversationEnded is returned by AddComment when chat-routing-service
-// reports (via 410 Gone) that the case's session already ended -- mirrors
+// reports (via 410 Gone) that the case's session already ended — mirrors
 // router.ErrConversationEnded on the server side. 410 is reserved across
 // this whole client for exactly this meaning; do's own status-to-error
 // mapping below is what makes errors.Is(err, ErrConversationEnded) work
@@ -69,14 +69,14 @@ var ErrConversationEnded = errors.New("chat session has already ended for this c
 
 // ErrCaseAlreadyEnded is returned by Escalate when chat-routing-service
 // reports (via 409 Conflict) that this caseId's chat_conversation has
-// already ended -- mirrors router.ErrCaseAlreadyEnded on the server side.
+// already ended — mirrors router.ErrCaseAlreadyEnded on the server side.
 // See that error's own doc comment for why Escalate rejects this instead
 // of creating a zombie queue row.
 var ErrCaseAlreadyEnded = errors.New("this case has already ended and cannot be escalated again")
 
 // ErrDuplicateOpenChat is returned by CreateWorkItem when chat-routing-
 // service reports (via 409 Conflict) that this customerEmail + projectId
-// already has another, non-ended live chat in progress -- mirrors
+// already has another, non-ended live chat in progress — mirrors
 // router.ErrDuplicateOpenChat on the server side.
 var ErrDuplicateOpenChat = errors.New("this customer already has an open live chat for this project")
 
@@ -158,12 +158,12 @@ type CaseInfo struct {
 	// Ask AI panel via console-chat-bridge). Persisted as-is in
 	// chat_conversation.case_info (existing jsonb column, no migration) and
 	// echoed back by GetCaseInfo so csm-portal/backend can route its
-	// downstream push to the right service. Optional -- an empty Source
+	// downstream push to the right service. Optional — an empty Source
 	// means "customer-portal", the only source that existed before this
 	// field did.
 	Source  string `json:"source,omitempty"`
 	Channel string `json:"channel,omitempty"`
-	// TenantSlug mirrors router.CaseInfo.TenantSlug -- which console-chat-
+	// TenantSlug mirrors router.CaseInfo.TenantSlug — which console-chat-
 	// bridge tenant raised this case through the generic /v1/{tenant}/...
 	// API. Empty for a case raised through the existing customer-portal
 	// flow or console-chat-bridge's legacy /support/chats path.
@@ -172,13 +172,13 @@ type CaseInfo struct {
 	CustomerEmail string `json:"customerEmail,omitempty"`
 	CustomerName  string `json:"customerName,omitempty"`
 	Message       string `json:"message,omitempty"`
-	// PriorMessages mirrors router.CaseInfo.PriorMessages -- the customer's
+	// PriorMessages mirrors router.CaseInfo.PriorMessages — the customer's
 	// AI-chatbot (Novera) conversation history, snapshotted at the moment
 	// of escalation. See PriorMessage below.
 	PriorMessages []PriorMessage `json:"priorMessages,omitempty"`
 }
 
-// PriorMessageRole mirrors router.PriorMessageRole -- who sent one
+// PriorMessageRole mirrors router.PriorMessageRole — who sent one
 // PriorMessage, the customer or the Novera AI assistant. Never an engineer:
 // a pre-escalation transcript predates any engineer being involved.
 type PriorMessageRole string
@@ -188,7 +188,7 @@ const (
 	PriorMessageRoleAssistant PriorMessageRole = "assistant"
 )
 
-// PriorMessage mirrors router.PriorMessage -- one message from the
+// PriorMessage mirrors router.PriorMessage — one message from the
 // customer's AI-chatbot (Novera) conversation that happened before an
 // escalation, supplied by the caller (customer-portal/backend-v2, from the
 // frontend's own visible conversation) and persisted into
@@ -217,9 +217,7 @@ type CaseStatus struct {
 // EscalateResult mirrors router.EscalateResult.
 type EscalateResult struct {
 	// EngineerUserID is the IdP "userid" claim of the engineer this case was
-	// assigned to (see chat-routing-service's migrations/
-	// 000014_rename_engineer_status_table for why this is a user ID rather
-	// than an email) -- empty when Queued.
+	// assigned to — empty when Queued.
 	EngineerUserID string `json:"engineerId,omitempty"`
 	Queued         bool   `json:"queued,omitempty"`
 	Position       int    `json:"position,omitempty"`
@@ -229,7 +227,7 @@ type EscalateResult struct {
 type PresenceResult struct {
 	Applied bool `json:"applied"`
 	// AssignedCases is set when this presence change immediately drained
-	// the queue -- transitioning to AVAILABLE claims cases off the queue
+	// the queue — transitioning to AVAILABLE claims cases off the queue
 	// until either it's empty or the engineer's own capacity is full, so
 	// (unlike Completed/Decline/a timeout, which each free at most one
 	// slot) more than one case can land here at once.
@@ -239,7 +237,7 @@ type PresenceResult struct {
 // CompletedResult mirrors router.CompletedResult.
 type CompletedResult struct {
 	// Ended is true when the given case was actually an open (not
-	// already-ended) conversation assigned to the caller -- false is a
+	// already-ended) conversation assigned to the caller — false is a
 	// no-op, guarding against a duplicate call for a session that already
 	// ended.
 	Ended bool `json:"ended,omitempty"`
@@ -247,7 +245,7 @@ type CompletedResult struct {
 	// was immediately backfilled from the waiting queue.
 	AssignedCase *CaseInfo `json:"assignedCase,omitempty"`
 	// AssignedEngineerID mirrors router.CompletedResult.AssignedEngineerID
-	// -- the engineer AssignedCase was just assigned to. Only meaningful
+	// — the engineer AssignedCase was just assigned to. Only meaningful
 	// (and only ever populated) alongside EndByTenant, whose caller has no
 	// other way to know which engineer to deliver AssignedCase to.
 	AssignedEngineerID string `json:"assignedEngineerId,omitempty"`
@@ -270,11 +268,11 @@ type AcceptResult struct {
 	Applied bool `json:"applied"`
 }
 
-// TimeoutResult mirrors router.TimeoutResult -- one conversation's outcome
+// TimeoutResult mirrors router.TimeoutResult — one conversation's outcome
 // from a call to SweepTimeouts: it had been assigned to an engineer and
 // never accepted within chat-routing-service's own configured
 // PENDING_TIMEOUT_SECONDS, so that service reassigned or requeued it. The
-// unresponsive engineer's chat_status is left untouched -- they may well
+// unresponsive engineer's chat_status is left untouched — they may well
 // be mid-conversation on a different concurrent case at the same time (see
 // router.Router.SweepExpiredPending's own doc comment).
 type TimeoutResult struct {
@@ -353,7 +351,7 @@ func (c *Client) Escalate(ctx context.Context, ci CaseInfo) (EscalateResult, err
 // SetPresence calls POST /route/presence, applying an engineer's requested
 // status change (see router.Router.SetPresence's doc comment for the full
 // state machine this triggers). userID is the caller's stable per-account
-// identifier (e.g. an IdP "userid" claim) -- the routing service's
+// identifier (e.g. an IdP "userid" claim) — the routing service's
 // cs_engineer_status table is keyed by it directly, so this is the only
 // identifier this call needs, on both a first-contact and a later call for
 // the same engineer.
@@ -368,7 +366,7 @@ func (c *Client) SetPresence(ctx context.Context, userID string, status Status) 
 }
 
 // Completed calls POST /route/completed, reporting that userID just ended
-// their session on caseID -- one of possibly several concurrent cases they
+// their session on caseID — one of possibly several concurrent cases they
 // hold. A no-op (Ended: false) if caseID isn't currently an open
 // conversation assigned to userID.
 func (c *Client) Completed(ctx context.Context, userID, caseID string) (CompletedResult, error) {
@@ -394,7 +392,7 @@ func (c *Client) Decline(ctx context.Context, userID, caseID string) (DeclineRes
 }
 
 // Accept calls POST /route/accept, confirming userID is accepting the case
-// (caseID) they were assigned -- moves that one conversation from OPEN to
+// (caseID) they were assigned — moves that one conversation from OPEN to
 // ACTIVE server-side; any other concurrent case userID holds is untouched
 // either way. See router.Router.Accept's own doc comment for when Applied
 // comes back false (a stale accept) rather than an error.
@@ -408,14 +406,14 @@ func (c *Client) Accept(ctx context.Context, userID, caseID string) (AcceptResul
 	return out, err
 }
 
-// CreateWorkItem calls POST /route/workitem -- LOCAL STAND-IN persistence,
-// see chat-routing-service's internal/router/workitem.go package doc
-// comment. Creates the work_item + chat_conversation pair (plus the first
+// CreateWorkItem calls POST /route/workitem — stand-in persistence, see
+// chat-routing-service's internal/router/workitem.go package doc comment.
+// Creates the work_item + chat_conversation pair (plus the first
 // comment, if ci.Message is non-empty) for a brand-new escalation, and
 // durably stores ci itself as the case's display blob (see that method's
 // own doc comment on why this now outlives Accept).
 //
-// Must be called BEFORE Escalate for the same case -- Escalate's own
+// Must be called BEFORE Escalate for the same case — Escalate's own
 // assignment now writes chat_conversation.assignee_id directly, so this
 // row must already exist by the time Escalate runs (see router.Router.
 // CreateWorkItem's doc comment). ci.CustomerEmail attributes the work item
@@ -424,11 +422,11 @@ func (c *Client) CreateWorkItem(ctx context.Context, ci CaseInfo) error {
 	return c.do(ctx, http.MethodPost, "/route/workitem", ci, nil, ErrDuplicateOpenChat)
 }
 
-// AddComment calls POST /route/comment -- LOCAL STAND-IN persistence, same
+// AddComment calls POST /route/comment — stand-in persistence, same
 // caveat as CreateWorkItem above. Used for both directions of a live chat
 // message (customer and engineer) so the whole transcript lands in one
 // place. authorEmail is a free-text attribution column (comment.
-// created_by), not an identity join -- also unaffected by the engineer
+// created_by), not an identity join — also unaffected by the engineer
 // user-ID switch.
 func (c *Client) AddComment(ctx context.Context, caseID, authorEmail, content string) error {
 	body := struct {
@@ -439,7 +437,7 @@ func (c *Client) AddComment(ctx context.Context, caseID, authorEmail, content st
 	return c.do(ctx, http.MethodPost, "/route/comment", body, nil, nil)
 }
 
-// PresenceDetail is GetPresence's result -- the engineer's manual
+// PresenceDetail is GetPresence's result — the engineer's manual
 // chat_status, their concurrent-chat capacity and current load, and every
 // case they're currently holding (pending or accepted alike) so a caller
 // whose own UI state was lost can rehydrate all of it, instead of leaving
@@ -453,7 +451,7 @@ type PresenceDetail struct {
 	AtCapacity         bool         `json:"atCapacity"`
 	Cases              []CaseStatus `json:"cases,omitempty"`
 	// PendingTimeoutSeconds is chat-routing-service's own configured
-	// PENDING_TIMEOUT_SECONDS -- always present, a constant rather than
+	// PENDING_TIMEOUT_SECONDS — always present, a constant rather than
 	// per-engineer state.
 	PendingTimeoutSeconds int `json:"pendingTimeoutSeconds"`
 }
@@ -473,11 +471,11 @@ func (c *Client) GetPresence(ctx context.Context, userID string) (PresenceDetail
 	return out, nil
 }
 
-// AbandonedResult mirrors router.AbandonedResult -- one case SweepTimeouts
+// AbandonedResult mirrors router.AbandonedResult — one case SweepTimeouts
 // gave up on because it sat WAITING_FOR_ENGINEER (never assigned to anyone
 // at all) past chat-routing-service's own configured QUEUE_ABANDON_SECONDS.
 // Distinct from TimeoutResult, which covers a case that WAS assigned to a
-// specific engineer and never confirmed -- see router.Router.
+// specific engineer and never confirmed — see router.Router.
 // SweepAbandonedQueue's own doc comment for why this second, longer-fused
 // sweep exists: without it, an old queued escalation nobody was ever free
 // to take could sit forever and later be silently claimed by whichever
@@ -503,7 +501,7 @@ type SweepResult struct {
 // QUEUE_ABANDON_SECONDS (see AbandonedResult). Meant to be polled
 // periodically by whichever caller owns delivering the result to the
 // newly-assigned engineer (see apps/csm-portal/backend/internal/handler's
-// ChatHandler.StartTimeoutSweeper) -- this service never pushes anything
+// ChatHandler.StartTimeoutSweeper) — this service never pushes anything
 // itself, see this package's own "Synchronous HTTP only" design note
 // above.
 func (c *Client) SweepTimeouts(ctx context.Context) (SweepResult, error) {
@@ -515,7 +513,7 @@ func (c *Client) SweepTimeouts(ctx context.Context) (SweepResult, error) {
 // SetCapacityResult mirrors router.SetCapacityResult.
 type SetCapacityResult struct {
 	// AssignedCases is set when raising the limit immediately drained the
-	// waiting queue into this engineer's newly-opened capacity -- same
+	// waiting queue into this engineer's newly-opened capacity — same
 	// queue-drain semantics as PresenceResult.AssignedCases (more than one
 	// case can land here at once). Deliver each one to the engineer the
 	// same way a fresh escalation would be.
@@ -524,11 +522,11 @@ type SetCapacityResult struct {
 
 // SetMaxConcurrentChats calls PATCH /route/capacity, setting userID's
 // configurable concurrent-chat capacity (see router.Router.
-// SetMaxConcurrentChats). max must be between 1 and 10 inclusive -- an
+// SetMaxConcurrentChats). max must be between 1 and 10 inclusive — an
 // out-of-range value gets a 400 from that endpoint, surfaced here as a
 // plain error. Raising the limit while this engineer is AVAILABLE can
 // immediately drain the waiting queue into the newly-opened capacity (see
-// SetCapacityResult.AssignedCases) -- callers must deliver each one to the
+// SetCapacityResult.AssignedCases) — callers must deliver each one to the
 // engineer, the same way HandleSetPresence already does for its own
 // queue-drain (see apps/csm-portal/backend/internal/handler/chat.go's
 // HandleSetMaxConcurrentChats).
@@ -573,7 +571,7 @@ func (c *Client) ConvertToCase(ctx context.Context, userID, caseID, entityCaseID
 }
 
 // EndByTenant calls POST /route/end-by-tenant, ending caseID's chat session
-// on behalf of tenantSlug rather than a specific engineer -- used by
+// on behalf of tenantSlug rather than a specific engineer — used by
 // console-chat-bridge's tenant-scoped POST /v1/{tenant}/chats/{caseId}/
 // complete route (see router.Router.EndByTenant for the full lifecycle:
 // same engineer-capacity backfill as Completed when the case was assigned,
