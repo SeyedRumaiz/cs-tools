@@ -50,6 +50,14 @@ func userIDTokenFromContext(ctx context.Context) string {
 	return v
 }
 
+// UserIDTokenFromContext is the exported form of userIDTokenFromContext, for
+// callers outside this package (see internal/handler.HandleConvertToCase)
+// that need to forward the converting engineer's own x-user-id-token to
+// another internal service rather than to entity-service directly.
+func UserIDTokenFromContext(ctx context.Context) string {
+	return userIDTokenFromContext(ctx)
+}
+
 // WithCorrelationID returns a copy of ctx carrying the correlation ID to be
 // forwarded as X-CSM-Correlation-ID on every outgoing entity request.
 func WithCorrelationID(ctx context.Context, id string) context.Context {

@@ -17,6 +17,7 @@
 package middleware
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -45,6 +46,38 @@ func (rw *responseWriter) Flush() {
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// deadlineSetter matches the unexported interface net/http's response type
+// implements, which http.ResponseController relies on via a type assertion.
+type deadlineSetter interface {
+	SetWriteDeadline(time.Time) error
+	SetReadDeadline(time.Time) error
+}
+
+// SetWriteDeadline and SetReadDeadline forward to the underlying
+// ResponseWriter, letting http.NewResponseController(w).SetWriteDeadline/
+// SetReadDeadline work through this wrapper. Needed for handlers whose
+// connection legitimately outlives the server's global WriteTimeout — e.g.
+// StreamEngineerAlerts's long-lived SSE connection, which now shares the
+// main API listener (see cmd/server/main.go) instead of a dedicated
+// zero-timeout listener of its own, and clears its own write deadline on
+// entry (see internal/handler/chat_stream.go). Mirrors
+// customer-portal/backend-v2's identically-named middleware.
+func (rw *responseWriter) SetWriteDeadline(deadline time.Time) error {
+	ds, ok := rw.ResponseWriter.(deadlineSetter)
+	if !ok {
+		return fmt.Errorf("underlying ResponseWriter does not support setting a write deadline")
+	}
+	return ds.SetWriteDeadline(deadline)
+}
+
+func (rw *responseWriter) SetReadDeadline(deadline time.Time) error {
+	ds, ok := rw.ResponseWriter.(deadlineSetter)
+	if !ok {
+		return fmt.Errorf("underlying ResponseWriter does not support setting a read deadline")
+	}
+	return ds.SetReadDeadline(deadline)
 }
 
 // Logger is an HTTP middleware that logs each completed request via slog. The

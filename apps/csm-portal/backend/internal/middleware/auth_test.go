@@ -195,6 +195,80 @@ func TestAuth_SecurityHeaders(t *testing.T) {
 	}
 }
 
+// ----- M2M-exempt internal routes -----
+
+// TestAuth_M2MExemptRoutes verifies that the two pure machine-to-machine
+// internal chat routes (see middleware.m2mExemptRoutes) bypass token
+// validation entirely -- no x-jwt-assertion header needed -- while a
+// same-path GET (the wrong method) and an unrelated POST still require one,
+// so the exemption is scoped to exactly "METHOD path", not the path alone.
+func TestAuth_M2MExemptRoutes(t *testing.T) {
+	exempt := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/internal/chat/escalate"},
+		{http.MethodPost, "/internal/chat/customer-message"},
+		{http.MethodPost, "/internal/chat/complete"},
+		{http.MethodGet, "/internal/chat/cases/11111111-1111-1111-1111-111111111111"},
+	}
+	for _, tc := range exempt {
+		t.Run(tc.method+" "+tc.path+" skips auth with no token", func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			w := serve(r)
+			if w.Code != http.StatusOK {
+				t.Errorf("status = %d, want 200 (exempt route, no token needed)", w.Code)
+			}
+		})
+	}
+
+	notExempt := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"GET on an exempt path still requires auth", http.MethodGet, "/internal/chat/escalate"},
+		{"unrelated internal-looking path still requires auth", http.MethodPost, "/internal/chat/escalate-typo"},
+		{"bare case-lookup prefix with no caseId segment still requires auth", http.MethodGet, "/internal/chat/cases/"},
+		{"bare case-lookup prefix with no trailing slash at all still requires auth", http.MethodGet, "/internal/chat/cases"},
+	}
+	for _, tc := range notExempt {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			w := serve(r)
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401 (not an exempt route)", w.Code)
+			}
+		})
+	}
+}
+
+// TestAuth_M2MExemptRoutes_PathTraversal is a regression test for a bug a
+// live E2E probe found: isM2MExempt originally compared against the raw,
+// unnormalized r.URL.Path, so a dirty path like
+// "/internal/chat/cases/../../../users/me" satisfied
+// m2mExemptPathPrefixes' literal string prefix even though it
+// canonicalizes (the same way net/http.ServeMux's own routing eventually
+// would) to an unrelated, non-exempt route. isM2MExempt must clean the
+// path before matching so this can never skip Auth for anything but a
+// genuine case-lookup request.
+func TestAuth_M2MExemptRoutes_PathTraversal(t *testing.T) {
+	dirty := []string{
+		"/internal/chat/cases/../../../users/me",
+		"/internal/chat/cases/../../users/me",
+		"/internal/chat/cases/foo/../../../cases/search",
+	}
+	for _, p := range dirty {
+		t.Run(p, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, p, nil)
+			w := serve(r)
+			if w.Code == http.StatusOK {
+				t.Errorf("status = %d, want anything but 200 -- a dirty path must never be treated as the exempt case-lookup route", w.Code)
+			}
+		})
+	}
+}
+
 // ----- error response shape -----
 
 func TestAuth_ErrorResponse(t *testing.T) {
@@ -215,4 +289,161 @@ func TestAuth_ErrorResponse(t *testing.T) {
 			t.Error("expected non-empty message in error response")
 		}
 	})
+}
+
+// ----- local-development Authorization: Bearer fallback -----
+
+// newTestJWKSServer starts a local httptest server serving a syntactically
+// valid, empty JWKS document, purely so Auth's construction-time JWKS fetch
+// succeeds when a test needs TokenValidatorEnabled=true. None of the tests
+// below that use it ever reach real signature verification -- each one is
+// rejected (missing/empty token) before the keyFunc is ever invoked -- so an
+// empty keyset is sufficient.
+func newTestJWKSServer(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"keys":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func tokenFor(email string) string {
+	return makeTestJWT(map[string]any{
+		"email":  email,
+		"userid": "uid-" + email,
+	})
+}
+
+func serveWithConfig(cfg middleware.Config, r *http.Request) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	middleware.Auth(cfg)(noopHandler).ServeHTTP(w, r)
+	return w
+}
+
+func TestAuth_ValidatorEnabled_NoAssertion_Rejected(t *testing.T) {
+	cfg := testConfig()
+	cfg.TokenValidatorEnabled = true
+	cfg.JWKSEndpoint = newTestJWKSServer(t)
+
+	tests := []struct {
+		name    string
+		headers func(*http.Request)
+	}{
+		{"no headers at all", func(_ *http.Request) {}},
+		{
+			"Authorization: Bearer present but no x-jwt-assertion",
+			func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+validToken()) },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/cases", nil)
+			tc.headers(r)
+			w := serveWithConfig(cfg, r)
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401 (the Authorization fallback must never apply when TokenValidatorEnabled=true)", w.Code)
+			}
+		})
+	}
+}
+
+func TestAuth_ValidatorDisabled_BearerFallback_Accepted(t *testing.T) {
+	cfg := testConfig() // TokenValidatorEnabled: false
+
+	t.Run("Bearer token accepted with no x-jwt-assertion", func(t *testing.T) {
+		var captured *middleware.UserInfo
+		capture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			captured = middleware.UserInfoFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		})
+
+		r := httptest.NewRequest(http.MethodGet, "/cases", nil)
+		r.Header.Set("Authorization", "Bearer "+tokenFor("bearer-user@example.com"))
+		w := httptest.NewRecorder()
+		middleware.Auth(cfg)(capture).ServeHTTP(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if captured == nil {
+			t.Fatal("UserInfo not set in context")
+		}
+		if captured.Email != "bearer-user@example.com" {
+			t.Errorf("email = %q, want bearer-user@example.com", captured.Email)
+		}
+	})
+
+	t.Run("lowercase bearer scheme also accepted", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/cases", nil)
+		r.Header.Set("Authorization", "bearer "+validToken())
+		w := serveWithConfig(cfg, r)
+		if w.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200", w.Code)
+		}
+	})
+}
+
+func TestAuth_AssertionTakesPrecedenceOverBearer(t *testing.T) {
+	cfg := testConfig() // TokenValidatorEnabled: false
+
+	t.Run("x-jwt-assertion identity wins when both headers are present", func(t *testing.T) {
+		var captured *middleware.UserInfo
+		capture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			captured = middleware.UserInfoFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		})
+
+		r := httptest.NewRequest(http.MethodGet, "/cases", nil)
+		r.Header.Set("x-jwt-assertion", tokenFor("assertion-user@example.com"))
+		r.Header.Set("Authorization", "Bearer "+tokenFor("bearer-user@example.com"))
+		w := httptest.NewRecorder()
+		middleware.Auth(cfg)(capture).ServeHTTP(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if captured == nil {
+			t.Fatal("UserInfo not set in context")
+		}
+		if captured.Email != "assertion-user@example.com" {
+			t.Errorf("email = %q, want assertion-user@example.com (x-jwt-assertion should win)", captured.Email)
+		}
+	})
+
+	t.Run("a malformed Authorization header does not block a valid x-jwt-assertion", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/cases", nil)
+		r.Header.Set("x-jwt-assertion", validToken())
+		r.Header.Set("Authorization", "not-a-bearer-token")
+		w := serve(r)
+		if w.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200 (x-jwt-assertion alone is sufficient)", w.Code)
+		}
+	})
+}
+
+func TestAuth_MalformedOrMissingBearer_Rejected(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers func(*http.Request)
+	}{
+		{"no Authorization header at all", func(_ *http.Request) {}},
+		{"empty Authorization header", func(r *http.Request) { r.Header.Set("Authorization", "") }},
+		{"wrong scheme", func(r *http.Request) { r.Header.Set("Authorization", "Basic "+validToken()) }},
+		{"scheme with no token", func(r *http.Request) { r.Header.Set("Authorization", "Bearer") }},
+		{"scheme with no space", func(r *http.Request) { r.Header.Set("Authorization", "Bearer"+validToken()) }},
+		{"Bearer with only whitespace as the token", func(r *http.Request) { r.Header.Set("Authorization", "Bearer    ") }},
+		{"malformed token: too few JWT segments", func(r *http.Request) { r.Header.Set("Authorization", "Bearer only-one-segment") }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/cases", nil)
+			tc.headers(r)
+			w := serve(r) // uses testConfig(): TokenValidatorEnabled false
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", w.Code)
+			}
+		})
+	}
 }

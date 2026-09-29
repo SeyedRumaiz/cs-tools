@@ -64,6 +64,10 @@ vi.mock("@providers/IdleTimeoutProvider", () => ({
 vi.mock("@context/case-tabs/CaseTabsContext", () => ({
   CaseTabsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
+
+vi.mock("@context/chat-sessions/ChatSessionsContext", () => ({
+  ChatSessionsProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
 vi.mock("@features/case-tabs/components/CaseTabsWorkspace", () => ({
   CaseTabsContentHost: () => null,
   CaseTabStripBar: () => null,

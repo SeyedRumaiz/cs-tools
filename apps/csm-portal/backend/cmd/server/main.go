@@ -33,6 +33,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/sdk-go/routingclient"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/chatnotify"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/dashboard"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/directory"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/entity"
@@ -42,6 +44,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/notifications"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/scim"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/sftpgo"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/stream"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/updates"
 )
 
@@ -59,9 +62,10 @@ func main() {
 	// request path.
 	dir := loadDirectory()
 
-	// All upstream service clients (entity, updates, SCIM, and future notification
-	// channels) authenticate as the same OAuth2 client-credentials app; only the
-	// base URL and scopes differ per service.
+	// All upstream service clients (entity, updates, SCIM, chatnotify, and
+	// future notification channels) authenticate as the same OAuth2
+	// client-credentials app; only the base URL and scopes differ per
+	// service.
 	oauth2ClientID := mustEnv("OAUTH2_CLIENT_ID")
 	oauth2ClientSecret := mustEnv("OAUTH2_CLIENT_SECRET")
 	oauth2TokenURL := mustEnv("OAUTH2_TOKEN_URL")
@@ -78,6 +82,81 @@ func main() {
 	customerEntityClient := entity.NewCustomerEntityClient(customerEntityCfg)
 
 	caseHandler := handler.NewCaseHandler(customerEntityClient)
+
+	// Live-engineer-chat escalation feature (Novera chat "Talk to a live
+	// engineer" button). engineerHub fans SSE alerts out to connected
+	// engineers (StreamEngineerAlerts, registered on the main API listener
+	// below); chatNotifyClient/routingClient are this backend's two
+	// outbound integrations (customer-portal/backend-v2's internal
+	// listener, and the standalone chat-routing-service). See .env.example
+	// for the corresponding env vars.
+	engineerHub := stream.NewBroadcastHub()
+	chatNotifyClient := chatnotify.NewClient(chatnotify.Config{
+		BaseURL:      envOrDefault("CUSTOMER_PORTAL_INTERNAL_BASE_URL", "http://localhost:8081"),
+		TokenURL:     oauth2TokenURL,
+		ClientID:     oauth2ClientID,
+		ClientSecret: oauth2ClientSecret,
+		Scopes:       splitComma(os.Getenv("CHAT_NOTIFY_SCOPES")),
+	})
+	// chatNotifiers maps a case's Source (see handler.chatEvent's own doc
+	// comment) to the downstream service its events push to.
+	// "customer-portal" (== handler.defaultNotifySource, used for every
+	// case with an empty Source too) is the pre-existing, always-on target.
+	// "asgardeo" is new: identity-apps' Ask AI panel escalates through
+	// console-chat-bridge (see that service's own README), a separate small
+	// backend, not customer-portal/backend-v2 -- only wired up when
+	// CONSOLE_CHAT_BRIDGE_BASE_URL is actually configured, so a deployment
+	// that hasn't set this up yet behaves exactly as before (an
+	// "asgardeo"-sourced case would fall back to the customer-portal
+	// target via notifierFor's own fallback, which is a no-op push to a
+	// service that doesn't know that case -- harmless, logged, matches
+	// this feature's existing best-effort philosophy for every other
+	// notify failure).
+	chatNotifiers := map[string]handler.ChatEventPusher{
+		"customer-portal": chatNotifyClient,
+	}
+	if bridgeBaseURL := os.Getenv("CONSOLE_CHAT_BRIDGE_BASE_URL"); bridgeBaseURL != "" {
+		// Reuses chatnotify.Client as-is: it already POSTs PushEvent's
+		// payload to "{BaseURL}/internal/chat-events", which is exactly the
+		// route shape console-chat-bridge implements for the same reason
+		// backend-v2 does (see that service's internal/handler/chats.go).
+		// CreateCase is also on this interface but console-chat-bridge
+		// does not implement /internal/chat/create-case -- HandleConvertToCase
+		// is not a meaningful action for an Ask AI-originated case (Console
+		// admins don't have entity-service "cases"), so that method is
+		// never expected to be called against this target.
+		bridgeNotifier := chatnotify.NewClient(chatnotify.Config{
+			BaseURL:      bridgeBaseURL,
+			TokenURL:     envOrDefault("CONSOLE_CHAT_BRIDGE_TOKEN_URL", oauth2TokenURL),
+			ClientID:     envOrDefault("CONSOLE_CHAT_BRIDGE_CLIENT_ID", oauth2ClientID),
+			ClientSecret: envOrDefault("CONSOLE_CHAT_BRIDGE_CLIENT_SECRET", oauth2ClientSecret),
+			Scopes:       splitComma(os.Getenv("CONSOLE_CHAT_BRIDGE_NOTIFY_SCOPES")),
+			// Local-dev-only: CONSOLE_CHAT_BRIDGE_TOKEN_URL points at a
+			// locally-installed WSO2 IS's self-signed certificate in that
+			// setup -- see chatnotify.Config.InsecureSkipVerify's own doc
+			// comment, and console-chat-bridge's identical
+			// INTROSPECTION_INSECURE_SKIP_VERIFY for the same issue on the
+			// other leg of this same integration.
+			InsecureSkipVerify: envOrDefault("CONSOLE_CHAT_BRIDGE_TOKEN_INSECURE_SKIP_VERIFY", "false") == "true",
+		})
+		// One HTTP client, two routing aliases: "asgardeo" is the legacy
+		// Source every case raised through console-chat-bridge's compat
+		// /support/chats path still carries; "console-chat-bridge" is the
+		// new default RoutingSource every /v1/{tenant}/... tenant uses
+		// unless it overrides one explicitly (see console-chat-bridge's
+		// internal/tenant package). Registering both keys against the same
+		// notifier here, once, means no future tenant needs a csm-portal/
+		// backend code change to have its events routed correctly.
+		chatNotifiers["asgardeo"] = bridgeNotifier
+		chatNotifiers["console-chat-bridge"] = bridgeNotifier
+	}
+	routingClient := routingclient.NewClient(routingclient.Config{
+		BaseURL:       envOrDefault("ROUTING_SERVICE_BASE_URL", "http://localhost:9096"),
+		InternalToken: os.Getenv("ROUTING_SERVICE_TOKEN"),
+	})
+	chatHandler := handler.NewChatHandler(customerEntityClient, engineerHub, chatNotifiers, routingClient)
+	engineerTimeoutSweepInterval := envDurationSeconds("ENGINEER_TIMEOUT_SWEEP_INTERVAL_SECONDS", 15)
+
 	dashboardHandler := handler.NewDashboardHandler()
 	metadataHandler := handler.NewMetadataHandler()
 	accountHandler := handler.NewAccountHandler(customerEntityClient)
@@ -301,15 +380,41 @@ func main() {
 	// Called manually today; not yet wired into real incident/case creation.
 	mux.HandleFunc("POST /notifications/google-chat/alerts", notificationHandler.PostGoogleChatAlert)
 
-	// Built once and reused on both listeners below: Auth() does a real JWKS
-	// fetch (when TokenValidatorEnabled), so calling it a second time would
-	// duplicate that startup network round-trip and double the chance of a
-	// transient JWKS hiccup aborting startup, for no benefit — both
-	// listeners validate the exact same tokens the exact same way.
-	authMiddleware := middleware.Auth(authCfg)
+	// Live-engineer-chat: engineer-facing session lifecycle + presence, the
+	// long-lived alert stream, and the two service-to-service receivers
+	// customer-portal/backend-v2's internal/csmchat.Client calls. All on
+	// this same main API listener — the SSE route's own long-lived
+	// connection is handled by clearing its write deadline (see
+	// StreamEngineerAlerts), not by a separate listener. The engineer-facing
+	// routes sit behind the same CORS/Auth chain as every other route above
+	// (a browser's x-jwt-assertion); the two internal routes below are pure
+	// M2M calls with no end-user identity involved and are exempted from
+	// Auth entirely (see middleware.m2mExemptRoutes) — they authenticate
+	// via a plain OAuth2 client-credentials token trusted at Choreo's API
+	// Manager gateway, the same established pattern
+	// integrations/csm-integration-service uses, not a bespoke shared
+	// secret and not the browser-facing JWT check.
+	mux.HandleFunc("POST /chat/sessions/{id}/accept", chatHandler.HandleAcceptSession)
+	mux.HandleFunc("POST /chat/sessions/{id}/messages", chatHandler.HandleEngineerMessage)
+	mux.HandleFunc("POST /chat/sessions/{id}/complete", chatHandler.HandleCompleteSession)
+	mux.HandleFunc("POST /chat/sessions/{id}/decline", chatHandler.HandleDeclineSession)
+	mux.HandleFunc("POST /chat/sessions/{id}/convert-to-case", chatHandler.HandleConvertToCase)
+	mux.HandleFunc("POST /engineers/me/status", chatHandler.HandleSetPresence)
+	mux.HandleFunc("GET /engineers/me/status", chatHandler.HandleGetPresence)
+	mux.HandleFunc("PATCH /engineers/me/capacity", chatHandler.HandleSetMaxConcurrentChats)
+	mux.HandleFunc("GET /chat/alerts/stream", chatHandler.StreamEngineerAlerts)
+	mux.HandleFunc("POST /internal/chat/escalate", chatHandler.HandleEscalate)
+	mux.HandleFunc("POST /internal/chat/customer-message", chatHandler.HandleCustomerMessage)
+	// Tenant-ownership + tenant-initiated completion -- called by
+	// console-chat-bridge's requireTenantCase and completeChat route
+	// respectively (see middleware.m2mExemptRoutes/m2mExemptPathPrefixes).
+	mux.HandleFunc("GET /internal/chat/cases/{caseId}", chatHandler.HandleGetCaseOwnership)
+	mux.HandleFunc("POST /internal/chat/complete", chatHandler.HandleCompleteByTenant)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	go chatHandler.StartTimeoutSweeper(ctx, engineerTimeoutSweepInterval)
 
 	addr := ":" + mustPort("PORT", "8080")
 
@@ -333,7 +438,7 @@ func main() {
 		Handler: middleware.SecurityHeaders(
 			middleware.CORS(splitComma(os.Getenv("CORS_ALLOWED_ORIGINS")))(
 				middleware.CorrelationID(
-					authMiddleware(
+					middleware.Auth(authCfg)(
 						middleware.Logger(mux),
 					),
 				),
@@ -359,12 +464,8 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	var srvErr error
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		srvErr = err
-	}
-	if srvErr != nil {
-		slog.Error("graceful shutdown failed", "err", srvErr)
+		slog.Error("graceful shutdown failed", "err", err)
 		os.Exit(1)
 	}
 
@@ -700,6 +801,20 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envDurationSeconds returns the given environment variable (or defSeconds
+// if unset) as a time.Duration, interpreting the value as a plain whole
+// number of seconds (e.g. "15", not "15s"). Exits the process if set to
+// something else, matching mustPort's fail-fast-at-startup style.
+func envDurationSeconds(key string, defSeconds int) time.Duration {
+	v := envOrDefault(key, strconv.Itoa(defSeconds))
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs <= 0 {
+		slog.Error("environment variable must be a positive whole number of seconds", "key", key, "value", v)
+		os.Exit(1)
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // mustPort returns the value of the given environment variable (or def if
