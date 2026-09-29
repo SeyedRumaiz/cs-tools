@@ -130,11 +130,9 @@ func NewClient(cfg Config) *Client {
 // independently, and this HTTP API is their only coupling point.
 //
 // Never PENDING: "pending" (assigned, not yet accepted) is a per-case fact
-// now, not a top-level engineer status — see CaseStatus.Pending. Removed
-// alongside the 2026-09-10 concurrent-chat-capacity change (see the
-// project's db-schema-review-2026-09-07-outcomes.md); a caller still
-// sending "PENDING" to SetPresence gets a 400 from that endpoint, same as
-// it always has for any other invalid value.
+// now, not a top-level engineer status — see CaseStatus.Pending. A caller
+// still sending "PENDING" to SetPresence gets a 400 from that endpoint,
+// same as it always has for any other invalid value.
 type Status string
 
 const (
@@ -275,8 +273,7 @@ type AcceptResult struct {
 // TimeoutResult mirrors router.TimeoutResult -- one conversation's outcome
 // from a call to SweepTimeouts: it had been assigned to an engineer and
 // never accepted within chat-routing-service's own configured
-// PENDING_TIMEOUT_SECONDS, so that service reassigned or requeued it.
-// Unlike before the 2026-09-10 concurrent-chat-capacity change, the
+// PENDING_TIMEOUT_SECONDS, so that service reassigned or requeued it. The
 // unresponsive engineer's chat_status is left untouched -- they may well
 // be mid-conversation on a different concurrent case at the same time (see
 // router.Router.SweepExpiredPending's own doc comment).
@@ -448,8 +445,7 @@ func (c *Client) AddComment(ctx context.Context, caseID, authorEmail, content st
 // whose own UI state was lost can rehydrate all of it, instead of leaving
 // the engineer stuck with nothing to act on. Replaces the old single
 // Status/CurrentCase/PendingSince shape now that an engineer can hold more
-// than one case at once (see the 2026-09-10 concurrent-chat-capacity
-// change).
+// than one case at once.
 type PresenceDetail struct {
 	ChatStatus         Status       `json:"chatStatus"`
 	ActiveChats        int          `json:"activeChats"`
