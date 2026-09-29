@@ -21,7 +21,7 @@
 // Console's browser ever calling either directly, and without any
 // chat-routing-service/csm-portal credential ever reaching the browser.
 //
-// POC-scoped to a single known WSO2 IS instance -- see internal/introspect's
+// POC-scoped to a single known WSO2 IS instance — see internal/introspect's
 // own package doc comment and this repo's
 // console-ask-ai-engineer-escalation-investigation.md (auth decision #1).
 // See .env.example for every setting below and README.md for the one-time
@@ -61,7 +61,7 @@ func envOrDefault(key, def string) string {
 // the same name so this service can be run the same way: cp .env.example
 // .env, fill in values, go run ./cmd/server.
 func loadDotEnv(path string) {
-	f, err := os.Open(path) // #nosec G304 -- path is always the hardcoded literal ".env" at the only call site
+	f, err := os.Open(path) // #nosec G304 — path is always the hardcoded literal ".env" at the only call site
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("loadDotEnv: failed to open .env file", "err", err)
@@ -141,7 +141,7 @@ func main() {
 	// csmPortalM2MClientID is the OAuth2 client ID csm-portal/backend's own
 	// outbound push (its chatNotifiers["asgardeo"] entry, see that
 	// service's cmd/server/main.go) authenticates as when calling this
-	// bridge's own /internal/chat-events -- checked by RequireClientID so
+	// bridge's own /internal/chat-events — checked by RequireClientID so
 	// only that specific client can post events into this bridge, even
 	// though its token is introspected against the same pinned IS instance
 	// as every browser-facing call.
@@ -149,7 +149,7 @@ func main() {
 
 	corsOrigins := splitComma(mustEnv("CORS_ALLOWED_ORIGINS"))
 
-	// tenantTable backs the generic /v1/{tenant}/... API only -- the legacy
+	// tenantTable backs the generic /v1/{tenant}/... API only — the legacy
 	// /support/chats routes above never consult it, and keep using
 	// validator/corsOrigins exactly as before (see internal/tenant's own
 	// package doc comment). TENANT_REGISTRY unset synthesizes a single
@@ -157,7 +157,7 @@ func main() {
 	// INTROSPECTION_*/CORS_ALLOWED_ORIGINS vars validator/corsOrigins
 	// already use, so /v1/identity-console/... works with zero additional
 	// configuration. BRIDGE_ROUTING_SOURCE is every explicit registry
-	// row's default RoutingSource when that row leaves it blank -- see
+	// row's default RoutingSource when that row leaves it blank — see
 	// csm-portal/backend's own dual "asgardeo"/"console-chat-bridge"
 	// chatNotifiers registration, which this default is designed to match.
 	tenantTable, err := tenant.BuildTable(
@@ -203,7 +203,7 @@ func main() {
 		middleware.Auth(validator)(middleware.RequireClientID(csmPortalM2MClientID)(http.HandlerFunc(chatsHandler.HandleChatEvents))))
 
 	// v1Chain: TenantAuth (per-tenant validator, resolved into context by
-	// ResolveTenant -- see this middleware chain's own composition below)
+	// ResolveTenant — see this middleware chain's own composition below)
 	// then RequireSubject (see that middleware's own doc comment on why
 	// /v1 never falls back to Username the way browserChain's RequireUser
 	// does).
@@ -219,7 +219,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// ResolveTenant must be OUTSIDE (run before) CORS -- see that
+	// ResolveTenant must be OUTSIDE (run before) CORS — see that
 	// middleware's own doc comment on why an unknown tenant must 404
 	// before CORS or Auth ever run, including for a bare OPTIONS
 	// preflight. It only ever acts on a /v1/... path; every other route

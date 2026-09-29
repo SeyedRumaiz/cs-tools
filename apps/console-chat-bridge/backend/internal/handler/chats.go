@@ -16,10 +16,10 @@
 
 // Package handler implements this bridge's four routes:
 //
-//	POST /support/chats                    -- browser, start an escalation
-//	POST /support/chats/{caseId}/messages   -- browser, send a chat message
-//	GET  /support/chats/{caseId}/stream     -- browser, SSE delivery
-//	POST /internal/chat-events              -- csm-portal/backend, M2M push
+//	POST /support/chats                    — browser, start an escalation
+//	POST /support/chats/{caseId}/messages   — browser, send a chat message
+//	GET  /support/chats/{caseId}/stream     — browser, SSE delivery
+//	POST /internal/chat-events              — csm-portal/backend, M2M push
 //
 // This mirrors identity-apps' console-ask-ai-engineer-escalation-
 // investigation.md's chosen "option C" design: a small, self-contained
@@ -27,7 +27,7 @@
 // push contract (chatnotify.Client.PushEvent / /internal/chat-events)
 // rather than a new one, and delivered to the browser over the same
 // AsgardeoSPAClient.httpStreamRequest SSE mechanism Ask AI's own answer
-// streaming already uses -- no new client-side transport concept enters
+// streaming already uses — no new client-side transport concept enters
 // identity-apps.
 package handler
 
@@ -48,11 +48,11 @@ import (
 const maxBodyBytes = 64 << 10 // 64 KiB
 
 // newCaseID mints a fresh RFC 4122 v4 UUID for a new escalation's
-// caseId/liveChatId -- copied from customer-portal/backend-v2's own
+// caseId/liveChatId — copied from customer-portal/backend-v2's own
 // internal/handler/chat_uuid.go (newLiveChatCaseID) rather than shared, per
 // that file's own doc comment on why this repo duplicates rather than pulls
 // in github.com/google/uuid for a few lines of code. NEVER the frontend's
-// askAiContextId -- see caseRecord's own doc comment on why these two stay
+// askAiContextId — see caseRecord's own doc comment on why these two stay
 // distinct.
 func newCaseID() string {
 	var b [16]byte
@@ -65,7 +65,7 @@ func newCaseID() string {
 }
 
 // caseRecord is this bridge's own small in-memory record of one escalation,
-// keyed by caseId -- POC-scoped (lost on restart, single-process only,
+// keyed by caseId — POC-scoped (lost on restart, single-process only,
 // same limitation as internal/stream.Hub) purely so HandleSendMessage and
 // HandleStream know which conversationId/customerEmail/subject to carry on
 // csm-portal/backend's existing wire shapes, and so a caller other than the
@@ -75,21 +75,21 @@ type caseRecord struct {
 	conversationID string
 	customerEmail  string
 	// ownerSubject is the introspected identity (Subject, falling back to
-	// Username) that opened this case -- checked on every later
+	// Username) that opened this case — checked on every later
 	// /messages and /stream call for this caseId. Only ever set by the
-	// legacy /support/chats path's requireOwner -- a /v1 case
+	// legacy /support/chats path's requireOwner — a /v1 case
 	// (requireTenantCase) authorizes by tenant membership, not caller
 	// identity, so this stays "" on a v1-created record.
 	ownerSubject string
 	// tenantSlug is set only for a case raised through the generic
-	// /v1/{tenant}/... API (see requireTenantCase in chats_v1.go) -- "" for
+	// /v1/{tenant}/... API (see requireTenantCase in chats_v1.go) — "" for
 	// a legacy /support/chats case, which requireTenantCase would then
 	// correctly refuse to treat as belonging to any tenant.
 	tenantSlug string
 }
 
 // PriorMessage mirrors csm-portal/backend's escalateRequest.PriorMessages
-// element shape (role/content/createdAt) -- duplicated rather than
+// element shape (role/content/createdAt) — duplicated rather than
 // imported, matching this repo's existing convention of small DTO structs
 // duplicated per service (see chat-routing-service/sdk-go/routingclient's
 // own doc comment on the same choice).
@@ -104,7 +104,7 @@ type PriorMessage struct {
 type escalateBody struct {
 	// AskAIContextID is Ask AI's stable per-panel-session id (generated
 	// client-side, since Ask AI's own backend does not return one over
-	// SSE today) -- becomes ConversationID on csm-portal/backend's wire
+	// SSE today) — becomes ConversationID on csm-portal/backend's wire
 	// shape. NEVER reused as the caseId (see chat-routing-service's own
 	// CaseInfo.ConversationID doc comment on why these two identities stay
 	// distinct).
@@ -123,7 +123,7 @@ type escalateUpstreamBody struct {
 	Source         string `json:"source,omitempty"`
 	Channel        string `json:"channel,omitempty"`
 	// TenantSlug is set only by the generic /v1/{tenant}/... API (see
-	// HandleEscalateV1 in chats_v1.go) -- empty for the legacy
+	// HandleEscalateV1 in chats_v1.go) — empty for the legacy
 	// HandleEscalate above, matching csm-portal/backend's own
 	// escalateRequest.TenantSlug doc comment.
 	TenantSlug    string         `json:"tenantSlug,omitempty"`
@@ -144,7 +144,7 @@ type escalateUpstreamBody struct {
 const consoleProjectID = "console-ask-ai"
 
 // sourceAsgardeo / channelAskAI are this integration's fixed source/channel
-// tags -- see chat-routing-service's CaseInfo.Source doc comment.
+// tags — see chat-routing-service's CaseInfo.Source doc comment.
 const (
 	sourceAsgardeo = "asgardeo"
 	channelAskAI   = "ask-ai"
@@ -187,9 +187,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // ownerIdentity picks the best available end-user identifier from a
-// validated introspect.Identity -- Subject when the local IS instance
+// validated introspect.Identity — Subject when the local IS instance
 // populates it, falling back to Username (which this POC's introspection
-// response is actually expected to carry -- see README).
+// response is actually expected to carry — see README).
 func ownerIdentity(ctx *http.Request) string {
 	id := middleware.IdentityFromContext(ctx.Context())
 	if id.Subject != "" {
@@ -304,7 +304,7 @@ type customerMessageUpstreamBody struct {
 
 // HandleSendMessage handles POST /support/chats/{caseId}/messages. Behind
 // Auth+RequireUser. Forwards to csm-portal/backend's EXISTING, unmodified
-// POST /internal/chat/customer-message -- the engineer receives it exactly
+// POST /internal/chat/customer-message — the engineer receives it exactly
 // the way an existing customer-portal chat message already arrives.
 func (h *ChatsHandler) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
 	caseID := r.PathValue("caseId")
@@ -343,14 +343,14 @@ func (h *ChatsHandler) HandleSendMessage(w http.ResponseWriter, r *http.Request)
 }
 
 // sseHeartbeatInterval keeps the connection alive through any intermediate
-// proxy that would otherwise time out an idle response -- same interval
+// proxy that would otherwise time out an idle response — same interval
 // csm-portal/backend's own GET /chat/alerts/stream already uses.
 const sseHeartbeatInterval = 15 * time.Second
 
 // HandleStream handles GET /support/chats/{caseId}/stream. Behind
 // Auth+RequireUser. Delivers engineer_assigned/engineer_message/etc.
 // events (see HandleChatEvents) to the Console browser over SSE, read via
-// AsgardeoSPAClient.httpStreamRequest -- the same streaming mechanism Ask
+// AsgardeoSPAClient.httpStreamRequest — the same streaming mechanism Ask
 // AI's own answer-streaming already uses in copilot-api.ts, so no new
 // client-side transport concept enters identity-apps.
 func (h *ChatsHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
@@ -391,12 +391,12 @@ func (h *ChatsHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HandleChatEvents handles POST /internal/chat-events -- csm-portal/
+// HandleChatEvents handles POST /internal/chat-events — csm-portal/
 // backend's EXISTING push contract (see that service's internal/chatnotify
 // client, now also targeting this bridge for source="asgardeo" cases via
 // its chatNotifiers map), not a new route shape invented for this
 // integration. Behind Auth+RequireClientID. Relays the event's raw JSON
-// body straight onto this case's SSE stream -- the same envelope shape
+// body straight onto this case's SSE stream — the same envelope shape
 // (type/caseId/conversationId/engineerEmail/message/...) customer-portal's
 // own frontend already knows how to parse, so identity-apps' frontend
 // switch-on-type logic mirrors an existing, proven pattern.

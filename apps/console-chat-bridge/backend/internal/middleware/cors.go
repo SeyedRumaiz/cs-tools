@@ -35,7 +35,7 @@ const corsAllowedMethods = "GET, POST, OPTIONS"
 // file's own doc comment for the full MUST-wrap-Auth-not-be-wrapped-by-it
 // rationale, which applies here unchanged). Fail-closed: an empty allow-list
 // allows no cross-origin browser request through at all, rather than
-// reflecting any Origin back -- this bridge authenticates via a
+// reflecting any Origin back — this bridge authenticates via a
 // caller-supplied Authorization bearer header, never cookies, so there is
 // no ambient credential for a browser to attach automatically, but stays
 // fail-closed anyway as defense-in-depth (see the original's own note on
@@ -46,13 +46,13 @@ const corsAllowedMethods = "GET, POST, OPTIONS"
 // this one for a /v1/{tenant}/... request, even for a bare OPTIONS
 // preflight (see that middleware's own doc comment on why an unknown
 // tenant 404s before CORS ever runs). When a Tenant is present, its own
-// Config.AllowedOrigins is checked instead of defaultAllowedOrigins -- so
+// Config.AllowedOrigins is checked instead of defaultAllowedOrigins — so
 // each tenant gets its own origin allow-list rather than one global union
 // (a global union would let tenant A's configured browser origin send
 // authenticated cross-origin requests against tenant B's data, which the
 // browser's own same-origin policy would otherwise have prevented). A
 // legacy /support/chats request never resolves a tenant at all, so it
-// always falls through to defaultAllowedOrigins -- CORS_ALLOWED_ORIGINS,
+// always falls through to defaultAllowedOrigins — CORS_ALLOWED_ORIGINS,
 // unchanged from before multi-tenant support existed.
 func CORS(defaultAllowedOrigins []string) func(http.Handler) http.Handler {
 	defaultAllowed := make(map[string]bool, len(defaultAllowedOrigins))

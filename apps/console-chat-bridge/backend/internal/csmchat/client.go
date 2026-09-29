@@ -20,12 +20,12 @@
 // Both calls are pure machine-to-machine: this bridge itself already
 // validated the caller's identity (see internal/introspect) before ever
 // reaching here, and forwards only what csm-portal/backend's existing
-// escalateRequest/customerMessageRequest shapes already accept -- no new
+// escalateRequest/customerMessageRequest shapes already accept — no new
 // fields, no new route.
 //
 // Previously this package (and customer-portal/backend-v2's own,
 // independently hand-rolled twin) each implemented the same OAuth2
-// client-credentials HTTP-client plumbing by hand -- this package's own
+// client-credentials HTTP-client plumbing by hand — this package's own
 // prior doc comment admitted as much ("deliberately copied ... rather than
 // shared"). Both now build on the shared
 // apps/live-chat-sdk/sdk-go/m2mclient package instead; this package keeps
@@ -114,10 +114,10 @@ type CaseOwnership struct {
 }
 
 // GetCaseOwnership calls csm-portal/backend's
-// GET /internal/chat/cases/{caseId} -- the durable source of truth behind
+// GET /internal/chat/cases/{caseId} — the durable source of truth behind
 // this bridge's own requireTenantCase authorization check (see
 // internal/handler's v1 routes). Returns an error for any non-2xx response,
-// including a 404 for an unrecognized case -- the caller treats any error
+// including a 404 for an unrecognized case — the caller treats any error
 // here as "reject", never distinguishing further (see requireTenantCase's
 // own doc comment on why).
 func (c *Client) GetCaseOwnership(ctx context.Context, caseID string) (CaseOwnership, error) {
@@ -136,7 +136,7 @@ func (c *Client) GetCaseOwnership(ctx context.Context, caseID string) (CaseOwner
 }
 
 // CompleteByTenant POSTs to csm-portal/backend's
-// POST /internal/chat/complete -- the tenant-initiated (customer-side)
+// POST /internal/chat/complete — the tenant-initiated (customer-side)
 // session-completion counterpart to the engineer-initiated
 // POST /chat/sessions/{id}/complete (which this bridge never calls).
 func (c *Client) CompleteByTenant(ctx context.Context, payload []byte) error {

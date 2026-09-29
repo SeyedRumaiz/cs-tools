@@ -27,11 +27,11 @@ import (
 // v1PathPrefix is every generic tenant-scoped route's shared prefix --
 // "/v1/{tenant}/...". Anything outside this prefix (the legacy
 // /support/chats path, /internal/chat-events, /health) is untouched by
-// ResolveTenant -- it only ever acts within /v1.
+// ResolveTenant — it only ever acts within /v1.
 const v1PathPrefix = "/v1/"
 
 // ResolveTenant must be the OUTERMOST middleware wrapping every /v1/... route
-// -- even outside CORS -- so a request for an unknown tenant 404s before
+// — even outside CORS — so a request for an unknown tenant 404s before
 // CORS or Auth ever run, including for a bare OPTIONS preflight (a
 // preflight for a tenant that doesn't exist has nothing valid to answer
 // about; letting it through to CORS would mean reflecting/declining an

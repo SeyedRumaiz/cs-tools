@@ -32,8 +32,8 @@ type Hub struct {
 	subs map[string]map[chan string]struct{}
 	// last holds the most recently published payload for each caseID, so a
 	// subscriber that connects *after* a publish (e.g. the Console browser's
-	// GET /stream is still mid-flight -- introspection + the SDK's Web
-	// Worker round trip can take a few seconds -- when the CSM engineer
+	// GET /stream is still mid-flight — introspection + the SDK's Web
+	// Worker round trip can take a few seconds — when the CSM engineer
 	// accepts the case) still sees that event instead of it being silently
 	// dropped. Without this, Publish's "fan out to whoever's currently
 	// registered" semantics mean the one event that tells the browser

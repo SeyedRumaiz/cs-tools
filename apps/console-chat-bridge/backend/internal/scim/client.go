@@ -17,14 +17,14 @@
 // Package scim resolves a WSO2 IS username (as introspection's own
 // "username" claim carries it) to that user's immutable SCIM id, via a
 // trusted, server-to-server call to WSO2 IS's native SCIM2 Users API
-// (GET /scim2/Users) -- authenticated with this bridge's own OAuth2
+// (GET /scim2/Users) — authenticated with this bridge's own OAuth2
 // client-credentials grant, never the caller's token.
 //
 // Why this exists: some IdP applications (WSO2 IS's own built-in "Console"
 // app among them) issue access tokens with cookie-based token binding.
 // WSO2 IS's OIDC UserInfo endpoint (internal/introspect.Validator's own
 // ResolveSubjectViaUserinfo) then requires the browser's binding cookie to
-// be presented alongside the bearer token -- something a server-side
+// be presented alongside the bearer token — something a server-side
 // backend, calling UserInfo with only the forwarded Authorization header,
 // structurally can never provide (the cookie is scoped to the browser's
 // origin and never reaches a third-party API). Confirmed live against this
@@ -38,7 +38,7 @@
 // token or the browser's binding cookie. It authenticates as ITSELF (a
 // separate, least-privilege client-credentials application, scoped only to
 // SCIM2's read/view capability) and looks the already-introspected
-// username up directly -- a mechanism token binding has no bearing on,
+// username up directly — a mechanism token binding has no bearing on,
 // since it's not the end user's session being used to call a protected
 // resource.
 package scim
@@ -58,7 +58,7 @@ import (
 // Config configures a Client.
 type Config struct {
 	// BaseURL is the WSO2 IS instance's own origin (SCIM2 lives at
-	// {BaseURL}/scim2/Users on every WSO2 IS instance) -- typically the
+	// {BaseURL}/scim2/Users on every WSO2 IS instance) — typically the
 	// same value as internal/introspect.Config.IssuerBaseURL.
 	BaseURL string
 	// TokenURL, ClientID, ClientSecret, and Scopes authenticate this client
@@ -72,7 +72,7 @@ type Config struct {
 	ClientSecret string
 	Scopes       []string
 	// InsecureSkipVerify disables TLS certificate verification for calls to
-	// BaseURL/TokenURL. LOCAL DEVELOPMENT ONLY -- mirrors
+	// BaseURL/TokenURL. LOCAL DEVELOPMENT ONLY — mirrors
 	// introspect.Config.InsecureSkipVerify's own doc comment; a real
 	// deployment should instead trust that instance's actual CA.
 	InsecureSkipVerify bool
@@ -98,7 +98,7 @@ func NewClient(cfg Config) *Client {
 // The three ways ResolveUserID can fail, kept distinguishable so a caller
 // can tell "this IdP genuinely has no such user" (ErrNoMatch), "this
 // username isn't uniquely resolvable" (ErrAmbiguous) apart from "the
-// lookup itself didn't work" (ErrUnavailable) -- every one of them means
+// lookup itself didn't work" (ErrUnavailable) — every one of them means
 // "do not trust a Subject from this call", the caller just may want to log
 // or report them differently.
 var (
@@ -123,8 +123,8 @@ type listResponse struct {
 	} `json:"Resources"`
 }
 
-// ResolveUserID resolves username -- exactly as introspection's own
-// "username" claim carries it, e.g. "admin@carbon.super" -- to WSO2 IS's
+// ResolveUserID resolves username — exactly as introspection's own
+// "username" claim carries it, e.g. "admin@carbon.super" — to WSO2 IS's
 // immutable per-user SCIM id (the same stable UUID a JWT-typed access
 // token's own "sub" claim carries). username is used ONLY as a search key;
 // the returned id, never username itself, is what a caller should treat as
@@ -135,8 +135,8 @@ type listResponse struct {
 // MultitenantUtils.getTenantAwareUsername's own default-configuration
 // behavior (confirmed by decompiling org.wso2.carbon.utils_4.12.34.jar's
 // actual bytecode, not just its Javadoc): with tenant email-as-username
-// disabled -- this deployment's own configuration, and the common default
-// -- that method unconditionally does
+// disabled — this deployment's own configuration, and the common default
+// — that method unconditionally does
 // username.substring(0, username.lastIndexOf('@')), regardless of which
 // tenant domain follows (not hardcoded to "carbon.super"), so this covers
 // any tenant, not only the super tenant.
@@ -149,7 +149,7 @@ type listResponse struct {
 // tenant is a server-side WSO2 IS configuration this service has no API to
 // query. This bridge is POC-scoped to one known, pinned instance (see this
 // package's own doc comment) whose email-as-username setting is already
-// known to be disabled -- live-verified end to end against it -- so this
+// known to be disabled — live-verified end to end against it — so this
 // is a documented scope limitation for a future email-as-username tenant,
 // not an unnoticed one.
 //
@@ -167,7 +167,7 @@ func (c *Client) ResolveUserID(ctx context.Context, username string) (string, er
 	}
 
 	// The filter's string literal follows SCIM2's own value syntax (RFC
-	// 7644 §3.4.2.2), which is JSON string syntax (RFC 8259) -- NOT Go
+	// 7644 §3.4.2.2), which is JSON string syntax (RFC 8259) — NOT Go
 	// string-literal syntax (e.g. fmt's %q), and distinct from this
 	// request's own URL-encoding (q.Encode() below, which only protects
 	// the query string transport, not the quoted literal's own content).
