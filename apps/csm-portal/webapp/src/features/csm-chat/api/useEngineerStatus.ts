@@ -105,6 +105,30 @@ const EMPTY_PRESENCE: EngineerPresence = {
 };
 
 /**
+ * How often useGetEngineerStatus re-polls in the background. This is what
+ * makes the "rehydrate pending/active cases from the server" mechanism
+ * (see ChatSessionsContext.tsx's own effect over presence.cases) an actual
+ * safety net rather than a one-time-on-mount convenience.
+ *
+ * It has to be a poll, not just refetch-on-mount: this app sets the
+ * QueryClient's own refetchOnWindowFocus to false globally (see
+ * AppWithConfig.tsx), and EngineerAlertNotification/ChatSessionsContext
+ * mount once in AuthGuard.tsx for the whole session, never remounting on
+ * navigation. So without a poll, a case assigned after this query's first
+ * fetch only ever appears if its own SSE push (useChatAlertsStream) is
+ * delivered while the browser happens to be connected at that exact
+ * moment -- SSE here is fire-and-forget with no replay buffer, so a brief
+ * reconnect window, a dropped connection, or any other transient miss
+ * loses that event permanently, with nothing else to catch it up short of
+ * the engineer manually reloading the whole page. Reported live: an
+ * engineer's already-open tab showed "No active chats" with no popup for a
+ * case chat-routing-service had genuinely assigned to them minutes
+ * earlier. Matches ENGINEER_TIMEOUT_SWEEP_INTERVAL_SECONDS's own default
+ * cadence elsewhere in this feature.
+ */
+const PRESENCE_POLL_INTERVAL_MS = 15_000;
+
+/**
  * Reads the authenticated engineer's current live-chat-routing presence:
  * GET /engineers/me/status (see csm-portal/backend's internal/handler/
  * chat.go HandleGetPresence, which proxies the standalone chat-routing-
@@ -142,6 +166,11 @@ export function useGetEngineerStatus(): UseQueryResult<EngineerPresence, Error> 
     },
     retry: false,
     staleTime: 30_000,
+    refetchInterval: PRESENCE_POLL_INTERVAL_MS,
+    // Keep polling even while the tab is in the background -- an engineer
+    // often has this tab open but not focused (working a case in another
+    // tab), and a newly-assigned case still needs to surface promptly.
+    refetchIntervalInBackground: true,
   });
 }
 
