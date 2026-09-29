@@ -1,0 +1,27 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- assignment_log is redundant -- the "fewest chats today" ranking (see
+-- popAvailableEngineer in internal/router/state.go) can be derived directly
+-- from chat_conversation (engineer_id, updated_at) instead of maintaining a
+-- separate history table.
+--
+-- This changes the metric slightly: assignment_log counted every case an
+-- engineer was assigned, including ones later declined or timed out.
+-- chat_conversation.engineer_id is only set once Router.Accept confirms the
+-- engineer, so the derived count is "chats accepted today" instead --
+-- arguably fairer, but worth knowing if this ranking ever looks off.
+DROP TABLE IF EXISTS chat_routing.assignment_log;
