@@ -1,0 +1,19 @@
+{
+  "name": "@wso2/live-chat-demo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal reference consumer proving @wso2/live-chat-client integrates with a second, independent product via config alone (console-chat-bridge's \"live-chat-demo\" TENANT_REGISTRY tenant) -- not a real product.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@wso2/live-chat-client": "file:../live-chat-sdk/sdk-ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.19.2",
+    "typescript": "5.9.3"
+  }
+}
