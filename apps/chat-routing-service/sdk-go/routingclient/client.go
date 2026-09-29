@@ -485,12 +485,28 @@ type AbandonedResult struct {
 	ConversationID string `json:"conversationId"`
 }
 
+// StaleSessionResult mirrors router.StaleSessionResult — one accepted
+// session SweepTimeouts force-ended because it sat with no activity (no
+// message, no state change) past chat-routing-service's own configured
+// ACCEPTED_SESSION_IDLE_SECONDS. Distinct from TimeoutResult (never
+// accepted) and AbandonedResult (never assigned at all): this is a session
+// an engineer genuinely held and then, for whatever reason, never
+// completed.
+type StaleSessionResult struct {
+	CaseID         string    `json:"caseId"`
+	ConversationID string    `json:"conversationId"`
+	AssigneeID     string    `json:"assigneeId"`
+	AssignedCase   *CaseInfo `json:"assignedCase,omitempty"`
+}
+
 // SweepResult is SweepTimeouts's result: every case reassigned/requeued
-// for a PENDING-accept timeout, plus every case abandoned for having
-// waited too long with nobody ever free to take it.
+// for a PENDING-accept timeout, every case abandoned for having waited too
+// long with nobody ever free to take it, and every accepted session
+// force-ended for going idle too long.
 type SweepResult struct {
-	Timeouts  []TimeoutResult   `json:"results"`
-	Abandoned []AbandonedResult `json:"abandoned"`
+	Timeouts  []TimeoutResult      `json:"results"`
+	Abandoned []AbandonedResult    `json:"abandoned"`
+	Stale     []StaleSessionResult `json:"stale"`
 }
 
 // SweepTimeouts calls POST /route/sweep-timeouts, asking the routing

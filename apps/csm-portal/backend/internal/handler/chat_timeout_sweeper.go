@@ -101,4 +101,30 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 			Timestamp:      time.Now().UTC().Format(time.RFC3339),
 		})
 	}
+
+	// Stale accepted sessions: an engineer held one of these and never
+	// completed it (browser closed, crashed, forgotten). Notify both sides
+	// exactly the way HandleCompleteSession does for an explicit complete,
+	// since from here on this session is over the same way either path
+	// leads to — the only difference is what triggered it.
+	for _, stale := range result.Stale {
+		slog.InfoContext(ctx, "chat: force-ended an accepted session that went idle too long",
+			"caseId", stale.CaseID, "conversationId", stale.ConversationID, "assigneeId", stale.AssigneeID)
+		now := time.Now().UTC().Format(time.RFC3339)
+		h.publishToEngineers(chatEvent{
+			Type:           "session_closed",
+			CaseID:         stale.CaseID,
+			ConversationID: stale.ConversationID,
+			Timestamp:      now,
+		})
+		h.notifyOrigin(ctx, h.sourceForCase(ctx, stale.CaseID), chatEvent{
+			Type:           "engineer_disconnected",
+			CaseID:         stale.CaseID,
+			ConversationID: stale.ConversationID,
+			Timestamp:      now,
+		})
+		if stale.AssignedCase != nil {
+			h.publishToEngineer(stale.AssigneeID, assignedCaseEvent(*stale.AssignedCase))
+		}
+	}
 }
