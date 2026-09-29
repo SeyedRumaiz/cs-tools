@@ -33,9 +33,9 @@ import (
 // chat-routing-service: this handler already owns the only thing that can
 // act on the result (the engineer SSE hub), and chat-routing-service is
 // intentionally synchronous/caller-driven only (see routingclient's
-// package doc comment on why it never calls back) -- adding a reverse
+// package doc comment on why it never calls back) — adding a reverse
 // callback direction just for this one feature would be new
-// infrastructure for a small win. Runs until ctx is cancelled -- see
+// infrastructure for a small win. Runs until ctx is cancelled — see
 // cmd/server/main.go, which starts this alongside the HTTP server and
 // passes the same shutdown context.
 func (h *ChatHandler) StartTimeoutSweeper(ctx context.Context, interval time.Duration) {
@@ -68,7 +68,7 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 
 		// Tell the unresponsive engineer's own browser their stale pending
 		// alert is gone. EngineerAlertNotification.tsx now handles this
-		// event type (clears the pending card) -- see that component's
+		// event type (clears the pending card) — see that component's
 		// handleAlert "case_timed_out" case.
 		h.publishToEngineer(timeout.UserID, chatEvent{
 			Type:      "case_timed_out",
@@ -82,10 +82,10 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 	}
 
 	// Queue-abandonment results: a case that sat WAITING_FOR_ENGINEER --
-	// never assigned to anyone at all -- past
+	// never assigned to anyone at all — past
 	// chat-routing-service's own QUEUE_ABANDON_SECONDS. Nobody on the
 	// engineer side ever saw this case (it was never delivered), so there
-	// is no engineer-facing event to clear here -- only the customer might
+	// is no engineer-facing event to clear here — only the customer might
 	// still have a tab open waiting on it. Best-effort notify the case's origin so
 	// a still-open customer chat can show a "no engineer was available"
 	// message instead of waiting forever; a customer who already left sees

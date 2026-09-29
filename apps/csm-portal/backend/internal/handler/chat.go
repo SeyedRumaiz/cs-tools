@@ -45,10 +45,8 @@ const broadcastHubKey = "engineers"
 // engineerHubKey returns the stream.BroadcastHub subscription key a
 // specific engineer's alert stream registers under for targeted delivery —
 // e.g. an escalation the routing service assigned to exactly this engineer.
-// userID is the IdP "userid" claim (middleware.UserInfo.UserID) -- this key
-// used to be built from the engineer's email; switched to userID alongside
-// chat-routing-service's own engineer-identity switch (see that service's
-// migrations/000014_rename_engineer_status_table) so both sides agree on
+// userID is the IdP "userid" claim (middleware.UserInfo.UserID), matching
+// how chat-routing-service identifies engineers, so both sides agree on
 // which key a given engineer's events land on.
 func engineerHubKey(userID string) string {
 	return "engineer:" + userID
@@ -67,8 +65,8 @@ const chatNotifyTimeout = 5 * time.Second
 // entityChatClient is the subset of the entity client this feature needs.
 // customerEntityClient (cmd/server/main.go) already implements this — see
 // internal/entity/customer.go's PatchCase. Message persistence goes
-// through the LOCAL STAND-IN routingService.AddComment instead (see that
-// interface's own doc comment), not entity's CreateCaseComment.
+// through routingService.AddComment instead (see that interface's own doc
+// comment), not entity's CreateCaseComment.
 type entityChatClient interface {
 	PatchCase(ctx context.Context, caseID string, body []byte) ([]byte, error)
 }
@@ -90,18 +88,16 @@ type ChatEventPusher interface {
 type routingService interface {
 	Escalate(ctx context.Context, ci routingclient.CaseInfo) (routingclient.EscalateResult, error)
 	// SetPresence/Completed/Decline/Accept/GetPresence identify the engineer
-	// by their IdP "userid" claim (middleware.UserInfo.UserID) -- see
-	// chat-routing-service's migrations/000014_rename_engineer_status_table
-	// for why this switched from an email.
+	// by their IdP "userid" claim (middleware.UserInfo.UserID)
 	SetPresence(ctx context.Context, userID string, status routingclient.Status) (routingclient.PresenceResult, error)
 	// Completed takes caseID because an engineer can hold several
-	// concurrent conversations at once -- ending one must say which.
+	// concurrent conversations at once — ending one must say which.
 	Completed(ctx context.Context, userID, caseID string) (routingclient.CompletedResult, error)
 	Decline(ctx context.Context, userID, caseID string) (routingclient.DeclineResult, error)
 	Accept(ctx context.Context, userID, caseID string) (routingclient.AcceptResult, error)
 	GetPresence(ctx context.Context, userID string) (routingclient.PresenceDetail, error)
 	// SweepTimeouts is polled periodically by ChatHandler.StartTimeoutSweeper
-	// (see that method's doc comment) -- not called from any HTTP handler in
+	// (see that method's doc comment) — not called from any HTTP handler in
 	// this file directly. Returns both PENDING-accept timeouts and
 	// queue-abandonment results (see routingclient.SweepResult), catching
 	// stale, never-assigned escalations that would otherwise sit in the
@@ -111,29 +107,29 @@ type routingService interface {
 	// SetMaxConcurrentChats lets an engineer set their own configurable
 	// concurrent-chat capacity (see HandleSetMaxConcurrentChats). Returns
 	// AssignedCases when raising the limit immediately drained the waiting
-	// queue into the newly-opened capacity -- see
+	// queue into the newly-opened capacity — see
 	// routingclient.SetCapacityResult's own doc comment.
 	SetMaxConcurrentChats(ctx context.Context, userID string, max int) (routingclient.SetCapacityResult, error)
-	// CreateWorkItem and AddComment are LOCAL STAND-IN persistence calls
-	// (see routingclient.Client.CreateWorkItem's doc comment and the
-	// project's chat-persistence-mapping-plan.md) -- they exist only until
-	// entity-service's real generic work_item/chat_conversation/comment
-	// schema ships, at which point these calls move there instead.
+	// CreateWorkItem and AddComment persist through chat-routing-service's
+	// own stand-in tables (see routingclient.Client.CreateWorkItem's doc
+	// comment) until entity-service's real generic
+	// work_item/chat_conversation/comment schema ships, at which point
+	// these calls move there instead.
 	//
 	// CreateWorkItem now takes the full CaseInfo (rather than four loose
 	// fields) since it durably stores that value as the case's display
-	// blob, and must be called BEFORE Escalate for the same case -- see
+	// blob, and must be called BEFORE Escalate for the same case — see
 	// HandleEscalate below and routingclient.Client.CreateWorkItem's own
 	// doc comment for why the order matters now.
 	CreateWorkItem(ctx context.Context, ci routingclient.CaseInfo) error
 	AddComment(ctx context.Context, caseID, authorEmail, content string) error
 	// GetCaseInfo and ConvertToCase back HandleConvertToCase (the
 	// chat-first-escalation flow's engineer-initiated conversion, see that
-	// method's own doc comment) -- both real, error-surfacing calls, not
+	// method's own doc comment) — both real, error-surfacing calls, not
 	// best-effort like most of this interface's other side-channel methods.
 	GetCaseInfo(ctx context.Context, caseID string) (routingclient.CaseInfo, error)
 	ConvertToCase(ctx context.Context, userID, caseID, entityCaseID string) (routingclient.ConvertToCaseResult, error)
-	// EndByTenant backs HandleCompleteByTenant -- console-chat-bridge's
+	// EndByTenant backs HandleCompleteByTenant — console-chat-bridge's
 	// tenant-initiated (customer-side) session completion, which has no
 	// engineer userID to authorize against the way Completed does.
 	EndByTenant(ctx context.Context, caseID, tenantSlug string) (routingclient.CompletedResult, error)
@@ -171,7 +167,7 @@ type chatEvent struct {
 	// Source/Channel identify which product/surface this case originated
 	// from (e.g. "customer-portal"/"" for the existing Novera flow,
 	// "asgardeo"/"ask-ai" for an escalation raised from identity-apps'
-	// Ask AI panel). Also doubles as the notifyOrigin routing key -- see
+	// Ask AI panel). Also doubles as the notifyOrigin routing key — see
 	// ChatHandler.notifierFor.
 	Source        string `json:"source,omitempty"`
 	Channel       string `json:"channel,omitempty"`
@@ -181,10 +177,10 @@ type chatEvent struct {
 	EngineerEmail string `json:"engineerEmail,omitempty"`
 	Message       string `json:"message,omitempty"`
 	// EntityCaseID is set only on a "converted_to_case" event (see
-	// HandleConvertToCase) -- the real entity-service case ID the customer's
+	// HandleConvertToCase) — the real entity-service case ID the customer's
 	// browser should point to now that this chat has ended.
 	EntityCaseID string `json:"entityCaseId,omitempty"`
-	// PriorMessages is set only on customer_escalation -- the customer's
+	// PriorMessages is set only on customer_escalation — the customer's
 	// AI-chatbot (Novera) transcript snapshotted at escalation time, so the
 	// receiving engineer's browser can seed the chat with that context
 	// instead of starting cold. See routingclient.PriorMessage.
@@ -216,16 +212,15 @@ func (h *ChatHandler) publishToEngineers(evt chatEvent) {
 // subscription (see engineerHubKey) — used for every routing-service-backed
 // delivery: a fresh routed escalation, a queue-drain assignment on
 // presence/session-completion, or a reassignment after a decline. userID is
-// the IdP "userid" claim (middleware.UserInfo.UserID) -- the routing
+// the IdP "userid" claim (middleware.UserInfo.UserID) — the routing
 // service's own EscalateResult.EngineerUserID/DeclineResult.ReassignedTo
-// already return this value directly (see chat-routing-service's
-// migrations/000014_rename_engineer_status_table).
+// already return this value directly.
 func (h *ChatHandler) publishToEngineer(userID string, evt chatEvent) {
 	h.publish(engineerHubKey(userID), evt)
 }
 
 // defaultNotifySource is the notifiers map key used whenever a case has no
-// Source set -- every case created before this field existed, and every
+// Source set — every case created before this field existed, and every
 // customer-portal-originated case going forward (that flow never sets
 // Source). Keeping this as the fallback means the pre-existing single-
 // target ("always push to backend-v2") behavior is unchanged for every
@@ -252,7 +247,7 @@ func (h *ChatHandler) notifierFor(source string) ChatEventPusher {
 // so a call site that doesn't already have the case's CaseInfo on hand
 // (HandleAcceptSession, HandleEngineerMessage, HandleCompleteSession) can
 // still route notifyOrigin correctly. Best-effort: any lookup failure
-// returns "", which notifierFor treats as defaultNotifySource -- the same
+// returns "", which notifierFor treats as defaultNotifySource — the same
 // target these call sites always used before Source existed.
 func (h *ChatHandler) sourceForCase(ctx context.Context, caseID string) string {
 	ci, err := h.routing.GetCaseInfo(ctx, caseID)
@@ -270,7 +265,7 @@ func (h *ChatHandler) sourceForCase(ctx context.Context, caseID string) string {
 // manual-refresh behaviour for this one event rather than seeing an
 // otherwise-successful action reported as failed. Renamed from this
 // package's original notifyBackendV2 now that backend-v2 is one of
-// possibly several notify targets rather than the only one -- see
+// possibly several notify targets rather than the only one — see
 // ChatHandler.notifiers.
 func (h *ChatHandler) notifyOrigin(ctx context.Context, source string, evt chatEvent) {
 	notifier := h.notifierFor(source)
@@ -337,7 +332,7 @@ func assignedCaseEvent(ci routingclient.CaseInfo) chatEvent {
 // never used for authorization or attribution in a durable record. No
 // entity-service case exists yet at this point (chat-first escalation
 // defers case creation until the engineer converts, see
-// HandleConvertToCase) -- CustomerName is shown only in the engineer's
+// HandleConvertToCase) — CustomerName is shown only in the engineer's
 // alert UI.
 type escalateRequest struct {
 	CaseID         string `json:"caseId"`
@@ -350,7 +345,7 @@ type escalateRequest struct {
 	// unchanged.
 	Source  string `json:"source,omitempty"`
 	Channel string `json:"channel,omitempty"`
-	// TenantSlug mirrors routingclient.CaseInfo.TenantSlug -- set only by
+	// TenantSlug mirrors routingclient.CaseInfo.TenantSlug — set only by
 	// console-chat-bridge's generic /v1/{tenant}/... API (see that
 	// service's HandleEscalateV1). Optional: empty for every caller that
 	// predates multi-tenant support, exactly like Source/Channel above.
@@ -360,7 +355,7 @@ type escalateRequest struct {
 	CustomerName  string `json:"customerName"`
 	Message       string `json:"message"`
 	// PriorMessages is the customer's AI-chatbot (Novera) transcript up to
-	// the moment of escalation -- see routingclient.PriorMessage. Optional:
+	// the moment of escalation — see routingclient.PriorMessage. Optional:
 	// omitted or empty just means the engineer's chat starts without that
 	// context, same as before this field existed.
 	PriorMessages []routingclient.PriorMessage `json:"priorMessages,omitempty"`
@@ -372,14 +367,14 @@ type escalateRequest struct {
 // called by customer-portal/backend-v2's own csmchat.Client, authenticating
 // with an OAuth2 client-credentials token rather than a user's own session
 // token. It is invoked from HandleEscalate before any entity-service case
-// exists -- chat-first
+// exists — chat-first
 // escalation defers real case creation until the assigned engineer
 // explicitly converts the chat (see HandleConvertToCase below and
 // backend-v2's escalation handler's own doc comment). req.CaseID here is
 // chat-routing-service's own case identity for this one live-engineer-chat
-// escalation instance -- a fresh UUID minted by backend-v2's HandleEscalate
+// escalation instance — a fresh UUID minted by backend-v2's HandleEscalate
 // for every new escalation, NOT the same as req.ConversationID (the stable
-// Novera AI-chat conversation this escalation came from -- see
+// Novera AI-chat conversation this escalation came from — see
 // router.CaseInfo's own doc comment on why these two are now distinct).
 // Also not a real entity-service case ID. This handler's only job is to
 // ask the routing service which engineer (if any) should get this case,
@@ -416,24 +411,22 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 		PriorMessages:  req.PriorMessages,
 	}
 
-	// Best-effort: LOCAL STAND-IN persistence (see routingService's own doc
-	// comment) -- creates the work_item/chat_conversation/first-comment
+	// Best-effort: stand-in persistence (see routingService's own doc
+	// comment) that creates the work_item/chat_conversation/first-comment
 	// record for this escalation. Must run BEFORE Escalate below: Escalate's
 	// own assignment now writes chat_conversation.assignee_id directly (see
 	// router.Router.CreateWorkItem's doc comment), so that row must already
-	// exist. A failure here is logged, not fatal to this request -- the
-	// live routing decision below still must reach the customer regardless
-	// of whether this bookkeeping call succeeded (a known limitation of the
-	// LOCAL STAND-IN tables, not new: this case just won't count toward the
-	// assigned engineer's capacity until the row exists) -- UNLESS the
-	// routing service rejected it outright with ErrDuplicateOpenChat, which
-	// is not a bookkeeping failure at all: it means this customer already
-	// has a live chat in progress for this project, and creating another
-	// one would leave them with two concurrent escalations. That case is
-	// reported to backend-v2 as a real 409 instead of being swallowed --
-	// see this handler's own doc comment on why req.CaseID here is a fresh,
-	// caller-minted UUID (never req.ConversationID) that only this call
-	// makes durable.
+	// exist. A failure here is logged, not fatal to this request. The live
+	// routing decision below still must reach the customer regardless of
+	// whether this bookkeeping call succeeded; the case just won't count
+	// toward the assigned engineer's capacity until the row exists. The
+	// one exception is ErrDuplicateOpenChat, which is not a bookkeeping
+	// failure at all: it means this customer already has a live chat in
+	// progress for this project, and creating another one would leave them
+	// with two concurrent escalations. That case is reported to backend-v2
+	// as a real 409 instead of being swallowed; see this handler's own doc
+	// comment on why req.CaseID here is a fresh, caller-minted UUID (never
+	// req.ConversationID) that only this call makes durable.
 	if err := h.routing.CreateWorkItem(r.Context(), ci); err != nil {
 		if errors.Is(err, routingclient.ErrDuplicateOpenChat) {
 			slog.InfoContext(r.Context(), "chat: escalation rejected, customer already has an open live chat", "caseId", req.CaseID, "conversationId", req.ConversationID, "customerEmail", req.CustomerEmail, "projectId", req.ProjectID)
@@ -446,7 +439,7 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 	result, err := h.routing.Escalate(r.Context(), ci)
 	if err != nil {
 		if errors.Is(err, routingclient.ErrCaseAlreadyEnded) {
-			// Not a routing-service outage -- a genuine rejection that
+			// Not a routing-service outage — a genuine rejection that
 			// must reach the customer as a real failure, not a silent
 			// "escalated successfully" (see this handler's own doc comment
 			// and router.Router.Escalate's ErrCaseAlreadyEnded). Falling
@@ -493,20 +486,19 @@ type customerMessageRequest struct {
 	ConversationID string `json:"conversationId"`
 	Message        string `json:"message"`
 	// CustomerEmail attributes the persisted comment to its actual sender
-	// (see AddComment below) -- added alongside the LOCAL STAND-IN
-	// persistence work, see routingService's own doc comment.
+	// (see AddComment below and routingService's own doc comment).
 	CustomerEmail string `json:"customerEmail"`
 }
 
 // HandleCustomerMessage handles POST /internal/chat/customer-message. Also
 // service-to-service only, authenticated the same way as HandleEscalate
 // above (see that handler's doc comment). Persists the customer's
-// message as a comment via the LOCAL STAND-IN routing-service tables (see
-// routingService's own doc comment) — entity-service's real CreateCaseComment
-// was never usable here (this internal, service-to-service call from
-// backend-v2 has no customer browser session behind it, so there is no
-// x-user-id-token to give entity-service, and that write 401s every time)
-// — then fans the message out over the shared broadcastHubKey so whichever
+// message as a comment via the routing-service tables (see routingService's
+// own doc comment). entity-service's real CreateCaseComment was never
+// usable here: this internal, service-to-service call from backend-v2 has
+// no customer browser session behind it, so there is no x-user-id-token to
+// give entity-service, and that write 401s every time. It then fans the
+// message out over the shared broadcastHubKey so whichever
 // engineer accepted the session sees it live. Deliberately still broadcast
 // rather than targeted at the accepting engineer specifically (this handler
 // has no record of who that is — see the package doc comment on why there
@@ -630,7 +622,7 @@ func (h *ChatHandler) HandleAcceptSession(w http.ResponseWriter, r *http.Request
 	// escalation path is a Postgres case, so this call is expected to fail
 	// there. This is no longer the only record of who accepted, though:
 	// Router.Accept (just above) already durably set chat_conversation.
-	// assignee_id in the LOCAL STAND-IN tables in the same transaction as
+	// assignee_id in the routing service's own tables in the same transaction as
 	// the PENDING -> BUSY flip. This PatchCase attempt is kept anyway, on
 	// the chance entity-service ever adds a real assignee column — a
 	// failure here must not block accepting either way.
@@ -666,9 +658,9 @@ type engineerMessageRequest struct {
 
 // HandleEngineerMessage handles POST /chat/sessions/{id}/messages —
 // browser-facing, behind Auth. {id} is the case ID. Persists the engineer's
-// reply via the LOCAL STAND-IN routing-service tables (see routingService's
-// own doc comment), then relays it to the customer's already-open WebSocket
-// via backend-v2's internal push (see the package doc comment on why this
+// reply via the routing-service tables (see routingService's own doc
+// comment), then relays it to the customer's already-open WebSocket via
+// backend-v2's internal push (see the package doc comment on why this
 // direction uses a push instead of SSE).
 func (h *ChatHandler) HandleEngineerMessage(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
@@ -695,15 +687,14 @@ func (h *ChatHandler) HandleEngineerMessage(w http.ResponseWriter, r *http.Reque
 
 	// Best-effort, matching HandleCustomerMessage's own philosophy for the
 	// other direction of this same transcript (see routingService's doc
-	// comment) -- an engineer's message must still reach the customer over
-	// notifyOrigin below even if this LOCAL STAND-IN persistence call
-	// fails. Previously this was a blocking entity.CreateCaseComment call;
-	// moved here so both directions of the conversation land in the same
-	// place (the stand-in comment table) instead of being split across two
-	// storage systems -- see the project's chat-persistence-mapping-plan.md.
+	// comment): an engineer's message must still reach the customer over
+	// notifyOrigin below even if this persistence call fails. Previously
+	// this was a blocking entity.CreateCaseComment call; moved here so both
+	// directions of the conversation land in the same place (the stand-in
+	// comment table) instead of being split across two storage systems.
 	//
 	// ErrConversationEnded is the one exception, exactly as in
-	// HandleCustomerMessage -- normally the engineer's own UI removes an
+	// HandleCustomerMessage — normally the engineer's own UI removes an
 	// ended session's tab before another message can be sent, but a
 	// request already in flight when "End session" is clicked shouldn't
 	// silently report success either.
@@ -825,7 +816,7 @@ func (h *ChatHandler) HandleSetPresence(w http.ResponseWriter, r *http.Request) 
 	// is a plain manual toggle independent of case load, and BUSY is a real
 	// do-not-disturb an engineer can set without dropping any case they
 	// already hold (see router.Router.SetPresence's doc comment). There is
-	// still no PENDING here -- that's a per-case fact, never a top-level
+	// still no PENDING here — that's a per-case fact, never a top-level
 	// status an engineer requests (see routingclient.CaseStatus.Pending).
 	status := routingclient.Status(req.Status)
 	switch status {
@@ -845,7 +836,7 @@ func (h *ChatHandler) HandleSetPresence(w http.ResponseWriter, r *http.Request) 
 
 	// Going AVAILABLE can drain more than one queued case at once now (see
 	// router.Router.SetPresence's queue-drain, capped at this engineer's own
-	// max_concurrent_chats) -- unlike Completed/Decline/a timeout, which
+	// max_concurrent_chats) — unlike Completed/Decline/a timeout, which
 	// each free at most one slot, so deliver every one of them.
 	for _, c := range result.AssignedCases {
 		h.publishToEngineer(user.UserID, assignedCaseEvent(c))
@@ -888,12 +879,10 @@ type setMaxConcurrentChatsRequest struct {
 }
 
 // minMaxConcurrentChats/maxMaxConcurrentChats mirror chat-routing-service's
-// own cs_engineer_status.max_concurrent_chats CHECK constraint (see that
-// service's migrations/000018_concurrent_chat_capacity.up.sql, lowered
-// from 1-20 to 1-10 by 000020_lower_max_concurrent_chats.up.sql -- Sajith
-// confirmed 10 as the intended maximum) -- checked here too so an
-// out-of-range value gets a clean 400 from this browser-facing endpoint
-// instead of a raw upstream error surfacing as a 502.
+// own cs_engineer_status.max_concurrent_chats CHECK constraint, checked
+// here too so an out-of-range value gets a clean 400 from this
+// browser-facing endpoint instead of a raw upstream error surfacing as a
+// 502.
 const (
 	minMaxConcurrentChats = 1
 	maxMaxConcurrentChats = 10
@@ -905,7 +894,7 @@ const (
 // SetMaxConcurrentChats and chat-routing-service's router.Router.
 // SetMaxConcurrentChats), replacing the manual pgAdmin `UPDATE
 // cs_engineer_status` this previously required. Deliberately does not
-// disturb any case the engineer already holds -- lowering the limit below
+// disturb any case the engineer already holds — lowering the limit below
 // their current active count just stops new work from routing to them
 // until they fall back under it, it never drops an in-progress chat.
 //
@@ -947,7 +936,7 @@ func (h *ChatHandler) HandleSetMaxConcurrentChats(w http.ResponseWriter, r *http
 
 	// Raising the limit can immediately drain more than one queued case
 	// into this engineer's newly-opened capacity (see router.Router.
-	// SetMaxConcurrentChats's queue-drain) -- same delivery
+	// SetMaxConcurrentChats's queue-drain) — same delivery
 	// HandleSetPresence already does for its own queue-drain.
 	for _, c := range result.AssignedCases {
 		h.publishToEngineer(user.UserID, assignedCaseEvent(c))
@@ -1034,7 +1023,7 @@ type createCaseResponseBody struct {
 // HandleConvertToCase handles POST /chat/sessions/{id}/convert-to-case,
 // letting the engineer holding a chat turn it into a real case. It fetches
 // the chat's stored details, creates the case, then ends the chat session
-// -- failing the whole request if any step fails, since a partially
+// — failing the whole request if any step fails, since a partially
 // converted chat (case created but not recorded here, or vice versa) is
 // worse than just failing the click.
 func (h *ChatHandler) HandleConvertToCase(w http.ResponseWriter, r *http.Request) {
@@ -1060,7 +1049,7 @@ func (h *ChatHandler) HandleConvertToCase(w http.ResponseWriter, r *http.Request
 	// Case conversion only makes sense for a customer-portal-originated
 	// chat, which has a customer account/project to attach the case to.
 	// console-chat-bridge (every other Source) doesn't implement case
-	// creation at all -- rejected here up front instead of a wasted call
+	// creation at all — rejected here up front instead of a wasted call
 	// that would otherwise surface as a misleading 502.
 	if ci.Source != "" && ci.Source != defaultNotifySource {
 		writeError(w, http.StatusConflict, "This chat can't be converted into a case — it didn't originate from the customer portal.")
@@ -1100,7 +1089,7 @@ func (h *ChatHandler) HandleConvertToCase(w http.ResponseWriter, r *http.Request
 
 	convertResult, err := h.routing.ConvertToCase(r.Context(), user.UserID, caseID, created.EntityCaseID)
 	if err != nil {
-		// The case above already exists even though this failed -- surface
+		// The case above already exists even though this failed — surface
 		// its ID so the engineer can find it manually rather than lose it.
 		slog.ErrorContext(r.Context(), "chat: routing service convert to case failed AFTER a real case was already created", "userID", user.UserID, "caseID", caseID, "entityCaseId", created.EntityCaseID, "err", err)
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("Case %s was created, but ending the chat session failed. Please refresh and check the case.", created.EntityCaseID))
@@ -1143,8 +1132,8 @@ type caseOwnershipResponse struct {
 // this tenant" once its own in-memory record is missing or disagrees (see
 // that method's own doc comment for the fast-path/durable-fallback split).
 //
-// Any lookup failure -- case genuinely not found, or the routing service
-// itself unreachable -- responds 404 rather than distinguishing the two:
+// Any lookup failure — case genuinely not found, or the routing service
+// itself unreachable — responds 404 rather than distinguishing the two:
 // this endpoint only ever backs an authorization decision, so failing
 // closed (reject the case as unrecognized) is the safe default rather than
 // letting a transient routing-service outage look like case ownership
@@ -1170,7 +1159,7 @@ func (h *ChatHandler) HandleGetCaseOwnership(w http.ResponseWriter, r *http.Requ
 }
 
 // completeByTenantRequest is the body for POST /internal/chat/complete.
-// ConversationID is optional -- only used to populate the session_closed
+// ConversationID is optional — only used to populate the session_closed
 // event this handler broadcasts to engineers, itself only a UI refresh
 // trigger (see broadcastHubKey's doc comment), so an empty value here never
 // blocks ending the session.
@@ -1185,14 +1174,14 @@ type completeByTenantRequest struct {
 // bridge's POST /v1/{tenant}/chats/{caseId}/complete calls this once its
 // own requireTenantCase check has confirmed caseId belongs to tenantSlug,
 // so a case can be ended from the customer/tenant side of a chat, not just
-// by the engineer holding it. Not browser-facing -- exempt from
+// by the engineer holding it. Not browser-facing — exempt from
 // middleware.Auth like every other /internal/chat/... route, authenticated
 // by an OAuth2 client-credentials token instead.
 //
 // router.Router.EndByTenant itself re-checks tenantSlug at the SQL level
 // (belt-and-suspenders on top of the bridge's own check) before ending
 // anything, so a caller that got tenantSlug wrong ends nothing rather than
-// someone else's case -- result.Ended false covers both that case and a
+// someone else's case — result.Ended false covers both that case and a
 // caseId that was already ended, and both are reported as 404 here since
 // this caller has no further action to take either way.
 func (h *ChatHandler) HandleCompleteByTenant(w http.ResponseWriter, r *http.Request) {

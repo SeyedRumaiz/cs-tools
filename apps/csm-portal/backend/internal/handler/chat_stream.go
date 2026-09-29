@@ -47,9 +47,8 @@ const engineerAlertStreamHeartbeat = 15 * time.Second
 // live engineer chat has no Kafka-backed fallback path to degrade to.
 //
 // Registers under TWO stream.BroadcastHub keys at once: this engineer's own
-// (engineerHubKey(user.UserID) -- the IdP "userid" claim, see
-// chat-routing-service's migrations/000014_rename_engineer_status_table for
-// why this is a user ID rather than an email), where the routing service's
+// (engineerHubKey(user.UserID), keyed by the IdP "userid" claim rather than
+// an email), where the routing service's
 // targeted deliveries land, and the shared broadcastHubKey, which now serves only as
 // the escalate fallback when the routing service is unreachable and as the
 // (still-broadcast) customer-message relay — see chat.go's package doc

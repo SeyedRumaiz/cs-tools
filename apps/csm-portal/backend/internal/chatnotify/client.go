@@ -17,13 +17,13 @@
 // Package chatnotify is the outbound HTTP client this backend uses to push
 // live-engineer-chat events into a case's origin (customer-portal/
 // backend-v2's open browser WebSocket, or console-chat-bridge's per-case
-// SSE stream -- see ChatHandler.notifiers/notifierFor) via
+// SSE stream — see ChatHandler.notifiers/notifierFor) via
 // POST /internal/chat-events, and to create a case on the engineer's behalf
 // when a chat is converted (POST /internal/chat/create-case).
 //
 // Both calls are pure machine-to-machine: there is no end-user identity
 // behind them (CreateCase forwards the accepting engineer's own
-// x-user-id-token as a plain header instead -- see that method below). That
+// x-user-id-token as a plain header instead — see that method below). That
 // puts them in the same class as integrations/csm-integration-service's
 // inbound API, not the receiving service's own browser-facing routes, so
 // this client follows that service's established M2M pattern instead of a
@@ -92,7 +92,7 @@ type Client struct {
 	m2m *m2mclient.Client
 }
 
-// NewClient constructs a Client. Does not validate connectivity -- the
+// NewClient constructs a Client. Does not validate connectivity — the
 // first PushEvent call surfaces a dial failure, logged (not fatal) by the
 // caller, consistent with this feature's "best effort" live-relay design: a
 // failed push never blocks the case/comment write that already succeeded.
@@ -125,14 +125,14 @@ func (c *Client) PushEvent(ctx context.Context, payload []byte) error {
 
 // CreateCase POSTs payload to the target's POST /internal/chat/create-case
 // and returns the raw response body. Unlike PushEvent, this is NOT
-// best-effort -- the caller needs the new case's ID back synchronously.
+// best-effort — the caller needs the new case's ID back synchronously.
 // userIDToken is forwarded as an x-user-id-token header since the target
 // has no end-user session to derive one from on this internal route.
 func (c *Client) CreateCase(ctx context.Context, payload []byte, userIDToken string) ([]byte, error) {
 	var headers map[string]string
 	if userIDToken != "" {
 		// Forwarded on to entity-service by backend-v2's HandleCreateCase
-		// (see that handler's doc comment) -- entity-service's CreateCase
+		// (see that handler's doc comment) — entity-service's CreateCase
 		// requires this header, and this internal route has no end-user
 		// session of its own to derive one from otherwise.
 		headers = map[string]string{"x-user-id-token": userIDToken}
