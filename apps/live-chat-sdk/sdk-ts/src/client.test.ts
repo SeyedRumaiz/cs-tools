@@ -198,6 +198,102 @@ describe("completeChat", () => {
   });
 });
 
+describe("getHistory", () => {
+  it("sends the correct URL and auth via GET", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { messages: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = createLiveChatClient(baseConfig());
+    await client.getHistory("case-1");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://support.example.com/v1/my-product/chats/case-1/history");
+    expect(init.method).toBe("GET");
+    expect(init.body).toBeUndefined();
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer test-token");
+  });
+
+  it("returns the parsed messages, including an engineer-authored one", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        messages: [
+          { role: "customer", content: "How do I configure SSO?", createdAt: "2026-01-01T00:00:00Z" },
+          { role: "assistant", content: "Sorry, I hit an error." },
+          { role: "engineer", content: "Happy to help with that." }
+        ]
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = createLiveChatClient(baseConfig());
+    const messages = await client.getHistory("case-1");
+
+    expect(messages).toEqual([
+      { role: "customer", content: "How do I configure SSO?", createdAt: "2026-01-01T00:00:00Z" },
+      { role: "assistant", content: "Sorry, I hit an error.", createdAt: undefined },
+      { role: "engineer", content: "Happy to help with that.", createdAt: undefined }
+    ]);
+  });
+
+  it("drops an entry with an unrecognized role instead of failing the whole call", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        messages: [
+          { role: "customer", content: "hi" },
+          { role: "system", content: "should be dropped" }
+        ]
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = createLiveChatClient(baseConfig());
+    const messages = await client.getHistory("case-1");
+
+    expect(messages).toEqual([{ role: "customer", content: "hi", createdAt: undefined }]);
+  });
+
+  it("rejects an empty caseId before calling fetch", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLiveChatClient(baseConfig());
+    await expect(client.getHistory("")).rejects.toBeInstanceOf(LiveChatError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a response with no messages array", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { notMessages: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLiveChatClient(baseConfig());
+    await expect(client.getHistory("case-1")).rejects.toBeInstanceOf(LiveChatError);
+  });
+
+  it("uses requestTransport.getJson instead of fetch when provided", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const getJson = vi.fn().mockResolvedValue({
+      status: 200,
+      text: JSON.stringify({ messages: [{ role: "engineer", content: "hi" }] })
+    });
+
+    const client = createLiveChatClient(
+      baseConfig({ getAccessToken: undefined, requestTransport: { postJson: vi.fn(), getJson } })
+    );
+    const messages = await client.getHistory("case-1");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(getJson).toHaveBeenCalledWith("https://support.example.com/v1/my-product/chats/case-1/history");
+    expect(messages).toEqual([{ role: "engineer", content: "hi", createdAt: undefined }]);
+  });
+
+  it("throws a clear error when requestTransport is given without getJson", async () => {
+    const client = createLiveChatClient(
+      baseConfig({ getAccessToken: undefined, requestTransport: { postJson: vi.fn() } })
+    );
+    await expect(client.getHistory("case-1")).rejects.toThrow(LiveChatError);
+  });
+});
+
 describe("URL encoding", () => {
   it("URL-encodes the tenant segment", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(202, { caseId: "c1", conversationId: "c1" }));

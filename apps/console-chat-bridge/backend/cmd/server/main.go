@@ -213,6 +213,7 @@ func main() {
 	mux.Handle("POST /v1/{tenant}/chats", v1Chain(chatsHandler.HandleEscalateV1))
 	mux.Handle("POST /v1/{tenant}/chats/{caseId}/messages", v1Chain(chatsHandler.HandleSendMessageV1))
 	mux.Handle("GET /v1/{tenant}/chats/{caseId}/events", v1Chain(chatsHandler.HandleStreamV1))
+	mux.Handle("GET /v1/{tenant}/chats/{caseId}/history", v1Chain(chatsHandler.HandleGetHistoryV1))
 	mux.Handle("POST /v1/{tenant}/chats/{caseId}/complete", v1Chain(chatsHandler.HandleCompleteV1))
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {

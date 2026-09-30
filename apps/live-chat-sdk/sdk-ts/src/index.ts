@@ -5,6 +5,7 @@
  * API exposed by console-chat-bridge (`POST /v1/{tenant}/chats`,
  * `GET /v1/{tenant}/chats/{caseId}/events`,
  * `POST /v1/{tenant}/chats/{caseId}/messages`,
+ * `GET /v1/{tenant}/chats/{caseId}/history`,
  * `POST /v1/{tenant}/chats/{caseId}/complete`). Any product embedding
  * this can escalate a chat to a live engineer and exchange messages
  * without knowing anything about csm-portal/backend, chat-routing-service,
@@ -79,6 +80,7 @@ export type {
   LiveChatClient,
   LiveChatClientConfig,
   LiveChatEvent,
+  LiveChatHistoryMessage,
   LiveChatRequestTransport,
   LiveChatStreamTransport,
   StartChatRequest,

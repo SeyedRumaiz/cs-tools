@@ -135,6 +135,39 @@ func (c *Client) GetCaseOwnership(ctx context.Context, caseID string) (CaseOwner
 	return out, nil
 }
 
+// HistoryMessage mirrors one entry of csm-portal/backend's
+// caseHistoryResponse.PriorMessages (itself routingclient.PriorMessage) --
+// Role is "customer", "assistant", or "engineer".
+type HistoryMessage struct {
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+// GetCaseHistory calls csm-portal/backend's
+// GET /internal/chat/cases/{caseId}/history — the full transcript to date
+// for caseID (pre-escalation Novera exchange plus, once accepted, the live
+// customer/engineer conversation), backing this bridge's own customer-
+// facing case-history route. Callers must have already confirmed the
+// requester owns caseID (requireOwner/requireTenantCase) before reaching
+// here, the same trust boundary GetCaseOwnership relies on.
+func (c *Client) GetCaseHistory(ctx context.Context, caseID string) ([]HistoryMessage, error) {
+	body, status, err := c.m2m.Do(ctx, http.MethodGet, "/internal/chat/cases/"+url.PathEscape(caseID)+"/history", nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("csmchat: get case history: %w", err)
+	}
+	if !m2mclient.Success(status) {
+		return nil, fmt.Errorf("csmchat: get case history: upstream returned %d: %s", status, body)
+	}
+	var out struct {
+		PriorMessages []HistoryMessage `json:"priorMessages"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("csmchat: get case history: decode response: %w", err)
+	}
+	return out.PriorMessages, nil
+}
+
 // CompleteByTenant POSTs to csm-portal/backend's
 // POST /internal/chat/complete — the tenant-initiated (customer-side)
 // session-completion counterpart to the engineer-initiated

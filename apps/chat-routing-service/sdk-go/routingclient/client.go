@@ -172,20 +172,27 @@ type CaseInfo struct {
 	CustomerEmail string `json:"customerEmail,omitempty"`
 	CustomerName  string `json:"customerName,omitempty"`
 	Message       string `json:"message,omitempty"`
-	// PriorMessages mirrors router.CaseInfo.PriorMessages — the customer's
-	// AI-chatbot (Novera) conversation history, snapshotted at the moment
-	// of escalation. See PriorMessage below.
+	// PriorMessages mirrors router.CaseInfo.PriorMessages — GetCaseInfo
+	// populates this fresh from chat_routing.comment on every call, not a
+	// stale snapshot from escalation time, so it includes the full
+	// conversation to date: the pre-escalation Novera transcript plus, once
+	// accepted, the live customer/engineer exchange. See PriorMessage below.
 	PriorMessages []PriorMessage `json:"priorMessages,omitempty"`
 }
 
 // PriorMessageRole mirrors router.PriorMessageRole — who sent one
-// PriorMessage, the customer or the Novera AI assistant. Never an engineer:
-// a pre-escalation transcript predates any engineer being involved.
+// PriorMessage. GetCaseInfo populates PriorMessages fresh from
+// chat_routing.comment (not a stale escalation-time snapshot — see
+// CaseInfo.PriorMessages's own doc comment), which also holds the live,
+// post-acceptance conversation an engineer joins, so Engineer is a real
+// value here even though a pre-escalation transcript alone never contains
+// one.
 type PriorMessageRole string
 
 const (
 	PriorMessageRoleCustomer  PriorMessageRole = "customer"
 	PriorMessageRoleAssistant PriorMessageRole = "assistant"
+	PriorMessageRoleEngineer  PriorMessageRole = "engineer"
 )
 
 // PriorMessage mirrors router.PriorMessage — one message from the

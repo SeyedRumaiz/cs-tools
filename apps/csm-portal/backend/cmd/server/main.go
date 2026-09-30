@@ -409,6 +409,9 @@ func main() {
 	// console-chat-bridge's requireTenantCase and completeChat route
 	// respectively (see middleware.m2mExemptRoutes/m2mExemptPathPrefixes).
 	mux.HandleFunc("GET /internal/chat/cases/{caseId}", chatHandler.HandleGetCaseOwnership)
+	// Case transcript -- called by console-chat-bridge's own customer-facing
+	// case-history route, after its own ownership check has already run.
+	mux.HandleFunc("GET /internal/chat/cases/{caseId}/history", chatHandler.HandleGetCaseHistory)
 	mux.HandleFunc("POST /internal/chat/complete", chatHandler.HandleCompleteByTenant)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -57,6 +57,21 @@ export interface StartChatResult {
 }
 
 /**
+ * One message from {@link LiveChatClient.getHistory} — the full transcript
+ * to date for a case. A superset of {@link ChatMessage}: "engineer" is a
+ * real value here (the backend echoes back the live, post-acceptance
+ * conversation too, not just the pre-escalation transcript a caller
+ * supplies to startChat), which is why this is its own type rather than
+ * reusing ChatMessage's narrower role union.
+ */
+export interface LiveChatHistoryMessage {
+  role: "customer" | "assistant" | "engineer";
+  content: string;
+  /** RFC 3339 timestamp, when the backend has one for this message. */
+  createdAt?: string;
+}
+
+/**
  * Normalized live-chat event, delivered via {@link LiveChatClient.subscribe}.
  * Each variant's fields are exactly what the backend guarantees for that
  * wire event today (see events.ts's own doc comment for the verified
@@ -102,6 +117,16 @@ export interface LiveChatRequestTransport {
    * (e.g. no network).
    */
   postJson(url: string, body: unknown): Promise<{ status: number; text: string }>;
+  /**
+   * Performs an authenticated GET of `url` and resolves with the raw
+   * response status and body text — same never-throws-on-non-2xx contract
+   * as {@link postJson}. Optional so an existing implementation written
+   * before {@link LiveChatClient.getHistory} existed still satisfies this
+   * interface; the SDK throws a clear {@link LiveChatError} if getHistory
+   * is called without this being provided, rather than a confusing
+   * "not a function" from calling it directly.
+   */
+  getJson?(url: string): Promise<{ status: number; text: string }>;
 }
 
 /**
@@ -172,4 +197,14 @@ export interface LiveChatClient {
 
   /** Ends the chat from the customer's side: POST /v1/{tenant}/chats/{caseId}/complete. */
   completeChat(caseId: string): Promise<void>;
+
+  /**
+   * Fetches the full transcript to date for an existing case:
+   * GET /v1/{tenant}/chats/{caseId}/history. Meant for restoring a
+   * conversation a caller lost track of client-side (e.g. a page reload
+   * mid-chat) but still has caseId for — not called by subscribe() or any
+   * other method here, since a live stream only ever delivers events going
+   * forward from when it opens.
+   */
+  getHistory(caseId: string): Promise<LiveChatHistoryMessage[]>;
 }

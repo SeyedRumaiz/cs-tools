@@ -19,6 +19,7 @@
 //	POST /v1/{tenant}/chats                    — start an escalation
 //	POST /v1/{tenant}/chats/{caseId}/messages   — send a chat message
 //	GET  /v1/{tenant}/chats/{caseId}/events     — SSE delivery
+//	GET  /v1/{tenant}/chats/{caseId}/history    — the transcript to date
 //	POST /v1/{tenant}/chats/{caseId}/complete   — end the chat (customer side)
 //
 // Additive alongside chats.go's four legacy /support/chats routes, which
@@ -39,6 +40,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/csmchat"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/tenant"
 )
@@ -412,6 +414,45 @@ func (h *ChatsHandler) HandleSendMessageV1(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"message": "sent"})
+}
+
+// historyResponse is GET /v1/{tenant}/chats/{caseId}/history's response
+// shape.
+type historyResponse struct {
+	Messages []csmchat.HistoryMessage `json:"messages"`
+}
+
+// HandleGetHistoryV1 handles GET /v1/{tenant}/chats/{caseId}/history.
+// Behind ResolveTenant, CORS, TenantAuth, RequireSubject -- same
+// authorization model as HandleStreamV1/HandleSendMessageV1, just a plain
+// request/response instead of a subscription or a mutation. Exists so a
+// client that lost its in-memory conversation (a page refresh mid-chat is
+// the case that prompted this: the client still knows caseId from its own
+// persisted escalation state, but not the messages that were on screen
+// before the reload) can restore the full transcript before resuming its
+// event stream, rather than resuming into a blank conversation.
+func (h *ChatsHandler) HandleGetHistoryV1(w http.ResponseWriter, r *http.Request) {
+	t, ok := tenant.FromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "Internal error.")
+		return
+	}
+	if canonicalOwner(r) == "" {
+		writeError(w, http.StatusUnauthorized, "A user session is required for this action.")
+		return
+	}
+
+	caseID := r.PathValue("caseId")
+	if _, ok := h.requireTenantCase(w, r, caseID, t); !ok {
+		return
+	}
+
+	messages, err := h.csm.GetCaseHistory(r.Context(), caseID)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "Could not load the conversation history right now. Please try again.")
+		return
+	}
+	writeJSON(w, http.StatusOK, historyResponse{Messages: messages})
 }
 
 // HandleStreamV1 handles GET /v1/{tenant}/chats/{caseId}/events. Behind

@@ -5,6 +5,7 @@ import type {
   LiveChatClient,
   LiveChatClientConfig,
   LiveChatEvent,
+  LiveChatHistoryMessage,
   StartChatRequest,
   StartChatResult
 } from "./types.js";
@@ -55,6 +56,53 @@ async function postJson(config: LiveChatClientConfig, url: string, body: unknown
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify(body)
+      });
+    } catch (err) {
+      throw new LiveChatError(err instanceof Error && err.message ? err.message : "A network error occurred.");
+    }
+    status = response.status;
+    rawBody = await response.text();
+  }
+
+  if (status < 200 || status >= 300) {
+    throw errorFromResponse(status, rawBody);
+  }
+  if (rawBody.trim() === "") {
+    return undefined;
+  }
+  try {
+    return JSON.parse(rawBody) as unknown;
+  } catch {
+    throw new LiveChatError("The server returned a malformed response.", { status });
+  }
+}
+
+/** GET counterpart to {@link postJson} — same transport selection and
+ * error-shape contract, just no request body. */
+async function getJson(config: LiveChatClientConfig, url: string): Promise<unknown> {
+  let status: number;
+  let rawBody: string;
+
+  if (config.requestTransport) {
+    if (typeof config.requestTransport.getJson !== "function") {
+      throw new LiveChatError("requestTransport.getJson is required to call getHistory.");
+    }
+    try {
+      ({ status, text: rawBody } = await config.requestTransport.getJson(url));
+    } catch (err) {
+      throw new LiveChatError(err instanceof Error && err.message ? err.message : "A network error occurred.");
+    }
+  } else {
+    if (typeof config.getAccessToken !== "function") {
+      throw new LiveChatError("getAccessToken or requestTransport is required.");
+    }
+    const token = await config.getAccessToken();
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` }
       });
     } catch (err) {
       throw new LiveChatError(err instanceof Error && err.message ? err.message : "A network error occurred.");
@@ -140,6 +188,39 @@ async function completeChat(config: LiveChatClientConfig, caseId: string): Promi
   await postJson(config, caseUrl(config, caseId, "/complete"), {});
 }
 
+/** Validates and narrows getHistory's raw JSON response — never a blind
+ * cast, same reasoning as {@link parseStartChatResult}. An entry with an
+ * unrecognized role or a missing content string is dropped rather than
+ * failing the whole call — one malformed row shouldn't blank out an
+ * otherwise-good transcript. */
+function parseHistoryMessages(raw: unknown): LiveChatHistoryMessage[] {
+  if (!isRecord(raw) || !Array.isArray(raw.messages)) {
+    throw new LiveChatError("The server returned an unexpected response loading the conversation history.");
+  }
+  const messages: LiveChatHistoryMessage[] = [];
+
+  for (const entry of raw.messages) {
+    if (
+      isRecord(entry) &&
+      (entry.role === "customer" || entry.role === "assistant" || entry.role === "engineer") &&
+      typeof entry.content === "string"
+    ) {
+      messages.push({
+        role: entry.role,
+        content: entry.content,
+        createdAt: typeof entry.createdAt === "string" ? entry.createdAt : undefined
+      });
+    }
+  }
+  return messages;
+}
+
+async function getHistory(config: LiveChatClientConfig, caseId: string): Promise<LiveChatHistoryMessage[]> {
+  requireNonEmpty(caseId, "caseId");
+  const raw = await getJson(config, caseUrl(config, caseId, "/history"));
+  return parseHistoryMessages(raw);
+}
+
 /** Creates a {@link LiveChatClient} bound to config. Validates baseUrl/tenant
  * once, up front. getAccessToken/requestTransport/streamTransport are
  * validated lazily instead, by the calls that actually need them — a
@@ -160,6 +241,7 @@ export function createLiveChatClient(config: LiveChatClientConfig): LiveChatClie
     startChat: (req) => startChat(config, req),
     subscribe: (caseId, onEvent) => subscribe(config, caseId, onEvent),
     sendMessage: (caseId, message) => sendMessage(config, caseId, message),
-    completeChat: (caseId) => completeChat(config, caseId)
+    completeChat: (caseId) => completeChat(config, caseId),
+    getHistory: (caseId) => getHistory(config, caseId)
   };
 }

@@ -1158,6 +1158,48 @@ func (h *ChatHandler) HandleGetCaseOwnership(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+// caseHistoryResponse is GET /internal/chat/cases/{caseId}/history's
+// response shape — deliberately just PriorMessages, not the rest of
+// CaseInfo, since callers of this endpoint already know their own
+// caseId/tenant and only need the transcript.
+type caseHistoryResponse struct {
+	PriorMessages []routingclient.PriorMessage `json:"priorMessages"`
+}
+
+// HandleGetCaseHistory handles GET /internal/chat/cases/{caseId}/history —
+// not browser-facing, exempt from middleware.Auth like every other
+// /internal/chat/... route (see middleware.m2mExemptRoutes), authenticated
+// by an OAuth2 client-credentials token from the calling service. The
+// caller is console-chat-bridge's own customer-facing case-history route,
+// itself only reachable after that bridge's requireTenantCase/requireOwner
+// has already confirmed the caller owns this case — this endpoint does no
+// ownership check of its own, the same trust boundary
+// HandleGetCaseOwnership relies on for its own caller.
+//
+// Kept as its own endpoint rather than folded into HandleGetCaseOwnership:
+// that one is on requireTenantCase's hot path (checked on every message
+// send/stream reconnect, cached after the first call) and is meant to stay
+// a cheap ownership check — bundling a potentially large transcript into
+// every one of those calls would be the wrong default, even though both
+// ultimately read the same GetCaseInfo.
+func (h *ChatHandler) HandleGetCaseHistory(w http.ResponseWriter, r *http.Request) {
+	caseID := r.PathValue("caseId")
+	if caseID == "" {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	ci, err := h.routing.GetCaseInfo(r.Context(), caseID)
+	if err != nil {
+		slog.WarnContext(r.Context(), "chat: get case history failed", "caseID", caseID, "err", err)
+		writeError(w, http.StatusNotFound, "No case found for this ID.")
+		return
+	}
+	writeJSONValue(w, http.StatusOK, caseHistoryResponse{
+		PriorMessages: ci.PriorMessages,
+	})
+}
+
 // completeByTenantRequest is the body for POST /internal/chat/complete.
 // ConversationID is optional — only used to populate the session_closed
 // event this handler broadcasts to engineers, itself only a UI refresh
