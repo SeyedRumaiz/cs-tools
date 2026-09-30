@@ -1,5 +1,4 @@
--- The source of truth for which case(s) an engineer holds -- see
--- assignee_id, not a column on cs_engineer_status.
+-- The source of truth for which case(s) an engineer holds.
 CREATE TYPE chat_routing.chat_conversation_state AS ENUM (
     'OPEN',
     'ACTIVE',
@@ -34,8 +33,7 @@ CREATE INDEX idx_chat_conversation_active_assignee
     ON chat_routing.chat_conversation (assignee_id, state)
     WHERE assignee_id IS NOT NULL AND session_ended_at IS NULL;
 
--- At most one open (non-ended) chat per customer+project -- see
--- ErrDuplicateOpenChat in internal/router/workitem.go.
+-- At most one open (non-ended) chat per customer+project.
 CREATE UNIQUE INDEX uq_chat_conversation_open_customer_project
     ON chat_routing.chat_conversation (
         COALESCE(case_info ->> 'customerEmail', ''),

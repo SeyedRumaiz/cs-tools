@@ -1,6 +1,5 @@
 -- An engineer's manual chat_status and configurable concurrent-chat
--- capacity. Which cases they're actually holding is NOT here -- see
--- chat_conversation.assignee_id (000004).
+-- capacity.
 CREATE TYPE chat_routing.engineer_status AS ENUM (
     'AVAILABLE',
     'BUSY',

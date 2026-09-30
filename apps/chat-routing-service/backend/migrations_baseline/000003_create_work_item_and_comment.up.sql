@@ -1,5 +1,4 @@
--- Local stand-in for entity-service's eventual real work-item schema --
--- see internal/router/workitem.go's own package comment.
+-- Local stand-in for entity-service's eventual real work-item schema.
 CREATE TABLE chat_routing.work_item (
     id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     creator_id         text NOT NULL,

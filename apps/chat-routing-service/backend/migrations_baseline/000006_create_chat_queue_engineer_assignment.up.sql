@@ -1,5 +1,5 @@
--- Append-only audit trail of assignment outcomes (accept/decline/timeout)
--- -- not written at assignment time, so it can't answer "how many chats
+-- Append-only audit trail of assignment outcomes (accept/decline/timeout).
+-- Not written at assignment time, so it can't answer "how many chats
 -- was this engineer assigned today" on its own.
 CREATE TYPE chat_routing.assignment_outcome AS ENUM (
     'CONNECTED',
