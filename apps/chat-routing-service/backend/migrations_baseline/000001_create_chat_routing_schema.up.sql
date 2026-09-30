@@ -1,0 +1,39 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- Baseline: the chat_routing schema as of migration 000023 in
+-- ../migrations/, split into one migration per table so it bootstraps a
+-- brand-new database without replaying that whole 23-step history. Content
+-- must match ../current_schema.sql -- regenerate both together (see
+-- current_schema.sql's own header) whenever ../migrations/ gains a new
+-- migration.
+--
+-- Only for a database that has never run ../migrations/. Do not point this
+-- at a database that already has that history applied -- every object
+-- below already exists there and every CREATE will fail. The two are
+-- tracked separately on purpose: run this with its own
+-- -x-migrations-table=chat_routing_schema_baseline_migrations, distinct
+-- from ../migrations/'s own chat_routing_schema_migrations, so golang-migrate
+-- can never confuse "ran the baseline" with "ran the real history" if the
+-- same tool is later pointed at ../migrations/ against this same database.
+--
+-- Files after this one are ordered by foreign-key dependency, same as a
+-- normal migration sequence: cs_engineer_status and work_item/comment have
+-- no dependencies and come first; chat_conversation depends on both;
+-- chat_queue and chat_queue_engineer_assignment depend on chat_conversation
+-- and come last.
+
+CREATE SCHEMA IF NOT EXISTS chat_routing;

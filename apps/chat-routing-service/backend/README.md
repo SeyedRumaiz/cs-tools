@@ -230,7 +230,14 @@ the connection string.
 
 Full schema history and rationale for each change lives in
 [`migrations/`](./migrations) (one pair of `.up`/`.down` files per change,
-each with its own comment) rather than here.
+each with its own comment) rather than here — an already-applied migration
+is frozen, so a schema change is always a new file, never an edit to an old
+one, even when the old one now reads oddly in isolation (e.g. `000016`
+renaming a column `000014` only just created). For the schema as it looks
+*today*, without replaying that whole history, see
+[`current_schema.sql`](./current_schema.sql): a generated snapshot, not
+read by this service and not applied by `golang-migrate`, regenerated from
+`migrations/` after each change per its own header comment.
 
 ## HTTP surface
 
