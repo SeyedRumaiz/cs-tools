@@ -256,24 +256,21 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
               // message either side sends after acceptance too. So it's
               // really "the transcript so far", and gets mapped into
               // messages the same way accept() below seeds a fresh session.
-              //
-              // Known gap, not fixed here: commentsForWorkItem can only
-              // tell "the Novera assistant" apart from "everyone else" (see
-              // its own doc comment) -- it has no way to know a given live
-              // message came from the engineer rather than the customer, so
-              // any live engineer reply already sent before this refresh
-              // replays as a left-aligned "customer" bubble instead of the
-              // engineer's own. Fixing that needs commentsForWorkItem to
-              // also compare created_by against the assigned engineer's own
-              // email. Not losing the transcript at all is still a strict
-              // improvement over today.
+              // commentsForWorkItem already tells apart Novera ("assistant"),
+              // the customer, and the assigned engineer ("engineer") by
+              // comparing created_by -- m.role reflects that three-way
+              // split directly, so a rehydrated engineer reply renders as
+              // the engineer's own bubble, not a left-aligned "customer"
+              // one (reported live: a refresh mid-chat showed the
+              // engineer's own prior message as if the customer had sent
+              // it).
               kind: "session",
               caseId: c.caseId,
               conversationId: c.conversationId,
               customerName: c.customerName,
               messages: (c.priorMessages ?? []).map((m, i) => ({
                 id: `prior-${c.caseId}-${i}`,
-                from: m.role === "assistant" ? "assistant" : "customer",
+                from: m.role,
                 text: m.content,
               })),
               // The whole restored transcript is treated as "prior" content
@@ -442,12 +439,15 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
         // Seed the new session with the customer's prior AI-chatbot
         // (Novera) transcript, if any, so the engineer opens the chat
         // already knowing what the customer asked -- see PendingAlert.
-        // priorMessages and ActiveSession.priorMessageCount. m.role is
-        // already "customer" or "assistant" (see chatAlerts.ts's
-        // PriorMessage) -- no more author-string heuristic needed.
+        // priorMessages and ActiveSession.priorMessageCount. This is the
+        // pre-acceptance escalation-time snapshot (see ChatAlertEvent.
+        // priorMessages's own doc comment), so m.role is only ever
+        // "customer"/"assistant" here in practice -- no engineer was
+        // involved yet -- but mapped directly (not narrowed to those two)
+        // to match PriorMessage's real three-value type.
         const seededMessages: LiveChatMessage[] = (priorMessages ?? []).map((m, i) => ({
           id: `prior-${caseId}-${i}`,
-          from: m.role === "assistant" ? "assistant" : "customer",
+          from: m.role,
           text: m.content,
         }));
         setCasesByCaseId((current) => {

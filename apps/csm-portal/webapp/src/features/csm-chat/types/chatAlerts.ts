@@ -31,16 +31,18 @@ export type ChatAlertType =
   // left untouched. Only caseId and timestamp are set.
   | "case_timed_out";
 
-// One message from the customer's AI-chatbot (Novera) conversation, from
-// before this escalation happened -- sent by the customer's own browser at
-// escalation time (see customer-portal's NoveraChatPage), persisted into
-// chat_routing.comment, and read back fresh from there on every
-// CaseInfo/CaseStatus this whole pipeline returns. Mirrors csm-portal/
-// backend's routingclient.PriorMessage / chat-routing-service's router.
-// PriorMessage field-for-field. Role, not a display name -- "assistant"
-// covers Novera's own replies, "customer" everything else; there is no
-// third value since a pre-escalation transcript predates any engineer.
-export type PriorMessageRole = "customer" | "assistant";
+// One message from the case's full transcript -- the customer's AI-chatbot
+// (Novera) exchange from before escalation, plus, once accepted, the live
+// customer/engineer conversation too (both persisted into the same
+// chat_routing.comment table and read back fresh from there on every
+// CaseInfo/CaseStatus this whole pipeline returns -- see
+// ChatSessionsContext's own "Known gap" comment, now closed, on where this
+// used to stop short). Mirrors csm-portal/backend's routingclient.
+// PriorMessage / chat-routing-service's router.PriorMessage field-for-field.
+// Role, not a display name -- "assistant" is Novera's own replies,
+// "engineer" is the assigned engineer's own replies once accepted,
+// "customer" everything else.
+export type PriorMessageRole = "customer" | "assistant" | "engineer";
 
 export type PriorMessage = {
   role: PriorMessageRole;
