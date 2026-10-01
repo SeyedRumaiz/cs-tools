@@ -14,6 +14,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package middleware provides this bridge's HTTP middleware: bearer-token
+// authentication (Auth, TenantAuth), the identity checks that run after it
+// (RequireUser, RequireSubject, RequireClientID), CORS, and tenant
+// resolution. Several must run in a specific order — see each function's
+// own doc comment.
 package middleware
 
 import (
@@ -32,20 +37,11 @@ type contextKey string
 const identityKey contextKey = "identity"
 
 // Auth returns middleware that introspects the request's bearer token
-// against v's pinned known IS instance (see package introspect) and stores
-// the resulting Identity in the request context. Unlike
-// customer-portal/backend-v2's own Auth middleware, there is no
-// "local dev, decode without verifying" fallback here — introspection
-// always calls the real instance, and for this POC that instance IS the
-// known local one, so there is nothing to skip.
-//
-// Applied to both this bridge's browser-facing routes (where the caller
-// must resolve to a real end-user identity, see RequireUser) and its one
-// internal route, /internal/chat-events (where the caller is
-// csm-portal/backend's own client-credentials token, see
-// RequireClientID) — introspection against the same pinned instance
-// validates either kind of token; only the check applied *after* it
-// differs.
+// against v's pinned IS instance and stores the resulting Identity in the
+// request context. Used on both browser-facing routes (paired with
+// RequireUser) and the internal /internal/chat-events route (paired with
+// RequireClientID) — introspection is the same either way; only the check
+// applied after it differs.
 func Auth(v *introspect.Validator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,14 +52,8 @@ func Auth(v *introspect.Validator) func(http.Handler) http.Handler {
 			}
 			identity, err := v.ValidateBearer(r.Context(), token)
 			if err != nil {
-				// The response to the browser stays generic on purpose (RFC
-				// 7662 introspection failures should never leak detail to
-				// an untrusted caller), but that left this bridge's own
-				// terminal with no way to tell "IS rejected our
-				// introspection client's own credentials", "TLS trust
-				// failure against a self-signed local IS" and "token
-				// genuinely inactive/expired" apart — log the real reason
-				// here, server-side only.
+				// Log the real reason server-side; the browser response stays
+				// generic so it never leaks introspection detail.
 				slog.ErrorContext(r.Context(), "auth: token introspection failed", "err", err)
 				writeUnauthorized(w, "Your session could not be verified. Please sign in again.")
 				return
@@ -74,15 +64,11 @@ func Auth(v *introspect.Validator) func(http.Handler) http.Handler {
 	}
 }
 
-// TenantAuth is Auth's counterpart for the generic /v1/{tenant}/... API:
-// instead of one pinned *introspect.Validator, it validates against
-// whichever tenant ResolveTenant already resolved into the request context
-// (see tenant.FromContext) — must run after ResolveTenant, same ordering
-// requirement Auth itself has none of (it only ever used the one validator
-// it closed over). If no tenant is in context at all (ResolveTenant was
-// skipped or misordered — a bug, not a normal request outcome, since every
-// /v1 route is always registered behind ResolveTenant), this fails closed
-// with 401 rather than a nil-pointer panic.
+// TenantAuth is Auth's counterpart for the generic /v1/{tenant}/... API: it
+// validates against whichever tenant ResolveTenant resolved into the
+// request context (see tenant.FromContext), so it must run after
+// ResolveTenant. If no tenant is in context — ResolveTenant skipped or
+// misordered — this fails closed with 401 rather than panicking.
 func TenantAuth() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +84,7 @@ func TenantAuth() func(http.Handler) http.Handler {
 				writeUnauthorized(w, "Missing bearer token.")
 				return
 			}
+			// Validates the token using that tenant’s validator.
 			identity, err := t.Validator.Validate(r.Context(), token)
 			if err != nil {
 				// Same fail-closed, log-detail-server-side-only shape as
@@ -129,17 +116,9 @@ func RequireUser(next http.Handler) http.Handler {
 }
 
 // RequireSubject rejects a request whose validated Identity has no Subject
-// claim — the /v1/{tenant}/... API's own, stricter counterpart to
-// RequireUser. Every /v1 user route uses this instead of RequireUser: the
-// generic API's canonicalOwner() (see internal/handler's v1 routes) trusts
-// Subject only, never falling back to Username the way the legacy
-// /support/chats path's ownerIdentity() does (see that function's own doc
-// comment for why — Subject is the one claim every TokenValidator kind
-// normalizes consistently, Username is optional/IdP-dependent). A token
-// that introspects successfully but carries no Subject (e.g. malformed, or
-// a client-credentials-only token hitting a user-only route) is rejected
-// here the same way RequireUser rejects a Subject-and-Username-both-empty
-// identity. Must run after TenantAuth.
+// claim — the /v1/{tenant}/... API's stricter counterpart to RequireUser,
+// which never falls back to Username the way the legacy path's
+// ownerIdentity() does. Must run after TenantAuth.
 func RequireSubject(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := IdentityFromContext(r.Context())

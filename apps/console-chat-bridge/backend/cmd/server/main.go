@@ -13,19 +13,10 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-
-// Command server runs console-chat-bridge: the small backend that lets
-// identity-apps' Console "Chat with an Engineer" button (see
-// features/admin.copilot.v1) reach the existing cs-tools live-engineer-chat
-// framework (chat-routing-service / csm-portal/backend) without the
-// Console's browser ever calling either directly, and without any
-// chat-routing-service/csm-portal credential ever reaching the browser.
 //
-// POC-scoped to a single known WSO2 IS instance — see internal/introspect's
-// own package doc comment and this repo's
-// console-ask-ai-engineer-escalation-investigation.md (auth decision #1).
-// See .env.example for every setting below and README.md for the one-time
-// setup this requires on that IS instance and on csm-portal/backend.
+// This is the startup file for console-chat-bridge. It connects configuration,
+// authentication, CSM Portal communication, event streaming, HTTP routes, and shutdown handling.
+
 package main
 
 import (
@@ -72,6 +63,7 @@ func loadDotEnv(path string) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
+		// Skip blank lines and comments
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -120,6 +112,7 @@ func mustEnv(key string) string {
 func main() {
 	loadDotEnv(".env")
 
+	// This configures token validation against the known WSO2 Identity Server.
 	validator := introspect.NewValidator(introspect.Config{
 		IssuerBaseURL:             mustEnv("KNOWN_ISSUER_BASE_URL"),
 		IntrospectionClientID:     mustEnv("INTROSPECTION_CLIENT_ID"),
@@ -127,6 +120,7 @@ func main() {
 		InsecureSkipVerify:        envOrDefault("INTROSPECTION_INSECURE_SKIP_VERIFY", "false") == "true",
 	})
 
+	// Create CSM portal client.
 	csmClient := csmchat.NewClient(csmchat.Config{
 		BaseURL:      mustEnv("CSM_PORTAL_BASE_URL"),
 		TokenURL:     mustEnv("CSM_PORTAL_TOKEN_URL"),
@@ -139,27 +133,15 @@ func main() {
 	chatsHandler := handler.NewChatsHandler(csmClient, hub)
 
 	// csmPortalM2MClientID is the OAuth2 client ID csm-portal/backend's own
-	// outbound push (its chatNotifiers["asgardeo"] entry, see that
-	// service's cmd/server/main.go) authenticates as when calling this
-	// bridge's own /internal/chat-events — checked by RequireClientID so
-	// only that specific client can post events into this bridge, even
-	// though its token is introspected against the same pinned IS instance
-	// as every browser-facing call.
+	// outbound push.
 	csmPortalM2MClientID := mustEnv("CSM_PORTAL_PUSH_CLIENT_ID")
 
 	corsOrigins := splitComma(mustEnv("CORS_ALLOWED_ORIGINS"))
 
-	// tenantTable backs the generic /v1/{tenant}/... API only — the legacy
-	// /support/chats routes above never consult it, and keep using
-	// validator/corsOrigins exactly as before (see internal/tenant's own
-	// package doc comment). TENANT_REGISTRY unset synthesizes a single
-	// "identity-console" tenant from the same KNOWN_ISSUER_BASE_URL/
-	// INTROSPECTION_*/CORS_ALLOWED_ORIGINS vars validator/corsOrigins
-	// already use, so /v1/identity-console/... works with zero additional
-	// configuration. BRIDGE_ROUTING_SOURCE is every explicit registry
-	// row's default RoutingSource when that row leaves it blank — see
-	// csm-portal/backend's own dual "asgardeo"/"console-chat-bridge"
-	// chatNotifiers registration, which this default is designed to match.
+	// Build the tenant registry.
+	// If TENANT_REGISTRY is configured, it supplies explicit tenant entries.
+	// If absent, a default identity-console tenant is built from the existing issuer, introspection, and CORS settings.
+	// Explicit entries with no routing source use BRIDGE_ROUTING_SOURCE, defaulting to console-chat-bridge
 	tenantTable, err := tenant.BuildTable(
 		os.Getenv("TENANT_REGISTRY"),
 		envOrDefault("BRIDGE_ROUTING_SOURCE", "console-chat-bridge"),

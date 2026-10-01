@@ -14,21 +14,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package handler implements this bridge's four routes:
-//
-//	POST /support/chats                    — browser, start an escalation
-//	POST /support/chats/{caseId}/messages   — browser, send a chat message
-//	GET  /support/chats/{caseId}/stream     — browser, SSE delivery
-//	POST /internal/chat-events              — csm-portal/backend, M2M push
-//
-// This mirrors identity-apps' console-ask-ai-engineer-escalation-
-// investigation.md's chosen "option C" design: a small, self-contained
-// realtime surface for this bridge, built on csm-portal/backend's EXISTING
-// push contract (chatnotify.Client.PushEvent / /internal/chat-events)
-// rather than a new one, and delivered to the browser over the same
-// AsgardeoSPAClient.httpStreamRequest SSE mechanism Ask AI's own answer
-// streaming already uses — no new client-side transport concept enters
-// identity-apps.
+// Package handler implements this bridge's routes, in two families sharing
+// one ChatsHandler: the legacy, single-tenant /support/chats routes
+// (chats.go), pinned to identity-apps' Console Ask AI panel, and the
+// generic, multi-tenant /v1/{tenant}/chats routes (chats_v1.go). See
+// chats_v1.go's own doc comment for its route list and how its tenant-based
+// authorization (requireTenantCase) differs from the legacy routes'
+// caller-identity ownership (requireOwner).
 package handler
 
 import (
@@ -48,12 +40,7 @@ import (
 const maxBodyBytes = 64 << 10 // 64 KiB
 
 // newCaseID mints a fresh RFC 4122 v4 UUID for a new escalation's
-// caseId/liveChatId — copied from customer-portal/backend-v2's own
-// internal/handler/chat_uuid.go (newLiveChatCaseID) rather than shared, per
-// that file's own doc comment on why this repo duplicates rather than pulls
-// in github.com/google/uuid for a few lines of code. NEVER the frontend's
-// askAiContextId — see caseRecord's own doc comment on why these two stay
-// distinct.
+// caseId/liveChatId. Never the frontend's askAiContextId — see caseRecord.
 func newCaseID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -64,27 +51,21 @@ func newCaseID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// caseRecord is this bridge's own small in-memory record of one escalation,
-// keyed by caseId — POC-scoped (lost on restart, single-process only,
-// same limitation as internal/stream.Hub) purely so HandleSendMessage and
-// HandleStream know which conversationId/customerEmail/subject to carry on
-// csm-portal/backend's existing wire shapes, and so a caller other than the
-// admin who opened this case can't send messages into it or read its
-// stream (see requireOwner).
+// caseRecord is this bridge's in-memory record of one escalation, keyed by
+// caseId. In-memory only (lost on restart, single-process), so
+// HandleSendMessage/HandleStream know which conversationId/customerEmail to
+// carry upstream, and requireOwner can enforce that only the case's opener
+// can send messages into it or read its stream.
 type caseRecord struct {
 	conversationID string
 	customerEmail  string
-	// ownerSubject is the introspected identity (Subject, falling back to
-	// Username) that opened this case — checked on every later
-	// /messages and /stream call for this caseId. Only ever set by the
-	// legacy /support/chats path's requireOwner — a /v1 case
-	// (requireTenantCase) authorizes by tenant membership, not caller
-	// identity, so this stays "" on a v1-created record.
+	// ownerSubject is the identity that opened this case, checked on every
+	// later /messages and /stream call. Set only by the legacy path's
+	// requireOwner; stays "" on a /v1 record, which authorizes by tenant
+	// membership instead (see requireTenantCase).
 	ownerSubject string
-	// tenantSlug is set only for a case raised through the generic
-	// /v1/{tenant}/... API (see requireTenantCase in chats_v1.go) — "" for
-	// a legacy /support/chats case, which requireTenantCase would then
-	// correctly refuse to treat as belonging to any tenant.
+	// tenantSlug is set only for a case raised through /v1/{tenant}/...;
+	// "" for a legacy case.
 	tenantSlug string
 }
 
@@ -102,12 +83,9 @@ type PriorMessage struct {
 // escalateBody is what identity-apps' Console SPA sends to
 // POST /support/chats.
 type escalateBody struct {
-	// AskAIContextID is Ask AI's stable per-panel-session id (generated
-	// client-side, since Ask AI's own backend does not return one over
-	// SSE today) — becomes ConversationID on csm-portal/backend's wire
-	// shape. NEVER reused as the caseId (see chat-routing-service's own
-	// CaseInfo.ConversationID doc comment on why these two identities stay
-	// distinct).
+	// AskAIContextID is Ask AI's stable per-panel-session id, generated
+	// client-side. Becomes ConversationID upstream; never reused as the
+	// caseId.
 	AskAIContextID string         `json:"askAiContextId"`
 	Question       string         `json:"question"`
 	ErrorContext   string         `json:"errorContext,omitempty"`
@@ -123,9 +101,7 @@ type escalateUpstreamBody struct {
 	Source         string `json:"source,omitempty"`
 	Channel        string `json:"channel,omitempty"`
 	// TenantSlug is set only by the generic /v1/{tenant}/... API (see
-	// HandleEscalateV1 in chats_v1.go) — empty for the legacy
-	// HandleEscalate above, matching csm-portal/backend's own
-	// escalateRequest.TenantSlug doc comment.
+	// HandleEscalateV1); empty for the legacy HandleEscalate above.
 	TenantSlug    string         `json:"tenantSlug,omitempty"`
 	Subject       string         `json:"subject,omitempty"`
 	CustomerEmail string         `json:"customerEmail,omitempty"`
@@ -134,13 +110,10 @@ type escalateUpstreamBody struct {
 	PriorMessages []PriorMessage `json:"priorMessages,omitempty"`
 }
 
-// consoleProjectID is a fixed sentinel used in place of a real
-// customer-portal projectId (Ask AI/Console has no such concept) --
-// csm-portal/backend's own duplicate-open-chat check
-// (routingService.CreateWorkItem) is scoped by customerEmail+projectId
-// together, so a fixed, distinct value here just means "one open live
-// chat per admin, across their whole Ask AI usage" rather than per
-// project, which has no meaning for this surface anyway.
+// consoleProjectID is a fixed sentinel in place of a real customer-portal
+// projectId (Ask AI/Console has no such concept). Since csm-portal/
+// backend's duplicate-open-chat check is scoped by customerEmail+projectId,
+// this means one open live chat per admin across all Ask AI usage.
 const consoleProjectID = "console-ask-ai"
 
 // sourceAsgardeo / channelAskAI are this integration's fixed source/channel
@@ -150,7 +123,8 @@ const (
 	channelAskAI   = "ask-ai"
 )
 
-// ChatsHandler implements this bridge's four routes.
+// ChatsHandler implements both this bridge's legacy and /v1 chat routes
+// (see the package doc comment). Safe for concurrent use.
 type ChatsHandler struct {
 	csm *csmchat.Client
 	hub *stream.Hub
@@ -200,9 +174,8 @@ func ownerIdentity(ctx *http.Request) string {
 
 // HandleEscalate handles POST /support/chats. Behind Auth+RequireUser.
 // Mints a fresh caseId (never AskAIContextID), calls csm-portal/backend's
-// EXISTING, unmodified POST /internal/chat/escalate with
-// source="asgardeo", channel="ask-ai", and returns {caseId} so the browser
-// can open the SSE stream and start sending messages.
+// POST /internal/chat/escalate with source="asgardeo", channel="ask-ai",
+// and returns {caseId} so the browser can open the SSE stream.
 func (h *ChatsHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 	body, ok := readBody(w, r)
 	if !ok {
@@ -220,11 +193,9 @@ func (h *ChatsHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 
 	priorMessages := req.PriorMessages
 	if req.ErrorContext != "" {
-		// Surfaces the Ask AI error the customer actually saw (see
-		// copilot-chat.tsx's isError branch) as one more prior message, so
-		// the engineer sees exactly what went wrong, not just the
-		// question. Assistant role: this is Ask AI's own reply, not the
-		// admin's.
+		// Surface the Ask AI error the customer saw as one more prior
+		// message, so the engineer sees what went wrong, not just the
+		// question.
 		priorMessages = append(priorMessages, PriorMessage{
 			Role:    "assistant",
 			Content: req.ErrorContext,
@@ -349,10 +320,7 @@ const sseHeartbeatInterval = 15 * time.Second
 
 // HandleStream handles GET /support/chats/{caseId}/stream. Behind
 // Auth+RequireUser. Delivers engineer_assigned/engineer_message/etc.
-// events (see HandleChatEvents) to the Console browser over SSE, read via
-// AsgardeoSPAClient.httpStreamRequest — the same streaming mechanism Ask
-// AI's own answer-streaming already uses in copilot-api.ts, so no new
-// client-side transport concept enters identity-apps.
+// events (see HandleChatEvents) to the browser over SSE.
 func (h *ChatsHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	caseID := r.PathValue("caseId")
 	if _, ok := h.requireOwner(w, r, caseID); !ok {
@@ -392,14 +360,9 @@ func (h *ChatsHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleChatEvents handles POST /internal/chat-events — csm-portal/
-// backend's EXISTING push contract (see that service's internal/chatnotify
-// client, now also targeting this bridge for source="asgardeo" cases via
-// its chatNotifiers map), not a new route shape invented for this
-// integration. Behind Auth+RequireClientID. Relays the event's raw JSON
-// body straight onto this case's SSE stream — the same envelope shape
-// (type/caseId/conversationId/engineerEmail/message/...) customer-portal's
-// own frontend already knows how to parse, so identity-apps' frontend
-// switch-on-type logic mirrors an existing, proven pattern.
+// backend's push contract for delivering chat events. Behind
+// Auth+RequireClientID. Relays the event's raw JSON body straight onto
+// this case's SSE stream.
 func (h *ChatsHandler) HandleChatEvents(w http.ResponseWriter, r *http.Request) {
 	body, ok := readBody(w, r)
 	if !ok {

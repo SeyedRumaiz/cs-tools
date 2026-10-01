@@ -14,23 +14,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package m2mclient is the shared outbound-HTTP-client plumbing behind
-// every service-to-service call in the live-engineer-chat feature:
-// customer-portal/backend-v2's internal/csmchat, console-chat-bridge's
-// internal/csmchat, and csm-portal/backend's internal/chatnotify were three
-// independently hand-rolled copies of the exact same "OAuth2
-// client-credentials token, refuse redirects, bound the error body" shape
-// (console-chat-bridge's own copy even said so in its own doc comment:
-// "deliberately copied ... rather than shared"). This package is that
-// shared plumbing; each of the three keeps its own typed methods
-// (Escalate/PushEvent/CreateCase/etc.) and package identity, now built on
-// top of one Client instead of three copies of the same boilerplate.
+// This is the shared HTTP client that handles OAuth authentication for backend-to-backend calls.
+
+// Package m2mclient provides the shared HTTP client plumbing for
+// service-to-service calls in the live-engineer-chat feature: an OAuth2
+// client-credentials token, no followed redirects, and a bounded response
+// body. Wrapper packages build their own typed methods on top of one
+// Client.
 //
-// Every call here is pure machine-to-machine, trusted entirely at Choreo's
-// API Manager gateway (subscription + client-credentials app auth) rather
-// than validated again in-process by the receiving service — see any of
-// the three wrapping packages' own doc comments for the full rationale this
-// mirrors.
+// Calls are authenticated at Choreo's API Manager gateway (subscription +
+// client-credentials app auth); the receiving service does not re-validate
+// them.
+// Authentication is enforced by Choreo’s gateway.
+// This client supplies credentials; it does not configure or enforce gateway security.
 package m2mclient
 
 import (
@@ -48,15 +44,14 @@ import (
 )
 
 // TokenFetchTimeout is the HTTP client timeout for token-endpoint requests.
-// A package-level var (not const) so a caller's own tests can shorten it,
-// matching the convention each of the three original clients already had.
+// It is a var, not a const, so tests can shorten it.
 var TokenFetchTimeout = 10 * time.Second
 
 // requestTimeout bounds the whole outbound call, token fetch included.
 const requestTimeout = 10 * time.Second
 
-// MaxResponseBodyBytes bounds how much of a response this client reads into
-// memory — matches all three original clients' own identical constant.
+// MaxResponseBodyBytes bounds how much of a response this client reads
+// into memory.
 const MaxResponseBodyBytes = 64 << 10 // 64 KiB
 
 // Config configures a Client's OAuth2 client-credentials grant and target.
@@ -71,12 +66,9 @@ type Config struct {
 	ClientSecret string
 	Scopes       []string
 	// InsecureSkipVerify disables TLS certificate verification for the
-	// TokenURL request. LOCAL DEVELOPMENT ONLY — e.g. a target IdP that is
-	// a locally-installed instance serving its own self-signed certificate,
-	// which Go's default transport won't trust. Mirrors
-	// console-chat-bridge's own introspect.Config.InsecureSkipVerify for
-	// the identical reason. A real deployment should instead trust that
-	// instance's actual CA and leave this false.
+	// TokenURL request. LOCAL DEVELOPMENT ONLY, e.g. a locally-installed
+	// IdP serving a self-signed certificate. A real deployment should
+	// trust that instance's actual CA and leave this false.
 	InsecureSkipVerify bool
 }
 
@@ -86,22 +78,24 @@ type Client struct {
 	baseURL string
 }
 
-// NewClient constructs a Client. Does not validate connectivity — the
-// first Do call surfaces a dial failure; every current caller of this
-// package treats that as best-effort (logged, not fatal to the request
-// that triggered it).
+// NewClient constructs a Client. It does not validate connectivity; a
+// dial failure only surfaces on the first Do call.
 func NewClient(cfg Config) *Client {
+	// Configure clietn credentials grant
 	cc := clientcredentials.Config{
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
 		TokenURL:     cfg.TokenURL,
 		Scopes:       cfg.Scopes,
 	}
+	// This client is used for token acquisition only.
 	tokenHTTPClient := &http.Client{Timeout: TokenFetchTimeout}
 	if cfg.InsecureSkipVerify {
 		tokenHTTPClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} // #nosec G402 — opt-in, local-dev-only, see Config.InsecureSkipVerify's doc comment
 	}
+	// Give the OAuth library that HTTP client
 	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, tokenHTTPClient)
+	// Create an authenticated HTTP client
 	httpClient := cc.Client(tokenCtx)
 	httpClient.Timeout = requestTimeout
 	// oauth2.Transport reattaches the Authorization bearer token to every
@@ -119,14 +113,12 @@ func NewClient(cfg Config) *Client {
 }
 
 // Do issues method to path (resolved against Config.BaseURL) with payload
-// as the JSON request body (nil for none) and any extra headers set after
-// Content-Type (so a caller can override it, though none currently do).
-// Returns the response body, status code, and a non-nil error only for a
-// transport-level failure (dial/timeout/etc.) or a failure to read the
-// response body — an HTTP-level non-2xx status is returned as a normal
-// (body, status, nil) result, since what counts as "failure" differs per
-// caller (e.g. one path passes a specific 409 straight through instead of
-// treating it as an error).
+// as the JSON request body (nil for none), plus any extra headers set
+// after Content-Type so a caller can override it.
+//
+// It returns a non-nil error only for a transport-level failure or a
+// failure reading the response body; a non-2xx status is returned as a
+// normal (body, status, nil) result for the caller to interpret.
 func (c *Client) Do(ctx context.Context, method, path string, payload []byte, headers map[string]string) ([]byte, int, error) {
 	var body io.Reader
 	if payload != nil {
@@ -154,8 +146,7 @@ func (c *Client) Do(ctx context.Context, method, path string, payload []byte, he
 	return respBody, resp.StatusCode, nil
 }
 
-// Success reports whether status is a 2xx — a small shared helper so every
-// wrapper package's own "is this an error" check reads the same way.
+// Success reports whether status is a 2xx status code.
 func Success(status int) bool {
 	return status >= http.StatusOK && status < http.StatusMultipleChoices
 }

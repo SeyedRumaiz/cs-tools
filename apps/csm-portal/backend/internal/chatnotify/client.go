@@ -21,36 +21,15 @@
 // POST /internal/chat-events, and to create a case on the engineer's behalf
 // when a chat is converted (POST /internal/chat/create-case).
 //
-// Both calls are pure machine-to-machine: there is no end-user identity
-// behind them (CreateCase forwards the accepting engineer's own
-// x-user-id-token as a plain header instead — see that method below). That
-// puts them in the same class as integrations/csm-integration-service's
-// inbound API, not the receiving service's own browser-facing routes, so
-// this client follows that service's established M2M pattern instead of a
-// browser-oriented Auth model: a plain OAuth2 client-credentials token
-// attached as a standard Authorization: Bearer header, trusted entirely at
-// Choreo's API Manager gateway (subscription + client-credentials app
-// auth) rather than validated again in-process. See
-// integrations/csm-integration-service/CLAUDE.md's "Why no Auth
-// middleware" section for the rationale this mirrors, and backend-v2's own
-// internal/middleware.Auth exemption for these two routes for the
-// receiving side.
-//
-// An earlier version of this client instead forced the client-credentials
-// token into x-jwt-assertion so it would pass backend-v2's browser-facing
-// Auth middleware, which requires "email"/"userid" claims on every token.
-// That would have meant provisioning backend-v2's OAuth2 IdP application to
-// emit synthetic end-user claims on a client-credentials grant purely to
-// satisfy a check these two routes have no end-user identity to supply --
-// this repo already has an established, gateway-trust pattern for exactly
-// this situation, so that requirement was removed instead of worked
-// around.
-//
-// The HTTP-client plumbing itself (OAuth2 client-credentials, refuse
-// redirects, bound the error body) used to be hand-rolled here and
-// independently re-hand-rolled in backend-v2's and console-chat-bridge's
-// own twin packages; all three now build on the shared
-// apps/live-chat-sdk/sdk-go/m2mclient package instead.
+// Both calls are machine-to-machine with no end-user identity behind them
+// (CreateCase forwards the accepting engineer's own x-user-id-token as a
+// plain header instead). Authentication is a plain OAuth2
+// client-credentials token as a standard Authorization: Bearer header,
+// trusted at Choreo's API Manager gateway rather than validated again
+// in-process — the same M2M pattern as
+// integrations/csm-integration-service's inbound API. The HTTP-client
+// plumbing itself builds on the shared apps/live-chat-sdk/sdk-go/m2mclient
+// package.
 package chatnotify
 
 import (
@@ -74,16 +53,8 @@ type Config struct {
 	ClientSecret string
 	Scopes       []string
 	// InsecureSkipVerify disables TLS certificate verification for the
-	// TokenURL request. LOCAL DEVELOPMENT ONLY: every consumer that talks
-	// to a real, CA-signed TokenURL (api.asgardeo.io) leaves this false --
-	// it only matters for a target whose TokenURL points at a
-	// locally-installed WSO2 IS serving its own self-signed certificate,
-	// which Go's default transport won't trust, failing every token fetch
-	// (and therefore every push) with "x509: certificate signed by unknown
-	// authority". Mirrors console-chat-bridge's own
-	// INTROSPECTION_INSECURE_SKIP_VERIFY for the identical reason. A real
-	// deployment should instead trust that instance's actual CA and leave
-	// this false.
+	// TokenURL request. Local development only, for a self-signed
+	// TokenURL; a real deployment must leave this false.
 	InsecureSkipVerify bool
 }
 
@@ -107,11 +78,10 @@ func NewClient(cfg Config) *Client {
 	})}
 }
 
-// PushEvent POSTs the given JSON payload (a marshaled
+// PushEvent POSTs payload (a marshaled
 // live-chat-sdk/sdk-go/pushevents.ChatEvent) to the target's
 // POST /internal/chat-events. Returns an error on any non-2xx response or
-// transport failure; callers treat this as best-effort (see NewClient) and
-// must not fail the caller-facing request over it.
+// transport failure; treat as best-effort.
 func (c *Client) PushEvent(ctx context.Context, payload []byte) error {
 	body, status, err := c.m2m.Do(ctx, http.MethodPost, "/internal/chat-events", payload, nil)
 	if err != nil {
@@ -131,10 +101,6 @@ func (c *Client) PushEvent(ctx context.Context, payload []byte) error {
 func (c *Client) CreateCase(ctx context.Context, payload []byte, userIDToken string) ([]byte, error) {
 	var headers map[string]string
 	if userIDToken != "" {
-		// Forwarded on to entity-service by backend-v2's HandleCreateCase
-		// (see that handler's doc comment) — entity-service's CreateCase
-		// requires this header, and this internal route has no end-user
-		// session of its own to derive one from otherwise.
 		headers = map[string]string{"x-user-id-token": userIDToken}
 	}
 	body, status, err := c.m2m.Do(ctx, http.MethodPost, "/internal/chat/create-case", payload, headers)

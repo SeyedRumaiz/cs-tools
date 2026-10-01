@@ -16,34 +16,26 @@
 
 // Package router implements the engineer-availability/queue state machine
 // for the live-engineer-chat routing feature. Each engineer has a manual
-// chat_status — AVAILABLE, BUSY (do-not-disturb; still holds whatever
-// cases they already have, but takes no new ones), or OFFLINE — plus a
-// configurable concurrent-chat capacity (max_concurrent_chats, default 1).
-// An escalation goes to whichever
-// AVAILABLE engineer with spare capacity has taken the fewest chats today
-// (ties broken by fewest currently-active chats, then who's been AVAILABLE
-// longest), or gets queued FIFO if nobody qualifies; a completed session
+// chat_status — AVAILABLE, BUSY (do-not-disturb: holds existing cases,
+// takes no new ones), or OFFLINE — plus a configurable concurrent-chat
+// capacity (max_concurrent_chats, default 1). An escalation goes to
+// whichever AVAILABLE engineer with spare capacity has taken the fewest
+// chats today (ties broken by fewest active chats, then longest
+// AVAILABLE), or is queued FIFO if nobody qualifies; a completed session
 // drains the queue.
 //
-// "Pending" (assigned, not yet accepted) and "which cases an engineer is
-// currently holding" are per-conversation facts derived from
-// chat_conversation (assignee_id/state/accepted_at/session_ended_at), not
-// per-engineer state — see Router.Escalate and Router.GetPresence for the
-// assignment/read logic and Router itself for the rest of the state
-// machine. This is deliberate: with concurrency, a single "current case"
-// column on the engineer's own row can't express holding several at once.
+// "Pending" and "which cases an engineer holds" are per-conversation facts
+// derived from chat_conversation (assignee_id/state/accepted_at/
+// session_ended_at), not per-engineer state — see Router.Escalate and
+// Router.GetPresence.
 //
-// Engineers are identified by their IdP "userid" claim — this package
-// stores no email of its own; a caller that needs one already has it from
-// its own authenticated session.
+// Engineers are identified by their IdP "userid" claim; this package
+// stores no email of its own.
 //
-// Backed by PostgreSQL, so engineer presence and the queue survive a
-// restart, and multiple replicas of this service can run against the same
-// database safely since every state transition is a transaction rather
-// than an in-process mutex. An assigned engineer who never accepts a
-// specific case is caught by the timeout sweep in timeout.go, not left
-// stuck forever — and only that one case is affected, not their other
-// concurrent sessions.
+// Backed by PostgreSQL: every state transition is a transaction, so
+// multiple replicas can run against the same database safely. An engineer
+// who never accepts an assigned case is caught by the timeout sweep in
+// timeout.go.
 package router
 
 // Status is an engineer's manual chat_status — a plain three-way toggle,
@@ -71,51 +63,35 @@ type CaseInfo struct {
 	ConversationID string `json:"conversationId"`
 	ProjectID      string `json:"projectId,omitempty"`
 	// Source/Channel identify which product/surface raised this case (e.g.
-	// "customer-portal"/"" for the existing Novera "Chat with an Engineer"
-	// flow, "asgardeo"/"ask-ai" for an escalation raised from identity-apps'
-	// Ask AI panel via console-chat-bridge). Persisted as-is in
-	// chat_conversation.case_info (existing jsonb column, no migration) and
-	// echoed back by GetCaseInfo so csm-portal/backend can route its
-	// downstream push to the right service. Optional — an empty Source
-	// means "customer-portal", the only source that existed before this
-	// field did.
+	// "customer-portal"/"" for the Novera "Chat with an Engineer" flow,
+	// "asgardeo"/"ask-ai" for identity-apps' Ask AI panel via
+	// console-chat-bridge). Persisted as-is and echoed back by GetCaseInfo.
+	// Empty Source means "customer-portal".
 	Source  string `json:"source,omitempty"`
 	Channel string `json:"channel,omitempty"`
-	// TenantSlug identifies which console-chat-bridge tenant (see that
-	// service's internal/tenant package) raised this case through the
-	// generic /v1/{tenant}/... API — empty for a case raised through the
-	// existing customer-portal flow or console-chat-bridge's legacy
-	// /support/chats compatibility path (both predate multi-tenant
-	// support). Persisted as-is in chat_conversation.case_info, same as
-	// Source/Channel, and used by Router.EndByTenant to scope a
-	// tenant-initiated completeChat to only that tenant's own case.
+	// TenantSlug identifies which console-chat-bridge tenant raised this
+	// case through the generic /v1/{tenant}/... API — empty for the legacy
+	// customer-portal/console-chat-bridge paths. Used by Router.EndByTenant
+	// to scope a tenant-initiated completeChat to that tenant's own case.
 	TenantSlug    string `json:"tenantSlug,omitempty"`
 	Subject       string `json:"subject,omitempty"`
 	CustomerEmail string `json:"customerEmail,omitempty"`
 	CustomerName  string `json:"customerName,omitempty"`
 	Message       string `json:"message,omitempty"`
 	// PriorMessages is the customer's AI-chatbot (Novera) conversation
-	// history, visible in Customer Portal at the moment "Chat with an
-	// Engineer" was clicked — see PriorMessage. Sent by the frontend
-	// itself (NoveraChatPage's own messages[] state), not fetched from
-	// entity-service: this deployment's DATA_SOURCE=postgres entity-service
-	// has no conversation/comment persistence of its own, so this is the
-	// only source. CreateWorkItem is the only place that reads this field
-	// (persisting it into chat_routing.comment, once) — every other
-	// CaseInfo/CaseStatus this package returns instead has PriorMessages
-	// populated fresh from that comment table (see commentsForCase), which
-	// is the durable, idempotency-safe copy from here on.
+	// history at the moment "Chat with an Engineer" was clicked, sent by
+	// the frontend itself (see PriorMessage). CreateWorkItem is the only
+	// place that reads this field (persisting it into chat_routing.comment
+	// once); every other CaseInfo/CaseStatus this package returns instead
+	// has PriorMessages populated fresh from that table (see
+	// commentsForCase).
 	PriorMessages []PriorMessage `json:"priorMessages,omitempty"`
 }
 
-// PriorMessageRole says who sent one PriorMessage. CreateWorkItem only ever
-// writes Customer/Assistant (a pre-escalation transcript never contains an
-// engineer message — no engineer exists yet), but commentsForCase/
-// commentsForWorkItem (workitem.go) read back the SAME chat_routing.comment
-// rows AddComment appends to for the live, post-acceptance conversation too
-// (see HandleEngineerMessage in csm-portal/backend), so Engineer exists for
-// that read path to report correctly — see those functions' own doc
-// comments for how a row's created_by resolves to one of these three.
+// PriorMessageRole says who sent one PriorMessage: Customer or Assistant
+// for CreateWorkItem's pre-escalation transcript, plus Engineer for the
+// live post-acceptance conversation that commentsForCase/
+// commentsForWorkItem read back from the same table (see AddComment).
 type PriorMessageRole string
 
 const (
@@ -124,22 +100,15 @@ const (
 	PriorMessageRoleEngineer  PriorMessageRole = "engineer"
 )
 
-// priorMessageAssistantAuthor is the chat_routing.comment.created_by value
-// that means "the Novera AI assistant said this", both when CreateWorkItem
-// inserts a PriorMessage with Role Assistant and when commentsForCase reads
-// it back — matching the same "Novera" convention customer-portal's own
-// ConversationDetailsPage/dto.MapSearchComments already use to tell the
-// assistant's replies apart from the customer's own messages.
+// priorMessageAssistantAuthor is the comment.created_by value meaning "the
+// Novera AI assistant said this".
 const priorMessageAssistantAuthor = "Novera"
 
-// PriorMessage is one message from the customer's AI-chatbot (Novera)
-// conversation that happened before this escalation, carried through so
-// the engineer assigned this case sees the same context the customer
-// already gave the AI instead of starting cold. CreatedAt is RFC 3339,
-// optional — carried as a string (not time.Time) since CaseInfo crosses
-// two service boundaries as JSON before it reaches CreateWorkItem, the
-// only place that parses it (falling back to now() if empty/malformed
-// rather than failing the whole escalation over it).
+// PriorMessage is one message from the customer's pre-escalation AI-chatbot
+// (Novera) conversation. CreatedAt is RFC 3339, optional, and carried as a
+// string since CaseInfo crosses service boundaries as JSON before
+// CreateWorkItem (the only parser) reads it, falling back to now() if
+// empty or malformed.
 type PriorMessage struct {
 	Role      PriorMessageRole `json:"role"`
 	Content   string           `json:"content"`

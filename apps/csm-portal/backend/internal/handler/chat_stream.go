@@ -32,33 +32,21 @@ const engineerAlertStreamHeartbeat = 15 * time.Second
 
 // StreamEngineerAlerts handles GET /chat/alerts/stream: a long-lived
 // Server-Sent Events connection that emits every live-chat event this
-// backend delivers to this engineer — a customer escalation the routing
-// service assigned to them specifically (see chat.go's engineerHubKey),
-// another engineer accepting/completing a session, or a customer message
-// arriving during an accepted session. It is registered on this backend's
-// main API listener alongside every other route, behind the same
-// authMiddleware/CORS chain (see cmd/server/main.go) — unlike
-// StreamCaseActivities, which still uses its own dedicated listener. Since
-// the main listener's WriteTimeout would otherwise cut this connection off
-// after that many seconds, the handler clears its own write deadline via
-// http.NewResponseController on entry (see the call below) rather than
-// requiring a second always-on listener just for this one endpoint. It is
-// unconditional: it does not depend on Event Hub being configured, since
-// live engineer chat has no Kafka-backed fallback path to degrade to.
+// backend delivers to the signed-in engineer — a customer escalation
+// routed to them specifically, another engineer accepting/completing a
+// session, or a customer message during an accepted session. It runs on
+// the main API listener behind the normal Auth/CORS chain, clearing its
+// own write deadline via http.NewResponseController so the listener's
+// WriteTimeout doesn't cut the connection off.
 //
-// Registers under TWO stream.BroadcastHub keys at once: this engineer's own
-// (engineerHubKey(user.UserID), keyed by the IdP "userid" claim rather than
-// an email), where the routing service's
-// targeted deliveries land, and the shared broadcastHubKey, which now serves only as
-// the escalate fallback when the routing service is unreachable and as the
-// (still-broadcast) customer-message relay — see chat.go's package doc
-// comment and broadcastHubKey's own doc comment for why those two cases
-// still go to everyone. Any signed-in user of this backend may subscribe;
-// the events themselves carry no more than what an engineer picking up a
-// case needs (case/conversation id, subject, customer display name, the
-// opening message) — never anything from inside a session assigned to a
-// *different* engineer, so the broadcast key's continued existence is an
-// accepted, deliberate tradeoff for this prototype phase, not an oversight.
+// It registers under two stream.BroadcastHub keys: this engineer's own
+// (engineerHubKey(user.UserID)), where targeted deliveries land, and the
+// shared broadcastHubKey, used only for the escalate fallback when the
+// routing service is unreachable and for the customer-message relay (see
+// broadcastHubKey's own doc comment). Events carry no more than an
+// engineer needs to pick up a case (case/conversation id, subject,
+// customer name, opening message) — never anything from a session
+// assigned to a different engineer.
 func (h *ChatHandler) StreamEngineerAlerts(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -72,16 +60,10 @@ func (h *ChatHandler) StreamEngineerAlerts(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// This connection is meant to stay open indefinitely, unlike every other
-	// route on the shared main listener (see cmd/server/main.go's
-	// srv.WriteTimeout) — clear the write deadline for this response only,
-	// rather than raising the shared listener's timeout for every route.
-	// A zero time.Time means "no deadline". Requires
-	// internal/middleware.Logger's responseWriter to forward
-	// SetWriteDeadline to the underlying connection (it does); an error
-	// here would mean that wrapper regressed, which is why it's still
-	// worth capturing for the log even though there is nothing else to do
-	// about it at this point in the request.
+	// This connection must stay open indefinitely, unlike every other route
+	// on the shared main listener, so clear the write deadline for this
+	// response only (zero time.Time means "no deadline") rather than
+	// raising the listener's timeout for every route.
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
 		slog.WarnContext(r.Context(), "engineer chat alert stream: failed to clear write deadline", "err", err)
 	}
@@ -108,10 +90,8 @@ func (h *ChatHandler) StreamEngineerAlerts(w http.ResponseWriter, r *http.Reques
 
 	slog.InfoContext(ctx, "engineer chat alert stream connected", "userID", user.UserID)
 
-	// emit writes one SSE event for payload (always compact, single-line
-	// JSON built by chatEvent/json.Marshal in chat.go — safe to write as
-	// one `data:` line), returning false if the write failed and the
-	// connection should be torn down.
+	// emit writes one SSE event for payload (compact, single-line JSON),
+	// returning false if the write failed and the connection should close.
 	emit := func(payload string) bool {
 		if _, err := fmt.Fprintf(w, "event: chat_alert\ndata: %s\n\n", payload); err != nil {
 			return false

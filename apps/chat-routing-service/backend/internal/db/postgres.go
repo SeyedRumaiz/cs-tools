@@ -14,6 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package db constructs chat-routing-service's PostgreSQL connection pool.
 package db
 
 import (
@@ -27,7 +28,6 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/backend/internal/config"
 )
 
-// Define constants for the connection pool configuration.
 const (
 	poolMaxConns        int32         = 10
 	poolMinConns        int32         = 1
@@ -38,6 +38,7 @@ const (
 // NewPool creates a pgxpool pool for the given DSN, pings it to confirm
 // connectivity, and returns it ready for use.
 func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+	// Turn the connection URL into configuration that pgxpool understands.
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse pool config: %w", err)
@@ -47,6 +48,8 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	cfg.MinConns = poolMinConns
 	cfg.MaxConnLifetime = poolMaxConnLifetime
 	cfg.MaxConnIdleTime = poolMaxConnIdleTime
+
+	// Set schema on every new connection
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		_, err := conn.Exec(ctx, "SET search_path TO "+pgx.Identifier{config.Schema}.Sanitize())
 		return err
@@ -57,10 +60,12 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("create pool: %w", err)
 	}
 
+	// Check database connectivity
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
+	// Return the pool pointer ready for use.
 	return pool, nil
 }

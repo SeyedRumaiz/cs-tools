@@ -14,17 +14,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package tenant turns this bridge from single-tenant (hardcoded to one
-// pinned WSO2 IS instance, see internal/introspect's own doc comment) into
-// a real multi-tenant gateway: each tenant gets its own IdP validation
-// config, allowed browser origins, and routing defaults, selected at
-// request time by a path segment (see internal/middleware's tenant-
-// resolution middleware) rather than compiled in.
-//
-// This is purely additive — the legacy /support/chats path never consults
-// this package's Table at all, and keeps using its own hardcoded env vars
-// exactly as before (see cmd/server/main.go). Only the new /v1/{tenant}/...
-// API resolves a tenant through here.
+// Package tenant resolves a request's /v1/{tenant}/... path segment to that
+// tenant's IdP validation config, allowed origins, and routing defaults.
+// The legacy /support/chats path never consults this package.
 package tenant
 
 import (
@@ -47,27 +39,20 @@ type Config struct {
 	// the TENANT_REGISTRY row's first field. Case-sensitive, matched
 	// exactly against the path segment.
 	Slug string
-	// ValidationType selects how this tenant's bearer tokens are checked:
-	// "introspection" (RFC 7662, the only kind actually implemented today
-	// — see tokenvalidator.IntrospectionValidator) or "jwks" (accepted,
-	// but tokenvalidator.JWKSValidator always fails — see that type's own
-	// doc comment). Defaults to "introspection" when blank.
+	// ValidationType is "introspection" (default, the only kind
+	// implemented) or "jwks" (accepted but always fails validation; see
+	// tokenvalidator.JWKSValidator).
 	ValidationType string
-	// Issuer is this tenant's trusted token issuer — for introspection,
-	// also the base used to derive the introspection endpoint when
-	// IntrospectionURL is blank (mirrors introspect.Config.IssuerBaseURL).
+	// Issuer is this tenant's trusted token issuer, and the base used to
+	// derive the introspection endpoint when IntrospectionURL is blank.
 	Issuer string
 	// IntrospectionURL overrides the derived introspection endpoint --
 	// required for an IdP (e.g. Asgardeo) whose introspection endpoint
 	// doesn't live under Issuer+"/oauth2/introspect".
 	IntrospectionURL string
-	// UserinfoURL overrides the derived OIDC UserInfo endpoint used by
-	// introspect.Validator's userinfo fallback (see that package's own doc
-	// comment on ValidateBearer) — required for an IdP whose userinfo
-	// endpoint doesn't live under Issuer+"/oauth2/userinfo". Optional even
-	// for an explicit TENANT_REGISTRY row: left blank, introspect.Validator
-	// derives it from Issuer itself, the same way IntrospectionURL's own
-	// blank case works.
+	// UserinfoURL overrides the derived OIDC UserInfo endpoint used by the
+	// userinfo fallback (see introspect.Validator.ValidateBearer) --
+	// required when it doesn't live under Issuer+"/oauth2/userinfo".
 	UserinfoURL string
 	// JWKSURI/Audience configure a "jwks" tenant — unused for
 	// "introspection".
@@ -81,48 +66,27 @@ type Config struct {
 	// to this tenant's IdP — LOCAL DEVELOPMENT ONLY, mirrors
 	// introspect.Config.InsecureSkipVerify's own doc comment.
 	InsecureSkipVerify bool
-	// AllowedOrigins is this tenant's own CORS allow-list — see
-	// internal/middleware.CORS, which reads this instead of the legacy
-	// path's single global CORS_ALLOWED_ORIGINS list once a tenant has
-	// been resolved.
+	// AllowedOrigins is this tenant's CORS allow-list, used by
+	// middleware.CORS once a tenant is resolved.
 	AllowedOrigins []string
-	// RoutingSource/Channel/ProjectID tag every case this tenant escalates
-	// — RoutingSource becomes chat-routing-service's CaseInfo.Source (and
-	// so csm-portal/backend's chatNotifiers routing key — see that
-	// service's own dual "asgardeo"/"console-chat-bridge" registration),
-	// Channel becomes CaseInfo.Channel, ProjectID becomes CaseInfo.
-	// ProjectID (the duplicate-open-chat scope — see chat-routing-
-	// service's CreateWorkItem doc comment). RoutingSource defaults to
-	// BuildTable's defaultRoutingSource when left blank in a registry row.
+	// RoutingSource, Channel, and ProjectID tag every case this tenant
+	// escalates, becoming CaseInfo.Source/Channel/ProjectID for
+	// chat-routing-service (ProjectID scopes the duplicate-open-chat
+	// check). RoutingSource defaults to BuildTable's defaultRoutingSource
+	// when blank.
 	RoutingSource string
 	Channel       string
 	ProjectID     string
 	// SCIM* configure this tenant's SCIM-based canonical-Subject resolver
 	// (see internal/scim and tokenvalidator.IntrospectionValidator.
-	// WithSCIMResolver), used instead of introspect.Validator's UserInfo
-	// fallback whenever introspection alone doesn't carry a Subject --
-	// needed for an IdP application whose access tokens are token-binding-
-	// bound to the browser (see internal/scim's own package doc comment),
-	// since UserInfo then rejects this bridge's bearer-only server-side
-	// call.
-	//
-	// SCIMClientID left blank (the default — every field here is optional,
-	// and SCIM is never required) means SCIM is not configured for this
-	// tenant: it keeps using ResolveSubjectViaUserinfo exactly as before,
-	// unaffected. A per-tenant capability, not a legacy-tenant-only one --
-	// any explicit TENANT_REGISTRY row can configure it exactly the same
-	// way the identity-console fallback tenant does (see BuildTable's own
-	// doc comment for the row syntax).
-	//
-	// Deliberately a SEPARATE, least-privilege client-credentials
-	// registration from ClientID (which only ever does RFC 7662 Basic-auth
-	// introspection) — this one needs a client-credentials-grant token
-	// carrying WSO2 IS's SCIM2-view scope, nothing else. The matching
-	// secret is never stored here — see BuildTable's own doc comment on
-	// why, and its scimSecretLookup parameter. SCIMBaseURL/SCIMTokenURL
-	// default to Issuer and Issuer+"/oauth2/token" respectively when left
-	// blank, since SCIM2 and the token endpoint both live on the same IdP
-	// instance as introspection for every tenant this applies to today.
+	// WithSCIMResolver), used instead of the UserInfo fallback whenever
+	// introspection alone doesn't carry a Subject. SCIMClientID blank (the
+	// default) means SCIM is not configured; ResolveSubjectViaUserinfo is
+	// used instead. Must be a separate, least-privilege client-credentials
+	// registration from ClientID, scoped only to SCIM2 read access; its
+	// secret is resolved the same way ClientID's is (see BuildTable).
+	// SCIMBaseURL/SCIMTokenURL default to Issuer and
+	// Issuer+"/oauth2/token" when blank.
 	SCIMBaseURL  string
 	SCIMTokenURL string
 	SCIMClientID string
@@ -148,58 +112,37 @@ func (t Table) Lookup(slug string) (*Tenant, bool) {
 }
 
 // SecretLookup resolves a tenant's IdP client secret, keyed by Slug. The
-// registry itself never carries a secret (see BuildTable's own doc
-// comment) — this exists as an interface, rather than a hardcoded env
-// lookup, only so tests can supply a fake without touching real process
-// environment variables.
+// registry itself never carries a secret — see BuildTable. An interface
+// rather than a hardcoded env lookup so tests can supply a fake.
 type SecretLookup func(slug string) string
 
-// registryFieldCountBase/Userinfo/SCIM are the only valid "|"-delimited
-// field counts for one TENANT_REGISTRY row — see BuildTable's own doc
-// comment for the field order. Each is a strict superset of the previous,
-// appending optional trailing fields, so every row written before a given
-// extension existed keeps parsing unchanged: Userinfo adds UserinfoURL,
-// SCIM adds SCIMClientID/SCIMBaseURL/SCIMTokenURL/SCIMScopes as one atomic
-// block (a row is never 14-16 fields — SCIM config is all four fields or
-// none, keeping the format unambiguous).
+// registryFieldCountBase/Userinfo/SCIM are the valid field counts for one
+// TENANT_REGISTRY row (see BuildTable). SCIM's four fields are all-or-
+// nothing, so a row is never 14-16 fields.
 const (
 	registryFieldCountBase     = 12
 	registryFieldCountUserinfo = 13
 	registryFieldCountSCIM     = 17
 )
 
-// LegacyConfig carries the pre-multi-tenant env vars /support/chats already
-// uses (cmd/server/main.go's KNOWN_ISSUER_BASE_URL/INTROSPECTION_CLIENT_ID/
-// INTROSPECTION_CLIENT_SECRET/INTROSPECTION_INSECURE_SKIP_VERIFY/
-// CORS_ALLOWED_ORIGINS), reused unchanged to synthesize the "identity-
-// console" fallback tenant when TENANT_REGISTRY is unset — see
-// BuildTable's own doc comment. Passing the legacy client secret through
-// here (rather than via SecretLookup, which only covers explicit registry
-// rows) keeps this fallback path independent of TENANT_<SLUG>_CLIENT_SECRET
-// naming.
+// LegacyConfig carries /support/chats' pre-multi-tenant env vars, reused to
+// synthesize the "identity-console" fallback tenant when TENANT_REGISTRY is
+// unset (see BuildTable). ClientSecret is passed directly rather than via
+// SecretLookup, since this fallback path has no TENANT_<SLUG>_CLIENT_SECRET
+// to look up.
 type LegacyConfig struct {
 	IssuerBaseURL      string
 	ClientID           string
 	ClientSecret       string
 	InsecureSkipVerify bool
 	AllowedOrigins     []string
-	// SCIM* configure this tenant's SCIM-based canonical-Subject resolver
-	// (see internal/scim and tokenvalidator.IntrospectionValidator.
-	// WithSCIMResolver), used instead of introspect.Validator's UserInfo
-	// fallback whenever introspection alone doesn't carry a Subject.
-	//
-	// SCIMClientID left blank (the default — these are all optional, and
-	// SCIM is never required) means SCIM is not configured: this tenant
-	// keeps using ResolveSubjectViaUserinfo exactly as before, unaffected.
-	//
-	// Deliberately a SEPARATE, least-privilege client-credentials
-	// registration from ClientID/ClientSecret above (which only ever does
-	// RFC 7662 Basic-auth introspection) — this one needs a
-	// client-credentials-grant token carrying WSO2 IS's SCIM2-view scope,
-	// nothing else. SCIMBaseURL/SCIMTokenURL default to IssuerBaseURL and
-	// IssuerBaseURL+"/oauth2/token" respectively when left blank, since
-	// SCIM2 and the token endpoint both live on the same WSO2 IS instance
-	// as introspection for every tenant this applies to today.
+	// SCIM* configure the SCIM-based canonical-Subject resolver (see
+	// internal/scim), used instead of the UserInfo fallback whenever
+	// introspection alone doesn't carry a Subject. SCIMClientID blank
+	// means SCIM is not configured. Must be a separate, least-privilege
+	// client-credentials registration from ClientID/ClientSecret.
+	// SCIMBaseURL/SCIMTokenURL default to IssuerBaseURL and
+	// IssuerBaseURL+"/oauth2/token" when blank.
 	SCIMBaseURL      string
 	SCIMTokenURL     string
 	SCIMClientID     string
@@ -211,59 +154,33 @@ type LegacyConfig struct {
 // /v1/identity-console/... once BuildTable synthesizes it.
 const legacySlug = "identity-console"
 
-// legacyRoutingSource/legacyChannel/legacyProjectID match this bridge's
-// existing /support/chats constants (sourceAsgardeo/channelAskAI/
-// consoleProjectID in internal/handler/chats.go) exactly, so a case raised
-// through the fallback tenant's /v1/identity-console/... path routes
-// identically to one raised through the legacy path.
+// legacyRoutingSource/legacyChannel/legacyProjectID match the legacy
+// /support/chats constants exactly (see internal/handler/chats.go), so a
+// case raised through /v1/identity-console/... routes identically.
 const (
 	legacyRoutingSource = "asgardeo"
 	legacyChannel       = "ask-ai"
 	legacyProjectID     = "console-ask-ai"
 )
 
-// BuildTable parses TENANT_REGISTRY's raw value into a Table, constructing
-// one TokenValidator per row — or, when raw is blank, synthesizes a single
-// "identity-console" row from legacy (today's pre-multi-tenant env vars),
-// so /v1/identity-console/... works out of the box without requiring a
-// separate TENANT_REGISTRY setup on top of what /support/chats already has
-// configured.
+// BuildTable parses TENANT_REGISTRY into a Table, one TokenValidator per
+// row. If raw is blank, it synthesizes a single "identity-console" row from
+// the legacy pre-multi-tenant env vars.
 //
-// Row syntax: rows separated by ";", fields by "|", 12, 13, or 17 fields
-// per row, in this order:
+// Each row is "|"-separated fields, in order:
 //
 //	slug|validationType|issuer|introspectionURL|jwksURI|audience|clientID|insecureSkipVerify|allowedOrigins|routingSource|channel|projectID|userinfoURL|scimClientID|scimBaseURL|scimTokenURL|scimScopes
 //
-// userinfoURL (field 13) is optional — a 12-field row (every row written
-// before this field existed) parses exactly as before, with UserinfoURL
-// left blank so introspect.Validator derives one from issuer itself (see
-// Config.UserinfoURL's own doc comment).
+// A row has 12, 13, or 17 fields: userinfoURL is optional (12 vs 13), and
+// the four SCIM fields are optional as one atomic block (13 vs 17).
+// allowedOrigins and scimScopes are themselves ","-separated.
+// validationType defaults to "introspection" ("jwks" is the alternative,
+// case-insensitive). insecureSkipVerify is true only for the literal
+// string "true". Blank routingSource inherits defaultRoutingSource.
 //
-// scimClientID/scimBaseURL/scimTokenURL/scimScopes (fields 14-17) are
-// likewise optional, but as one atomic block — a row is 12, 13, or 17
-// fields, never 14-16 — appended after userinfoURL (present, even if
-// blank, whenever SCIM fields are). A blank scimClientID (the 12- and
-// 13-field cases, and a 17-field row that still leaves it blank) means
-// this tenant has no SCIM resolver configured, exactly as before this
-// extension existed (see Config's own doc comment on its SCIM* fields).
-// scimScopes is "," separated like allowedOrigins.
-//
-// allowedOrigins is itself "," separated when it carries more than one
-// origin (a nested list inside one "|"-delimited field, the same flat-
-// delimited-config convention csm-portal/backend's own CSM_TEAM_REGISTRY
-// uses). validationType is "introspection" (default when blank) or "jwks",
-// case-insensitive. insecureSkipVerify is the literal string "true" or
-// anything else (including blank) for false. Blank routingSource inherits
-// defaultRoutingSource (BRIDGE_ROUTING_SOURCE).
-//
-// Client secrets are never in this registry — Choreo's config UI and this
-// registry's own row-based design are both a poor fit for a value that
-// must stay confidential, so each row's introspection secret is instead
-// resolved via secretLookup(slug) (defaults to reading
-// TENANT_<SLUG_UPPER_SNAKE>_CLIENT_SECRET when nil) and its SCIM secret via
-// scimSecretLookup(slug) (defaults to reading
-// TENANT_<SLUG_UPPER_SNAKE>_SCIM_CLIENT_SECRET when nil) — two separate
-// lookups for two separate, least-privilege credentials.
+// Client secrets are never stored in the registry: each row's secrets are
+// resolved via secretLookup(slug) and scimSecretLookup(slug), which default
+// to TENANT_<SLUG>_CLIENT_SECRET and TENANT_<SLUG>_SCIM_CLIENT_SECRET.
 func BuildTable(raw, defaultRoutingSource string, secretLookup, scimSecretLookup SecretLookup, legacy LegacyConfig) (Table, error) {
 	if secretLookup == nil {
 		secretLookup = EnvSecretLookup
@@ -401,16 +318,9 @@ func envSlug(slug string) string {
 }
 
 // buildValidator constructs cfg's TokenValidator. secret authenticates
-// introspection (RFC 7662 Basic auth); scimSecret authenticates cfg's own
-// SCIM resolver's client-credentials grant, when cfg.SCIMClientID
-// configures one (see Config's own doc comment) — both are passed in
-// rather than read from cfg itself, since Config never stores secrets (see
-// BuildTable's own doc comment on why). SCIM attachment is per-tenant, not
-// legacy-tenant-specific: this is the only place either construction path
-// (BuildTable's per-row loop and buildLegacyTenant) builds a validator, so
-// a tenant configured via an explicit TENANT_REGISTRY row gets exactly the
-// same SCIM-or-UserInfo behavior the identity-console fallback tenant
-// does.
+// introspection; scimSecret authenticates the SCIM resolver's
+// client-credentials grant when cfg.SCIMClientID configures one. Both are
+// passed in rather than read from cfg, since Config never stores secrets.
 func buildValidator(cfg Config, secret, scimSecret string) (tokenvalidator.TokenValidator, error) {
 	switch cfg.ValidationType {
 	case "", "introspection":
@@ -455,11 +365,8 @@ func buildValidator(cfg Config, secret, scimSecret string) (tokenvalidator.Token
 }
 
 // buildLegacyTenant synthesizes the identity-console fallback tenant from
-// legacy — only Config construction (this tenant's fixed slug/routing
-// tags and legacy's env-var-sourced fields) is specific to it; the
-// validator itself is built by the exact same buildValidator every
-// explicit TENANT_REGISTRY row goes through, so this tenant's SCIM-or-
-// UserInfo behavior has never been special-cased relative to any other.
+// legacy, building its validator through the same buildValidator every
+// TENANT_REGISTRY row uses.
 func buildLegacyTenant(legacy LegacyConfig) (*Tenant, error) {
 	if legacy.IssuerBaseURL == "" {
 		return nil, errors.New("tenant: TENANT_REGISTRY is unset and KNOWN_ISSUER_BASE_URL is empty -- cannot build the identity-console fallback tenant")

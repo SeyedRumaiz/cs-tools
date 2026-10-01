@@ -14,6 +14,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package config loads and validates chat-routing-service's PostgreSQL
+// connection settings from the environment.
 package config
 
 import (

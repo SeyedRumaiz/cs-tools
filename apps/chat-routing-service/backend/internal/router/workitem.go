@@ -39,22 +39,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// ErrDuplicateOpenChat is returned by CreateWorkItem when c.CustomerEmail +
-// c.ProjectID already has another, different-caseId chat_conversation row
-// with session_ended_at IS NULL — i.e. that customer already has a live
-// chat in progress for this project. Enforced two ways: the plain SELECT
-// check inside CreateWorkItem below (a fast, friendly rejection for the
-// common case) and, as a race-safe backstop for two concurrent escalations
-// arriving at once, the partial unique index added by migration
-// 000021_split_case_and_conversation_identity
-// (uq_chat_conversation_open_customer_project) — a unique-violation on
-// that index is translated to this same error (see the pgconn.PgError
-// check below), so a caller never has to tell the two enforcement paths
-// apart.
-//
-// Never returned for a retried CreateWorkItem call for the SAME caseId --
-// that is idempotency (see the early case_id lookup below), not a
-// duplicate.
+// ErrDuplicateOpenChat is returned by CreateWorkItem when
+// c.CustomerEmail/c.ProjectID already has another open (session_ended_at
+// IS NULL) chat_conversation row under a different case_id — enforced both
+// by a plain SELECT check and, as a race-safe backstop, by the
+// uq_chat_conversation_open_customer_project partial unique index. Never
+// returned for an idempotent retry of the same case_id.
 var ErrDuplicateOpenChat = errors.New("this customer already has an open live chat for this project")
 
 // uqOpenCustomerProjectConstraint is the partial unique index's name --
@@ -116,44 +106,18 @@ type WorkItemDetail struct {
 	Comments []Comment `json:"comments"`
 }
 
-// CreateWorkItem creates the work_item + chat_conversation pair (starting
-// in state OPEN, unassigned) for a brand-new escalation, plus its prior
-// AI-chatbot messages and first comment if c.Message is non-empty. Also
-// stores c itself as chat_conversation.case_info — the durable display
-// blob (subject, customer email/name, message) GetPresence/DebugState read
-// back for as long as this conversation is held by an engineer, including
-// after Accept (unlike chat_queue's own case_info, which Accept deletes).
-// That blob's own copy of PriorMessages is never trusted on read, though --
-// see commentsForCase, which every read path uses instead, so the
-// chat_routing.comment rows inserted below are the durable source of truth.
+// CreateWorkItem creates the work_item and chat_conversation pair (state
+// OPEN, unassigned) for a new escalation, along with c's prior AI-chatbot
+// messages and first comment. It stores c as chat_conversation.case_info,
+// the durable display blob read by GetPresence/DebugState.
 //
-// Called once per case, BEFORE Router.Escalate — unlike the single-case
-// model this replaced, Escalate's own assignment now writes
-// chat_conversation.assignee_id directly (see assignCaseToEngineer), so
-// this row must already exist by the time Escalate runs. This mirrors how
-// the real entity-service case this stand-in mimics already exists before
-// csm-portal/backend's HandleEscalate is even called.
+// It is idempotent by c.CaseID: if a chat_conversation row already exists
+// for that case, it returns nil without modifying anything. Concurrent
+// calls for the same case are also safe — the loser gets a unique-
+// constraint error and rolls back.
 //
-// Idempotent by case_id: escalation retries (a network hiccup, backend-v2
-// or csm-portal/backend re-sending the same request) are expected, and
-// must not duplicate the prior-message transcript inserted below. If
-// chat_conversation already has a row for c.CaseID, this returns nil
-// immediately without touching work_item/chat_conversation/comment at all
-// — never by deleting and reinserting anything. The existence check and
-// every insert below share one transaction, so a genuinely concurrent
-// double call still can't duplicate anything: whichever call loses the
-// race gets a unique-constraint error on the chat_conversation insert
-// (case_id has a UNIQUE INDEX) and its whole transaction rolls back.
-//
-// Also enforces at most one non-ended live chat per (c.CustomerEmail,
-// c.ProjectID): a brand-new caseId (different from any existing row's)
-// for a customer/project that already has an open (session_ended_at IS
-// NULL) chat_conversation row is rejected with ErrDuplicateOpenChat rather
-// than creating a second, competing escalation — see that error's own doc
-// comment for the two layers this is enforced at. A caseId that IS an
-// existing row's own (the idempotent-retry case above) never reaches this
-// check at all, and a customer whose previous chat has since ended or
-// converted (session_ended_at set) is never blocked by it.
+// It must be called before Router.Escalate, and returns ErrDuplicateOpenChat
+// if c.CustomerEmail/c.ProjectID already has another open chat.
 func (r *Router) CreateWorkItem(ctx context.Context, c CaseInfo) error {
 	caseInfoJSON, err := json.Marshal(c)
 	if err != nil {
@@ -258,21 +222,11 @@ func (r *Router) CreateWorkItem(ctx context.Context, c CaseInfo) error {
 	})
 }
 
-// AddComment appends one message to caseID's transcript, looking up its
-// work_item via chat_conversation.case_id. Used for both directions of the
-// live chat so the whole transcript ends up in one place. Returns an error
-// rather than a silent no-op if caseID has no chat_conversation row, since
-// that means CreateWorkItem was never called for it — worth surfacing
-// even though current callers still treat this call as best-effort.
-//
-// Also rejects a comment on a case whose session_ended_at is already set
-// (ErrConversationEnded), instead of silently inserting it — this used to
-// succeed unconditionally, which was the direct cause of a live bug: after
-// an engineer clicked "End session", the case vanished from their own
-// view, but the customer's page kept accepting and "relaying" messages
-// with no error at all (see csm-portal/backend's HandleCustomerMessage,
-// which previously treated this call as pure best-effort and always
-// reported success regardless of the outcome here).
+// AddComment appends one message to caseID's transcript (looked up via
+// chat_conversation.case_id) and bumps chat_conversation.updated_at so the
+// message counts as activity for SweepStaleAcceptedSessions. Returns an
+// error if caseID has no chat_conversation row, or ErrConversationEnded if
+// its session has already ended, rather than silently no-op'ing.
 func (r *Router) AddComment(ctx context.Context, caseID, authorEmail, content string) error {
 	return r.withTx(ctx, func(tx pgx.Tx) error {
 		var (
@@ -298,11 +252,7 @@ func (r *Router) AddComment(ctx context.Context, caseID, authorEmail, content st
 			return fmt.Errorf("insert comment: %w", err)
 		}
 
-		// Also bumps chat_conversation.updated_at so a message counts as
-		// activity for SweepStaleAcceptedSessions -- without this, an
-		// accepted session's updated_at only ever reflected the last state
-		// transition (Accept), so a genuinely active conversation with many
-		// recent messages would look idle to that sweep.
+		// Bumps updated_at so this counts as activity for SweepStaleAcceptedSessions.
 		if _, err := tx.Exec(ctx, `
 			UPDATE chat_conversation SET updated_at = now() WHERE case_id = $1
 		`, caseID); err != nil {
@@ -312,13 +262,10 @@ func (r *Router) AddComment(ctx context.Context, caseID, authorEmail, content st
 	})
 }
 
-// GetCaseInfo returns caseID's originally-submitted CaseInfo (subject,
-// customer email/name, message, projectId) as CreateWorkItem stored it,
-// so callers can build a case request without resending data this service
-// already has. PriorMessages is NOT read from that stored blob — it's
-// replaced with a fresh read of chat_routing.comment (see commentsForCase),
-// so what a caller gets here always matches what's actually durably
-// persisted, including anything AddComment has added since.
+// GetCaseInfo returns caseID's originally-submitted CaseInfo, as
+// CreateWorkItem stored it, with PriorMessages replaced by a fresh read
+// from chat_routing.comment (see commentsForCase) so it reflects anything
+// AddComment has added since.
 func (r *Router) GetCaseInfo(ctx context.Context, caseID string) (CaseInfo, error) {
 	var caseInfoJSON []byte
 	err := r.db.QueryRow(ctx, `SELECT case_info FROM chat_conversation WHERE case_id = $1`, caseID).Scan(&caseInfoJSON)
@@ -343,17 +290,9 @@ func (r *Router) GetCaseInfo(ctx context.Context, caseID string) (CaseInfo, erro
 }
 
 // commentsForCase loads caseID's chat_routing.comment rows as PriorMessage,
-// oldest first — the durable source of truth for what a case's
-// PriorMessages should show to an engineer, resolved via
-// chat_conversation.work_item_id. Used by every path that returns a
-// CaseInfo/CaseStatus destined for csm-portal/backend's assignedCaseEvent
-// or GetPresence rehydration (GetCaseInfo above, and claimOldestWaiting/
-// lockPendingConversation/engineerCases in state.go), instead of trusting
-// whatever CreateWorkItem/Escalate originally snapshotted into the
-// case_info JSONB blob — see CaseInfo.PriorMessages's own doc comment.
-// Also reads back case_info for its own customerEmail, needed to tell a
-// live engineer reply apart from the customer's own live message — see
-// commentsForWorkItem's own doc comment on why that distinction matters.
+// oldest first, resolved via chat_conversation.work_item_id. It also reads
+// case_info for customerEmail, needed to tell an engineer reply apart from
+// the customer's own message (see commentsForWorkItem).
 func commentsForCase(ctx context.Context, q pgxQuerier, caseID string) ([]PriorMessage, error) {
 	var (
 		workItemID   string
@@ -377,23 +316,10 @@ func commentsForCase(ctx context.Context, q pgxQuerier, caseID string) ([]PriorM
 }
 
 // commentsForWorkItem is commentsForCase's query, factored out for callers
-// that already have workItemID (and customerEmail, off the same decoded
-// CaseInfo) on hand — currently just engineerCases in state.go.
-//
-// created_by maps back to Role the same way CreateWorkItem maps Role to
-// created_by on insert, PLUS a case CreateWorkItem never has to handle:
-// priorMessageAssistantAuthor -> Assistant; customerEmail (when known and
-// it matches) -> Customer; anything else -> Engineer. That third case is
-// exactly AddComment's other caller, HandleEngineerMessage in csm-portal/
-// backend — once a case is accepted, the live conversation (customer
-// messages AND engineer replies) is appended to this SAME comment table via
-// AddComment, so this read path has to tell those two apart even though
-// CreateWorkItem's own write path never needs to. A row is only ever
-// classified Engineer when customerEmail is non-empty and genuinely
-// doesn't match — an empty/unresolved customerEmail (shouldn't normally
-// happen, but see CreateWorkItem's own defensive comments on a malformed
-// record) falls back to Customer rather than mislabeling everything as
-// Engineer.
+// that already have workItemID and customerEmail on hand (engineerCases in
+// state.go). created_by maps back to Role: priorMessageAssistantAuthor ->
+// Assistant, a match on customerEmail -> Customer, anything else ->
+// Engineer (falls back to Customer when customerEmail is empty/unknown).
 func commentsForWorkItem(ctx context.Context, q pgxQuerier, workItemID, customerEmail string) ([]PriorMessage, error) {
 	rows, err := q.Query(ctx, `
 		SELECT content, created_by, created_at FROM comment

@@ -14,6 +14,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package handler adapts chat-routing-service's HTTP API onto router.Router.
+// Authentication (internal/middleware.InternalTokenHeader) is enforced by
+// the middleware chain in main.go, not by this package. A handler maps a
+// router.Router sentinel error to a specific HTTP status; any other error
+// is reported as 502 (see writeStorageError).
 package handler
 
 import (
@@ -31,11 +36,15 @@ const maxBodyBytes = 64 << 10 // 64 KiB
 // RoutingHandler adapts HTTP requests to router.Router calls.
 type RoutingHandler struct {
 	router              *router.Router
-	pendingTimeout      time.Duration
-	queueAbandonTimeout time.Duration
-	staleSessionTimeout time.Duration
+	pendingTimeout      time.Duration // Threshold for assignments waiting for acceptance
+	queueAbandonTimeout time.Duration // Threshold used to clean up abandoned queued chats
+	staleSessionTimeout time.Duration // Threshold used to clean up stale accepted sessions
 }
 
+// NewRoutingHandler constructs a RoutingHandler bound to r. pendingTimeout,
+// queueAbandonTimeout, and staleSessionTimeout are SweepTimeouts' three
+// thresholds — see router.Router.SweepExpiredPending, SweepAbandonedQueue,
+// and SweepStaleAcceptedSessions respectively.
 func NewRoutingHandler(r *router.Router, pendingTimeout, queueAbandonTimeout, staleSessionTimeout time.Duration) *RoutingHandler {
 	return &RoutingHandler{
 		router:              r,
@@ -147,7 +156,9 @@ type presenceRequest struct {
 	Status string `json:"status"`
 }
 
-// SetPresence handles POST /route/presence.
+// SetPresence handles POST /route/presence, applying an engineer's manual
+// chat_status change. Requesting AVAILABLE may claim waiting cases into
+// newly-open capacity — see PresenceResult.AssignedCases.
 func (h *RoutingHandler) SetPresence(w http.ResponseWriter, r *http.Request) {
 	var req presenceRequest
 	if !decodeBody(w, r, &req) {
@@ -174,7 +185,8 @@ type completedRequest struct {
 	CaseID string `json:"caseId"`
 }
 
-// Completed handles POST /route/completed.
+// Completed handles POST /route/completed. Ended is false, not an error,
+// if caseId isn't currently an open conversation assigned to userId.
 func (h *RoutingHandler) Completed(w http.ResponseWriter, r *http.Request) {
 	var req completedRequest
 	if !decodeBody(w, r, &req) {
@@ -199,7 +211,9 @@ type declineRequest struct {
 	CaseID string `json:"caseId"`
 }
 
-// Decline handles POST /route/decline.
+// Decline handles POST /route/decline: an engineer dismissing caseId
+// before accepting it. See router.Router.Decline for the reassignment
+// rules.
 func (h *RoutingHandler) Decline(w http.ResponseWriter, r *http.Request) {
 	var req declineRequest
 	if !decodeBody(w, r, &req) {
@@ -450,9 +464,10 @@ func caseInfoToResponse(c router.CaseInfo) caseInfoResponse {
 	}
 }
 
-// GetCaseInfo handles POST /route/workitem/{caseId}/info, returning the
-// case's originally-submitted subject/customer/message data. POST rather
-// than GET only to match this package's other server-to-server routes.
+// GetCaseInfo handles POST /route/workitem/{caseId}/info, returning
+// caseId's case details with PriorMessages read fresh from the comment
+// transcript (see router.CaseInfo.PriorMessages). Responds 404 if caseId
+// is unknown.
 func (h *RoutingHandler) GetCaseInfo(w http.ResponseWriter, r *http.Request) {
 	caseID := r.PathValue("caseId")
 	if caseID == "" {
@@ -548,8 +563,10 @@ func completedToResponse(result router.CompletedResult) completedResponse {
 	return resp
 }
 
-// EndByTenant handles POST /route/end-by-tenant, which ends caseId's chat
-// session on behalf of tenantSlug rather than a specific engineer.
+// EndByTenant handles POST /route/end-by-tenant, ending caseId's chat
+// session on behalf of tenantSlug rather than a specific engineer. Ended
+// is false, not an error, if caseId isn't currently an open conversation
+// belonging to tenantSlug.
 func (h *RoutingHandler) EndByTenant(w http.ResponseWriter, r *http.Request) {
 	var req endByTenantRequest
 	if !decodeBody(w, r, &req) {

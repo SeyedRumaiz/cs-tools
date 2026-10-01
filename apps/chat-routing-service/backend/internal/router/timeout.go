@@ -26,14 +26,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// TimeoutResult is one conversation's outcome from a timeout sweep --
-// exactly one of ReassignedTo (with AssignedCase) or Requeued applies,
-// mirroring DeclineResult's shape: a timed-out case is handled the same
-// way as an explicit Decline, just triggered by a sweep instead of a
-// click. Only the timed-out conversation is affected — the unresponsive
-// engineer's other concurrent cases, if any, and their own chat_status,
-// are untouched (see the package doc comment on why chat_status is now a
-// pure manual toggle).
+// TimeoutResult is one conversation's outcome from a timeout sweep,
+// mirroring DeclineResult's shape: exactly one of ReassignedTo (with
+// AssignedCase) or Requeued applies. Only the timed-out conversation is
+// affected — the engineer's other cases and chat_status are untouched.
 type TimeoutResult struct {
 	// UserID is the engineer who was PENDING on CaseID past the timeout.
 	UserID       string    `json:"userId"`
@@ -88,12 +84,9 @@ func (r *Router) SweepExpiredPending(ctx context.Context, timeout time.Duration)
 	return results, nil
 }
 
-// timeoutOne re-verifies and applies a single conversation's timeout
-// inside its own transaction. Re-checks assignment/confirmation/staleness
-// under the row lock, since SweepExpiredPending's own scan is unlocked --
-// the engineer may have already accepted, declined, or been reassigned in
-// the meantime, in which case this is a no-op (nil, nil) instead of
-// double-processing it.
+// timeoutOne re-verifies and applies a single conversation's timeout under
+// its own row lock — a no-op if the engineer already accepted, declined,
+// or was reassigned since SweepExpiredPending's unlocked scan.
 func (r *Router) timeoutOne(ctx context.Context, userID, caseID string, timeout time.Duration) (*TimeoutResult, error) {
 	var result *TimeoutResult
 	err := r.withTx(ctx, func(tx pgx.Tx) error {
@@ -176,33 +169,18 @@ type AbandonedResult struct {
 }
 
 // abandonedCandidate is one row from SweepAbandonedQueue's initial,
-// unlocked scan — re-verified under lock by abandonOne before anything
-// changes, mirroring pendingCandidate/timeoutOne's own pattern.
-//
-// caseID, not conversationID: chat_queue.chat_conversation_id (this
-// column's own legacy name — see insertQueueRow's doc comment) is keyed
-// by CaseID, so that is what this scan actually reads back.
+// unlocked scan, re-verified under lock by abandonOne. caseID (not
+// conversationID) since chat_queue.chat_conversation_id is keyed by
+// CaseID.
 type abandonedCandidate struct {
 	caseID string
 }
 
 // SweepAbandonedQueue gives up on every chat_queue row that's sat
 // WAITING_FOR_ENGINEER (never assigned to anyone) past timeout: deletes
-// the queue row and marks the conversation ended, so it can't be claimed
-// later.
-//
-// SweepExpiredPending only catches a case that WAS assigned and never
-// confirmed — a case nobody was ever free to take had no expiry before
-// this. Left alone, the next engineer to go AVAILABLE would silently
-// claim it, mistaking it for a fresh escalation and losing a unit of
-// their real capacity to it. See
-// TestRepro_StaleQueuedCaseAmbushesNextAvailableEngineer for a
-// reproduction.
-//
-// Polled alongside SweepExpiredPending (see csm-portal/backend's
-// StartTimeoutSweeper) — no background loop of its own. Each call is a
-// snapshot; a case crossing the timeout between calls is picked up next
-// time.
+// the queue row and marks the conversation ended, so it can't later be
+// claimed by mistake by the next engineer to go AVAILABLE. Polled
+// alongside SweepExpiredPending; each call is a snapshot.
 func (r *Router) SweepAbandonedQueue(ctx context.Context, timeout time.Duration) ([]AbandonedResult, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT chat_conversation_id FROM chat_queue
@@ -238,11 +216,8 @@ func (r *Router) SweepAbandonedQueue(ctx context.Context, timeout time.Duration)
 }
 
 // abandonOne re-verifies and applies a single queue row's abandonment
-// inside its own transaction, the same re-check-under-lock pattern
-// timeoutOne uses: the row may have been claimed (by a queue-drain) or
-// accepted in the moment between SweepAbandonedQueue's unlocked scan and
-// this lock, in which case this is a no-op (nil, nil) rather than
-// abandoning a case an engineer is now legitimately holding.
+// under its own row lock — a no-op if the row was claimed or accepted
+// since SweepAbandonedQueue's unlocked scan.
 func (r *Router) abandonOne(ctx context.Context, caseID string, timeout time.Duration) (*AbandonedResult, error) {
 	var result *AbandonedResult
 	err := r.withTx(ctx, func(tx pgx.Tx) error {
@@ -283,12 +258,8 @@ func (r *Router) abandonOne(ctx context.Context, caseID string, timeout time.Dur
 			return fmt.Errorf("mark abandoned conversation ended: %w", err)
 		}
 
-		// ConversationID comes from the decoded case_info (c.ConversationID),
-		// not the raw queue-key variable (caseID) — that key is this row's
-		// CaseID (see insertQueueRow), and reusing it here as
-		// AbandonedResult.ConversationID would report the wrong identity
-		// for exactly the reason this whole change exists: the two are no
-		// longer guaranteed equal.
+		// Use the decoded c.ConversationID, not the queue-key caseID param
+		// (this row's CaseID) — the two are not guaranteed equal.
 		result = &AbandonedResult{CaseID: c.CaseID, ConversationID: c.ConversationID}
 		return nil
 	})
@@ -316,17 +287,12 @@ type staleCandidate struct {
 	caseID string
 }
 
-// SweepStaleAcceptedSessions ends every accepted session (state = 'ACTIVE')
-// that's had no activity -- no message sent, no state change -- for at
-// least timeout, freeing the assigned engineer's capacity and backfilling
-// from the queue the same way an explicit Completed call would.
-//
-// SweepExpiredPending and SweepAbandonedQueue both only ever catch a case
-// before an engineer confirms it; once accepted, nothing previously timed
-// a session out again. A session an engineer forgot to complete -- browser
-// closed, crashed, or simply never clicked Complete -- stayed open
-// indefinitely, silently blocking that same customer's next escalation for
-// the same project via CreateWorkItem's own duplicate-open-chat check.
+// SweepStaleAcceptedSessions ends every accepted session (state ACTIVE)
+// idle for at least timeout, freeing the assigned engineer's capacity and
+// backfilling from the queue the same way Completed would — catching a
+// session an engineer forgot to complete, which would otherwise stay open
+// indefinitely and block that customer's next escalation via
+// CreateWorkItem's duplicate-open-chat check.
 func (r *Router) SweepStaleAcceptedSessions(ctx context.Context, timeout time.Duration) ([]StaleSessionResult, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT case_id FROM chat_conversation
@@ -363,12 +329,9 @@ func (r *Router) SweepStaleAcceptedSessions(ctx context.Context, timeout time.Du
 }
 
 // staleSessionOne re-verifies and applies a single session's staleness
-// inside its own transaction, the same re-check-under-lock pattern
-// timeoutOne/abandonOne use: the session may have gotten a new message,
-// been completed, or reassigned in the moment between
-// SweepStaleAcceptedSessions's own unlocked scan and this lock, in which
-// case this is a no-op (nil, nil) rather than force-ending a session
-// that's no longer actually stale.
+// under its own row lock — a no-op if the session got a new message, was
+// completed, or reassigned since SweepStaleAcceptedSessions's unlocked
+// scan.
 func (r *Router) staleSessionOne(ctx context.Context, caseID string, timeout time.Duration) (*StaleSessionResult, error) {
 	var result *StaleSessionResult
 	err := r.withTx(ctx, func(tx pgx.Tx) error {

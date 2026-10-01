@@ -21,15 +21,7 @@
 //	GET  /v1/{tenant}/chats/{caseId}/events     — SSE delivery
 //	GET  /v1/{tenant}/chats/{caseId}/history    — the transcript to date
 //	POST /v1/{tenant}/chats/{caseId}/complete   — end the chat (customer side)
-//
-// Additive alongside chats.go's four legacy /support/chats routes, which
-// stay completely unchanged — identity-apps' Console needs zero changes
-// for this to exist (see this repo's live-chat-SDK extraction plan, Stage
-// 1). ChatsHandler, its csm client, its SSE hub, and its in-memory
-// h.cases map are all shared between the legacy and v1 surfaces; only the
-// authorization model and wire shapes differ (tenant-scoped rather than
-// single-pinned-instance/owner-subject-scoped — see requireTenantCase and
-// canonicalOwner below).
+
 package handler
 
 import (
@@ -45,12 +37,8 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/tenant"
 )
 
-// Input limits, all UTF-8 BYTE lengths (len(string), not
-// utf8.RuneCountInString) — matches maxBodyBytes' own byte-based cap
-// (http.MaxBytesReader), not a character count. A message full of
-// multi-byte characters (emoji, CJK) hits its limit sooner in byte terms
-// than in rune terms — expected and consistent with the whole-body cap it
-// sits inside.
+// Input limits, all UTF-8 byte lengths (len(string), matching
+// maxBodyBytes' byte-based cap), not character counts.
 const (
 	maxSubjectBytes        = 200
 	maxPriorMessagesCount  = 20
@@ -61,11 +49,8 @@ const (
 	maxMetadataValueBytes  = 500
 )
 
-// reservedMetadataKeys are rejected case-insensitively — these names are
-// either already dedicated top-level fields on the escalate request
-// (source/channel/tenant/tenantSlug never being metadata's job to carry)
-// or a reserved internal field (projectId, always derived from the
-// resolved tenant, never client-supplied).
+// reservedMetadataKeys are rejected case-insensitively: dedicated
+// top-level request fields, or projectId (always derived from the tenant).
 var reservedMetadataKeys = map[string]bool{
 	"source":     true,
 	"channel":    true,
@@ -139,26 +124,18 @@ func validateEscalateInput(req v1EscalateRequest) error {
 }
 
 // canonicalOwner returns the caller's Subject claim only — never falling
-// back to Username the way the legacy path's ownerIdentity() does (see that
-// function's own doc comment). Every /v1 route calls this and rejects an
-// empty result the same way: Subject is the one claim every TokenValidator
-// kind (introspection today, JWKS later) normalizes consistently, so it's
-// the only claim this generic, multi-IdP API trusts as a caller's identity.
+// back to Username the way the legacy path's ownerIdentity() does. Every
+// /v1 route rejects an empty result.
 func canonicalOwner(r *http.Request) string {
 	return middleware.IdentityFromContext(r.Context()).Subject
 }
 
 // requireTenantCase confirms caseID belongs to t, durably. h.cases is a
 // fast first-layer check only — a miss, or a stored tenantSlug that
-// disagrees with t.Slug, always falls through to csm-portal/backend's own
-// GET /internal/chat/cases/{caseId} (the durable source of truth) before
-// rejecting, so a stale, wrong, or simply missing in-memory record (e.g.
-// after this bridge process restarted) can never itself cause a false
-// accept — at worst it costs one extra outbound call before a correct
-// 403/404. Used by every case-scoped v1 route (stream, sendMessage,
-// completeChat) alike; completeChat additionally gets its own SQL-level
-// tenantSlug check inside router.Router.EndByTenant, belt-and-suspenders
-// specifically on that one irreversible action.
+// disagrees with t.Slug, always falls through to csm-portal/backend's
+// GET /internal/chat/cases/{caseId} (the source of truth) before
+// rejecting, so a stale or missing in-memory record never causes a false
+// accept.
 func (h *ChatsHandler) requireTenantCase(w http.ResponseWriter, r *http.Request, caseID string, t *tenant.Tenant) (caseRecord, bool) {
 	h.mu.Lock()
 	rec, exists := h.cases[caseID]
@@ -177,15 +154,8 @@ func (h *ChatsHandler) requireTenantCase(w http.ResponseWriter, r *http.Request,
 		return caseRecord{}, false
 	}
 
-	// Backfill/repair — preserves whatever this process already knew
-	// (conversationId/customerEmail, if this same case's HandleEscalateV1
-	// ran in this process) while correcting tenantSlug from the durable
-	// answer; a genuine cache miss just gets tenantSlug populated, and
-	// conversationId/customerEmail stay zero-valued until a caller that
-	// needs them (HandleSendMessageV1) supplies conversationId itself --
-	// see v1EscalateResponse/v1MessageRequest's own doc comments on why
-	// this generic API always round-trips conversationId through the
-	// client rather than depending solely on this best-effort cache.
+	// Backfill/repair: keep whatever this process already cached while
+	// correcting tenantSlug from the durable answer.
 	rec.tenantSlug = ownership.TenantSlug
 	h.mu.Lock()
 	h.cases[caseID] = rec
@@ -200,33 +170,25 @@ type v1PriorMessage = PriorMessage
 
 // v1EscalateRequest is the body for POST /v1/{tenant}/chats.
 type v1EscalateRequest struct {
-	// ConversationID is a stable per-session id the caller already has
-	// (e.g. an existing AI-chatbot conversation this escalates from).
+	// ConversationID is a stable per-session id the caller already has.
 	// Optional — when empty, this bridge mints the same fresh id it uses
-	// as CaseID, so ConversationID and CaseID start out equal (mirrors
-	// chat-routing-service's own CaseInfo.ConversationID doc comment on
-	// why a case-first escalation with no pre-existing conversation does
-	// this).
+	// as CaseID, so both start out equal.
 	ConversationID string           `json:"conversationId,omitempty"`
 	Subject        string           `json:"subject,omitempty"`
 	Message        string           `json:"message"`
 	CustomerName   string           `json:"customerName,omitempty"`
 	PriorMessages  []v1PriorMessage `json:"priorMessages,omitempty"`
 	// Metadata is arbitrary tenant-supplied key/value data, subject to
-	// this file's own byte/count limits and reserved/sensitive-key
-	// rejection (see validateEscalateInput) — NOT currently forwarded to
-	// chat-routing-service (CaseInfo has no metadata field yet); accepted
-	// and validated now so a tenant's integration can start sending it
-	// without a breaking wire change later.
+	// this file's byte/count limits and reserved/sensitive-key rejection
+	// (see validateEscalateInput). Not yet forwarded to
+	// chat-routing-service; accepted now so integrations can start
+	// sending it.
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // v1EscalateResponse is POST /v1/{tenant}/chats's response. Echoes back
-// conversationId (whether client-supplied or bridge-minted) so the caller
-// never has to separately remember which case it applied — every later
-// /v1 call for this case carries both ids explicitly instead of relying on
-// this bridge's own best-effort in-memory cache (see requireTenantCase's
-// own doc comment on why that cache is fast-path-only, never a dependency).
+// conversationId (client-supplied or bridge-minted) so later /v1 calls can
+// carry it explicitly instead of relying on this bridge's in-memory cache.
 type v1EscalateResponse struct {
 	CaseID         string `json:"caseId"`
 	ConversationID string `json:"conversationId"`
@@ -318,36 +280,22 @@ func (h *ChatsHandler) HandleEscalateV1(w http.ResponseWriter, r *http.Request) 
 		customerEmail:  customerEmail,
 		tenantSlug:     t.Slug,
 		// The resolved canonical Subject (never Username — see
-		// canonicalOwner's own doc comment), recorded here even though
-		// requireTenantCase authorizes by tenant membership only, not a
-		// per-caller Subject match (see that function's own doc comment --
-		// unchanged by this). This durably records, in the one place this
-		// codebase already models "who owns this case" (ownerSubject,
-		// otherwise only ever set by the legacy path's requireOwner), that
-		// a v1 case's owner identity really is the IdP's stable Subject
-		// claim, not the customerEmail display field above (which
-		// deliberately still prefers the human-readable Username for
-		// engineer-UI legibility and stays unchanged here).
+		// canonicalOwner), recorded even though requireTenantCase
+		// authorizes by tenant membership, not a per-caller Subject match.
 		ownerSubject: subject,
 	}
 	h.mu.Unlock()
 
-	// Never logs the bearer token itself — only the already-validated,
-	// non-sensitive identity claims TokenValidator resolved from it. Useful
-	// to confirm, per tenant, which identity-resolution path actually fired
-	// (introspection's own "sub" vs. the userinfo fallback both land here
-	// identically) without needing a debug endpoint.
+	// Logs only the already-validated identity claims, never the token.
 	slog.InfoContext(r.Context(), "v1 chat escalation", "tenant", t.Slug, "caseId", caseID, "ownerSubject", subject)
 
 	writeJSON(w, http.StatusAccepted, v1EscalateResponse{CaseID: caseID, ConversationID: conversationID})
 }
 
 // v1MessageRequest is the body for
-// POST /v1/{tenant}/chats/{caseId}/messages. ConversationID is optional --
-// used when this bridge's own in-memory record has no cached value for it
-// yet (see requireTenantCase's own doc comment); when both are available,
-// the client-supplied value here wins, since it can never be staler than
-// this process's own cache.
+// POST /v1/{tenant}/chats/{caseId}/messages. ConversationID is optional;
+// when both are available, the client-supplied value wins since it can
+// never be staler than this process's cache.
 type v1MessageRequest struct {
 	ConversationID string `json:"conversationId,omitempty"`
 	Message        string `json:"message"`
@@ -422,15 +370,9 @@ type historyResponse struct {
 	Messages []csmchat.HistoryMessage `json:"messages"`
 }
 
-// HandleGetHistoryV1 handles GET /v1/{tenant}/chats/{caseId}/history.
-// Behind ResolveTenant, CORS, TenantAuth, RequireSubject -- same
-// authorization model as HandleStreamV1/HandleSendMessageV1, just a plain
-// request/response instead of a subscription or a mutation. Exists so a
-// client that lost its in-memory conversation (a page refresh mid-chat is
-// the case that prompted this: the client still knows caseId from its own
-// persisted escalation state, but not the messages that were on screen
-// before the reload) can restore the full transcript before resuming its
-// event stream, rather than resuming into a blank conversation.
+// HandleGetHistoryV1 handles GET /v1/{tenant}/chats/{caseId}/history,
+// returning caseId's full transcript to date. Behind ResolveTenant, CORS,
+// TenantAuth, RequireSubject — the same authorization as HandleStreamV1.
 func (h *ChatsHandler) HandleGetHistoryV1(w http.ResponseWriter, r *http.Request) {
 	t, ok := tenant.FromContext(r.Context())
 	if !ok {
@@ -456,12 +398,9 @@ func (h *ChatsHandler) HandleGetHistoryV1(w http.ResponseWriter, r *http.Request
 }
 
 // HandleStreamV1 handles GET /v1/{tenant}/chats/{caseId}/events. Behind
-// ResolveTenant, CORS, TenantAuth, RequireSubject. Identical delivery
-// mechanism to the legacy HandleStream (same per-case stream.Hub, same SSE
-// framing/heartbeat) — only the authorization check (tenant membership,
-// not caller-subject ownership) differs, so the loop itself isn't
-// duplicated beyond what's needed to call requireTenantCase instead of
-// requireOwner.
+// ResolveTenant, CORS, TenantAuth, RequireSubject. Identical delivery to
+// the legacy HandleStream; only the authorization check (tenant
+// membership via requireTenantCase, not caller-subject ownership) differs.
 func (h *ChatsHandler) HandleStreamV1(w http.ResponseWriter, r *http.Request) {
 	t, ok := tenant.FromContext(r.Context())
 	if !ok {
@@ -511,19 +450,16 @@ func (h *ChatsHandler) HandleStreamV1(w http.ResponseWriter, r *http.Request) {
 }
 
 // v1CompleteRequest is the (optional) body for
-// POST /v1/{tenant}/chats/{caseId}/complete — conversationId is only used
-// to populate csm-portal/backend's session_closed broadcast to engineers
-// (a UI refresh trigger, see that handler's own doc comment), so an absent
+// POST /v1/{tenant}/chats/{caseId}/complete. conversationId only populates
+// csm-portal/backend's session_closed broadcast to engineers, so an absent
 // or empty body never blocks ending the session.
 type v1CompleteRequest struct {
 	ConversationID string `json:"conversationId,omitempty"`
 }
 
 // HandleCompleteV1 handles POST /v1/{tenant}/chats/{caseId}/complete — the
-// customer/tenant-initiated session end this bridge's legacy path has no
-// equivalent for (an Ask AI admin never ends a chat from that side; only
-// the engineer does, via csm-portal/backend's own browser-facing route).
-// Behind ResolveTenant, CORS, TenantAuth, RequireSubject.
+// customer/tenant-initiated session end; this bridge's legacy path has no
+// equivalent. Behind ResolveTenant, CORS, TenantAuth, RequireSubject.
 func (h *ChatsHandler) HandleCompleteV1(w http.ResponseWriter, r *http.Request) {
 	t, ok := tenant.FromContext(r.Context())
 	if !ok {

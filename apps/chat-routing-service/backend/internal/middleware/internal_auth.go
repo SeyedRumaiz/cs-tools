@@ -14,6 +14,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package middleware provides chat-routing-service's HTTP middleware:
+// shared-secret authentication, request logging, and security headers.
 package middleware
 
 import (
@@ -39,6 +41,8 @@ func InternalToken(expected string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			got := r.Header.Get(InternalTokenHeader)
+			// If the service has no configured secret, The caller supplied no token, or
+			// the supplied token does not match
 			if expected == "" || got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)

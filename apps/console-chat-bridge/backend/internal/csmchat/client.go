@@ -15,22 +15,15 @@
 // under the License.
 
 // Package csmchat is the outbound HTTP client this bridge uses to call
-// csm-portal/backend's live-engineer-chat endpoints
-// (POST /internal/chat/escalate, POST /internal/chat/customer-message).
-// Both calls are pure machine-to-machine: this bridge itself already
-// validated the caller's identity (see internal/introspect) before ever
-// reaching here, and forwards only what csm-portal/backend's existing
-// escalateRequest/customerMessageRequest shapes already accept — no new
-// fields, no new route.
+// csm-portal/backend's live-engineer-chat endpoints: escalate,
+// customer-message, and complete under /internal/chat/..., and case
+// ownership/transcript lookups under /internal/chat/cases/{caseId}. Every
+// call is machine-to-machine, authenticated separately from the caller
+// (see internal/introspect).
 //
-// Previously this package (and customer-portal/backend-v2's own,
-// independently hand-rolled twin) each implemented the same OAuth2
-// client-credentials HTTP-client plumbing by hand — this package's own
-// prior doc comment admitted as much ("deliberately copied ... rather than
-// shared"). Both now build on the shared
-// apps/live-chat-sdk/sdk-go/m2mclient package instead; this package keeps
-// its own identity and typed methods (Escalate/SendCustomerMessage), only
-// the transport internals moved.
+// It builds on the shared apps/live-chat-sdk/sdk-go/m2mclient package for
+// OAuth2 client-credentials transport, keeping its own identity and typed
+// methods (Escalate/SendCustomerMessage) on top.
 package csmchat
 
 import (
@@ -50,11 +43,8 @@ type Config struct {
 	BaseURL string
 	// TokenURL, ClientID, ClientSecret, and Scopes authenticate this client
 	// against csm-portal/backend via the OAuth2 client-credentials grant.
-	// ClientID/Secret should be a dedicated registration distinct from
-	// backend-v2's own, carrying only the least-privilege
-	// "internal_console_chat_escalate" scope (see this bridge's README) --
-	// least-privilege per consumer, same principle backend-v2's own
-	// csmchat client already follows for its own scopes.
+	// ClientID/Secret should be a dedicated registration carrying only the
+	// least-privilege "internal_console_chat_escalate" scope.
 	TokenURL     string
 	ClientID     string
 	ClientSecret string
@@ -114,12 +104,9 @@ type CaseOwnership struct {
 }
 
 // GetCaseOwnership calls csm-portal/backend's
-// GET /internal/chat/cases/{caseId} — the durable source of truth behind
-// this bridge's own requireTenantCase authorization check (see
-// internal/handler's v1 routes). Returns an error for any non-2xx response,
-// including a 404 for an unrecognized case — the caller treats any error
-// here as "reject", never distinguishing further (see requireTenantCase's
-// own doc comment on why).
+// GET /internal/chat/cases/{caseId} — the source of truth behind
+// requireTenantCase's authorization check. Returns an error for any
+// non-2xx response, including a 404 for an unrecognized case.
 func (c *Client) GetCaseOwnership(ctx context.Context, caseID string) (CaseOwnership, error) {
 	body, status, err := c.m2m.Do(ctx, http.MethodGet, "/internal/chat/cases/"+url.PathEscape(caseID), nil, nil)
 	if err != nil {
@@ -145,12 +132,9 @@ type HistoryMessage struct {
 }
 
 // GetCaseHistory calls csm-portal/backend's
-// GET /internal/chat/cases/{caseId}/history — the full transcript to date
-// for caseID (pre-escalation Novera exchange plus, once accepted, the live
-// customer/engineer conversation), backing this bridge's own customer-
-// facing case-history route. Callers must have already confirmed the
-// requester owns caseID (requireOwner/requireTenantCase) before reaching
-// here, the same trust boundary GetCaseOwnership relies on.
+// GET /internal/chat/cases/{caseId}/history, returning caseID's full
+// transcript to date. Callers must confirm the requester owns caseID (see
+// requireOwner/requireTenantCase) before calling this.
 func (c *Client) GetCaseHistory(ctx context.Context, caseID string) ([]HistoryMessage, error) {
 	body, status, err := c.m2m.Do(ctx, http.MethodGet, "/internal/chat/cases/"+url.PathEscape(caseID)+"/history", nil, nil)
 	if err != nil {

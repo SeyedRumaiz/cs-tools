@@ -24,27 +24,20 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/tenant"
 )
 
-// v1PathPrefix is every generic tenant-scoped route's shared prefix --
-// "/v1/{tenant}/...". Anything outside this prefix (the legacy
-// /support/chats path, /internal/chat-events, /health) is untouched by
-// ResolveTenant — it only ever acts within /v1.
+// v1PathPrefix is every generic tenant-scoped route's shared prefix. A
+// request outside it (legacy /support/chats, /internal/chat-events,
+// /health) is untouched by ResolveTenant.
 const v1PathPrefix = "/v1/"
 
-// ResolveTenant must be the OUTERMOST middleware wrapping every /v1/... route
-// — even outside CORS — so a request for an unknown tenant 404s before
-// CORS or Auth ever run, including for a bare OPTIONS preflight (a
-// preflight for a tenant that doesn't exist has nothing valid to answer
-// about; letting it through to CORS would mean reflecting/declining an
-// Origin on behalf of a tenant this bridge doesn't recognize at all).
+// ResolveTenant must be the outermost middleware wrapping every /v1/...
+// route, even outside CORS, so a request for an unknown tenant 404s before
+// CORS or Auth ever run — including for an OPTIONS preflight.
 //
-// Parses the path segment immediately after "/v1/" as the tenant slug,
-// looks it up in table, and on a match stores the resolved *tenant.Tenant
-// in the request context (see tenant.WithTenant) before calling next --
-// CORS (tenant-aware) and the /v1 Auth middleware both read it from there.
-// A request outside "/v1/" is passed through untouched; it never resolves
-// a tenant, so CORS falls back to its own default allow-list and the
-// legacy Auth middleware is used instead (see cmd/server/main.go's route
-// wiring).
+// It parses the path segment after "/v1/" as the tenant slug, looks it up
+// in table, and on a match stores the resolved *tenant.Tenant in the
+// request context (see tenant.WithTenant) before calling next; CORS and
+// the /v1 Auth middleware both read it from there. A request outside
+// "/v1/" passes through untouched.
 func ResolveTenant(table tenant.Table) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

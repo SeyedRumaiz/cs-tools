@@ -23,21 +23,11 @@ import (
 )
 
 // StartTimeoutSweeper polls chat-routing-service periodically for
-// engineers who were assigned a case (PENDING) and never accepted it past
-// that service's own configured PENDING_TIMEOUT_SECONDS, delivering any
-// resulting reassignment the same way a fresh escalation would arrive, and
-// clearing the stale alert on the original (unresponsive) engineer's
-// screen.
-//
-// Deliberately a poll from this side rather than a push from
-// chat-routing-service: this handler already owns the only thing that can
-// act on the result (the engineer SSE hub), and chat-routing-service is
-// intentionally synchronous/caller-driven only (see routingclient's
-// package doc comment on why it never calls back) — adding a reverse
-// callback direction just for this one feature would be new
-// infrastructure for a small win. Runs until ctx is cancelled — see
-// cmd/server/main.go, which starts this alongside the HTTP server and
-// passes the same shutdown context.
+// engineers who were assigned a case (PENDING) and never accepted it
+// within that service's configured timeout, delivering any resulting
+// reassignment the same way a fresh escalation would arrive and clearing
+// the stale alert on the original engineer's screen. It runs until ctx is
+// cancelled.
 func (h *ChatHandler) StartTimeoutSweeper(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -51,10 +41,8 @@ func (h *ChatHandler) StartTimeoutSweeper(ctx context.Context, interval time.Dur
 	}
 }
 
-// sweepTimeoutsOnce runs one sweep. Best-effort by construction, matching
-// this file's other background/side-channel calls: a failed sweep just
-// means this tick found nothing to do from this handler's point of view —
-// chat-routing-service itself is unaffected, and the next tick tries again.
+// sweepTimeoutsOnce runs one sweep. Best-effort: a failed sweep just means
+// this tick found nothing to do; the next tick tries again.
 func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 	result, err := h.routing.SweepTimeouts(ctx)
 	if err != nil {
@@ -67,9 +55,7 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 			"reassignedTo", timeout.ReassignedTo, "requeued", timeout.Requeued)
 
 		// Tell the unresponsive engineer's own browser their stale pending
-		// alert is gone. EngineerAlertNotification.tsx now handles this
-		// event type (clears the pending card) — see that component's
-		// handleAlert "case_timed_out" case.
+		// alert is gone.
 		h.publishToEngineer(timeout.UserID, chatEvent{
 			Type:      "case_timed_out",
 			CaseID:    timeout.CaseID,
@@ -81,15 +67,10 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 		}
 	}
 
-	// Queue-abandonment results: a case that sat WAITING_FOR_ENGINEER --
-	// never assigned to anyone at all — past
-	// chat-routing-service's own QUEUE_ABANDON_SECONDS. Nobody on the
-	// engineer side ever saw this case (it was never delivered), so there
-	// is no engineer-facing event to clear here — only the customer might
-	// still have a tab open waiting on it. Best-effort notify the case's origin so
-	// a still-open customer chat can show a "no engineer was available"
-	// message instead of waiting forever; a customer who already left sees
-	// nothing, which is no worse than today.
+	// Queue-abandonment results: a case never assigned to any engineer,
+	// abandoned after sitting too long. No engineer-facing event to clear
+	// here; best-effort notify the case's origin so an open customer chat
+	// can show a "no engineer was available" message.
 	for _, abandoned := range result.Abandoned {
 		slog.InfoContext(ctx, "chat: abandoned a case that waited too long with no engineer free",
 			"caseId", abandoned.CaseID, "conversationId", abandoned.ConversationID)
@@ -104,9 +85,7 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 
 	// Stale accepted sessions: an engineer held one of these and never
 	// completed it (browser closed, crashed, forgotten). Notify both sides
-	// exactly the way HandleCompleteSession does for an explicit complete,
-	// since from here on this session is over the same way either path
-	// leads to — the only difference is what triggered it.
+	// the same way HandleCompleteSession does for an explicit complete.
 	for _, stale := range result.Stale {
 		slog.InfoContext(ctx, "chat: force-ended an accepted session that went idle too long",
 			"caseId", stale.CaseID, "conversationId", stale.ConversationID, "assigneeId", stale.AssigneeID)
