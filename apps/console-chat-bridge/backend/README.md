@@ -212,7 +212,17 @@ go test ./...
 ## Known POC limitations
 
 - `internal/stream.Hub` and `ChatsHandler`'s case-ownership map are
-  in-memory, single-process, lost on restart.
+  in-memory, single-process, lost on restart. This is fine as long as this
+  service runs as a single instance — restarting just means connected SSE
+  clients reconnect (expected behavior; `GET .../history` lets them catch
+  up on anything missed) and the ownership cache gets rebuilt from
+  `chat_conversation`, the durable source it was always a shortcut for. It
+  only becomes a real problem if this service is ever scaled to more than
+  one instance: a push event could land on the instance that doesn't hold
+  the matching browser's SSE connection. If that need arises, prefer
+  sticky sessions at the load balancer (no code change here) over adding a
+  shared pub/sub layer (e.g. Redis) — the latter is the textbook fix but is
+  unwarranted added infrastructure for this service's current scale.
 - No persistence beyond what csm-portal/backend/chat-routing-service
   already durably store — this bridge itself keeps no database.
 - JWKS/JWT-signature validation (`validationType: "jwks"` in a
