@@ -107,12 +107,15 @@ token introspection**, not JWKS/JWT validation — see `internal/introspect`.
 If your Console application's own **Access Token Type** setting
 (Console → your app → Protocol → Access Token) has specifically been
 switched to JWT, introspection still works (WSO2 IS's introspection
-endpoint accepts both token types) but is unnecessarily slow for that case;
-swapping in a JWKS-based validator instead is a contained change scoped to
-`internal/introspect/validator.go` alone — nothing else in this service
-assumes one or the other. (A `TENANT_REGISTRY` row can also declare
-`validationType: "jwks"` today, but that path isn't implemented yet — see
-[Known POC limitations](#known-poc-limitations).)
+endpoint accepts both token types) but is unnecessarily slow for that case.
+The legacy `/support/chats` path (pinned to `KNOWN_ISSUER_BASE_URL`) only
+ever validates via `internal/introspect`, with no JWKS alternative wired
+up for it. The generic `/v1/{tenant}/...` API doesn't have that
+limitation: a `TENANT_REGISTRY` row can declare `validationType: "jwks"`
+to verify a JWT-issuing tenant's tokens directly against its own JWKS
+instead — see `internal/tokenvalidator.JWKSValidator` and
+[`docs/TENANT_ONBOARDING.md`](docs/TENANT_ONBOARDING.md)'s "Auth modes"
+section.
 
 ## One-time setup
 
@@ -225,7 +228,3 @@ go test ./...
   unwarranted added infrastructure for this service's current scale.
 - No persistence beyond what csm-portal/backend/chat-routing-service
   already durably store — this bridge itself keeps no database.
-- JWKS/JWT-signature validation (`validationType: "jwks"` in a
-  `TENANT_REGISTRY` row) is accepted at config-parse time but not actually
-  implemented yet — every request to a `jwks`-type tenant currently fails;
-  only `introspection` works today.

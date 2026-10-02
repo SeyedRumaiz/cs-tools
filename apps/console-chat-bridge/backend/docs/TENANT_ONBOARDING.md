@@ -45,15 +45,19 @@ before SCIM support existed parsing identically to before.
 
 ## Auth modes
 
-- **`introspection`** (the only kind actually implemented): validates the
-  bearer token via RFC 7662 token introspection against the tenant's own
-  IdP, then optionally enriches the result with a canonical Subject (see
-  below) when introspection alone doesn't carry one.
-- **`jwks`**: the row shape exists so a JWT-issuing tenant can already be
-  *configured* without a `TENANT_REGISTRY` parse error, but actual
-  JWT/JWKS signature verification is not implemented yet — every request
-  to a `jwks`-type tenant fails. Don't configure a real tenant with this
-  type yet; it's reserved for future work.
+- **`introspection`**: validates the bearer token via RFC 7662 token
+  introspection against the tenant's own IdP, then optionally enriches the
+  result with a canonical Subject (see below) when introspection alone
+  doesn't carry one. Fields 4–6 (`introspectionURL`/`jwksURI`/`audience`)
+  are introspection-irrelevant except `introspectionURL`.
+- **`jwks`**: verifies a JWT access token's signature against `jwksURI`
+  (field 5), optionally checking `issuer` (field 3) and `audience`
+  (field 6) when set. No Subject-enrichment step exists for this mode —
+  the token's own `sub`/`username`/`client_id` claims are taken as-is (see
+  `tokenvalidator.JWKSValidator`'s own doc comment); a tenant whose JWT
+  carries none of those is rejected the same way an introspection response
+  with no usable identity is. SCIM fields (14–17) are introspection-only
+  and ignored for a `jwks` tenant.
 
 ## Canonical Subject requirement
 

@@ -18,12 +18,19 @@ package tokenvalidator
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/introspect"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/scim"
 )
@@ -304,5 +311,260 @@ func TestValidate_ClientCredentialsToken_SkipsUserinfo_NoError(t *testing.T) {
 	}
 	if id.ClientID != "m2m-client" {
 		t.Errorf("ClientID = %q, want %q", id.ClientID, "m2m-client")
+	}
+}
+
+// --- JWKSValidator ---
+
+const testKID = "test-key-1"
+
+// jwksServer serves a single RSA public key as a JWKS document at its root.
+func jwksServer(t *testing.T, kid string, pub *rsa.PublicKey) *httptest.Server {
+	t.Helper()
+	jwk := map[string]string{
+		"kty": "RSA",
+		"kid": kid,
+		"use": "sig",
+		"alg": "RS256",
+		"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+		"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+	}
+	body, err := json.Marshal(map[string]any{"keys": []any{jwk}})
+	if err != nil {
+		t.Fatalf("marshal JWKS: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// signToken builds and signs a JWT with claims, using key and kid. A test
+// mutates claims (or the token's own header, via headerMutators) before
+// signing to exercise one specific failure mode.
+func signToken(t *testing.T, key *rsa.PrivateKey, kid string, claims jwksClaims) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tok.Header["kid"] = kid
+	signed, err := tok.SignedString(key)
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	return signed
+}
+
+func validClaims() jwksClaims {
+	return jwksClaims{
+		Username: "jane@example.com",
+		ClientID: "c1",
+		Scope:    "openid profile",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   "user-uuid-1",
+			Issuer:    "https://idp.test",
+			Audience:  jwt.ClaimStrings{"my-audience"},
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+	}
+}
+
+func TestJWKSValidator_ValidToken_Succeeds(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := jwksServer(t, testKID, &key.PublicKey)
+
+	jv, err := NewJWKSValidator(context.Background(), JWKSValidatorConfig{
+		JWKSURI:  srv.URL,
+		Issuer:   "https://idp.test",
+		Audience: "my-audience",
+	})
+	if err != nil {
+		t.Fatalf("NewJWKSValidator: %v", err)
+	}
+
+	token := signToken(t, key, testKID, validClaims())
+	id, err := jv.Validate(context.Background(), token)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if id.Subject != "user-uuid-1" {
+		t.Errorf("Subject = %q, want %q", id.Subject, "user-uuid-1")
+	}
+	if id.Username != "jane@example.com" {
+		t.Errorf("Username = %q, want %q", id.Username, "jane@example.com")
+	}
+	if id.ClientID != "c1" {
+		t.Errorf("ClientID = %q, want %q", id.ClientID, "c1")
+	}
+	if id.Issuer != "https://idp.test" {
+		t.Errorf("Issuer = %q, want %q", id.Issuer, "https://idp.test")
+	}
+	wantScopes := []string{"openid", "profile"}
+	if len(id.Scopes) != len(wantScopes) || id.Scopes[0] != wantScopes[0] || id.Scopes[1] != wantScopes[1] {
+		t.Errorf("Scopes = %v, want %v", id.Scopes, wantScopes)
+	}
+}
+
+func TestJWKSValidator_ExpiredToken_Fails(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := jwksServer(t, testKID, &key.PublicKey)
+	jv, err := NewJWKSValidator(context.Background(), JWKSValidatorConfig{JWKSURI: srv.URL})
+	if err != nil {
+		t.Fatalf("NewJWKSValidator: %v", err)
+	}
+
+	claims := validClaims()
+	claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(-time.Hour))
+	token := signToken(t, key, testKID, claims)
+
+	if _, err := jv.Validate(context.Background(), token); err == nil {
+		t.Fatal("Validate: expected an error for an expired token, got nil")
+	}
+}
+
+func TestJWKSValidator_WrongIssuer_Fails(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := jwksServer(t, testKID, &key.PublicKey)
+	jv, err := NewJWKSValidator(context.Background(), JWKSValidatorConfig{
+		JWKSURI: srv.URL,
+		Issuer:  "https://expected.test",
+	})
+	if err != nil {
+		t.Fatalf("NewJWKSValidator: %v", err)
+	}
+
+	claims := validClaims()
+	claims.Issuer = "https://someone-else.test"
+	token := signToken(t, key, testKID, claims)
+
+	if _, err := jv.Validate(context.Background(), token); err == nil {
+		t.Fatal("Validate: expected an error for a mismatched issuer, got nil")
+	}
+}
+
+func TestJWKSValidator_WrongAudience_Fails(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := jwksServer(t, testKID, &key.PublicKey)
+	jv, err := NewJWKSValidator(context.Background(), JWKSValidatorConfig{
+		JWKSURI:  srv.URL,
+		Audience: "expected-audience",
+	})
+	if err != nil {
+		t.Fatalf("NewJWKSValidator: %v", err)
+	}
+
+	claims := validClaims()
+	claims.Audience = jwt.ClaimStrings{"someone-elses-audience"}
+	token := signToken(t, key, testKID, claims)
+
+	if _, err := jv.Validate(context.Background(), token); err == nil {
+		t.Fatal("Validate: expected an error for a mismatched audience, got nil")
+	}
+}
+
+// A token signed by a key never published in the tenant's own JWKS must be
+// rejected -- the whole point of JWKS verification.
+func TestJWKSValidator_WrongSigningKey_Fails(t *testing.T) {
+	published, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	attacker, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := jwksServer(t, testKID, &published.PublicKey)
+	jv, err := NewJWKSValidator(context.Background(), JWKSValidatorConfig{JWKSURI: srv.URL})
+	if err != nil {
+		t.Fatalf("NewJWKSValidator: %v", err)
+	}
+
+	token := signToken(t, attacker, testKID, validClaims())
+	if _, err := jv.Validate(context.Background(), token); err == nil {
+		t.Fatal("Validate: expected an error for a token signed by an unpublished key, got nil")
+	}
+}
+
+func TestJWKSValidator_NoUsableIdentity_Fails(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := jwksServer(t, testKID, &key.PublicKey)
+	jv, err := NewJWKSValidator(context.Background(), JWKSValidatorConfig{JWKSURI: srv.URL})
+	if err != nil {
+		t.Fatalf("NewJWKSValidator: %v", err)
+	}
+
+	claims := validClaims()
+	claims.Subject = ""
+	claims.Username = ""
+	claims.ClientID = ""
+	token := signToken(t, key, testKID, claims)
+
+	if _, err := jv.Validate(context.Background(), token); err == nil {
+		t.Fatal("Validate: expected an error for a token with no sub/username/client_id, got nil")
+	}
+}
+
+func TestJWKSValidator_NoIssuerOrAudienceConfigured_SkipsThoseChecks(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := jwksServer(t, testKID, &key.PublicKey)
+	// Issuer/Audience both left blank -- any value in the token is accepted.
+	jv, err := NewJWKSValidator(context.Background(), JWKSValidatorConfig{JWKSURI: srv.URL})
+	if err != nil {
+		t.Fatalf("NewJWKSValidator: %v", err)
+	}
+
+	token := signToken(t, key, testKID, validClaims())
+	if _, err := jv.Validate(context.Background(), token); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestNewJWKSValidator_EmptyJWKSURI_Fails(t *testing.T) {
+	if _, err := NewJWKSValidator(context.Background(), JWKSValidatorConfig{}); err == nil {
+		t.Fatal("NewJWKSValidator: expected an error for an empty JWKSURI, got nil")
+	}
+}
+
+// keyfunc tolerates an unreachable JWKS endpoint at construction time (it
+// logs and keeps retrying in the background) rather than failing fast --
+// see NewJWKSValidator's own doc comment. The observable effect is that
+// every token is rejected as unverifiable until a fetch eventually
+// succeeds, not a construction-time error.
+func TestNewJWKSValidator_UnreachableJWKSURI_ConstructsButRejectsEveryToken(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	srv.Close() // closed before use -- guaranteed unreachable, no network flakiness
+
+	jv, err := NewJWKSValidator(context.Background(), JWKSValidatorConfig{JWKSURI: srv.URL})
+	if err != nil {
+		t.Fatalf("NewJWKSValidator: %v", err)
+	}
+
+	token := signToken(t, key, testKID, validClaims())
+	if _, err := jv.Validate(context.Background(), token); err == nil {
+		t.Fatal("Validate: expected an error when the JWKS was never successfully fetched, got nil")
 	}
 }

@@ -39,9 +39,9 @@ type Config struct {
 	// the TENANT_REGISTRY row's first field. Case-sensitive, matched
 	// exactly against the path segment.
 	Slug string
-	// ValidationType is "introspection" (default, the only kind
-	// implemented) or "jwks" (accepted but always fails validation; see
-	// tokenvalidator.JWKSValidator).
+	// ValidationType is "introspection" (default, validates an Opaque
+	// token via RFC 7662) or "jwks" (verifies a JWT's signature against
+	// JWKSURI — see tokenvalidator.JWKSValidator).
 	ValidationType string
 	// Issuer is this tenant's trusted token issuer, and the base used to
 	// derive the introspection endpoint when IntrospectionURL is blank.
@@ -356,9 +356,12 @@ func buildValidator(cfg Config, secret, scimSecret string) (tokenvalidator.Token
 		}
 		return iv, nil
 	case "jwks":
-		return tokenvalidator.NewJWKSValidator(tokenvalidator.JWKSValidatorConfig{
-			JWKSURI: cfg.JWKSURI, Issuer: cfg.Issuer, Audience: cfg.Audience,
-		}), nil
+		return tokenvalidator.NewJWKSValidator(context.Background(), tokenvalidator.JWKSValidatorConfig{
+			JWKSURI:            cfg.JWKSURI,
+			Issuer:             cfg.Issuer,
+			Audience:           cfg.Audience,
+			InsecureSkipVerify: cfg.InsecureSkipVerify,
+		})
 	default:
 		return nil, fmt.Errorf("unknown validationType %q (want \"introspection\" or \"jwks\")", cfg.ValidationType)
 	}

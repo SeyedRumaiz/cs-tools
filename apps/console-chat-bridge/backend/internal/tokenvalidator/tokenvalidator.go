@@ -22,10 +22,18 @@
 package tokenvalidator
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 
+	"github.com/MicahParks/keyfunc/v3"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/introspect"
 )
 
@@ -110,35 +118,152 @@ func (iv *IntrospectionValidator) Validate(ctx context.Context, token string) (*
 	return &id, nil
 }
 
-// ErrJWKSNotImplemented is returned by JWKSValidator.Validate. A
-// validationType "jwks" tenant can be configured today (see
-// internal/tenant.Config), but actual JWT/JWKS verification is deferred
-// follow-up work.
-var ErrJWKSNotImplemented = errors.New("tokenvalidator: JWKS validation is not implemented yet")
-
-// JWKSValidatorConfig configures a JWKSValidator — accepted and stored now
-// so a tenant row can declare validationType "jwks" without a
-// TENANT_REGISTRY parse error, even though Validate always fails until
-// JWT/JWKS verification lands.
+// JWKSValidatorConfig configures a JWKSValidator.
 type JWKSValidatorConfig struct {
-	JWKSURI  string
-	Issuer   string
+	// JWKSURI is this tenant's JWKS endpoint, fetched once at construction
+	// time (see NewJWKSValidator) and kept refreshed by the underlying
+	// keyfunc.Keyfunc for the life of the validator.
+	JWKSURI string
+	// Issuer, when non-empty, must match the token's "iss" claim exactly.
+	Issuer string
+	// Audience, when non-empty, must appear in the token's "aud" claim.
 	Audience string
+	// InsecureSkipVerify disables TLS certificate verification for the
+	// JWKS fetch. LOCAL DEVELOPMENT ONLY — mirrors
+	// introspect.Config.InsecureSkipVerify's own doc comment.
+	InsecureSkipVerify bool
 }
 
-// JWKSValidator is a stub TokenValidator for a JWT-issuing tenant. See
-// ErrJWKSNotImplemented.
+// JWKSValidator verifies a JWT-typed access token's signature against a
+// tenant's own JWKS, as the alternative to IntrospectionValidator for a
+// tenant whose IdP issues JWT (rather than Opaque) access tokens.
 type JWKSValidator struct {
-	cfg JWKSValidatorConfig
+	cfg     JWKSValidatorConfig
+	keyFunc jwt.Keyfunc
 }
 
-// NewJWKSValidator constructs a JWKSValidator. Does not fetch cfg.JWKSURI or
-// validate connectivity — there is nothing to verify against yet.
-func NewJWKSValidator(cfg JWKSValidatorConfig) *JWKSValidator {
-	return &JWKSValidator{cfg: cfg}
+// jwksClaims is the expected JWT access-token payload shape. username and
+// client_id mirror the same-named fields introspection returns for an
+// Opaque token from the same class of IdP (see introspectionResponse in
+// internal/introspect) — WSO2 IS/Asgardeo's JWT access tokens carry both
+// as top-level claims.
+type jwksClaims struct {
+	Username string `json:"username"`
+	ClientID string `json:"client_id"`
+	Scope    string `json:"scope"`
+	jwt.RegisteredClaims
 }
 
-// Validate always fails — see ErrJWKSNotImplemented.
-func (jv *JWKSValidator) Validate(context.Context, string) (*Identity, error) {
-	return nil, ErrJWKSNotImplemented
+// NewJWKSValidator constructs a JWKSValidator and starts keyfunc's own
+// background JWKS fetch/refresh for cfg.JWKSURI. Only cfg.JWKSURI being
+// empty fails construction outright — an unreachable or malformed JWKS
+// endpoint does not: keyfunc logs the failure and keeps retrying in the
+// background (so a transient fetch failure at startup can still recover),
+// which means Validate will reject every token as unverifiable (no
+// matching key found) until a fetch actually succeeds, rather than this
+// constructor returning an error.
+func NewJWKSValidator(ctx context.Context, cfg JWKSValidatorConfig) (*JWKSValidator, error) {
+	if cfg.JWKSURI == "" {
+		return nil, errors.New("tokenvalidator: JWKSURI is required for validationType jwks")
+	}
+
+	transport := http.RoundTripper(&x5cStrippingTransport{base: http.DefaultTransport})
+	if cfg.InsecureSkipVerify {
+		transport = &x5cStrippingTransport{base: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}} // #nosec G402 — opt-in, local-dev-only, see JWKSValidatorConfig.InsecureSkipVerify's doc comment
+	}
+
+	jwks, err := keyfunc.NewDefaultOverrideCtx(ctx, []string{cfg.JWKSURI}, keyfunc.Override{Client: &http.Client{Transport: transport}})
+	if err != nil {
+		return nil, fmt.Errorf("tokenvalidator: fetch JWKS from %s: %w", cfg.JWKSURI, err)
+	}
+	return &JWKSValidator{cfg: cfg, keyFunc: jwks.Keyfunc}, nil
+}
+
+// Validate verifies token's signature against jv's JWKS and, when
+// configured, its issuer and audience. Returns an error for an expired,
+// malformed, badly-signed, or issuer/audience-mismatched token, or one
+// carrying no usable identity (no sub, username, or client_id claim) —
+// every /v1 caller that reaches this validator requires at least one.
+func (jv *JWKSValidator) Validate(_ context.Context, token string) (*Identity, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, errors.New("tokenvalidator: empty token")
+	}
+
+	opts := []jwt.ParserOption{jwt.WithExpirationRequired()}
+	if jv.cfg.Issuer != "" {
+		opts = append(opts, jwt.WithIssuer(jv.cfg.Issuer))
+	}
+	if jv.cfg.Audience != "" {
+		opts = append(opts, jwt.WithAudience(jv.cfg.Audience))
+	}
+
+	var c jwksClaims
+	parsed, err := jwt.ParseWithClaims(token, &c, jv.keyFunc, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("tokenvalidator: validate token: %w", err)
+	}
+	if !parsed.Valid {
+		return nil, errors.New("tokenvalidator: invalid token")
+	}
+	if c.Subject == "" && c.Username == "" && c.ClientID == "" {
+		return nil, errors.New("tokenvalidator: token carries no usable identity")
+	}
+
+	var scopes []string
+	if c.Scope != "" {
+		scopes = strings.Fields(c.Scope)
+	}
+	return &Identity{
+		Username: c.Username,
+		Subject:  c.Subject,
+		ClientID: c.ClientID,
+		Scopes:   scopes,
+		Issuer:   c.Issuer,
+	}, nil
+}
+
+// x5cStrippingTransport removes the "x5c" certificate chain from every key
+// in a JWKS response before it reaches the jwkset parser. Verification
+// only needs "n"/"e" (or the EC/OKP equivalents); jwkset unconditionally
+// parses "x5c" as X.509 certificates, and some IdPs (Asgardeo included)
+// publish certs with a negative serial number that Go's x509 parser
+// rejects since Go 1.23, which would otherwise make the whole JWK Set
+// fail to load.
+type x5cStrippingTransport struct {
+	base http.RoundTripper
+}
+
+func (t *x5cStrippingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return resp, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read JWKS response body: %w", err)
+	}
+
+	var jwks struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &jwks); err != nil {
+		// Not a JWKS document we can sanitize; hand back the original body untouched.
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		return resp, nil
+	}
+
+	for _, key := range jwks.Keys {
+		delete(key, "x5c")
+	}
+	sanitized, err := json.Marshal(jwks)
+	if err != nil {
+		return nil, fmt.Errorf("marshal sanitized JWKS: %w", err)
+	}
+
+	resp.Body = io.NopCloser(bytes.NewReader(sanitized))
+	resp.ContentLength = int64(len(sanitized))
+	resp.Header.Set("Content-Length", fmt.Sprint(len(sanitized)))
+	return resp, nil
 }
