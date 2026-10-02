@@ -1,0 +1,12 @@
+schemaVersion: 1.2
+
+endpoints:
+  - name: console-chat-bridge-api
+    displayName: Console Chat Bridge API
+    service:
+      basePath: /
+      port: 8090
+    type: REST
+    networkVisibilities:
+      - Public
+    schemaFilePath: openapi.yaml

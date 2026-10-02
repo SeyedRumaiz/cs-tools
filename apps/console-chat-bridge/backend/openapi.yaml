@@ -1,0 +1,607 @@
+openapi: 3.0.1
+info:
+  title: Console Chat Bridge API
+  description: >-
+    Lets a product's "Chat with an Engineer" feature escalate into the
+    cs-tools live-engineer-chat framework (chat-routing-service /
+    csm-portal/backend) without that product's browser ever calling either
+    directly. See README.md for the full architecture and the legacy
+    (/support/chats) vs. generic (/v1/{tenant}/...) distinction.
+  version: 1.0.0
+security:
+  - bearerAuth: []
+servers:
+  - url: "{server}:{port}/"
+    variables:
+      server:
+        default: http://localhost
+      port:
+        default: "8090"
+
+paths:
+  /health:
+    get:
+      summary: Health check endpoint.
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Ok
+
+  /support/chats:
+    post:
+      summary: >-
+        Start a live-engineer-chat escalation from identity-apps' Console
+        Ask AI panel. Legacy, single-tenant path — see README.md.
+      operationId: postSupportChats
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EscalateRequest'
+      responses:
+        "202":
+          description: Accepted — escalation queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseIdResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "409":
+          description: >-
+            Conflict — this customer already has an open live chat.
+            Passed through from csm-portal/backend unmodified.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: BadGateway — csm-portal/backend was unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /support/chats/{caseId}/messages:
+    post:
+      summary: Send a customer message on an existing legacy-path chat.
+      operationId: postSupportChatsMessages
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageRequest'
+      responses:
+        "201":
+          description: Created — message forwarded to the engineer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusMessageResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden — caller does not own this chat.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound — unknown caseId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: BadGateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /support/chats/{caseId}/stream:
+    get:
+      summary: >-
+        Subscribe to this chat's live events over Server-Sent Events
+        (queued/engineer_assigned/engineer_message/etc. — see
+        apps/live-chat-sdk/sdk-go/pushevents for the full wire vocabulary).
+      operationId: getSupportChatsStream
+      parameters:
+        - $ref: '#/components/parameters/CaseId'
+      responses:
+        "200":
+          description: >-
+            An open SSE stream. Each event is one "data: <json>\n\n"
+            frame; a ": heartbeat\n\n" comment frame is sent every 15s to
+            keep intermediate proxies from timing out an idle connection.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden — caller does not own this chat.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound — unknown caseId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /internal/chat-events:
+    post:
+      summary: >-
+        csm-portal/backend's push contract for delivering a chat event
+        into this bridge, which relays it onto the matching case's SSE
+        stream unchanged. Pure machine-to-machine — see
+        m2mExemptRoutes-equivalent handling in internal/middleware.
+      operationId: postInternalChatEvents
+      security:
+        - oauth2ClientCredentials: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatEventPush'
+      responses:
+        "200":
+          description: Ok — relayed onto the matching SSE stream.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusMessageResponse'
+        "400":
+          description: BadRequest — missing caseId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /v1/{tenant}/chats:
+    post:
+      summary: >-
+        Start a live-engineer-chat escalation for any onboarded product.
+        Generic, multi-tenant path — see docs/TENANT_ONBOARDING.md.
+      operationId: postV1TenantChats
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/V1EscalateRequest'
+      responses:
+        "202":
+          description: Accepted — escalation queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1EscalateResponse'
+        "400":
+          description: >-
+            BadRequest — missing message, or an input-limit violation
+            (see README.md's "Input limits" reference).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized — no canonical Subject on the token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "409":
+          description: Conflict — this customer already has an open live chat.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: BadGateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /v1/{tenant}/chats/{caseId}/messages:
+    post:
+      summary: Send a customer message on an existing /v1 chat.
+      operationId: postV1TenantChatsMessages
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+        - $ref: '#/components/parameters/CaseId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/V1MessageRequest'
+      responses:
+        "201":
+          description: Created — message forwarded to the engineer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusMessageResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden — this chat does not belong to this tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound — unknown caseId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: BadGateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /v1/{tenant}/chats/{caseId}/events:
+    get:
+      summary: Subscribe to this /v1 chat's live events over SSE.
+      operationId: getV1TenantChatsEvents
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+        - $ref: '#/components/parameters/CaseId'
+      responses:
+        "200":
+          description: >-
+            An open SSE stream — identical delivery to
+            /support/chats/{caseId}/stream; only the authorization check
+            differs (tenant membership, not caller-subject ownership).
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden — this chat does not belong to this tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound — unknown caseId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /v1/{tenant}/chats/{caseId}/history:
+    get:
+      summary: Get this /v1 chat's full transcript to date.
+      operationId: getV1TenantChatsHistory
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+        - $ref: '#/components/parameters/CaseId'
+      responses:
+        "200":
+          description: Ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoryResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden — this chat does not belong to this tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound — unknown caseId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: BadGateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /v1/{tenant}/chats/{caseId}/complete:
+    post:
+      summary: >-
+        End this chat from the customer/tenant side. The legacy path has
+        no equivalent — a legacy-path chat is only ever ended by the
+        engineer.
+      operationId: postV1TenantChatsComplete
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+        - $ref: '#/components/parameters/CaseId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/V1CompleteRequest'
+      responses:
+        "200":
+          description: Ok — session ended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusMessageResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden — this chat does not belong to this tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound — unknown caseId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: BadGateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: >-
+        Opaque (RFC 7662 introspection) or JWT (JWKS), depending on the
+        target tenant's validationType — see internal/tokenvalidator.
+    # M2M scheme for the one pure service-to-service route above
+    # (POST /internal/chat-events). Mirrors csm-portal/backend's own
+    # openapi.yaml's identical declaration for its own M2M routes -- trust
+    # lives at Choreo's API Manager gateway (subscription +
+    # client-credentials app auth), not in this service's own request
+    # handling.
+    oauth2ClientCredentials:
+      type: oauth2
+      flows:
+        clientCredentials:
+          # Placeholder -- fill in with the actual token endpoint for this
+          # service's Choreo-managed API once it's provisioned. Not a
+          # real/guessed URL.
+          tokenUrl: "<token_url>"
+          scopes: {}
+
+  parameters:
+    CaseId:
+      name: caseId
+      in: path
+      required: true
+      schema:
+        type: string
+    Tenant:
+      name: tenant
+      in: path
+      required: true
+      description: The tenant slug from this bridge's TENANT_REGISTRY.
+      schema:
+        type: string
+
+  schemas:
+    ErrorPayload:
+      type: object
+      properties:
+        message:
+          type: string
+
+    StatusMessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    PriorMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+        content:
+          type: string
+        createdAt:
+          type: string
+
+    EscalateRequest:
+      type: object
+      required: [askAiContextId]
+      properties:
+        askAiContextId:
+          type: string
+          description: Ask AI's stable per-panel-session id, generated client-side.
+        question:
+          type: string
+        errorContext:
+          type: string
+          description: >-
+            The Ask AI error the customer saw, if any — surfaced to the
+            engineer as one more prior message.
+        priorMessages:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriorMessage'
+
+    CaseIdResponse:
+      type: object
+      properties:
+        caseId:
+          type: string
+
+    MessageRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    ChatEventPush:
+      type: object
+      required: [caseId]
+      description: >-
+        caseId is the only field this bridge itself reads — the rest of
+        the body is relayed onto the SSE stream verbatim, so its shape is
+        whatever apps/live-chat-sdk/sdk-go/pushevents.ChatEvent defines.
+      properties:
+        caseId:
+          type: string
+      additionalProperties: true
+
+    V1EscalateRequest:
+      type: object
+      required: [message]
+      properties:
+        conversationId:
+          type: string
+          description: >-
+            A stable per-session id the caller already has. Optional —
+            when empty, this bridge mints the same fresh id it uses as
+            caseId.
+        subject:
+          type: string
+          maxLength: 200
+        message:
+          type: string
+          maxLength: 4000
+        customerName:
+          type: string
+        priorMessages:
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/PriorMessage'
+        metadata:
+          type: object
+          description: >-
+            Arbitrary tenant-supplied key/value data (at most 20 keys, 64
+            bytes/key, 500 bytes/value). Reserved keys (source, channel,
+            tenant, tenantSlug, projectId) and any key containing
+            token/secret/password/credential/apikey are rejected.
+          additionalProperties:
+            type: string
+
+    V1EscalateResponse:
+      type: object
+      properties:
+        caseId:
+          type: string
+        conversationId:
+          type: string
+
+    V1MessageRequest:
+      type: object
+      required: [message]
+      properties:
+        conversationId:
+          type: string
+        message:
+          type: string
+          maxLength: 4000
+
+    V1CompleteRequest:
+      type: object
+      properties:
+        conversationId:
+          type: string
+          description: >-
+            Only populates csm-portal/backend's session_closed broadcast
+            to engineers — an absent or empty body never blocks ending
+            the session.
+
+    HistoryMessage:
+      type: object
+      properties:
+        role:
+          type: string
+        content:
+          type: string
+        createdAt:
+          type: string
+
+    HistoryResponse:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/HistoryMessage'
