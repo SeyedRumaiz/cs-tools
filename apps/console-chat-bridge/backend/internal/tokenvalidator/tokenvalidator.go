@@ -149,6 +149,7 @@ type JWKSValidator struct {
 // as top-level claims.
 type jwksClaims struct {
 	Username string `json:"username"`
+	Email    string `json:"email"`
 	ClientID string `json:"client_id"`
 	Scope    string `json:"scope"`
 	jwt.RegisteredClaims
@@ -213,8 +214,13 @@ func (jv *JWKSValidator) Validate(_ context.Context, token string) (*Identity, e
 	if c.Scope != "" {
 		scopes = strings.Fields(c.Scope)
 	}
+	// Some IdPs (e.g. Devant's STS) issue no username claim, only email.
+	username := c.Username
+	if username == "" {
+		username = c.Email
+	}
 	return &Identity{
-		Username: c.Username,
+		Username: username,
 		Subject:  c.Subject,
 		ClientID: c.ClientID,
 		Scopes:   scopes,
