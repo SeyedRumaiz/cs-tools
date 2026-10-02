@@ -146,10 +146,12 @@ func (h *ChatsHandler) requireTenantCase(w http.ResponseWriter, r *http.Request,
 
 	ownership, err := h.csm.GetCaseOwnership(r.Context(), caseID)
 	if err != nil {
+		slog.ErrorContext(r.Context(), "requireTenantCase: GetCaseOwnership failed", "tenant", t.Slug, "caseId", caseID, "err", err)
 		writeError(w, http.StatusNotFound, "Unknown chat.")
 		return caseRecord{}, false
 	}
 	if ownership.TenantSlug != t.Slug {
+		slog.ErrorContext(r.Context(), "requireTenantCase: tenant mismatch", "tenant", t.Slug, "caseId", caseID, "ownerTenant", ownership.TenantSlug)
 		writeError(w, http.StatusForbidden, "This chat does not belong to this tenant.")
 		return caseRecord{}, false
 	}
@@ -287,7 +289,7 @@ func (h *ChatsHandler) HandleEscalateV1(w http.ResponseWriter, r *http.Request) 
 	h.mu.Unlock()
 
 	// Logs only the already-validated identity claims, never the token.
-	slog.InfoContext(r.Context(), "v1 chat escalation", "tenant", t.Slug, "caseId", caseID, "ownerSubject", subject)
+	slog.InfoContext(r.Context(), "v1 chat escalation", "tenant", t.Slug, "caseId", caseID, "ownerSubject", subject, "customerEmail", customerEmail)
 
 	writeJSON(w, http.StatusAccepted, v1EscalateResponse{CaseID: caseID, ConversationID: conversationID})
 }
@@ -402,12 +404,16 @@ func (h *ChatsHandler) HandleGetHistoryV1(w http.ResponseWriter, r *http.Request
 // the legacy HandleStream; only the authorization check (tenant
 // membership via requireTenantCase, not caller-subject ownership) differs.
 func (h *ChatsHandler) HandleStreamV1(w http.ResponseWriter, r *http.Request) {
+	slog.InfoContext(r.Context(), "v1 stream request received", "caseId", r.PathValue("caseId"))
+
 	t, ok := tenant.FromContext(r.Context())
 	if !ok {
+		slog.ErrorContext(r.Context(), "v1 stream: no tenant in context")
 		writeError(w, http.StatusInternalServerError, "Internal error.")
 		return
 	}
 	if canonicalOwner(r) == "" {
+		slog.ErrorContext(r.Context(), "v1 stream: no subject on identity", "tenant", t.Slug)
 		writeError(w, http.StatusUnauthorized, "A user session is required for this action.")
 		return
 	}
@@ -422,6 +428,8 @@ func (h *ChatsHandler) HandleStreamV1(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Streaming unsupported.")
 		return
 	}
+
+	slog.InfoContext(r.Context(), "v1 stream opened", "tenant", t.Slug, "caseId", caseID)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
