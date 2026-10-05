@@ -203,6 +203,61 @@ func (c *GoogleChatClient) SendIncidentAlert(ctx context.Context, product, title
 		},
 	}
 
+	return c.postCard(ctx, webhookURL, msg)
+}
+
+// HasSpace reports whether a Google Chat space is configured for product.
+func (c *GoogleChatClient) HasSpace(product string) bool {
+	return c.webhookURLsByProduct[normalizeProduct(product)] != ""
+}
+
+// SendLiveChatAlert posts a "live chat requested" card with an "Open in CSM
+// Portal" button to the space configured for product. The link only opens
+// the portal; accepting still happens there, as the signed-in engineer.
+func (c *GoogleChatClient) SendLiveChatAlert(ctx context.Context, product, summary, customerMessage, portalURL string) error {
+	if summary == "" || portalURL == "" {
+		return fmt.Errorf("notifications: summary and portalURL are required")
+	}
+	webhookURL, ok := c.webhookURLsByProduct[normalizeProduct(product)]
+	if !ok || webhookURL == "" {
+		return fmt.Errorf("notifications: no google chat space configured for product %q", product)
+	}
+
+	widgets := []chatCardWidget{{TextParagraph: &chatTextParagraph{Text: summary}}}
+	if customerMessage != "" {
+		widgets = append(widgets, chatCardWidget{TextParagraph: &chatTextParagraph{Text: customerMessage}})
+	}
+	msg := chatCardMessage{
+		CardsV2: []chatCardWrapper{
+			{
+				CardID: "live-chat-alert",
+				Card: chatCard{
+					Header: chatCardHeader{Title: "Live chat requested"},
+					Sections: []chatCardSection{
+						{Widgets: widgets},
+						{
+							Widgets: []chatCardWidget{
+								{
+									ButtonList: &chatButtonList{
+										Buttons: []chatButton{
+											{
+												Text:    "Open in CSM Portal",
+												OnClick: chatOnClick{OpenLink: chatOpenLink{URL: portalURL}},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	return c.postCard(ctx, webhookURL, msg)
+}
+
+func (c *GoogleChatClient) postCard(ctx context.Context, webhookURL string, msg chatCardMessage) error {
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("notifications: encode google chat message: %w", err)

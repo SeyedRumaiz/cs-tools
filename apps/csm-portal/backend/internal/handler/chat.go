@@ -28,9 +28,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/sdk-go/routingclient"
@@ -117,6 +119,65 @@ type ChatHandler struct {
 	hub       *stream.BroadcastHub
 	notifiers map[string]ChatEventPusher
 	routing   routingService
+
+	// liveChatAlerts, when set, posts a Google Chat message for every new
+	// live-chat escalation. portalBaseURL builds that message's link.
+	liveChatAlerts liveChatAlertSender
+	portalBaseURL  string
+}
+
+// liveChatAlertSender is the Google Chat channel used for live-chat alerts.
+type liveChatAlertSender interface {
+	HasSpace(product string) bool
+	SendLiveChatAlert(ctx context.Context, product, summary, customerMessage, portalURL string) error
+}
+
+// WithLiveChatAlerts enables Google Chat alerts for new live-chat
+// escalations. Without it (or without a configured space) none are sent.
+func (h *ChatHandler) WithLiveChatAlerts(sender liveChatAlertSender, portalBaseURL string) *ChatHandler {
+	h.liveChatAlerts = sender
+	h.portalBaseURL = strings.TrimRight(portalBaseURL, "/")
+	return h
+}
+
+const (
+	liveChatAlertSpace      = "live-chat"
+	liveChatAlertTimeout    = 15 * time.Second
+	liveChatAlertMaxMessage = 300
+)
+
+// alertLiveChatRequested posts the Google Chat alert in the background; a
+// failure is logged and never affects the customer's escalation.
+func (h *ChatHandler) alertLiveChatRequested(ctx context.Context, ci routingclient.CaseInfo, queued bool) {
+	if h.liveChatAlerts == nil || h.portalBaseURL == "" || !h.liveChatAlerts.HasSpace(liveChatAlertSpace) {
+		return
+	}
+	who := ci.CustomerName
+	if who == "" {
+		who = ci.CustomerEmail
+	}
+	if who == "" {
+		who = "A customer"
+	}
+	summary := fmt.Sprintf("<b>%s</b> is asking to talk to a live engineer.", html.EscapeString(who))
+	if ci.TenantSlug != "" {
+		summary += " (" + html.EscapeString(ci.TenantSlug) + ")"
+	}
+	if queued {
+		summary += " No engineer is free yet, so the chat is waiting in the queue."
+	}
+	message := []rune(strings.TrimSpace(ci.Message))
+	if len(message) > liveChatAlertMaxMessage {
+		message = append(message[:liveChatAlertMaxMessage], '…')
+	}
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), liveChatAlertTimeout)
+	go func() {
+		defer cancel()
+		err := h.liveChatAlerts.SendLiveChatAlert(sendCtx, liveChatAlertSpace, summary, html.EscapeString(string(message)), h.portalBaseURL+"/chat")
+		if err != nil {
+			slog.Error("chat: google chat live-chat alert failed", "caseId", ci.CaseID, "err", err)
+		}
+	}()
 }
 
 // NewChatHandler creates a ChatHandler. hub and routing must both be
@@ -363,6 +424,7 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 		// connected engineer so the outage doesn't strand the customer.
 		slog.ErrorContext(r.Context(), "chat: routing service escalate failed, falling back to broadcast", "caseId", req.CaseID, "err", err)
 		h.publishToEngineers(assignedCaseEvent(ci))
+		h.alertLiveChatRequested(r.Context(), ci, false)
 		writeJSON(w, http.StatusAccepted, []byte(`{"message":"escalation broadcast to available engineers"}`))
 		return
 	}
@@ -381,6 +443,8 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 			Timestamp:      time.Now().UTC().Format(time.RFC3339),
 		})
 	}
+
+	h.alertLiveChatRequested(r.Context(), ci, result.Queued)
 
 	writeJSON(w, http.StatusAccepted, []byte(`{"message":"escalation routed"}`))
 }

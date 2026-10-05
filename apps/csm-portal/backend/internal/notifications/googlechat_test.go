@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -193,5 +194,43 @@ func TestSendIncidentAlert_ConstructsWithZeroValueConfig(t *testing.T) {
 	c := NewGoogleChatClient(GoogleChatConfig{})
 	if c == nil {
 		t.Fatal("NewGoogleChatClient returned nil for zero-value GoogleChatConfig")
+	}
+}
+
+func TestSendLiveChatAlert_PostsCardWithPortalLink(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := new(strings.Builder)
+		_, _ = io.Copy(buf, r.Body)
+		got = buf.String()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewGoogleChatClient(GoogleChatConfig{Spaces: []GoogleChatSpace{{Product: "live-chat", WebhookURL: srv.URL}}})
+	if !c.HasSpace("Live-Chat") {
+		t.Fatal("HasSpace should match case-insensitively")
+	}
+	if err := c.SendLiveChatAlert(context.Background(), "live-chat", "Jane is asking for help", "hi there", "https://portal.example/chat"); err != nil {
+		t.Fatalf("SendLiveChatAlert: %v", err)
+	}
+	for _, want := range []string{"Live chat requested", "Jane is asking for help", "hi there", "Open in CSM Portal", "https://portal.example/chat"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("card body missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestSendLiveChatAlert_RejectsUnconfiguredSpaceAndMissingLink(t *testing.T) {
+	c := NewGoogleChatClient(GoogleChatConfig{})
+	if c.HasSpace("live-chat") {
+		t.Error("HasSpace should be false with no spaces")
+	}
+	if err := c.SendLiveChatAlert(context.Background(), "live-chat", "s", "", "https://p/chat"); err == nil {
+		t.Error("expected error for unconfigured space")
+	}
+	c = NewGoogleChatClient(GoogleChatConfig{Spaces: []GoogleChatSpace{{Product: "live-chat", WebhookURL: "http://x"}}})
+	if err := c.SendLiveChatAlert(context.Background(), "live-chat", "s", "", ""); err == nil {
+		t.Error("expected error for empty portal URL")
 	}
 }

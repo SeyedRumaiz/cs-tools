@@ -190,6 +190,7 @@ func main() {
 		Spaces: parseGoogleChatSpaces(os.Getenv("NOTIFICATIONS_GOOGLE_CHAT_SPACES")),
 	})
 	notificationHandler := handler.NewNotificationHandler(googleChatClient, os.Getenv("CSM_PORTAL_WEB_BASE_URL"))
+	chatHandler.WithLiveChatAlerts(googleChatClient, os.Getenv("CSM_PORTAL_WEB_BASE_URL"))
 
 	// SFTPGo-backed attachment storage — off by default (see loadSftpgoConfig).
 	// When disabled, no SFTPGO_* env var is read at all and neither the client
