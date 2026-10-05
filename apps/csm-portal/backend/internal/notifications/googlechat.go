@@ -23,8 +23,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -48,6 +50,12 @@ type GoogleChatSpace struct {
 // channel: one space per product, since each WSO2 product has its own space.
 type GoogleChatConfig struct {
 	Spaces []GoogleChatSpace
+	// MentionDomains lists the email domains (e.g. "wso2.com") whose users
+	// are real Google Chat users and can be @mentioned. Google prints an
+	// unrecognized mention as raw "<users/...>" text instead of rejecting it,
+	// so an address outside these domains is never mentioned. Empty disables
+	// mentions entirely.
+	MentionDomains []string
 }
 
 // GoogleChatClient posts messages to a Google Chat space via an incoming
@@ -62,6 +70,7 @@ type GoogleChatConfig struct {
 type GoogleChatClient struct {
 	http                 *http.Client
 	webhookURLsByProduct map[string]string
+	mentionDomains       map[string]bool
 }
 
 // NewGoogleChatClient constructs a GoogleChatClient that routes alerts to the
@@ -83,10 +92,27 @@ func NewGoogleChatClient(cfg GoogleChatConfig) *GoogleChatClient {
 		}
 		webhookURLsByProduct[product] = space.WebhookURL
 	}
+	mentionDomains := make(map[string]bool, len(cfg.MentionDomains))
+	for _, d := range cfg.MentionDomains {
+		if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
+			mentionDomains[d] = true
+		}
+	}
 	return &GoogleChatClient{
 		http:                 &http.Client{Timeout: 10 * time.Second},
 		webhookURLsByProduct: webhookURLsByProduct,
+		mentionDomains:       mentionDomains,
 	}
+}
+
+// canMention reports whether email is safe to place in mention markup and
+// belongs to a configured Google Workspace domain.
+func (c *GoogleChatClient) canMention(email string) bool {
+	if !mentionEmailRe.MatchString(email) {
+		return false
+	}
+	at := strings.LastIndex(email, "@")
+	return c.mentionDomains[strings.ToLower(email[at+1:])]
 }
 
 // normalizeProduct makes product matching case- and whitespace-insensitive.
@@ -108,6 +134,9 @@ func redactURLError(err error) error {
 // chatCardMessage is the wire shape Google Chat's webhook API expects for a
 // single card message: https://developers.google.com/chat/api/guides/message-formats/cards
 type chatCardMessage struct {
+	// Text is the message's plain-text part, shown above the card. It is the
+	// only place a Google Chat webhook message can @mention (ping) someone.
+	Text    string            `json:"text,omitempty"`
 	CardsV2 []chatCardWrapper `json:"cardsV2"`
 }
 
@@ -241,7 +270,15 @@ type LiveChatAlert struct {
 	// follow-ups about the same chat appear under the original card. Empty
 	// posts a standalone message.
 	ThreadKey string
+	// MentionEmail @mentions that Google Chat user above the card so they are
+	// notified, if its domain is one of the client's MentionDomains. If Google
+	// rejects the mention outright, the card is re-sent without it.
+	MentionEmail string
 }
+
+// mentionEmailRe is deliberately strict: the address is placed inside Google
+// Chat's <users/...> markup, so it must not contain angle brackets or spaces.
+var mentionEmailRe = regexp.MustCompile(`^[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
 
 // SendLiveChatAlert posts a live-chat card with an "Open in CSM Portal" button
 // to the space configured for product. The link only opens the portal;
@@ -281,12 +318,25 @@ func (c *GoogleChatClient) SendLiveChatAlert(ctx context.Context, product string
 		},
 	}})
 
-	return c.postCard(ctx, webhookURL, chatCardMessage{
+	msg := chatCardMessage{
 		CardsV2: []chatCardWrapper{{
 			CardID: "live-chat-alert",
 			Card:   chatCard{Header: chatCardHeader{Title: alert.Title, Subtitle: alert.Subtitle}, Sections: sections},
 		}},
-	}, alert.ThreadKey)
+	}
+	if c.canMention(alert.MentionEmail) {
+		msg.Text = "<users/" + alert.MentionEmail + "> a live chat was assigned to you. Please accept it in the CSM Portal."
+	}
+
+	err := c.postCard(ctx, webhookURL, msg, alert.ThreadKey)
+	var apiErr *apierror.Error
+	if err != nil && msg.Text != "" && errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
+		// An unresolvable mention must not cost the team the alert itself.
+		slog.Warn("notifications: google chat rejected the mention, re-sending the card without it")
+		msg.Text = ""
+		err = c.postCard(ctx, webhookURL, msg, alert.ThreadKey)
+	}
+	return err
 }
 
 func (c *GoogleChatClient) postCard(ctx context.Context, webhookURL string, msg chatCardMessage, threadKey string) error {

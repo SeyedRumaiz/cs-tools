@@ -100,24 +100,26 @@ func (h *ChatHandler) rememberEngineer(user *middleware.UserInfo) {
 // when it is not accepted. Only the assigned engineer can accept it.
 func (h *ChatHandler) publishAssignment(ctx context.Context, engineerID string, ci routingclient.CaseInfo, kind liveChatAlertKind) {
 	h.publishToEngineer(engineerID, assignedCaseEvent(ci))
-	who := "an available engineer"
+	who, mention := "an available engineer", ""
 	if h.engineers != nil {
 		if email := h.engineers.email(engineerID); email != "" {
-			who = email
+			who, mention = email, email
 		}
 	}
-	h.alertLiveChat(ctx, ci, kind, who)
+	h.alertLiveChat(ctx, ci, kind, who, mention)
 }
 
 // alertLiveChat posts the Google Chat card in the background; a failure is
-// logged and never affects the customer's chat.
-func (h *ChatHandler) alertLiveChat(ctx context.Context, ci routingclient.CaseInfo, kind liveChatAlertKind, engineer string) {
+// logged and never affects the customer's chat. mentionEmail, when set, pings
+// that engineer: only used for cards that hand them a chat to accept.
+func (h *ChatHandler) alertLiveChat(ctx context.Context, ci routingclient.CaseInfo, kind liveChatAlertKind, engineer, mentionEmail string) {
 	if h.liveChatAlerts == nil || h.portalBaseURL == "" || !h.liveChatAlerts.HasSpace(liveChatAlertSpace) {
 		return
 	}
 	alert := buildLiveChatAlert(ci, kind, engineer)
 	alert.PortalURL = h.portalBaseURL + "/chat"
 	alert.ThreadKey = ci.CaseID
+	alert.MentionEmail = mentionEmail
 	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), liveChatAlertTimeout)
 	go func() {
 		defer cancel()
@@ -204,6 +206,6 @@ func (h *ChatHandler) alertLiveChatAccepted(ctx context.Context, caseID, enginee
 		if engineerEmail == "" {
 			engineerEmail = "an engineer"
 		}
-		h.alertLiveChat(lookupCtx, ci, liveChatAccepted, engineerEmail)
+		h.alertLiveChat(lookupCtx, ci, liveChatAccepted, engineerEmail, "")
 	}()
 }

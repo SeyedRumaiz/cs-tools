@@ -187,7 +187,8 @@ func main() {
 	// only surfaces as an error the first time an alert is sent for a product
 	// with no matching space.
 	googleChatClient := notifications.NewGoogleChatClient(notifications.GoogleChatConfig{
-		Spaces: parseGoogleChatSpaces(os.Getenv("NOTIFICATIONS_GOOGLE_CHAT_SPACES")),
+		Spaces:         parseGoogleChatSpaces(os.Getenv("NOTIFICATIONS_GOOGLE_CHAT_SPACES")),
+		MentionDomains: strings.Split(os.Getenv("NOTIFICATIONS_GOOGLE_CHAT_MENTION_DOMAINS"), ","),
 	})
 	notificationHandler := handler.NewNotificationHandler(googleChatClient, os.Getenv("CSM_PORTAL_WEB_BASE_URL"))
 	chatHandler.WithLiveChatAlerts(googleChatClient, os.Getenv("CSM_PORTAL_WEB_BASE_URL"))

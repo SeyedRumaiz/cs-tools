@@ -369,7 +369,7 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 		// connected engineer so the outage doesn't strand the customer.
 		slog.ErrorContext(r.Context(), "chat: routing service escalate failed, falling back to broadcast", "caseId", req.CaseID, "err", err)
 		h.publishToEngineers(assignedCaseEvent(ci))
-		h.alertLiveChat(r.Context(), ci, liveChatBroadcast, "")
+		h.alertLiveChat(r.Context(), ci, liveChatBroadcast, "", "")
 		writeJSON(w, http.StatusAccepted, []byte(`{"message":"escalation broadcast to available engineers"}`))
 		return
 	}
@@ -378,7 +378,7 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 	case result.EngineerUserID != "":
 		h.publishAssignment(r.Context(), result.EngineerUserID, ci, liveChatNewlyAssigned)
 	case result.Queued:
-		h.alertLiveChat(r.Context(), ci, liveChatQueued, "")
+		h.alertLiveChat(r.Context(), ci, liveChatQueued, "", "")
 		h.notifyOrigin(r.Context(), req.Source, chatEvent{
 			Type:           "queued",
 			CaseID:         req.CaseID,

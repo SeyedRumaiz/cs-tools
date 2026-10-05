@@ -313,3 +313,62 @@ func TestSendLiveChatAlert_ThreadsCardsSharingAThreadKey(t *testing.T) {
 		t.Errorf("the webhook's own key/token must be preserved: %v", gotQuery)
 	}
 }
+
+func TestSendLiveChatAlert_MentionsTheEngineerAndFallsBackWhenRejected(t *testing.T) {
+	baseAlert := LiveChatAlert{Title: "t", Details: []LiveChatDetail{{Label: "a", Value: "b"}}, PortalURL: "https://p/chat"}
+
+	post := func(t *testing.T, status func(call int) int, mention string) (texts []string, err error) {
+		t.Helper()
+		calls := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body struct{ Text string }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			texts = append(texts, body.Text)
+			calls++
+			w.WriteHeader(status(calls))
+		}))
+		defer srv.Close()
+		c := NewGoogleChatClient(GoogleChatConfig{
+			Spaces:         []GoogleChatSpace{{Product: "live-chat", WebhookURL: srv.URL}},
+			MentionDomains: []string{" Example.com "},
+		})
+		alert := baseAlert
+		alert.MentionEmail = mention
+		return texts, c.SendLiveChatAlert(context.Background(), "live-chat", alert)
+	}
+
+	t.Run("an email in a mention domain is mentioned above the card", func(t *testing.T) {
+		texts, err := post(t, func(int) int { return http.StatusOK }, "Eng@EXAMPLE.com")
+		if err != nil || len(texts) != 1 || !strings.Contains(texts[0], "<users/Eng@EXAMPLE.com>") {
+			t.Fatalf("texts=%v err=%v", texts, err)
+		}
+	})
+
+	t.Run("no mention without an email, with an unsafe one, or outside the mention domains", func(t *testing.T) {
+		for _, bad := range []string{"", "an available engineer", "x@y.com><users/all", "a b@example.com", "test-engineer@chat-test.local", "eng@other.com"} {
+			texts, err := post(t, func(int) int { return http.StatusOK }, bad)
+			if err != nil || len(texts) != 1 || texts[0] != "" {
+				t.Errorf("mention %q: texts=%v err=%v, want a card with no text", bad, texts, err)
+			}
+		}
+	})
+
+	t.Run("a rejected mention re-sends the card without it", func(t *testing.T) {
+		texts, err := post(t, func(call int) int {
+			if call == 1 {
+				return http.StatusBadRequest
+			}
+			return http.StatusOK
+		}, "eng@example.com")
+		if err != nil || len(texts) != 2 || texts[0] == "" || texts[1] != "" {
+			t.Fatalf("texts=%v err=%v, want a mention then a plain retry", texts, err)
+		}
+	})
+
+	t.Run("other failures are not retried", func(t *testing.T) {
+		texts, err := post(t, func(int) int { return http.StatusInternalServerError }, "eng@example.com")
+		if err == nil || len(texts) != 1 {
+			t.Fatalf("texts=%v err=%v, want one attempt and an error", texts, err)
+		}
+	})
+}

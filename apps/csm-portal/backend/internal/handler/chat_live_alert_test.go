@@ -105,6 +105,9 @@ func TestHandleEscalate_AssignedChatNamesTheEngineerAndLinksToThePortal(t *testi
 			t.Errorf("%s = %q, want %q", label, got, want)
 		}
 	}
+	if a.alert.MentionEmail != "eng@example.com" {
+		t.Errorf("the assigned engineer should be mentioned, got %q", a.alert.MentionEmail)
+	}
 	if !strings.Contains(a.alert.Note, "Only the assigned engineer can accept") {
 		t.Errorf("note should explain that only the assignee can accept: %q", a.alert.Note)
 	}
@@ -118,8 +121,12 @@ func TestHandleEscalate_UnknownEngineerIsStillAnnounced(t *testing.T) {
 
 	assertStatus(t, postEscalation(h, liveChatEscalateBody), http.StatusAccepted)
 
-	if a := awaitAlert(t, alerts); a.detail("Assigned to") != "<b>an available engineer</b>" {
+	a := awaitAlert(t, alerts)
+	if a.detail("Assigned to") != "<b>an available engineer</b>" {
 		t.Errorf("should fall back to a generic name: %+v", a.alert.Details)
+	}
+	if a.alert.MentionEmail != "" {
+		t.Errorf("nobody can be mentioned without a known email, got %q", a.alert.MentionEmail)
 	}
 }
 
@@ -144,6 +151,9 @@ func TestPublishAssignment_ReassignmentAndQueueDrainAreAnnouncedWithoutTheMessag
 
 	h.publishAssignment(context.Background(), "u-2", ci, liveChatReassigned)
 	a := awaitAlert(t, alerts)
+	if a.alert.MentionEmail != "next@example.com" {
+		t.Errorf("the new assignee should be mentioned on reassignment, got %q", a.alert.MentionEmail)
+	}
 	if a.alert.Title != "Live chat reassigned" || a.detail("Now assigned to") != "<b>next@example.com</b>" || a.detail("Message") != "" {
 		t.Errorf("reassignment alert wrong: %+v", a.alert)
 	}
@@ -193,6 +203,9 @@ func TestHandleAcceptSession_PostsAcceptedCardInTheChatsThread(t *testing.T) {
 	}
 	if a.alert.ThreadKey != caseID {
 		t.Errorf("thread key = %q, want the case id so it lands under the original card", a.alert.ThreadKey)
+	}
+	if a.alert.MentionEmail != "" {
+		t.Errorf("an accepted card must not ping anyone, got %q", a.alert.MentionEmail)
 	}
 	if a.detail("Accepted by") != "<b>agent@example.com</b>" || a.detail("Customer") != "Jane" || a.detail("Product") != "devant" {
 		t.Errorf("rows wrong: %+v", a.alert.Details)
