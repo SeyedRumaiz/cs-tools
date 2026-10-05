@@ -196,7 +196,10 @@ consumer, via the `live-chat-demo` tenant) run through this same
 deployment side by side today, each fully isolated from the other's cases,
 origins, and credentials. See
 [`docs/TENANT_ONBOARDING.md`](docs/TENANT_ONBOARDING.md) for everything
-needed to add another one.
+needed to add another one. A tenant's `routingSource` must match a
+notifier registered in csm-portal/backend (leave it blank to inherit the
+default), or engineer replies are dropped silently — see that doc's
+"Routing source must match a csm-portal notifier".
 
 | Method | Path | Caller | Auth |
 |---|---|---|---|

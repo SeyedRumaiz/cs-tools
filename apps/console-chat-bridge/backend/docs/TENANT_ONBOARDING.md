@@ -21,15 +21,15 @@ within a row are `|`-separated.
 | # | Field | Required? | Meaning |
 |---|---|---|---|
 | 1 | `slug` | **Yes** | Identifies this tenant in the URL path (`/v1/{slug}/...`). Case-sensitive. |
-| 2 | `validationType` | No (defaults to `introspection`) | `introspection` (RFC 7662 — the only kind actually implemented) or `jwks` (accepted, but currently always rejects every request — see "Auth modes" below). |
+| 2 | `validationType` | No (defaults to `introspection`) | `introspection` (RFC 7662 — the only kind actually implemented) or `jwks` (verifies a signed JWT against the IdP's published keys — see "Auth modes" below). |
 | 3 | `issuer` | **Yes**, for `introspection` | This tenant's trusted token issuer. Also the base URL introspection/UserInfo/SCIM endpoints derive from when their own override fields are left blank. |
 | 4 | `introspectionURL` | No | Overrides the derived introspection endpoint (`{issuer}/oauth2/introspect`) — needed for an IdP whose introspection endpoint lives elsewhere. |
-| 5 | `jwksURI` | Only for `jwks` | Unused today (see "Auth modes"). |
-| 6 | `audience` | Only for `jwks` | Unused today. |
+| 5 | `jwksURI` | **Yes**, for `jwks` | The IdP's JWKS endpoint, used to verify token signatures (see "Auth modes"). |
+| 6 | `audience` | No | For `jwks`, the `aud` value tokens must carry; checked only when set. |
 | 7 | `clientID` | **Yes**, for `introspection` | Authenticates this bridge to the tenant's introspection endpoint via HTTP Basic auth (RFC 7662 §2.1). A technical credential — see "Secret handling" for where its secret lives. |
 | 8 | `insecureSkipVerify` | No (defaults to `false`) | Literal string `true` to skip TLS certificate verification for this tenant's IdP calls. **Local development only** — see the `.env.example` warning. |
 | 9 | `allowedOrigins` | No | This tenant's own CORS allow-list — see "CORS/origin configuration". `,`-separated for more than one origin. |
-| 10 | `routingSource` | No (defaults to `BRIDGE_ROUTING_SOURCE`) | Tags every case this tenant escalates — becomes chat-routing-service's `CaseInfo.Source`, and so csm-portal/backend's `chatNotifiers` routing key. |
+| 10 | `routingSource` | No (defaults to `BRIDGE_ROUTING_SOURCE`) | Tags every case this tenant escalates — becomes chat-routing-service's `CaseInfo.Source`, and so csm-portal/backend's `chatNotifiers` routing key. **Must match a notifier csm-portal/backend registers** (see "Routing source must match a csm-portal notifier" below), or engineer replies never reach the customer. |
 | 11 | `channel` | No | Tags every case's `CaseInfo.Channel`. |
 | 12 | `projectID` | No | Tags every case's `CaseInfo.ProjectID` — this is the **duplicate-open-chat scope**: two tenants sharing a `projectID` would see each other's "you already have an open chat" conflicts, so give each tenant its own. |
 | 13 | `userinfoURL` | No | Overrides the derived OIDC UserInfo endpoint (`{issuer}/oauth2/userinfo`). Optional even when present — see "Optional UserInfo/SCIM resolution". |
@@ -54,10 +54,30 @@ before SCIM support existed parsing identically to before.
   (field 5), optionally checking `issuer` (field 3) and `audience`
   (field 6) when set. No Subject-enrichment step exists for this mode —
   the token's own `sub`/`username`/`client_id` claims are taken as-is (see
-  `tokenvalidator.JWKSValidator`'s own doc comment); a tenant whose JWT
-  carries none of those is rejected the same way an introspection response
-  with no usable identity is. SCIM fields (14–17) are introspection-only
-  and ignored for a `jwks` tenant.
+  `tokenvalidator.JWKSValidator`'s own doc comment). A token with none of
+  those three is rejected. When it has no `username` claim, its `email`
+  claim is used as the customer's username/display name instead. The
+  `sub` claim is what the `/v1` API treats as the canonical Subject. SCIM
+  fields (14–17) are introspection-only and ignored for a `jwks` tenant.
+  The bridge must be able to reach `jwksURI` over the network; it fetches
+  and refreshes keys in the background and keeps retrying if the endpoint
+  is unreachable at startup, but until a fetch succeeds every token is
+  rejected.
+
+## Routing source must match a csm-portal notifier
+
+`routingSource` becomes the case's `Source` in chat-routing-service.
+When an engineer accepts or replies, csm-portal/backend looks up its
+`chatNotifiers[source]` entry to push the event back to this bridge. If
+there is no entry for a tenant's `routingSource`, csm-portal drops the
+event **silently**: the customer's chat opens and the stream connects, but
+the status stays `queued` and no engineer message ever arrives.
+
+Today csm-portal/backend registers `asgardeo` and `console-chat-bridge`
+(see `chatNotifiers` in its `cmd/server/main.go`). Leave a new tenant's
+`routingSource` blank so it inherits `BRIDGE_ROUTING_SOURCE`
+(`console-chat-bridge`), unless you have also registered a notifier for a
+custom value there.
 
 ## Canonical Subject requirement
 
@@ -202,6 +222,22 @@ TENANT_<YOUR_PRODUCT_SLUG>_CLIENT_SECRET=<introspection client secret>
   resolution is tried automatically with zero extra config.
 - `routingSource` left blank — defaults to `BRIDGE_ROUTING_SOURCE`.
 
+### JWT-issuing tenant (`jwks`, no introspection)
+
+```
+TENANT_REGISTRY=<slug>|jwks|<token issuer>||<https://idp.example/oauth2/jwks>|<expected aud>||false|<https://your-product-origin>||<your-channel-tag>|<your-project-tag>
+```
+
+- 12 fields; `clientID` is blank because no introspection call is made, so
+  there is no `TENANT_<SLUG>_CLIENT_SECRET` to set.
+- `routingSource` left blank, for the reason in "Routing source must match
+  a csm-portal notifier".
+- Take `issuer`/`audience` from a real token, not from the IdP's static
+  config: some products exchange tokens through an internal STS first, so
+  the token the browser actually sends has a different issuer and audience
+  than the IdP's own metadata suggests. Decode its payload and copy `iss`
+  and `aud`.
+
 ### Multiple tenants together
 
 Rows are `;`-separated in one `TENANT_REGISTRY` value:
@@ -276,7 +312,10 @@ slug, as above.
 6. Decide this tenant's `slug`, `routingSource`, `channel`, and
    `projectID` — each must be unique enough that this tenant's
    duplicate-open-chat scope (`projectID`) and csm-portal routing
-   (`routingSource`) don't collide with an existing tenant's.
+   (`routingSource`) don't collide with an existing tenant's. Leave
+   `routingSource` blank unless csm-portal/backend has a notifier
+   registered for your value (see "Routing source must match a
+   csm-portal notifier").
 7. Write the `TENANT_REGISTRY` row (12, 13, or 17 fields per "Required
    tenant fields" above) and the matching `TENANT_<SLUG>_CLIENT_SECRET` /
    `TENANT_<SLUG>_SCIM_CLIENT_SECRET` env vars.
