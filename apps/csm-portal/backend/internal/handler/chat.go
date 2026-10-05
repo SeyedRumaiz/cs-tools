@@ -28,11 +28,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/sdk-go/routingclient"
@@ -120,71 +118,18 @@ type ChatHandler struct {
 	notifiers map[string]ChatEventPusher
 	routing   routingService
 
-	// liveChatAlerts, when set, posts a Google Chat message for every new
-	// live-chat escalation. portalBaseURL builds that message's link.
+	// liveChatAlerts, when set, posts Google Chat messages about live-chat
+	// escalations and assignments (see chat_live_alert.go).
 	liveChatAlerts liveChatAlertSender
 	portalBaseURL  string
-}
-
-// liveChatAlertSender is the Google Chat channel used for live-chat alerts.
-type liveChatAlertSender interface {
-	HasSpace(product string) bool
-	SendLiveChatAlert(ctx context.Context, product, summary, customerMessage, portalURL string) error
-}
-
-// WithLiveChatAlerts enables Google Chat alerts for new live-chat
-// escalations. Without it (or without a configured space) none are sent.
-func (h *ChatHandler) WithLiveChatAlerts(sender liveChatAlertSender, portalBaseURL string) *ChatHandler {
-	h.liveChatAlerts = sender
-	h.portalBaseURL = strings.TrimRight(portalBaseURL, "/")
-	return h
-}
-
-const (
-	liveChatAlertSpace      = "live-chat"
-	liveChatAlertTimeout    = 15 * time.Second
-	liveChatAlertMaxMessage = 300
-)
-
-// alertLiveChatRequested posts the Google Chat alert in the background; a
-// failure is logged and never affects the customer's escalation.
-func (h *ChatHandler) alertLiveChatRequested(ctx context.Context, ci routingclient.CaseInfo, queued bool) {
-	if h.liveChatAlerts == nil || h.portalBaseURL == "" || !h.liveChatAlerts.HasSpace(liveChatAlertSpace) {
-		return
-	}
-	who := ci.CustomerName
-	if who == "" {
-		who = ci.CustomerEmail
-	}
-	if who == "" {
-		who = "A customer"
-	}
-	summary := fmt.Sprintf("<b>%s</b> is asking to talk to a live engineer.", html.EscapeString(who))
-	if ci.TenantSlug != "" {
-		summary += " (" + html.EscapeString(ci.TenantSlug) + ")"
-	}
-	if queued {
-		summary += " No engineer is free yet, so the chat is waiting in the queue."
-	}
-	message := []rune(strings.TrimSpace(ci.Message))
-	if len(message) > liveChatAlertMaxMessage {
-		message = append(message[:liveChatAlertMaxMessage], '…')
-	}
-	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), liveChatAlertTimeout)
-	go func() {
-		defer cancel()
-		err := h.liveChatAlerts.SendLiveChatAlert(sendCtx, liveChatAlertSpace, summary, html.EscapeString(string(message)), h.portalBaseURL+"/chat")
-		if err != nil {
-			slog.Error("chat: google chat live-chat alert failed", "caseId", ci.CaseID, "err", err)
-		}
-	}()
+	engineers      *engineerDirectory
 }
 
 // NewChatHandler creates a ChatHandler. hub and routing must both be
 // non-nil: live engineer chat has no offline fallback, and HandleEscalate's
 // fallback path requires a routing client to have attempted and failed.
 func NewChatHandler(entity entityChatClient, hub *stream.BroadcastHub, notifiers map[string]ChatEventPusher, routing routingService) *ChatHandler {
-	return &ChatHandler{entity: entity, hub: hub, notifiers: notifiers, routing: routing}
+	return &ChatHandler{entity: entity, hub: hub, notifiers: notifiers, routing: routing, engineers: newEngineerDirectory()}
 }
 
 // chatEvent is the JSON envelope for every event this feature publishes, to
@@ -424,15 +369,16 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 		// connected engineer so the outage doesn't strand the customer.
 		slog.ErrorContext(r.Context(), "chat: routing service escalate failed, falling back to broadcast", "caseId", req.CaseID, "err", err)
 		h.publishToEngineers(assignedCaseEvent(ci))
-		h.alertLiveChatRequested(r.Context(), ci, false)
+		h.alertLiveChat(r.Context(), ci, liveChatBroadcast, "")
 		writeJSON(w, http.StatusAccepted, []byte(`{"message":"escalation broadcast to available engineers"}`))
 		return
 	}
 
 	switch {
 	case result.EngineerUserID != "":
-		h.publishToEngineer(result.EngineerUserID, assignedCaseEvent(ci))
+		h.publishAssignment(r.Context(), result.EngineerUserID, ci, liveChatNewlyAssigned)
 	case result.Queued:
+		h.alertLiveChat(r.Context(), ci, liveChatQueued, "")
 		h.notifyOrigin(r.Context(), req.Source, chatEvent{
 			Type:           "queued",
 			CaseID:         req.CaseID,
@@ -443,8 +389,6 @@ func (h *ChatHandler) HandleEscalate(w http.ResponseWriter, r *http.Request) {
 			Timestamp:      time.Now().UTC().Format(time.RFC3339),
 		})
 	}
-
-	h.alertLiveChatRequested(r.Context(), ci, result.Queued)
 
 	writeJSON(w, http.StatusAccepted, []byte(`{"message":"escalation routed"}`))
 }
@@ -529,6 +473,7 @@ func (h *ChatHandler) HandleAcceptSession(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
 		return
 	}
+	h.rememberEngineer(user)
 
 	caseID := r.PathValue("id")
 	if caseID == "" || !uuidRe.MatchString(caseID) {
@@ -696,7 +641,7 @@ func (h *ChatHandler) HandleCompleteSession(w http.ResponseWriter, r *http.Reque
 	if result, err := h.routing.Completed(r.Context(), user.UserID, caseID); err != nil {
 		slog.ErrorContext(r.Context(), "chat: routing service completed failed", "userID", user.UserID, "err", err)
 	} else if result.AssignedCase != nil {
-		h.publishToEngineer(user.UserID, assignedCaseEvent(*result.AssignedCase))
+		h.publishAssignment(r.Context(), user.UserID, *result.AssignedCase, liveChatFromQueue)
 	}
 
 	writeJSON(w, http.StatusOK, []byte(`{"message":"session ended"}`))
@@ -720,6 +665,7 @@ func (h *ChatHandler) HandleSetPresence(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
 		return
 	}
+	h.rememberEngineer(user)
 
 	body, ok := readChatBody(w, r)
 	if !ok {
@@ -752,7 +698,7 @@ func (h *ChatHandler) HandleSetPresence(w http.ResponseWriter, r *http.Request) 
 	// at this engineer's max_concurrent_chats), unlike Completed/Decline/a
 	// timeout which each free at most one slot.
 	for _, c := range result.AssignedCases {
-		h.publishToEngineer(user.UserID, assignedCaseEvent(c))
+		h.publishAssignment(r.Context(), user.UserID, c, liveChatFromQueue)
 	}
 
 	writeJSONValue(w, http.StatusOK, result)
@@ -768,6 +714,7 @@ func (h *ChatHandler) HandleGetPresence(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
 		return
 	}
+	h.rememberEngineer(user)
 
 	detail, err := h.routing.GetPresence(r.Context(), user.UserID)
 	if err != nil {
@@ -830,7 +777,7 @@ func (h *ChatHandler) HandleSetMaxConcurrentChats(w http.ResponseWriter, r *http
 	// Raising the limit can drain more than one queued case into this
 	// engineer's newly opened capacity.
 	for _, c := range result.AssignedCases {
-		h.publishToEngineer(user.UserID, assignedCaseEvent(c))
+		h.publishAssignment(r.Context(), user.UserID, c, liveChatFromQueue)
 	}
 
 	writeJSON(w, http.StatusOK, []byte(`{"applied":true}`))
@@ -852,6 +799,7 @@ func (h *ChatHandler) HandleDeclineSession(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
 		return
 	}
+	h.rememberEngineer(user)
 
 	caseID := r.PathValue("id")
 	if caseID == "" || !uuidRe.MatchString(caseID) {
@@ -877,7 +825,7 @@ func (h *ChatHandler) HandleDeclineSession(w http.ResponseWriter, r *http.Reques
 	}
 
 	if result.ReassignedTo != "" && result.AssignedCase != nil {
-		h.publishToEngineer(result.ReassignedTo, assignedCaseEvent(*result.AssignedCase))
+		h.publishAssignment(r.Context(), result.ReassignedTo, *result.AssignedCase, liveChatReassigned)
 	}
 
 	writeJSON(w, http.StatusOK, []byte(`{"message":"session declined"}`))
@@ -985,7 +933,7 @@ func (h *ChatHandler) HandleConvertToCase(w http.ResponseWriter, r *http.Request
 		Timestamp:      now,
 	})
 	if convertResult.AssignedCase != nil {
-		h.publishToEngineer(user.UserID, assignedCaseEvent(*convertResult.AssignedCase))
+		h.publishAssignment(r.Context(), user.UserID, *convertResult.AssignedCase, liveChatFromQueue)
 	}
 
 	writeJSONValue(w, http.StatusOK, createCaseResponseBody{EntityCaseID: created.EntityCaseID})
@@ -1101,7 +1049,7 @@ func (h *ChatHandler) HandleCompleteByTenant(w http.ResponseWriter, r *http.Requ
 		Timestamp:      now,
 	})
 	if result.AssignedCase != nil && result.AssignedEngineerID != "" {
-		h.publishToEngineer(result.AssignedEngineerID, assignedCaseEvent(*result.AssignedCase))
+		h.publishAssignment(r.Context(), result.AssignedEngineerID, *result.AssignedCase, liveChatFromQueue)
 	}
 
 	writeJSON(w, http.StatusOK, []byte(`{"message":"session ended"}`))

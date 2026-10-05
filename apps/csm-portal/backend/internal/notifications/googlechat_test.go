@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -197,12 +196,28 @@ func TestSendIncidentAlert_ConstructsWithZeroValueConfig(t *testing.T) {
 	}
 }
 
-func TestSendLiveChatAlert_PostsCardWithPortalLink(t *testing.T) {
-	var got string
+func TestSendLiveChatAlert_PostsStructuredCardWithPortalLink(t *testing.T) {
+	var got struct {
+		CardsV2 []struct {
+			Card struct {
+				Header   struct{ Title, Subtitle string }
+				Sections []struct {
+					Widgets []struct {
+						DecoratedText *struct{ TopLabel, Text string }
+						TextParagraph *struct{ Text string }
+						ButtonList    *struct {
+							Buttons []struct {
+								Text    string
+								OnClick struct{ OpenLink struct{ URL string } }
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := new(strings.Builder)
-		_, _ = io.Copy(buf, r.Body)
-		got = buf.String()
+		_ = json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -211,26 +226,60 @@ func TestSendLiveChatAlert_PostsCardWithPortalLink(t *testing.T) {
 	if !c.HasSpace("Live-Chat") {
 		t.Fatal("HasSpace should match case-insensitively")
 	}
-	if err := c.SendLiveChatAlert(context.Background(), "live-chat", "Jane is asking for help", "hi there", "https://portal.example/chat"); err != nil {
+	err := c.SendLiveChatAlert(context.Background(), "live-chat", LiveChatAlert{
+		Title:    "Live chat requested",
+		Subtitle: "A customer wants to talk to an engineer",
+		Details: []LiveChatDetail{
+			{Label: "Customer", Value: "Jane"},
+			{Label: "Message", Value: ""},
+			{Label: "Assigned to", Value: "<b>eng@example.com</b>"},
+		},
+		Note:      "<i>only they can accept</i>",
+		PortalURL: "https://portal.example/chat",
+	})
+	if err != nil {
 		t.Fatalf("SendLiveChatAlert: %v", err)
 	}
-	for _, want := range []string{"Live chat requested", "Jane is asking for help", "hi there", "Open in CSM Portal", "https://portal.example/chat"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("card body missing %q: %s", want, got)
-		}
+
+	card := got.CardsV2[0].Card
+	if card.Header.Title != "Live chat requested" || card.Header.Subtitle == "" {
+		t.Errorf("header wrong: %+v", card.Header)
+	}
+	var rows []string
+	for _, w := range card.Sections[0].Widgets {
+		rows = append(rows, w.DecoratedText.TopLabel+"="+w.DecoratedText.Text)
+	}
+	if want := "Customer=Jane,Assigned to=<b>eng@example.com</b>"; strings.Join(rows, ",") != want {
+		t.Errorf("rows = %v, want %s (empty values must be skipped)", rows, want)
+	}
+	if card.Sections[1].Widgets[0].TextParagraph.Text != "<i>only they can accept</i>" {
+		t.Errorf("note section wrong: %+v", card.Sections[1])
+	}
+	btn := card.Sections[2].Widgets[0].ButtonList.Buttons[0]
+	if btn.Text != "Open in CSM Portal" || btn.OnClick.OpenLink.URL != "https://portal.example/chat" {
+		t.Errorf("button wrong: %+v", btn)
 	}
 }
 
-func TestSendLiveChatAlert_RejectsUnconfiguredSpaceAndMissingLink(t *testing.T) {
+func TestSendLiveChatAlert_RejectsUnconfiguredSpaceAndIncompleteAlerts(t *testing.T) {
+	ok := LiveChatAlert{Title: "t", Details: []LiveChatDetail{{Label: "a", Value: "b"}}, PortalURL: "https://p/chat"}
 	c := NewGoogleChatClient(GoogleChatConfig{})
 	if c.HasSpace("live-chat") {
 		t.Error("HasSpace should be false with no spaces")
 	}
-	if err := c.SendLiveChatAlert(context.Background(), "live-chat", "s", "", "https://p/chat"); err == nil {
+	if err := c.SendLiveChatAlert(context.Background(), "live-chat", ok); err == nil {
 		t.Error("expected error for unconfigured space")
 	}
 	c = NewGoogleChatClient(GoogleChatConfig{Spaces: []GoogleChatSpace{{Product: "live-chat", WebhookURL: "http://x"}}})
-	if err := c.SendLiveChatAlert(context.Background(), "live-chat", "s", "", ""); err == nil {
-		t.Error("expected error for empty portal URL")
+	for name, mutate := range map[string]func(*LiveChatAlert){
+		"no title":   func(a *LiveChatAlert) { a.Title = "" },
+		"no details": func(a *LiveChatAlert) { a.Details = nil },
+		"no link":    func(a *LiveChatAlert) { a.PortalURL = "" },
+	} {
+		a := ok
+		mutate(&a)
+		if err := c.SendLiveChatAlert(context.Background(), "live-chat", a); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
 	}
 }

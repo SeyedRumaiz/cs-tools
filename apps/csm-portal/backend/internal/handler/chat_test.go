@@ -43,11 +43,15 @@ func (m *mockChatEntityClient) PatchCase(ctx context.Context, caseID string, bod
 // ----- mock routingService -----
 
 type mockRoutingService struct {
+	escalateFn      func(ctx context.Context, ci routingclient.CaseInfo) (routingclient.EscalateResult, error)
 	getCaseInfoFn   func(ctx context.Context, caseID string) (routingclient.CaseInfo, error)
 	convertToCaseFn func(ctx context.Context, userID, caseID, entityCaseID string) (routingclient.ConvertToCaseResult, error)
 }
 
 func (m *mockRoutingService) Escalate(ctx context.Context, ci routingclient.CaseInfo) (routingclient.EscalateResult, error) {
+	if m.escalateFn != nil {
+		return m.escalateFn(ctx, ci)
+	}
 	return routingclient.EscalateResult{}, nil
 }
 

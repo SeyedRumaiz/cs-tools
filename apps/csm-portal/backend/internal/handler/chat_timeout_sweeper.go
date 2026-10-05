@@ -63,7 +63,7 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 		})
 
 		if timeout.ReassignedTo != "" && timeout.AssignedCase != nil {
-			h.publishToEngineer(timeout.ReassignedTo, assignedCaseEvent(*timeout.AssignedCase))
+			h.publishAssignment(ctx, timeout.ReassignedTo, *timeout.AssignedCase, liveChatReassigned)
 		}
 	}
 
@@ -103,7 +103,7 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 			Timestamp:      now,
 		})
 		if stale.AssignedCase != nil {
-			h.publishToEngineer(stale.AssigneeID, assignedCaseEvent(*stale.AssignedCase))
+			h.publishAssignment(ctx, stale.AssigneeID, *stale.AssignedCase, liveChatFromQueue)
 		}
 	}
 }

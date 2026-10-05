@@ -53,6 +53,7 @@ func (h *ChatHandler) StreamEngineerAlerts(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
 		return
 	}
+	h.rememberEngineer(user)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {

@@ -23,9 +23,26 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/sdk-go/routingclient"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/notifications"
 )
 
-type liveChatAlert struct{ product, summary, message, url string }
+type liveChatAlert struct {
+	product string
+	alert   notifications.LiveChatAlert
+}
+
+// detail returns the value of the row labeled label, or "" if it is absent.
+func (a liveChatAlert) detail(label string) string {
+	for _, d := range a.alert.Details {
+		if d.Label == label {
+			return d.Value
+		}
+	}
+	return ""
+}
 
 type fakeLiveChatAlerts struct {
 	hasSpace bool
@@ -34,8 +51,8 @@ type fakeLiveChatAlerts struct {
 
 func (f *fakeLiveChatAlerts) HasSpace(string) bool { return f.hasSpace }
 
-func (f *fakeLiveChatAlerts) SendLiveChatAlert(_ context.Context, product, summary, message, url string) error {
-	f.sent <- liveChatAlert{product, summary, message, url}
+func (f *fakeLiveChatAlerts) SendLiveChatAlert(_ context.Context, product string, alert notifications.LiveChatAlert) error {
+	f.sent <- liveChatAlert{product, alert}
 	return nil
 }
 
@@ -48,36 +65,100 @@ func postEscalation(h *ChatHandler, body string) *httptest.ResponseRecorder {
 
 const liveChatEscalateBody = `{"caseId":"c-1","conversationId":"conv-1","projectId":"p","source":"console-chat-bridge","tenantSlug":"devant","customerName":"Jane <b>","message":"help me"}`
 
-func TestHandleEscalate_SendsGoogleChatAlertWithPortalLink(t *testing.T) {
-	alerts := &fakeLiveChatAlerts{hasSpace: true, sent: make(chan liveChatAlert, 1)}
-	h := newTestChatHandler(&mockRoutingService{}, &mockChatEventPusher{}).
-		WithLiveChatAlerts(alerts, "https://portal.example/")
+func newAlertingHandler(routing *mockRoutingService, hasSpace bool) (*ChatHandler, *fakeLiveChatAlerts) {
+	alerts := &fakeLiveChatAlerts{hasSpace: hasSpace, sent: make(chan liveChatAlert, 4)}
+	h := newTestChatHandler(routing, &mockChatEventPusher{}).WithLiveChatAlerts(alerts, "https://portal.example/")
+	return h, alerts
+}
+
+func awaitAlert(t *testing.T, alerts *fakeLiveChatAlerts) liveChatAlert {
+	t.Helper()
+	select {
+	case a := <-alerts.sent:
+		return a
+	case <-time.After(2 * time.Second):
+		t.Fatal("no Google Chat alert was sent")
+		return liveChatAlert{}
+	}
+}
+
+func TestHandleEscalate_AssignedChatNamesTheEngineerAndLinksToThePortal(t *testing.T) {
+	routing := &mockRoutingService{escalateFn: func(context.Context, routingclient.CaseInfo) (routingclient.EscalateResult, error) {
+		return routingclient.EscalateResult{EngineerUserID: "u-1"}, nil
+	}}
+	h, alerts := newAlertingHandler(routing, true)
+	h.engineers.remember("u-1", "eng@example.com")
 
 	assertStatus(t, postEscalation(h, liveChatEscalateBody), http.StatusAccepted)
 
-	select {
-	case a := <-alerts.sent:
-		if a.product != "live-chat" {
-			t.Errorf("product = %q, want live-chat", a.product)
+	a := awaitAlert(t, alerts)
+	if a.product != "live-chat" || a.alert.PortalURL != "https://portal.example/chat" || a.alert.Title != "Live chat requested" {
+		t.Errorf("unexpected alert envelope: %+v", a)
+	}
+	for label, want := range map[string]string{
+		"Customer":    "Jane &lt;b&gt;",
+		"Product":     "devant",
+		"Message":     "help me",
+		"Assigned to": "<b>eng@example.com</b>",
+	} {
+		if got := a.detail(label); got != want {
+			t.Errorf("%s = %q, want %q", label, got, want)
 		}
-		if a.url != "https://portal.example/chat" {
-			t.Errorf("url = %q, want https://portal.example/chat", a.url)
-		}
-		if !strings.Contains(a.summary, "Jane &lt;b&gt;") || !strings.Contains(a.summary, "devant") {
-			t.Errorf("summary should name the (escaped) customer and tenant: %q", a.summary)
-		}
-		if a.message != "help me" {
-			t.Errorf("message = %q", a.message)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no Google Chat alert was sent")
+	}
+	if !strings.Contains(a.alert.Note, "Only the assigned engineer can accept") {
+		t.Errorf("note should explain that only the assignee can accept: %q", a.alert.Note)
+	}
+}
+
+func TestHandleEscalate_UnknownEngineerIsStillAnnounced(t *testing.T) {
+	routing := &mockRoutingService{escalateFn: func(context.Context, routingclient.CaseInfo) (routingclient.EscalateResult, error) {
+		return routingclient.EscalateResult{EngineerUserID: "u-never-seen"}, nil
+	}}
+	h, alerts := newAlertingHandler(routing, true)
+
+	assertStatus(t, postEscalation(h, liveChatEscalateBody), http.StatusAccepted)
+
+	if a := awaitAlert(t, alerts); a.detail("Assigned to") != "<b>an available engineer</b>" {
+		t.Errorf("should fall back to a generic name: %+v", a.alert.Details)
+	}
+}
+
+func TestHandleEscalate_QueuedChatSaysNoOneIsFreeYet(t *testing.T) {
+	routing := &mockRoutingService{escalateFn: func(context.Context, routingclient.CaseInfo) (routingclient.EscalateResult, error) {
+		return routingclient.EscalateResult{Queued: true, Position: 2}, nil
+	}}
+	h, alerts := newAlertingHandler(routing, true)
+
+	assertStatus(t, postEscalation(h, liveChatEscalateBody), http.StatusAccepted)
+
+	a := awaitAlert(t, alerts)
+	if !strings.Contains(a.detail("Status"), "Waiting in the queue") || a.detail("Assigned to") != "" {
+		t.Errorf("queued alert wrong: %+v", a.alert.Details)
+	}
+}
+
+func TestPublishAssignment_ReassignmentAndQueueDrainAreAnnouncedWithoutTheMessage(t *testing.T) {
+	h, alerts := newAlertingHandler(&mockRoutingService{}, true)
+	h.rememberEngineer(&middleware.UserInfo{UserID: "u-2", Email: "next@example.com"})
+	ci := routingclient.CaseInfo{CaseID: "c-1", CustomerName: "Jane", Message: "help me"}
+
+	h.publishAssignment(context.Background(), "u-2", ci, liveChatReassigned)
+	a := awaitAlert(t, alerts)
+	if a.alert.Title != "Live chat reassigned" || a.detail("Now assigned to") != "<b>next@example.com</b>" || a.detail("Message") != "" {
+		t.Errorf("reassignment alert wrong: %+v", a.alert)
+	}
+
+	h.publishAssignment(context.Background(), "u-2", ci, liveChatFromQueue)
+	if a := awaitAlert(t, alerts); a.alert.Title != "Waiting chat assigned" || a.detail("Assigned to") != "<b>next@example.com</b>" {
+		t.Errorf("queue-drain alert wrong: %+v", a.alert)
 	}
 }
 
 func TestHandleEscalate_NoAlertWithoutConfiguredSpace(t *testing.T) {
-	alerts := &fakeLiveChatAlerts{hasSpace: false, sent: make(chan liveChatAlert, 1)}
-	h := newTestChatHandler(&mockRoutingService{}, &mockChatEventPusher{}).
-		WithLiveChatAlerts(alerts, "https://portal.example")
+	routing := &mockRoutingService{escalateFn: func(context.Context, routingclient.CaseInfo) (routingclient.EscalateResult, error) {
+		return routingclient.EscalateResult{EngineerUserID: "u-1"}, nil
+	}}
+	h, alerts := newAlertingHandler(routing, false)
 
 	assertStatus(t, postEscalation(h, liveChatEscalateBody), http.StatusAccepted)
 

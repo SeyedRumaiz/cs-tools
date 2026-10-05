@@ -122,7 +122,8 @@ type chatCard struct {
 }
 
 type chatCardHeader struct {
-	Title string `json:"title"`
+	Title    string `json:"title"`
+	Subtitle string `json:"subtitle,omitempty"`
 }
 
 type chatCardSection struct {
@@ -134,7 +135,15 @@ type chatCardSection struct {
 // is set per widget, matching Google Chat's widget schema.
 type chatCardWidget struct {
 	TextParagraph *chatTextParagraph `json:"textParagraph,omitempty"`
+	DecoratedText *chatDecoratedText `json:"decoratedText,omitempty"`
 	ButtonList    *chatButtonList    `json:"buttonList,omitempty"`
+}
+
+// chatDecoratedText renders a small label above a value: one row of a card.
+type chatDecoratedText struct {
+	TopLabel string `json:"topLabel,omitempty"`
+	Text     string `json:"text"`
+	WrapText bool   `json:"wrapText"`
 }
 
 type chatTextParagraph struct {
@@ -211,50 +220,69 @@ func (c *GoogleChatClient) HasSpace(product string) bool {
 	return c.webhookURLsByProduct[normalizeProduct(product)] != ""
 }
 
-// SendLiveChatAlert posts a "live chat requested" card with an "Open in CSM
-// Portal" button to the space configured for product. The link only opens
-// the portal; accepting still happens there, as the signed-in engineer.
-func (c *GoogleChatClient) SendLiveChatAlert(ctx context.Context, product, summary, customerMessage, portalURL string) error {
-	if summary == "" || portalURL == "" {
-		return fmt.Errorf("notifications: summary and portalURL are required")
+// LiveChatDetail is one labeled row of a live-chat card. Value may use
+// Google Chat's simple HTML (<b>, <i>, <br>), so callers must escape any
+// user-supplied text.
+type LiveChatDetail struct {
+	Label string
+	Value string
+}
+
+// LiveChatAlert describes a live-chat card: a header, labeled rows, an
+// optional note, and the portal link behind the button. Title, at least one
+// detail and PortalURL are required.
+type LiveChatAlert struct {
+	Title     string
+	Subtitle  string
+	Details   []LiveChatDetail
+	Note      string
+	PortalURL string
+}
+
+// SendLiveChatAlert posts a live-chat card with an "Open in CSM Portal" button
+// to the space configured for product. The link only opens the portal;
+// accepting still happens there, as the signed-in engineer.
+func (c *GoogleChatClient) SendLiveChatAlert(ctx context.Context, product string, alert LiveChatAlert) error {
+	if alert.Title == "" || len(alert.Details) == 0 || alert.PortalURL == "" {
+		return fmt.Errorf("notifications: title, details and portalURL are required")
 	}
 	webhookURL, ok := c.webhookURLsByProduct[normalizeProduct(product)]
 	if !ok || webhookURL == "" {
 		return fmt.Errorf("notifications: no google chat space configured for product %q", product)
 	}
 
-	widgets := []chatCardWidget{{TextParagraph: &chatTextParagraph{Text: summary}}}
-	if customerMessage != "" {
-		widgets = append(widgets, chatCardWidget{TextParagraph: &chatTextParagraph{Text: customerMessage}})
+	detailWidgets := make([]chatCardWidget, 0, len(alert.Details))
+	for _, d := range alert.Details {
+		if d.Value == "" {
+			continue
+		}
+		detailWidgets = append(detailWidgets, chatCardWidget{DecoratedText: &chatDecoratedText{TopLabel: d.Label, Text: d.Value, WrapText: true}})
 	}
-	msg := chatCardMessage{
-		CardsV2: []chatCardWrapper{
-			{
-				CardID: "live-chat-alert",
-				Card: chatCard{
-					Header: chatCardHeader{Title: "Live chat requested"},
-					Sections: []chatCardSection{
-						{Widgets: widgets},
-						{
-							Widgets: []chatCardWidget{
-								{
-									ButtonList: &chatButtonList{
-										Buttons: []chatButton{
-											{
-												Text:    "Open in CSM Portal",
-												OnClick: chatOnClick{OpenLink: chatOpenLink{URL: portalURL}},
-											},
-										},
-									},
-								},
-							},
-						},
+	sections := []chatCardSection{{Widgets: detailWidgets}}
+	if alert.Note != "" {
+		sections = append(sections, chatCardSection{Widgets: []chatCardWidget{
+			{TextParagraph: &chatTextParagraph{Text: alert.Note}},
+		}})
+	}
+	sections = append(sections, chatCardSection{Widgets: []chatCardWidget{
+		{
+			ButtonList: &chatButtonList{
+				Buttons: []chatButton{
+					{
+						Text:    "Open in CSM Portal",
+						OnClick: chatOnClick{OpenLink: chatOpenLink{URL: alert.PortalURL}},
 					},
 				},
 			},
 		},
-	}
-	return c.postCard(ctx, webhookURL, msg)
+	}})
+
+	return c.postCard(ctx, webhookURL, chatCardMessage{
+		CardsV2: []chatCardWrapper{{
+			CardID: "live-chat-alert",
+			Card:   chatCard{Header: chatCardHeader{Title: alert.Title, Subtitle: alert.Subtitle}, Sections: sections},
+		}},
+	})
 }
 
 func (c *GoogleChatClient) postCard(ctx context.Context, webhookURL string, msg chatCardMessage) error {
