@@ -43,6 +43,7 @@ import {
   type EngineerPresence,
 } from "@features/csm-chat/api/useEngineerStatus";
 import type { ChatAlertEvent, PriorMessage } from "@features/csm-chat/types/chatAlerts";
+import { useLiveChatAlertSignals } from "@hooks/useLiveChatAlertSignals";
 
 export type LiveChatMessage = {
   id: string;
@@ -177,6 +178,7 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
   const entries = Object.values(casesByCaseId);
   const pendingEntries = entries.filter((e): e is PendingAlert => e.kind === "pending");
   const sessionEntries = entries.filter((e): e is ActiveSession => e.kind === "session");
+  useLiveChatAlertSignals(pendingEntries.map((e) => e.caseId));
 
   // Ticks once a second, only while at least one pending alert is showing,
   // to drive the accept-countdown -- see PendingAlert.assignedAt and
