@@ -43,6 +43,7 @@ func (m *mockChatEntityClient) PatchCase(ctx context.Context, caseID string, bod
 // ----- mock routingService -----
 
 type mockRoutingService struct {
+	acceptFn        func(ctx context.Context, userID, caseID string) (routingclient.AcceptResult, error)
 	escalateFn      func(ctx context.Context, ci routingclient.CaseInfo) (routingclient.EscalateResult, error)
 	getCaseInfoFn   func(ctx context.Context, caseID string) (routingclient.CaseInfo, error)
 	convertToCaseFn func(ctx context.Context, userID, caseID, entityCaseID string) (routingclient.ConvertToCaseResult, error)
@@ -68,6 +69,9 @@ func (m *mockRoutingService) Decline(ctx context.Context, userID, caseID string)
 }
 
 func (m *mockRoutingService) Accept(ctx context.Context, userID, caseID string) (routingclient.AcceptResult, error) {
+	if m.acceptFn != nil {
+		return m.acceptFn(ctx, userID, caseID)
+	}
 	return routingclient.AcceptResult{}, nil
 }
 

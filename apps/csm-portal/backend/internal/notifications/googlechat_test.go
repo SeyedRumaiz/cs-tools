@@ -283,3 +283,33 @@ func TestSendLiveChatAlert_RejectsUnconfiguredSpaceAndIncompleteAlerts(t *testin
 		}
 	}
 }
+
+func TestSendLiveChatAlert_ThreadsCardsSharingAThreadKey(t *testing.T) {
+	var gotQuery map[string][]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewGoogleChatClient(GoogleChatConfig{Spaces: []GoogleChatSpace{{Product: "live-chat", WebhookURL: srv.URL + "/v1/spaces/X/messages?key=k&token=t"}}})
+	alert := LiveChatAlert{Title: "t", Details: []LiveChatDetail{{Label: "a", Value: "b"}}, PortalURL: "https://p/chat"}
+
+	if err := c.SendLiveChatAlert(context.Background(), "live-chat", alert); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := gotQuery["threadKey"]; ok {
+		t.Error("an alert without a ThreadKey must post a standalone message")
+	}
+
+	alert.ThreadKey = "case-1"
+	if err := c.SendLiveChatAlert(context.Background(), "live-chat", alert); err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery["threadKey"][0] != "case-1" || gotQuery["messageReplyOption"][0] != "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD" {
+		t.Errorf("threading params missing: %v", gotQuery)
+	}
+	if gotQuery["key"][0] != "k" || gotQuery["token"][0] != "t" {
+		t.Errorf("the webhook's own key/token must be preserved: %v", gotQuery)
+	}
+}

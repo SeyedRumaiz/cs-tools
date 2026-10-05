@@ -58,6 +58,7 @@ const (
 	liveChatFromQueue                              // a waiting chat was given to a freed-up engineer
 	liveChatQueued                                 // no engineer free; the chat is waiting
 	liveChatBroadcast                              // routing service down; shown to every engineer
+	liveChatAccepted                               // the assigned engineer accepted the chat
 )
 
 // engineerDirectory remembers each engineer's email by IdP user id, filled
@@ -116,6 +117,7 @@ func (h *ChatHandler) alertLiveChat(ctx context.Context, ci routingclient.CaseIn
 	}
 	alert := buildLiveChatAlert(ci, kind, engineer)
 	alert.PortalURL = h.portalBaseURL + "/chat"
+	alert.ThreadKey = ci.CaseID
 	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), liveChatAlertTimeout)
 	go func() {
 		defer cancel()
@@ -168,6 +170,9 @@ func buildLiveChatAlert(ci routingclient.CaseInfo, kind liveChatAlertKind, engin
 	case liveChatFromQueue:
 		alert.Title, alert.Subtitle = "Waiting chat assigned", "An engineer became free"
 		engineerRow("Assigned to")
+	case liveChatAccepted:
+		alert.Title, alert.Subtitle = "Live chat accepted", "No one else needs to pick this up"
+		engineerRow("Accepted by")
 	case liveChatQueued:
 		addMessage()
 		details = append(details, notifications.LiveChatDetail{Label: "Status", Value: "<b>Waiting in the queue</b>: no engineer is free yet"})
@@ -177,4 +182,28 @@ func buildLiveChatAlert(ci routingclient.CaseInfo, kind liveChatAlertKind, engin
 	}
 	alert.Details = details
 	return alert
+}
+
+// alertLiveChatAccepted tells the Google Chat space that the assigned engineer
+// accepted the chat, in the same thread as the original card. The case's
+// customer details are fetched best-effort; without them the card still names
+// the engineer.
+func (h *ChatHandler) alertLiveChatAccepted(ctx context.Context, caseID, engineerEmail string) {
+	if h.liveChatAlerts == nil || h.portalBaseURL == "" || !h.liveChatAlerts.HasSpace(liveChatAlertSpace) {
+		return
+	}
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		lookupCtx, cancel := context.WithTimeout(detached, liveChatAlertTimeout)
+		defer cancel()
+		ci, err := h.routing.GetCaseInfo(lookupCtx, caseID)
+		if err != nil {
+			slog.Warn("chat: could not load case details for the accepted-chat alert", "caseId", caseID, "err", err)
+			ci = routingclient.CaseInfo{CaseID: caseID}
+		}
+		if engineerEmail == "" {
+			engineerEmail = "an engineer"
+		}
+		h.alertLiveChat(lookupCtx, ci, liveChatAccepted, engineerEmail)
+	}()
 }

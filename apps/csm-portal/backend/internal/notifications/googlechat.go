@@ -212,7 +212,7 @@ func (c *GoogleChatClient) SendIncidentAlert(ctx context.Context, product, title
 		},
 	}
 
-	return c.postCard(ctx, webhookURL, msg)
+	return c.postCard(ctx, webhookURL, msg, "")
 }
 
 // HasSpace reports whether a Google Chat space is configured for product.
@@ -237,6 +237,10 @@ type LiveChatAlert struct {
 	Details   []LiveChatDetail
 	Note      string
 	PortalURL string
+	// ThreadKey groups every card sharing it into one Google Chat thread, so
+	// follow-ups about the same chat appear under the original card. Empty
+	// posts a standalone message.
+	ThreadKey string
 }
 
 // SendLiveChatAlert posts a live-chat card with an "Open in CSM Portal" button
@@ -282,10 +286,21 @@ func (c *GoogleChatClient) SendLiveChatAlert(ctx context.Context, product string
 			CardID: "live-chat-alert",
 			Card:   chatCard{Header: chatCardHeader{Title: alert.Title, Subtitle: alert.Subtitle}, Sections: sections},
 		}},
-	})
+	}, alert.ThreadKey)
 }
 
-func (c *GoogleChatClient) postCard(ctx context.Context, webhookURL string, msg chatCardMessage) error {
+func (c *GoogleChatClient) postCard(ctx context.Context, webhookURL string, msg chatCardMessage, threadKey string) error {
+	if threadKey != "" {
+		u, err := url.Parse(webhookURL)
+		if err != nil {
+			return fmt.Errorf("notifications: parse google chat webhook url: %w", redactURLError(err))
+		}
+		q := u.Query()
+		q.Set("threadKey", threadKey)
+		q.Set("messageReplyOption", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD")
+		u.RawQuery = q.Encode()
+		webhookURL = u.String()
+	}
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("notifications: encode google chat message: %w", err)

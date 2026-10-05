@@ -168,3 +168,50 @@ func TestHandleEscalate_NoAlertWithoutConfiguredSpace(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+func TestHandleAcceptSession_PostsAcceptedCardInTheChatsThread(t *testing.T) {
+	const caseID = "11111111-1111-1111-1111-111111111111"
+	routing := &mockRoutingService{
+		acceptFn: func(context.Context, string, string) (routingclient.AcceptResult, error) {
+			return routingclient.AcceptResult{Applied: true}, nil
+		},
+		getCaseInfoFn: func(_ context.Context, id string) (routingclient.CaseInfo, error) {
+			return routingclient.CaseInfo{CaseID: id, CustomerName: "Jane", TenantSlug: "devant"}, nil
+		},
+	}
+	h, alerts := newAlertingHandler(routing, true)
+
+	r := withUser(httptest.NewRequest(http.MethodPost, "/chat/sessions/"+caseID+"/accept", strings.NewReader(`{"conversationId":"conv-1"}`)))
+	r.SetPathValue("id", caseID)
+	w := httptest.NewRecorder()
+	h.HandleAcceptSession(w, r)
+	assertStatus(t, w, http.StatusOK)
+
+	a := awaitAlert(t, alerts)
+	if a.alert.Title != "Live chat accepted" {
+		t.Errorf("title = %q", a.alert.Title)
+	}
+	if a.alert.ThreadKey != caseID {
+		t.Errorf("thread key = %q, want the case id so it lands under the original card", a.alert.ThreadKey)
+	}
+	if a.detail("Accepted by") != "<b>agent@example.com</b>" || a.detail("Customer") != "Jane" || a.detail("Product") != "devant" {
+		t.Errorf("rows wrong: %+v", a.alert.Details)
+	}
+}
+
+func TestHandleAcceptSession_NoCardWhenTheAcceptWasRejected(t *testing.T) {
+	const caseID = "11111111-1111-1111-1111-111111111111"
+	h, alerts := newAlertingHandler(&mockRoutingService{}, true)
+
+	r := withUser(httptest.NewRequest(http.MethodPost, "/chat/sessions/"+caseID+"/accept", strings.NewReader(`{"conversationId":"conv-1"}`)))
+	r.SetPathValue("id", caseID)
+	w := httptest.NewRecorder()
+	h.HandleAcceptSession(w, r)
+	assertStatus(t, w, http.StatusConflict)
+
+	select {
+	case <-alerts.sent:
+		t.Fatal("an accepted card was sent although the accept did not apply")
+	case <-time.After(200 * time.Millisecond):
+	}
+}

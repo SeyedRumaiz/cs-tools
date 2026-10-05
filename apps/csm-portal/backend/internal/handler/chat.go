@@ -531,6 +531,8 @@ func (h *ChatHandler) HandleAcceptSession(w http.ResponseWriter, r *http.Request
 		Timestamp:      now,
 	})
 
+	h.alertLiveChatAccepted(r.Context(), caseID, user.Email)
+
 	writeJSON(w, http.StatusOK, []byte(`{"message":"session accepted"}`))
 }
 
