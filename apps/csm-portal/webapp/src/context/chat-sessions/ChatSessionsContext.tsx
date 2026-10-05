@@ -388,6 +388,10 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
             delete next[event.caseId as string];
             return next;
           });
+          // The routing service has already freed this engineer's slot;
+          // refetch so the active-chats counter drops now, not on the
+          // next poll.
+          queryClient.invalidateQueries({ queryKey: ENGINEER_STATUS_QUERY_KEY });
           break;
         }
         case "case_timed_out": {
