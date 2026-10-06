@@ -622,6 +622,18 @@ func (h *ChatHandler) HandleCompleteSession(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Best-effort: releases this engineer's capacity for this case and, if
+	// that drains the queue, delivers the next case to them below.
+	//
+	// End the session in the routing service before announcing it: the
+	// engineer's browser refetches its case list on session_closed, and an
+	// announcement that wins the race loads a list that still holds this
+	// case, which the page then re-adds.
+	result, completeErr := h.routing.Completed(r.Context(), user.UserID, caseID)
+	if completeErr != nil {
+		slog.ErrorContext(r.Context(), "chat: routing service completed failed", "userID", user.UserID, "err", completeErr)
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	h.publishToEngineers(chatEvent{
 		Type:           "session_closed",
@@ -638,11 +650,7 @@ func (h *ChatHandler) HandleCompleteSession(w http.ResponseWriter, r *http.Reque
 		Timestamp:      now,
 	})
 
-	// Best-effort: releases this engineer's capacity for this case and, if
-	// that drains the queue, delivers the next case to them.
-	if result, err := h.routing.Completed(r.Context(), user.UserID, caseID); err != nil {
-		slog.ErrorContext(r.Context(), "chat: routing service completed failed", "userID", user.UserID, "err", err)
-	} else if result.AssignedCase != nil {
+	if completeErr == nil && result.AssignedCase != nil {
 		h.publishAssignment(r.Context(), user.UserID, *result.AssignedCase, liveChatFromQueue)
 	}
 

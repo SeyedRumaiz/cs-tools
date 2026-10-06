@@ -228,3 +228,37 @@ func TestHandleAcceptSession_NoCardWhenTheAcceptWasRejected(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+func TestHandleCompleteSession_EndsTheSessionBeforeAnnouncingIt(t *testing.T) {
+	const caseID = "11111111-1111-1111-1111-111111111111"
+	var h *ChatHandler
+	var announcements chan string
+	routing := &mockRoutingService{
+		completedFn: func(context.Context, string, string) (routingclient.CompletedResult, error) {
+			select {
+			case <-announcements:
+				t.Error("session_closed was published before the routing service ended the session")
+			default:
+			}
+			return routingclient.CompletedResult{}, nil
+		},
+	}
+	h = newTestChatHandler(routing, &mockChatEventPusher{})
+	announcements = h.hub.Register(broadcastHubKey)
+	defer h.hub.Unregister(broadcastHubKey, announcements)
+
+	r := withUser(httptest.NewRequest(http.MethodPost, "/chat/sessions/"+caseID+"/complete", strings.NewReader(`{"conversationId":"conv-1"}`)))
+	r.SetPathValue("id", caseID)
+	w := httptest.NewRecorder()
+	h.HandleCompleteSession(w, r)
+	assertStatus(t, w, http.StatusOK)
+
+	select {
+	case payload := <-announcements:
+		if !strings.Contains(payload, `"session_closed"`) {
+			t.Errorf("unexpected announcement: %s", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("session_closed was never published")
+	}
+}
