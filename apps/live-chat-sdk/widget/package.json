@@ -1,0 +1,54 @@
+{
+  "name": "@wso2/live-chat-widget",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drop-in \"Chat with an Engineer\" web component (<wso2-live-chat>) for any WSO2 product, configured by a JSON config instead of product-specific code. Built on @wso2/live-chat-client.",
+  "keywords": [
+    "live-chat",
+    "web-component",
+    "console-chat-bridge",
+    "wso2"
+  ],
+  "license": "Apache-2.0",
+  "author": "WSO2 LLC. (https://www.wso2.com)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wso2-open-operations/cs-tools.git",
+    "directory": "apps/live-chat-sdk/widget"
+  },
+  "type": "module",
+  "main": "./dist/live-chat-widget.js",
+  "module": "./dist/live-chat-widget.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/live-chat-widget.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": [
+    "./dist/live-chat-widget.js"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.1",
+    "@wso2/live-chat-client": "file:../sdk-ts",
+    "eslint": "9.39.1",
+    "jsdom": "27.0.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.4",
+    "vite": "7.1.12",
+    "vitest": "4.0.18"
+  }
+}
