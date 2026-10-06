@@ -87,6 +87,7 @@ export default function ChatWorkspacePage(): JSX.Element {
     sendMessage,
     complete,
     convertToCase,
+    closeEndedSession,
   } = useChatSessions();
 
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
@@ -163,7 +164,7 @@ export default function ChatWorkspacePage(): JSX.Element {
               key={session.caseId}
               role="tab"
               aria-selected={active}
-              label={session.customerName || "Live chat"}
+              label={`${session.customerName || "Live chat"}${session.endedByCustomer ? " (ended)" : ""}`}
               onClick={() => setSelectedCaseId(session.caseId)}
               variant={active ? "filled" : "outlined"}
               color={active ? "primary" : "default"}
@@ -189,27 +190,38 @@ export default function ChatWorkspacePage(): JSX.Element {
               <Typography variant="h6" noWrap sx={{ pr: 1 }}>
                 {selectedSession.customerName || "Live chat"}
               </Typography>
-              <Stack direction="row" spacing={1} flexShrink={0}>
-                <Button
-                  variant="outlined"
-                  color="primary"
-                  onClick={() => void convertToCase(selectedSession)}
-                  disabled={isConverting || isCompleting}
-                  startIcon={isConverting ? <CircularProgress size={16} color="inherit" /> : undefined}
-                  sx={{ textTransform: "none" }}
-                >
-                  Convert to Case
-                </Button>
+              {selectedSession.endedByCustomer ? (
                 <Button
                   variant="outlined"
                   color="inherit"
-                  onClick={() => void complete(selectedSession)}
-                  disabled={isCompleting || isConverting}
-                  sx={{ textTransform: "none" }}
+                  onClick={() => closeEndedSession(selectedSession.caseId)}
+                  sx={{ textTransform: "none", flexShrink: 0 }}
                 >
-                  End session
+                  Close
                 </Button>
-              </Stack>
+              ) : (
+                <Stack direction="row" spacing={1} flexShrink={0}>
+                  <Button
+                    variant="outlined"
+                    color="primary"
+                    onClick={() => void convertToCase(selectedSession)}
+                    disabled={isConverting || isCompleting}
+                    startIcon={isConverting ? <CircularProgress size={16} color="inherit" /> : undefined}
+                    sx={{ textTransform: "none" }}
+                  >
+                    Convert to Case
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    color="inherit"
+                    onClick={() => void complete(selectedSession)}
+                    disabled={isCompleting || isConverting}
+                    sx={{ textTransform: "none" }}
+                  >
+                    End session
+                  </Button>
+                </Stack>
+              )}
             </Stack>
             {convertErrorByCaseId[selectedSession.caseId] && (
               <Typography variant="caption" color="error" sx={{ mt: 0.5, display: "block" }}>
@@ -296,30 +308,42 @@ export default function ChatWorkspacePage(): JSX.Element {
                 </Box>
               ))
             )}
+            {selectedSession.endedByCustomer && (
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                role="status"
+                sx={{ alignSelf: "center", fontStyle: "italic" }}
+              >
+                The customer ended this chat.
+              </Typography>
+            )}
             <div ref={messagesEndRef} />
           </Box>
 
-          <Box sx={{ p: 2, borderTop: 1, borderColor: "divider" }}>
-            <Stack direction="row" spacing={1.5} alignItems="flex-end">
-              <TextField
-                fullWidth
-                placeholder="Type a message..."
-                value={draftByCaseId[selectedSession.caseId] ?? ""}
-                onChange={(e) => setDraft(selectedSession.caseId, e.target.value)}
-                onKeyDown={handleDraftKeyDown(selectedSession)}
-                multiline
-                maxRows={6}
-              />
-              <Button
-                variant="contained"
-                onClick={() => void sendMessage(selectedSession)}
-                disabled={!(draftByCaseId[selectedSession.caseId] ?? "").trim() || isSending}
-                sx={{ textTransform: "none", height: 40 }}
-              >
-                Send
-              </Button>
-            </Stack>
-          </Box>
+          {!selectedSession.endedByCustomer && (
+            <Box sx={{ p: 2, borderTop: 1, borderColor: "divider" }}>
+              <Stack direction="row" spacing={1.5} alignItems="flex-end">
+                <TextField
+                  fullWidth
+                  placeholder="Type a message..."
+                  value={draftByCaseId[selectedSession.caseId] ?? ""}
+                  onChange={(e) => setDraft(selectedSession.caseId, e.target.value)}
+                  onKeyDown={handleDraftKeyDown(selectedSession)}
+                  multiline
+                  maxRows={6}
+                />
+                <Button
+                  variant="contained"
+                  onClick={() => void sendMessage(selectedSession)}
+                  disabled={!(draftByCaseId[selectedSession.caseId] ?? "").trim() || isSending}
+                  sx={{ textTransform: "none", height: 40 }}
+                >
+                  Send
+                </Button>
+              </Stack>
+            </Box>
+          )}
         </Paper>
       )}
     </Box>

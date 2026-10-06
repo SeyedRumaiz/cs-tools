@@ -97,6 +97,10 @@ export type ActiveSession = {
   // refresh (messages start empty either way -- see the rehydration effect
   // below's own doc comment).
   priorMessageCount?: number;
+  // Set when the customer ended the chat from their side. The session stays
+  // on screen, read-only, so the engineer sees it ended instead of it just
+  // vanishing; closeEndedSession removes it.
+  endedByCustomer?: boolean;
 };
 
 export type CaseEntry = PendingAlert | ActiveSession;
@@ -126,6 +130,8 @@ export interface ChatSessions {
   sendMessage: (session: ActiveSession) => Promise<void>;
   complete: (session: ActiveSession) => Promise<void>;
   convertToCase: (session: ActiveSession) => Promise<void>;
+  // Removes a session the customer already ended (no server call needed).
+  closeEndedSession: (caseId: string) => void;
 }
 
 const ChatSessionsCtx = createContext<ChatSessions | null>(null);
@@ -381,10 +387,17 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
           );
           if (!event.caseId) return;
           setCasesByCaseId((current) => {
-            if (!current[event.caseId as string]) return current;
+            const entry = current[event.caseId as string];
+            if (!entry) return current;
+            // No engineerEmail means the customer's side ended it (or the
+            // idle-session sweeper did): keep an accepted session visible,
+            // marked ended, so the engineer sees what happened.
+            if (entry.kind === "session" && !event.engineerEmail) {
+              return { ...current, [entry.caseId]: { ...entry, endedByCustomer: true } };
+            }
             // eslint-disable-next-line no-console
             console.log(
-              `[ACCEPT-DEBUG] SSE session_closed DELETING entry caseId=${event.caseId} kind=${current[event.caseId as string]?.kind} t=${new Date().toISOString()}`,
+              `[ACCEPT-DEBUG] SSE session_closed DELETING entry caseId=${event.caseId} kind=${entry.kind} t=${new Date().toISOString()}`,
             );
             const next = { ...current };
             delete next[event.caseId as string];
@@ -560,6 +573,19 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
     [draftByCaseId, sendMutation],
   );
 
+  const closeEndedSession = useCallback(
+    (caseId: string): void => {
+      setCasesByCaseId((current) => {
+        if (!current[caseId]) return current;
+        const next = { ...current };
+        delete next[caseId];
+        return next;
+      });
+      clearCachedCase(caseId);
+    },
+    [clearCachedCase],
+  );
+
   const complete = useCallback(
     async (session: ActiveSession): Promise<void> => {
       const { caseId, conversationId } = session;
@@ -569,6 +595,7 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
         return next;
       });
       clearCachedCase(caseId);
+      if (session.endedByCustomer) return;
       try {
         await completeMutation.mutateAsync({ caseId, conversationId });
       } catch {
@@ -629,6 +656,7 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
       sendMessage,
       complete,
       convertToCase,
+      closeEndedSession,
     }),
     [
       pendingEntries,
@@ -648,6 +676,7 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
       sendMessage,
       complete,
       convertToCase,
+      closeEndedSession,
     ],
   );
 
