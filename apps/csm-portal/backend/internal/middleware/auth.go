@@ -107,6 +107,7 @@ var m2mExemptRoutes = map[string]bool{
 	http.MethodPost + " /internal/chat/escalate":         true,
 	http.MethodPost + " /internal/chat/customer-message": true,
 	http.MethodPost + " /internal/chat/complete":         true,
+	http.MethodGet + " /internal/chat/open-chat":         true,
 }
 
 // m2mExemptPathPrefixes lists method+path-prefix pairs that skip Auth the

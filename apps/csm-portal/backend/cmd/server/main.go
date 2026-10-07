@@ -415,6 +415,7 @@ func main() {
 	// case-history route, after its own ownership check has already run.
 	mux.HandleFunc("GET /internal/chat/cases/{caseId}/history", chatHandler.HandleGetCaseHistory)
 	mux.HandleFunc("POST /internal/chat/complete", chatHandler.HandleCompleteByTenant)
+	mux.HandleFunc("GET /internal/chat/open-chat", chatHandler.HandleFindOpenChat)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

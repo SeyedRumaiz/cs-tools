@@ -109,6 +109,9 @@ type routingService interface {
 	// EndByTenant backs HandleCompleteByTenant: tenant-initiated session
 	// completion, with no engineer userID to authorize against.
 	EndByTenant(ctx context.Context, caseID, tenantSlug string) (routingclient.CompletedResult, error)
+	// FindOpenChat backs HandleFindOpenChat; nil means the customer has no
+	// open chat for the project.
+	FindOpenChat(ctx context.Context, customerEmail, projectID string) (*routingclient.OpenChat, error)
 }
 
 // ChatHandler implements the live-engineer-chat escalation endpoints.
@@ -1063,4 +1066,53 @@ func (h *ChatHandler) HandleCompleteByTenant(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, []byte(`{"message":"session ended"}`))
+}
+
+// openChatResponse is HandleFindOpenChat's response. OpenChat is null when
+// the customer has no open chat for the project.
+type openChatResponse struct {
+	OpenChat *openChat `json:"openChat"`
+}
+
+type openChat struct {
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId"`
+	// Accepted is true once the assigned engineer has accepted the chat.
+	Accepted bool `json:"accepted"`
+	// EngineerEmail is the assigned engineer's email when this portal has
+	// seen it (see engineerDirectory); empty otherwise.
+	EngineerEmail string `json:"engineerEmail,omitempty"`
+}
+
+// HandleFindOpenChat handles GET /internal/chat/open-chat?customerEmail=&projectId=,
+// called by console-chat-bridge so a customer who reloads the page, or opens
+// another tab, can resume their open chat instead of being refused a new one.
+// Machine-to-machine only (see middleware.m2mExemptRoutes).
+func (h *ChatHandler) HandleFindOpenChat(w http.ResponseWriter, r *http.Request) {
+	customerEmail := r.URL.Query().Get("customerEmail")
+	projectID := r.URL.Query().Get("projectId")
+	if customerEmail == "" || projectID == "" {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	found, err := h.routing.FindOpenChat(r.Context(), customerEmail, projectID)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "chat: routing service find open chat failed", "projectId", projectID, "err", err)
+		writeError(w, http.StatusBadGateway, "Failed to look up the open chat. Please try again.")
+		return
+	}
+
+	resp := openChatResponse{}
+	if found != nil {
+		resp.OpenChat = &openChat{
+			CaseID:         found.CaseID,
+			ConversationID: found.ConversationID,
+			Accepted:       found.Accepted,
+		}
+		if found.AssigneeID != "" && h.engineers != nil {
+			resp.OpenChat.EngineerEmail = h.engineers.email(found.AssigneeID)
+		}
+	}
+	writeJSONValue(w, http.StatusOK, resp)
 }

@@ -43,6 +43,7 @@ func (m *mockChatEntityClient) PatchCase(ctx context.Context, caseID string, bod
 // ----- mock routingService -----
 
 type mockRoutingService struct {
+	findOpenChatFn  func(ctx context.Context, customerEmail, projectID string) (*routingclient.OpenChat, error)
 	completedFn     func(ctx context.Context, userID, caseID string) (routingclient.CompletedResult, error)
 	acceptFn        func(ctx context.Context, userID, caseID string) (routingclient.AcceptResult, error)
 	escalateFn      func(ctx context.Context, ci routingclient.CaseInfo) (routingclient.EscalateResult, error)
@@ -111,6 +112,13 @@ func (m *mockRoutingService) ConvertToCase(ctx context.Context, userID, caseID, 
 		return m.convertToCaseFn(ctx, userID, caseID, entityCaseID)
 	}
 	return routingclient.ConvertToCaseResult{}, nil
+}
+
+func (m *mockRoutingService) FindOpenChat(ctx context.Context, customerEmail, projectID string) (*routingclient.OpenChat, error) {
+	if m.findOpenChatFn != nil {
+		return m.findOpenChatFn(ctx, customerEmail, projectID)
+	}
+	return nil, nil
 }
 
 func (m *mockRoutingService) EndByTenant(ctx context.Context, caseID, tenantSlug string) (routingclient.CompletedResult, error) {
