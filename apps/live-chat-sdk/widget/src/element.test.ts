@@ -31,15 +31,23 @@ function fakeClient() {
     sendMessage: vi.fn().mockResolvedValue(undefined),
     completeChat: vi.fn().mockResolvedValue(undefined),
     getHistory: vi.fn().mockResolvedValue([]),
+    getCurrentChat: vi.fn().mockResolvedValue(null),
   };
   return { client, unsubscribe, push: (e: LiveChatEvent) => onEvent?.(e) };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
+const settle = async () => {
+  for (let i = 0; i < 6; i++) await flush();
+};
 
-function mount(config: object = { bridgeUrl: "https://bridge.example", tenant: "my-product" }) {
+function mount(
+  config: object = { bridgeUrl: "https://bridge.example", tenant: "my-product" },
+  setup: (fake: ReturnType<typeof fakeClient>) => void = () => {},
+) {
   const el = document.createElement("wso2-live-chat") as LiveChatWidgetElement;
   const fake = fakeClient();
+  setup(fake);
   el.createClient = vi.fn(() => fake.client as never);
   el.getAccessToken = () => "token";
   el.config = config;
@@ -56,7 +64,10 @@ function mount(config: object = { bridgeUrl: "https://bridge.example", tenant: "
 }
 
 describe("<wso2-live-chat>", () => {
-  beforeEach(() => document.body.replaceChildren());
+  beforeEach(() => {
+    document.body.replaceChildren();
+    sessionStorage.clear();
+  });
   afterEach(() => vi.restoreAllMocks());
 
   it("shows a default launcher and applies config values as CSS variables", () => {
@@ -200,6 +211,7 @@ describe("<wso2-live-chat>", () => {
       { role: "customer", content: "help" },
       { role: "engineer", content: "Hello!" },
     ]);
+    fake.client.getCurrentChat.mockResolvedValue({ caseId: "case-1", conversationId: "conv-1", status: "connected" });
     q<HTMLButtonElement>(".reconnect").click();
     await flush();
     expect(fake.client.getHistory).toHaveBeenCalledWith("case-1");
@@ -214,5 +226,171 @@ describe("<wso2-live-chat>", () => {
     el.open();
     await type("help");
     expect(q(".error span").textContent).toBe("Live chat is not configured.");
+  });
+
+  describe("resuming an open chat", () => {
+    const connected = { caseId: "case-9", conversationId: "conv-9", status: "connected" as const, engineerEmail: "eng@example.com" };
+    const waiting = { caseId: "case-9", conversationId: "conv-9", status: "waiting" as const };
+
+    it("restores a connected chat on load, without the AI conversation that preceded it", async () => {
+      const { el, fake, q } = mount(undefined, (f) => {
+        f.client.getCurrentChat.mockResolvedValue(connected);
+        f.client.getHistory.mockResolvedValue([
+          { role: "customer", content: "How do I set up RAG?" },
+          { role: "assistant", content: "Open Setup RAG Ingestion." },
+          { role: "customer", content: "It still fails" },
+          { role: "engineer", content: "Let me check." },
+        ]);
+      });
+      const resumed = vi.fn();
+      el.addEventListener(LIVE_CHAT_EVENTS.resumed, resumed);
+      await settle();
+
+      expect(el.state).toMatchObject({ phase: "connected", caseId: "case-9", open: false });
+      expect(fake.client.subscribe).toHaveBeenCalledWith("case-9", expect.any(Function));
+      expect(fake.client.startChat).not.toHaveBeenCalled();
+      expect(q(".status").textContent).toBe("Connected with eng@example.com");
+      const texts = [...el.shadowRoot!.querySelectorAll(".message")].map((m) => m.textContent);
+      expect(texts).toEqual(["It still fails", "Let me check.", "Your chat was restored."]);
+      expect(resumed).toHaveBeenCalledOnce();
+    });
+
+    it("reopens the panel after a reload only if it was open", async () => {
+      sessionStorage.setItem("wso2-live-chat:my-product:open", "1");
+      const { el } = mount(undefined, (f) => f.client.getCurrentChat.mockResolvedValue(connected));
+      await settle();
+      expect(el.state.open).toBe(true);
+    });
+
+    it("picks up an accept that happened while the page was reloading", async () => {
+      const { el, q } = mount(undefined, (f) => {
+        f.client.getCurrentChat.mockResolvedValueOnce(waiting).mockResolvedValueOnce(connected);
+      });
+      await settle();
+      expect(el.state.phase).toBe("connected");
+      expect(q(".status").textContent).toBe("Connected with eng@example.com");
+    });
+
+    it("shows a restored chat as ended if it ended during the reload", async () => {
+      const { el, q } = mount(undefined, (f) => {
+        f.client.getCurrentChat.mockResolvedValueOnce(waiting).mockResolvedValueOnce(null);
+      });
+      const ended = vi.fn();
+      el.addEventListener(LIVE_CHAT_EVENTS.ended, ended);
+      await settle();
+      expect(el.state.phase).toBe("ended");
+      expect(q(".new").hidden).toBe(false);
+      expect((ended.mock.calls[0]![0] as CustomEvent<LiveChatEndedDetail>).detail.reason).toBe("unknown");
+    });
+
+    it("says connected without a name when the engineer's email is unknown", async () => {
+      const { q } = mount(undefined, (f) =>
+        f.client.getCurrentChat.mockResolvedValue({ caseId: "c", conversationId: "c", status: "connected" }),
+      );
+      await settle();
+      expect(q(".status").textContent).toBe("Connected with an engineer");
+    });
+
+    it("does not announce the engineer again when the bridge replays the accept", async () => {
+      const { el, fake } = mount(undefined, (f) => {
+        f.client.getCurrentChat.mockResolvedValue(connected);
+        f.client.getHistory.mockResolvedValue([{ role: "engineer", content: "Hi" }]);
+      });
+      await settle();
+      fake.push({ type: "assigned", engineerEmail: "eng@example.com" });
+      const texts = [...el.shadowRoot!.querySelectorAll(".message")].map((m) => m.textContent);
+      expect(texts).toEqual(["Hi", "Your chat was restored."]);
+    });
+
+    it("takes the engineer's name from a replayed accept when it was unknown", async () => {
+      const { el, fake, q } = mount(undefined, (f) =>
+        f.client.getCurrentChat.mockResolvedValue({ caseId: "c", conversationId: "c", status: "connected" }),
+      );
+      await settle();
+      fake.push({ type: "assigned", engineerEmail: "eng@example.com" });
+      expect(q(".status").textContent).toBe("Connected with eng@example.com");
+      const texts = [...el.shadowRoot!.querySelectorAll(".message")].map((m) => m.textContent);
+      expect(texts).toEqual(["Your chat was restored."]);
+    });
+
+    it("stays idle when there is no open chat or the lookup fails", async () => {
+      const none = mount();
+      await settle();
+      expect(none.el.state.phase).toBe("idle");
+      expect(none.fake.client.subscribe).not.toHaveBeenCalled();
+
+      const failing = mount(undefined, (f) => f.client.getCurrentChat.mockRejectedValue(new Error("down")));
+      await settle();
+      expect(failing.el.state.phase).toBe("idle");
+    });
+
+    it("reopens the existing chat when starting one is refused with 409, keeping the typed text", async () => {
+      const { el, fake, q } = mount();
+      await settle();
+      fake.client.startChat.mockRejectedValue(new LiveChatError("conflict", { status: 409 }));
+      fake.client.getCurrentChat.mockResolvedValue(waiting);
+      el.open();
+      const input = q<HTMLTextAreaElement>(".input");
+      input.value = "hello again";
+      input.dispatchEvent(new Event("input"));
+      q<HTMLButtonElement>(".send").click();
+      await settle();
+
+      expect(el.state).toMatchObject({ phase: "queued", caseId: "case-9" });
+      expect(input.value).toBe("hello again");
+      expect(q(".error").hidden).toBe(true);
+      expect([...el.shadowRoot!.querySelectorAll(".message")].map((m) => m.textContent)).toContain(
+        "You already had an open chat, so it was reopened here.",
+      );
+    });
+
+    it("still explains a 409 when no open chat can be found", async () => {
+      const { el, fake, q, type } = mount();
+      await settle();
+      fake.client.startChat.mockRejectedValue(new LiveChatError("conflict", { status: 409 }));
+      el.open();
+      await type("help");
+      await settle();
+      expect(q(".error span").textContent).toContain("already have an open chat");
+    });
+
+    it("listens again when the element is moved in the page during a chat", async () => {
+      const { el, fake, type } = mount();
+      el.open();
+      await type("help");
+      fake.client.getCurrentChat.mockResolvedValue({ ...waiting, caseId: "case-1" });
+      el.remove();
+      expect(fake.unsubscribe).toHaveBeenCalled();
+      document.body.append(el);
+      await settle();
+      expect(fake.client.subscribe).toHaveBeenCalledTimes(2);
+      expect(el.state.phase).toBe("queued");
+    });
+
+    it("never ends a live chat just because the status lookup failed", async () => {
+      const { el, fake, q, type } = mount();
+      el.open();
+      await type("help");
+      fake.push({ type: "error", message: "stream ended" });
+      fake.client.getCurrentChat.mockRejectedValue(new LiveChatError("not found", { status: 404 }));
+      q<HTMLButtonElement>(".reconnect").click();
+      await settle();
+      expect(el.state.phase).toBe("queued");
+      expect(fake.client.subscribe).toHaveBeenCalledTimes(2);
+    });
+
+    it("works when session storage is unavailable", async () => {
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new Error("blocked");
+      });
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new Error("blocked");
+      });
+      const { el } = mount(undefined, (f) => f.client.getCurrentChat.mockResolvedValue(connected));
+      await settle();
+      expect(el.state.phase).toBe("connected");
+      el.open();
+      expect(el.state.open).toBe(true);
+    });
   });
 });

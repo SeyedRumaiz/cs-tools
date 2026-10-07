@@ -73,6 +73,8 @@ export interface LiveChatTexts {
   statusQueued: string;
   /** `{engineer}` is the engineer's email. */
   statusConnected: string;
+  /** Used instead of statusConnected when the engineer's email is unknown. */
+  statusConnectedAnonymous: string;
   statusEnded: string;
   /** `{engineer}` is the engineer's email. */
   engineerJoined: string;
@@ -87,6 +89,12 @@ export interface LiveChatTexts {
   sendFailed: string;
   endFailed: string;
   notConfigured: string;
+  /** Shown when a chat still open on the server is restored after a reload. */
+  chatResumed: string;
+  /** Shown when starting a chat finds one already open, which is reopened. */
+  alreadyOpenResumed: string;
+  /** Shown when a restored chat turns out to have ended meanwhile. */
+  endedWhileAway: string;
 }
 
 /**
@@ -157,6 +165,7 @@ export const DEFAULT_TEXTS: LiveChatTexts = {
   statusStarting: "Starting your chat…",
   statusQueued: "Waiting for an engineer",
   statusConnected: "Connected with {engineer}",
+  statusConnectedAnonymous: "Connected with an engineer",
   statusEnded: "Chat ended",
   engineerJoined: "{engineer} joined the chat.",
   endedByCustomer: "You ended the chat.",
@@ -169,6 +178,9 @@ export const DEFAULT_TEXTS: LiveChatTexts = {
   sendFailed: "Your message could not be sent.",
   endFailed: "Could not end the chat. Please try again.",
   notConfigured: "Live chat is not configured.",
+  chatResumed: "Your chat was restored.",
+  alreadyOpenResumed: "You already had an open chat, so it was reopened here.",
+  endedWhileAway: "This chat ended while you were away.",
 };
 
 const DEFAULT_CONVERSATION_PREFIX = "live-chat-";

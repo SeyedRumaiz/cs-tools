@@ -1,6 +1,6 @@
 {
   "name": "@wso2/live-chat-widget",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "description": "Drop-in \"Chat with an Engineer\" web component (<wso2-live-chat>) for any WSO2 product, configured by a JSON config instead of product-specific code. Built on @wso2/live-chat-client.",
   "keywords": [

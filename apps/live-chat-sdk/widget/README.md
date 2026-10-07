@@ -16,14 +16,14 @@ Not yet published to a registry. Build a package file and vendor it into your pr
 ```bash
 cd apps/live-chat-sdk/widget
 pnpm install && pnpm run build && pnpm pack
-# -> wso2-live-chat-widget-0.1.0.tgz
+# -> wso2-live-chat-widget-0.1.2.tgz
 ```
 
 Copy it to `<your-app>/vendor/` and add it to your `package.json`:
 
 ```json
 "dependencies": {
-  "@wso2/live-chat-widget": "file:./vendor/wso2-live-chat-widget-0.1.0.tgz"
+  "@wso2/live-chat-widget": "file:./vendor/wso2-live-chat-widget-0.1.2.tgz"
 }
 ```
 
@@ -115,7 +115,7 @@ Any CSS color or font value.
 
 ### `texts`
 
-Every visible string can be replaced, for wording or translation: `title`, `subtitle`, `launcherLabel`, `intro`, `contextNotice`, `inputPlaceholder`, `startButton`, `sendButton`, `endButton`, `newChatButton`, `reconnectButton`, `closeLabel`, `statusIdle`, `statusStarting`, `statusQueued`, `statusConnected`, `statusEnded`, `engineerJoined`, `endedByCustomer`, `endedByEngineer`, `convertedToCase`, `expired`, `connectionLost`, `startFailed`, `alreadyOpen`, `sendFailed`, `endFailed`, `notConfigured`. `{engineer}` and `{caseId}` are filled in where they apply. See `DEFAULT_TEXTS` in `src/config.ts` for the defaults.
+Every visible string can be replaced, for wording or translation: `title`, `subtitle`, `launcherLabel`, `intro`, `contextNotice`, `inputPlaceholder`, `startButton`, `sendButton`, `endButton`, `newChatButton`, `reconnectButton`, `closeLabel`, `statusIdle`, `statusStarting`, `statusQueued`, `statusConnected`, `statusEnded`, `engineerJoined`, `endedByCustomer`, `endedByEngineer`, `convertedToCase`, `expired`, `connectionLost`, `startFailed`, `alreadyOpen`, `sendFailed`, `endFailed`, `notConfigured`, `statusConnectedAnonymous`, `chatResumed`, `alreadyOpenResumed`, `endedWhileAway`. `{engineer}` and `{caseId}` are filled in where they apply. See `DEFAULT_TEXTS` in `src/config.ts` for the defaults.
 
 ## Opening it from your own UI
 
@@ -147,8 +147,9 @@ The element dispatches DOM events that bubble out of the shadow root:
 |---|---|---|
 | `live-chat-open` / `live-chat-close` | `{}` | The panel opened or closed. |
 | `live-chat-started` | `{ caseId }` | A chat was created. |
+| `live-chat-resumed` | `{ caseId }` | A chat still open on the server was restored, for example after a page reload. |
 | `live-chat-assigned` | `{ caseId, engineerEmail }` | An engineer accepted it. |
-| `live-chat-ended` | `{ caseId, reason, entityCaseId?, transcript }` | The chat ended. `reason` is `customer`, `engineer`, `converted` or `expired`. |
+| `live-chat-ended` | `{ caseId, reason, entityCaseId?, transcript }` | The chat ended. `reason` is `customer`, `engineer`, `converted`, `expired`, or `unknown` when it ended while the page was not listening (for example during a reload). |
 | `live-chat-error` | `{ message }` | Starting failed or the connection dropped. |
 
 For example, to return the customer to your AI assistant when the chat ends:
@@ -168,6 +169,7 @@ The config covers most needs. For more, the host page can:
 
 ## Behaviour notes
 
+- **Reloads and other tabs.** On load the widget asks the bridge for the customer's open chat and, if there is one, restores its transcript and status and reconnects. The panel reopens only if it was open before the reload. Starting a chat while one is already open (for example in another tab) reopens that chat instead of failing.
 - **Ending is shown live on both sides.** When the engineer ends the chat or turns it into a case, the panel shows it immediately and offers "Start a new chat".
 - **Reconnect.** If the live connection drops, the panel shows "The connection was lost" with a Reconnect button that reloads the transcript and listens again.
 - **Leaving the page** stops listening but does not end the chat; ending is always an explicit action.

@@ -19,6 +19,7 @@ import {
   LiveChatError,
   type LiveChatClient,
   type LiveChatClientConfig,
+  type LiveChatCurrentChat,
   type LiveChatEvent,
 } from "@wso2/live-chat-client";
 import {
@@ -44,8 +45,10 @@ export interface LiveChatOpenOptions {
 
 export type LiveChatPhase = "idle" | "starting" | "queued" | "connected" | "ended";
 
-/** Why a chat ended, as reported in the `live-chat-ended` event. */
-export type LiveChatEndReason = "customer" | "engineer" | "converted" | "expired";
+/** Why a chat ended, as reported in the `live-chat-ended` event. "unknown"
+ * means it ended while the page was not listening, for example during a
+ * reload. */
+export type LiveChatEndReason = "customer" | "engineer" | "converted" | "expired" | "unknown";
 
 export interface LiveChatTranscriptEntry {
   from: "customer" | "engineer" | "system";
@@ -65,6 +68,7 @@ export const LIVE_CHAT_EVENTS = {
   open: "live-chat-open",
   close: "live-chat-close",
   started: "live-chat-started",
+  resumed: "live-chat-resumed",
   assigned: "live-chat-assigned",
   ended: "live-chat-ended",
   error: "live-chat-error",
@@ -88,12 +92,12 @@ export class LiveChatWidgetElement extends HTMLElement {
     return ["config", "config-src"];
   }
 
-  /** Returns the signed-in user's access token. Called before every request. */
-  getAccessToken: AccessTokenProvider | null = null;
 
   /** @internal Builds the SDK client; replaced in tests. */
   createClient: (config: LiveChatClientConfig) => LiveChatClient = createLiveChatClient;
 
+  private tokenProvider: AccessTokenProvider | null = null;
+  private restoreStarted = false;
   private resolved: ResolvedLiveChatConfig | null = null;
   private configError: string | null = null;
   private client: LiveChatClient | null = null;
@@ -189,6 +193,18 @@ export class LiveChatWidgetElement extends HTMLElement {
     this.ui.input.addEventListener("input", () => this.renderComposer());
   }
 
+  /** Returns the signed-in user's access token. Called before every request. */
+  get getAccessToken(): AccessTokenProvider | null {
+    return this.tokenProvider;
+  }
+
+  set getAccessToken(provider: AccessTokenProvider | null) {
+    this.tokenProvider = provider;
+    this.client = null;
+    this.restoreStarted = false;
+    this.maybeRestore();
+  }
+
   /** The configuration in use, after defaults were applied. */
   get config(): ResolvedLiveChatConfig | null {
     return this.resolved;
@@ -219,6 +235,12 @@ export class LiveChatWidgetElement extends HTMLElement {
 
   connectedCallback(): void {
     this.render();
+    // Detaching stopped listening; resume an in-progress chat when re-attached.
+    if (this.caseId && (this.phase === "queued" || this.phase === "connected") && !this.unsubscribe) {
+      void this.reconnect();
+    } else {
+      this.maybeRestore();
+    }
   }
 
   disconnectedCallback(): void {
@@ -249,6 +271,7 @@ export class LiveChatWidgetElement extends HTMLElement {
     }
     if (!this.isOpen) {
       this.isOpen = true;
+      this.rememberOpen(true);
       this.emit(LIVE_CHAT_EVENTS.open, {});
     }
     this.render();
@@ -258,6 +281,7 @@ export class LiveChatWidgetElement extends HTMLElement {
   close(): void {
     if (!this.isOpen) return;
     this.isOpen = false;
+    this.rememberOpen(false);
     this.render();
     this.emit(LIVE_CHAT_EVENTS.close, {});
   }
@@ -309,7 +333,9 @@ export class LiveChatWidgetElement extends HTMLElement {
     }
     this.dataset.position = layout.position;
     this.dataset.launcher = String(layout.showLauncher);
+    this.restoreStarted = false;
     this.render();
+    this.maybeRestore();
   }
 
   private fail(message: string): void {
@@ -366,6 +392,7 @@ export class LiveChatWidgetElement extends HTMLElement {
       this.emit(LIVE_CHAT_EVENTS.started, { caseId: result.caseId });
     } catch (err) {
       this.phase = "idle";
+      if (err instanceof LiveChatError && err.status === 409 && (await this.resumeExisting())) return;
       const texts = this.texts();
       this.showError(err instanceof LiveChatError && err.status === 409 ? texts.alreadyOpen : texts.startFailed, false);
       this.emit(LIVE_CHAT_EVENTS.error, { message: err instanceof Error ? err.message : String(err) });
@@ -407,8 +434,12 @@ export class LiveChatWidgetElement extends HTMLElement {
         break;
       case "assigned": {
         const engineer = event.engineerEmail || null;
-        // Ignore a repeated assigned event for the same engineer.
-        if (this.phase === "connected" && engineer === this.engineer) break;
+        // The bridge replays this event to a reconnecting page, so when
+        // already connected it only fills in an engineer not yet known.
+        if (this.phase === "connected" && (engineer === this.engineer || this.engineer === null)) {
+          this.engineer = engineer;
+          break;
+        }
         this.phase = "connected";
         this.engineer = engineer;
         this.transcript.push({ from: "system", text: format(texts.engineerJoined, { engineer: this.engineerName() }) });
@@ -443,25 +474,132 @@ export class LiveChatWidgetElement extends HTMLElement {
   // The bridge does not replay events missed while disconnected, so the
   // transcript is reloaded before listening again.
   private async reconnect(): Promise<void> {
-    const client = this.getClient();
-    if (!client || !this.caseId) return;
+    const caseId = this.caseId;
+    if (!caseId || !this.getClient()) return;
     this.error = null;
     this.render();
-    try {
-      const history = await client.getHistory(this.caseId);
-      const restored: LiveChatTranscriptEntry[] = [];
-      for (const m of history) {
-        if (m.role === "customer") restored.push({ from: "customer", text: m.content });
-        else if (m.role === "engineer") restored.push({ from: "engineer", text: m.content });
-      }
-      if (restored.length > 0) this.transcript = restored;
-      if (restored.some((m) => m.from === "engineer")) this.phase = "connected";
-    } catch {
-      // History is best effort; the new subscription still delivers later
-      // messages.
-    }
-    this.listen(this.caseId);
+    const restored = await this.loadTranscript(caseId);
+    if (this.caseId !== caseId) return;
+    if (restored.length > 0) this.transcript = restored;
+    if (restored.some((m) => m.from === "engineer")) this.phase = "connected";
+    this.listen(caseId);
     this.render();
+    await this.reconcile(caseId);
+  }
+
+  // Resumes the customer's open chat after a page reload or in another tab:
+  // the server still holds it, and starting a new one would be refused.
+  private maybeRestore(): void {
+    if (this.restoreStarted || !this.isConnected || this.phase !== "idle") return;
+    const client = this.getClient();
+    if (!client) return;
+    this.restoreStarted = true;
+    client.getCurrentChat().then(
+      (chat) => {
+        if (chat && this.phase === "idle") void this.resume(chat, this.texts().chatResumed, this.wasOpen());
+      },
+      () => {
+        // Best effort: starting a chat later still recovers an open one.
+      },
+    );
+  }
+
+  // After a 409 on start: reopen the chat the server says is already open.
+  private async resumeExisting(): Promise<boolean> {
+    let chat: LiveChatCurrentChat | null;
+    try {
+      chat = (await this.getClient()?.getCurrentChat()) ?? null;
+    } catch {
+      return false;
+    }
+    if (!chat || this.phase !== "idle") return false;
+    await this.resume(chat, this.texts().alreadyOpenResumed, false);
+    return true;
+  }
+
+  private async resume(chat: LiveChatCurrentChat, notice: string, openPanel: boolean): Promise<void> {
+    this.caseId = chat.caseId;
+    this.engineer = chat.engineerEmail ?? null;
+    this.phase = chat.status === "connected" ? "connected" : "queued";
+    this.priorMessages = [];
+    this.error = null;
+    this.transcript = [];
+    this.render();
+    const history = await this.loadTranscript(chat.caseId);
+    if (this.caseId !== chat.caseId) return;
+    this.transcript = [...history, { from: "system", text: notice }, ...this.transcript];
+    this.listen(chat.caseId);
+    if (openPanel) this.open();
+    this.render();
+    this.emit(LIVE_CHAT_EVENTS.resumed, { caseId: chat.caseId });
+    await this.reconcile(chat.caseId);
+  }
+
+  // Catches an accept, or the chat ending, that happened before the event
+  // stream was open and so was never delivered.
+  private async reconcile(caseId: string): Promise<void> {
+    let chat: LiveChatCurrentChat | null;
+    try {
+      chat = (await this.getClient()?.getCurrentChat()) ?? null;
+    } catch {
+      return;
+    }
+    if (this.caseId !== caseId || (this.phase !== "queued" && this.phase !== "connected")) return;
+    if (!chat || chat.caseId !== caseId) {
+      this.transcript.push({ from: "system", text: this.texts().endedWhileAway });
+      this.finish("unknown");
+      return;
+    }
+    if (chat.status === "connected" && this.phase === "queued") {
+      this.phase = "connected";
+      this.engineer = chat.engineerEmail ?? this.engineer;
+      this.transcript.push({ from: "system", text: format(this.texts().engineerJoined, { engineer: this.engineerName() }) });
+      this.emit(LIVE_CHAT_EVENTS.assigned, { caseId, engineerEmail: chat.engineerEmail ?? "" });
+      this.render();
+    }
+  }
+
+  // History also holds the AI-assistant conversation handed over when the
+  // chat started; only what follows it belongs in this transcript.
+  private async loadTranscript(caseId: string): Promise<LiveChatTranscriptEntry[]> {
+    const client = this.getClient();
+    if (!client) return [];
+    try {
+      const history = await client.getHistory(caseId);
+      const live = history.slice(history.map((m) => m.role).lastIndexOf("assistant") + 1);
+      return live.flatMap((m): LiveChatTranscriptEntry[] =>
+        m.role === "customer" || m.role === "engineer" ? [{ from: m.role, text: m.content }] : [],
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  private openKey(): string | null {
+    return this.resolved ? `wso2-live-chat:${this.resolved.tenant}:open` : null;
+  }
+
+  // Remembered per browser tab so a reload reopens the panel only if it was
+  // open. Storage can be unavailable (privacy modes); that just loses this.
+  private rememberOpen(open: boolean): void {
+    const key = this.openKey();
+    if (!key) return;
+    try {
+      if (open) sessionStorage.setItem(key, "1");
+      else sessionStorage.removeItem(key);
+    } catch {
+      // Storage unavailable.
+    }
+  }
+
+  private wasOpen(): boolean {
+    const key = this.openKey();
+    if (!key) return false;
+    try {
+      return sessionStorage.getItem(key) === "1";
+    } catch {
+      return false;
+    }
   }
 
   private finish(reason: LiveChatEndReason, entityCaseId?: string): void {
@@ -517,7 +655,9 @@ export class LiveChatWidgetElement extends HTMLElement {
     ui.status.dataset.phase = this.phase;
     ui.status.textContent =
       this.phase === "connected"
-        ? format(texts.statusConnected, { engineer: this.engineerName() })
+        ? this.engineer
+          ? format(texts.statusConnected, { engineer: this.engineer })
+          : texts.statusConnectedAnonymous
         : {
             idle: texts.statusIdle,
             starting: texts.statusStarting,
