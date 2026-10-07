@@ -584,3 +584,30 @@ func (h *RoutingHandler) EndByTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, completedToResponse(result))
 }
+
+// openChatResponse is FindOpenChat's response. OpenChat is null when the
+// customer has no open chat for the project.
+type openChatResponse struct {
+	OpenChat *router.OpenChat `json:"openChat"`
+}
+
+// FindOpenChat handles GET /route/open-chat?customerEmail=&projectId=,
+// returning the customer's chat that has not ended yet, if any.
+func (h *RoutingHandler) FindOpenChat(w http.ResponseWriter, r *http.Request) {
+	customerEmail := r.URL.Query().Get("customerEmail")
+	projectID := r.URL.Query().Get("projectId")
+	if customerEmail == "" || projectID == "" {
+		writeError(w, http.StatusBadRequest, "customerEmail and projectId are required.")
+		return
+	}
+	chat, found, err := h.router.FindOpenChat(r.Context(), customerEmail, projectID)
+	if err != nil {
+		writeStorageError(w, "open-chat", err)
+		return
+	}
+	resp := openChatResponse{}
+	if found {
+		resp.OpenChat = &chat
+	}
+	writeJSON(w, http.StatusOK, resp)
+}

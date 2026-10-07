@@ -399,3 +399,37 @@ func (r *Router) DebugWorkItem(ctx context.Context, caseID string) (WorkItemDeta
 	}
 	return detail, rows.Err()
 }
+
+// OpenChat is a customer's chat that has not ended yet.
+type OpenChat struct {
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId"`
+	// Accepted is true once the assigned engineer has accepted the chat.
+	Accepted bool `json:"accepted"`
+	// AssigneeID is the engineer the chat is assigned to, if any.
+	AssigneeID string `json:"assigneeId,omitempty"`
+}
+
+// FindOpenChat returns customerEmail's open chat for projectID, using the
+// same key as the duplicate-open-chat check. found is false when there is
+// none.
+func (r *Router) FindOpenChat(ctx context.Context, customerEmail, projectID string) (chat OpenChat, found bool, err error) {
+	var acceptedAt *time.Time
+	err = r.db.QueryRow(ctx, `
+		SELECT case_id, conversation_id, accepted_at, COALESCE(assignee_id, '')
+		FROM chat_conversation
+		WHERE session_ended_at IS NULL
+		  AND case_info ->> 'customerEmail' = $1
+		  AND case_info ->> 'projectId' = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, customerEmail, projectID).Scan(&chat.CaseID, &chat.ConversationID, &acceptedAt, &chat.AssigneeID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return OpenChat{}, false, nil
+	case err != nil:
+		return OpenChat{}, false, fmt.Errorf("find open chat: %w", err)
+	}
+	chat.Accepted = acceptedAt != nil
+	return chat, true, nil
+}

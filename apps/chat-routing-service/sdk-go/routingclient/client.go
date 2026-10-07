@@ -501,6 +501,27 @@ func (c *Client) GetCaseInfo(ctx context.Context, caseID string) (CaseInfo, erro
 	return out, err
 }
 
+// OpenChat mirrors router.OpenChat.
+type OpenChat struct {
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId"`
+	Accepted       bool   `json:"accepted"`
+	AssigneeID     string `json:"assigneeId,omitempty"`
+}
+
+// FindOpenChat calls GET /route/open-chat, returning customerEmail's chat
+// for projectID that has not ended yet, or nil when there is none.
+func (c *Client) FindOpenChat(ctx context.Context, customerEmail, projectID string) (*OpenChat, error) {
+	var out struct {
+		OpenChat *OpenChat `json:"openChat"`
+	}
+	q := url.Values{"customerEmail": {customerEmail}, "projectId": {projectID}}
+	if err := c.do(ctx, http.MethodGet, "/route/open-chat?"+q.Encode(), nil, &out, nil); err != nil {
+		return nil, err
+	}
+	return out.OpenChat, nil
+}
+
 // ConvertToCaseResult mirrors router.ConvertToCaseResult.
 type ConvertToCaseResult struct {
 	// AssignedCase is set when converting freed a slot that was immediately

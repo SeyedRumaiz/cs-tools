@@ -462,3 +462,62 @@ func TestAddComment_RejectsAfterSessionEnded(t *testing.T) {
 		}
 	}
 }
+
+func TestFindOpenChat_ReturnsTheCustomersChatUntilItEnds(t *testing.T) {
+	r, pool := newTestRouter(t)
+	ctx := context.Background()
+	userID := testUserID(t, r, pool, "find-open")
+	caseID := testCaseID(t, pool, "find-open")
+	email := "find-open-" + caseID + "@example.com"
+	projectID := "find-open-project-" + caseID
+
+	if _, found, err := r.FindOpenChat(ctx, email, projectID); err != nil || found {
+		t.Fatalf("before any chat: found=%v err=%v, want none", found, err)
+	}
+
+	ci := CaseInfo{
+		CaseID: caseID, ConversationID: "conv-" + caseID, Subject: "test",
+		CustomerEmail: email, ProjectID: projectID,
+	}
+	workItemFixture(t, r, pool, ci)
+
+	chat, found, err := r.FindOpenChat(ctx, email, projectID)
+	if err != nil || !found {
+		t.Fatalf("after CreateWorkItem: found=%v err=%v", found, err)
+	}
+	if chat.CaseID != caseID || chat.ConversationID != "conv-"+caseID || chat.Accepted {
+		t.Errorf("unexpected open chat before accept: %+v", chat)
+	}
+
+	if _, found, _ := r.FindOpenChat(ctx, email, projectID+"-other"); found {
+		t.Error("a chat for another project must not be returned")
+	}
+
+	caseInfoJSON, err := json.Marshal(ci)
+	if err != nil {
+		t.Fatalf("marshal case info: %v", err)
+	}
+	if err := r.withTx(ctx, func(tx pgx.Tx) error {
+		if _, err := insertQueueRow(ctx, tx, ci, caseInfoJSON, queueAssigned); err != nil {
+			return err
+		}
+		return assignCaseToEngineer(ctx, tx, userID, ci)
+	}); err != nil {
+		t.Fatalf("assign fixture: %v", err)
+	}
+	if res, err := r.Accept(ctx, userID, caseID); err != nil || !res.Applied {
+		t.Fatalf("Accept: %+v %v", res, err)
+	}
+
+	chat, found, err = r.FindOpenChat(ctx, email, projectID)
+	if err != nil || !found || !chat.Accepted || chat.AssigneeID != userID {
+		t.Fatalf("after accept: chat=%+v found=%v err=%v", chat, found, err)
+	}
+
+	if _, err := r.Completed(ctx, userID, caseID); err != nil {
+		t.Fatalf("Completed: %v", err)
+	}
+	if _, found, err := r.FindOpenChat(ctx, email, projectID); err != nil || found {
+		t.Fatalf("after the chat ended: found=%v err=%v, want none", found, err)
+	}
+}

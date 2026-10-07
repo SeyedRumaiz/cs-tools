@@ -105,6 +105,7 @@ func main() {
 	// stand-in persistence endpoints until real persistence lands
 	mux.HandleFunc("POST /route/workitem", h.CreateWorkItem)
 	mux.HandleFunc("POST /route/workitem/{caseId}/info", h.GetCaseInfo)
+	mux.HandleFunc("GET /route/open-chat", h.FindOpenChat)
 	mux.HandleFunc("POST /route/comment", h.AddComment)
 	mux.HandleFunc("GET /route/debug/workitem/{caseId}", h.DebugWorkItem)
 	mux.HandleFunc("GET /route/debug/state", h.DebugState)
