@@ -166,3 +166,32 @@ func (c *Client) CompleteByTenant(ctx context.Context, payload []byte) error {
 	}
 	return nil
 }
+
+// OpenChat mirrors csm-portal/backend's open-chat response entry.
+type OpenChat struct {
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId"`
+	Accepted       bool   `json:"accepted"`
+	EngineerEmail  string `json:"engineerEmail,omitempty"`
+}
+
+// FindOpenChat calls csm-portal/backend's GET /internal/chat/open-chat,
+// returning customerEmail's chat for projectID that has not ended yet, or nil
+// when there is none.
+func (c *Client) FindOpenChat(ctx context.Context, customerEmail, projectID string) (*OpenChat, error) {
+	q := url.Values{"customerEmail": {customerEmail}, "projectId": {projectID}}
+	body, status, err := c.m2m.Do(ctx, http.MethodGet, "/internal/chat/open-chat?"+q.Encode(), nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("csmchat: find open chat: %w", err)
+	}
+	if !m2mclient.Success(status) {
+		return nil, fmt.Errorf("csmchat: find open chat: upstream returned %d: %s", status, body)
+	}
+	var out struct {
+		OpenChat *OpenChat `json:"openChat"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("csmchat: find open chat: decode response: %w", err)
+	}
+	return out.OpenChat, nil
+}

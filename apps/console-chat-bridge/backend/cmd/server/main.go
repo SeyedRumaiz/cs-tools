@@ -193,6 +193,7 @@ func main() {
 		return middleware.TenantAuth()(middleware.RequireSubject(h))
 	}
 	mux.Handle("POST /v1/{tenant}/chats", v1Chain(chatsHandler.HandleEscalateV1))
+	mux.Handle("GET /v1/{tenant}/chats/current", v1Chain(chatsHandler.HandleCurrentChatV1))
 	mux.Handle("POST /v1/{tenant}/chats/{caseId}/messages", v1Chain(chatsHandler.HandleSendMessageV1))
 	mux.Handle("GET /v1/{tenant}/chats/{caseId}/events", v1Chain(chatsHandler.HandleStreamV1))
 	mux.Handle("GET /v1/{tenant}/chats/{caseId}/history", v1Chain(chatsHandler.HandleGetHistoryV1))

@@ -225,11 +225,7 @@ func (h *ChatsHandler) HandleEscalateV1(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	identity := middleware.IdentityFromContext(r.Context())
-	customerEmail := identity.Username
-	if customerEmail == "" {
-		customerEmail = identity.Subject
-	}
+	customerEmail := customerKey(r)
 	customerName := req.CustomerName
 	if customerName == "" {
 		customerName = customerEmail
@@ -342,11 +338,7 @@ func (h *ChatsHandler) HandleSendMessageV1(w http.ResponseWriter, r *http.Reques
 	}
 	customerEmail := rec.customerEmail
 	if customerEmail == "" {
-		identity := middleware.IdentityFromContext(r.Context())
-		customerEmail = identity.Username
-		if customerEmail == "" {
-			customerEmail = identity.Subject
-		}
+		customerEmail = customerKey(r)
 	}
 
 	payload, err := json.Marshal(customerMessageUpstreamBody{
@@ -512,4 +504,75 @@ func (h *ChatsHandler) HandleCompleteV1(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "session ended"})
+}
+
+// customerKey identifies the customer to csm-portal: the token's username
+// (or email), falling back to its subject. Starting a chat and finding the
+// open one must use the same key, because chat-routing-service matches open
+// chats on it.
+func customerKey(r *http.Request) string {
+	identity := middleware.IdentityFromContext(r.Context())
+	if identity.Username != "" {
+		return identity.Username
+	}
+	return identity.Subject
+}
+
+// v1CurrentChatResponse is GET /v1/{tenant}/chats/current's response.
+type v1CurrentChatResponse struct {
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId"`
+	// Status is "waiting" until an engineer accepts the chat, then "connected".
+	Status        string `json:"status"`
+	EngineerEmail string `json:"engineerEmail,omitempty"`
+}
+
+// HandleCurrentChatV1 handles GET /v1/{tenant}/chats/current: the caller's
+// chat in this tenant that has not ended yet, or 404 when there is none. It
+// lets a product resume a chat after a page reload or in another tab instead
+// of being refused a new one. Behind ResolveTenant, CORS, TenantAuth,
+// RequireSubject.
+func (h *ChatsHandler) HandleCurrentChatV1(w http.ResponseWriter, r *http.Request) {
+	t, ok := tenant.FromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "Internal error.")
+		return
+	}
+	subject := canonicalOwner(r)
+	if subject == "" {
+		writeError(w, http.StatusUnauthorized, "A user session is required for this action.")
+		return
+	}
+
+	customerEmail := customerKey(r)
+	chat, err := h.csm.FindOpenChat(r.Context(), customerEmail, t.ProjectID)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "v1 current chat: lookup failed", "tenant", t.Slug, "err", err)
+		writeError(w, http.StatusBadGateway, "Could not look up your chat right now. Please try again.")
+		return
+	}
+	if chat == nil {
+		writeError(w, http.StatusNotFound, "No open chat.")
+		return
+	}
+
+	h.mu.Lock()
+	h.cases[chat.CaseID] = caseRecord{
+		conversationID: chat.ConversationID,
+		customerEmail:  customerEmail,
+		tenantSlug:     t.Slug,
+		ownerSubject:   subject,
+	}
+	h.mu.Unlock()
+
+	status := "waiting"
+	if chat.Accepted {
+		status = "connected"
+	}
+	writeJSON(w, http.StatusOK, v1CurrentChatResponse{
+		CaseID:         chat.CaseID,
+		ConversationID: chat.ConversationID,
+		Status:         status,
+		EngineerEmail:  chat.EngineerEmail,
+	})
 }
