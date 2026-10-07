@@ -64,6 +64,16 @@ export interface StartChatResult {
  * supplies to startChat), which is why this is its own type rather than
  * reusing ChatMessage's narrower role union.
  */
+/** The caller's open chat, from {@link LiveChatClient.getCurrentChat}. */
+export interface LiveChatCurrentChat {
+  caseId: string;
+  conversationId: string;
+  /** "waiting" until an engineer accepts the chat, then "connected". */
+  status: "waiting" | "connected";
+  /** The assigned engineer's email, when the backend knows it. */
+  engineerEmail?: string;
+}
+
 export interface LiveChatHistoryMessage {
   role: "customer" | "assistant" | "engineer";
   content: string;
@@ -207,4 +217,11 @@ export interface LiveChatClient {
    * forward from when it opens.
    */
   getHistory(caseId: string): Promise<LiveChatHistoryMessage[]>;
+
+  /**
+   * Returns the caller's chat in this tenant that has not ended yet, or null
+   * when there is none: GET /v1/{tenant}/chats/current. Used to resume a chat
+   * after a page reload or in another tab.
+   */
+  getCurrentChat(): Promise<LiveChatCurrentChat | null>;
 }

@@ -182,6 +182,29 @@ calling `unsubscribe()` — the two are independent: `unsubscribe()` only
 stops *your side* from listening, it does not tell the backend the chat is
 over. See "Unsubscribe lifecycle" below for the ordering that matters.
 
+### `client.getCurrentChat()`
+
+```ts
+getCurrentChat(): Promise<LiveChatCurrentChat | null>;
+
+interface LiveChatCurrentChat {
+  caseId: string;
+  conversationId: string;
+  /** "waiting" until an engineer accepts the chat, then "connected". */
+  status: "waiting" | "connected";
+  /** The assigned engineer's email, when the backend knows it. */
+  engineerEmail?: string;
+}
+```
+
+`GET /v1/{tenant}/chats/current`. Returns the caller's chat in this tenant
+that has not ended yet, or `null` when there is none. Use it to resume a
+chat after a page reload or in another tab: a customer can have only one
+open chat per product, so starting a new one would fail with `409`. Combine
+it with `getHistory(caseId)` and `subscribe(caseId, ...)` to restore the
+transcript and keep listening. A `404` that is not the bridge's own JSON
+response (a bridge without this route) is thrown, not reported as `null`.
+
 ## Event types
 
 Delivered via `subscribe`'s `onEvent` callback, one variant per outcome —

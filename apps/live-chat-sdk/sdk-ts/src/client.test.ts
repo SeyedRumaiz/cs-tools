@@ -294,6 +294,39 @@ describe("getHistory", () => {
   });
 });
 
+describe("getCurrentChat", () => {
+  it("returns the open chat", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { caseId: "c1", conversationId: "conv1", status: "connected", engineerEmail: "e@x.com" })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const chat = await createLiveChatClient(baseConfig()).getCurrentChat();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://support.example.com/v1/my-product/chats/current",
+      expect.objectContaining({ method: "GET" })
+    );
+    expect(chat).toEqual({ caseId: "c1", conversationId: "conv1", status: "connected", engineerEmail: "e@x.com" });
+  });
+
+  it("returns null when there is no open chat", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(404, { error: "No open chat." })));
+    await expect(createLiveChatClient(baseConfig()).getCurrentChat()).resolves.toBeNull();
+  });
+
+  it("throws on a plain-text 404 from a bridge without this route", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("404 page not found", { status: 404 })));
+    await expect(createLiveChatClient(baseConfig()).getCurrentChat()).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("throws on other failures and on a malformed response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(502, { error: "down" })));
+    await expect(createLiveChatClient(baseConfig()).getCurrentChat()).rejects.toMatchObject({ status: 502 });
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(200, { caseId: "c1", status: "maybe" })));
+    await expect(createLiveChatClient(baseConfig()).getCurrentChat()).rejects.toBeInstanceOf(LiveChatError);
+  });
+});
+
 describe("URL encoding", () => {
   it("URL-encodes the tenant segment", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(202, { caseId: "c1", conversationId: "c1" }));

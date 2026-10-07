@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   LiveChatClient,
   LiveChatClientConfig,
+  LiveChatCurrentChat,
   LiveChatEvent,
   LiveChatHistoryMessage,
   StartChatRequest,
@@ -221,6 +222,37 @@ async function getHistory(config: LiveChatClientConfig, caseId: string): Promise
   return parseHistoryMessages(raw);
 }
 
+function parseCurrentChat(raw: unknown): LiveChatCurrentChat {
+  if (
+    !isRecord(raw) ||
+    typeof raw.caseId !== "string" ||
+    raw.caseId === "" ||
+    typeof raw.conversationId !== "string" ||
+    (raw.status !== "waiting" && raw.status !== "connected")
+  ) {
+    throw new LiveChatError("The server returned an unexpected response looking up the open chat.");
+  }
+  return {
+    caseId: raw.caseId,
+    conversationId: raw.conversationId,
+    status: raw.status,
+    engineerEmail: typeof raw.engineerEmail === "string" && raw.engineerEmail !== "" ? raw.engineerEmail : undefined
+  };
+}
+
+async function getCurrentChat(config: LiveChatClientConfig): Promise<LiveChatCurrentChat | null> {
+  try {
+    return parseCurrentChat(await getJson(config, `${chatsUrl(config)}/current`));
+  } catch (err) {
+    // Only the bridge's own JSON 404 means "no open chat"; a plain-text 404
+    // means a bridge too old to have this route, which must not read as one.
+    if (err instanceof LiveChatError && err.status === 404 && err.details !== undefined) {
+      return null;
+    }
+    throw err;
+  }
+}
+
 /** Creates a {@link LiveChatClient} bound to config. Validates baseUrl/tenant
  * once, up front. getAccessToken/requestTransport/streamTransport are
  * validated lazily instead, by the calls that actually need them — a
@@ -242,6 +274,7 @@ export function createLiveChatClient(config: LiveChatClientConfig): LiveChatClie
     subscribe: (caseId, onEvent) => subscribe(config, caseId, onEvent),
     sendMessage: (caseId, message) => sendMessage(config, caseId, message),
     completeChat: (caseId) => completeChat(config, caseId),
-    getHistory: (caseId) => getHistory(config, caseId)
+    getHistory: (caseId) => getHistory(config, caseId),
+    getCurrentChat: () => getCurrentChat(config)
   };
 }
