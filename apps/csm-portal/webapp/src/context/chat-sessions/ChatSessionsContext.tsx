@@ -44,6 +44,7 @@ import {
 } from "@features/csm-chat/api/useEngineerStatus";
 import type { ChatAlertEvent, PriorMessage } from "@features/csm-chat/types/chatAlerts";
 import { useLiveChatAlertSignals } from "@hooks/useLiveChatAlertSignals";
+import { acceptedSessionMessages } from "./acceptedSessionMessages";
 
 export type LiveChatMessage = {
   id: string;
@@ -442,7 +443,7 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
 
   const accept = useCallback(
     async (alert: PendingAlert): Promise<boolean> => {
-      const { caseId, conversationId, customerName, priorMessages } = alert;
+      const { caseId, conversationId, customerName, message, priorMessages } = alert;
       // TEMPORARY diagnostic logging (2026-09 investigation). Remove once
       // root-caused.
       // eslint-disable-next-line no-console
@@ -456,19 +457,12 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
           `[ACCEPT-DEBUG] accept() mutateAsync RESOLVED caseId=${caseId} kindAtResolve=${casesByCaseIdRef.current[caseId]?.kind} t=${new Date().toISOString()}`,
         );
         // Seed the new session with the customer's prior AI-chatbot
-        // (Novera) transcript, if any, so the engineer opens the chat
-        // already knowing what the customer asked -- see PendingAlert.
-        // priorMessages and ActiveSession.priorMessageCount. This is the
-        // pre-acceptance escalation-time snapshot (see ChatAlertEvent.
-        // priorMessages's own doc comment), so m.role is only ever
-        // "customer"/"assistant" here in practice -- no engineer was
-        // involved yet -- but mapped directly (not narrowed to those two)
-        // to match PriorMessage's real three-value type.
-        const seededMessages: LiveChatMessage[] = (priorMessages ?? []).map((m, i) => ({
-          id: `prior-${caseId}-${i}`,
-          from: m.role,
-          text: m.content,
-        }));
+        // (Novera) transcript, if any, then the message they opened the
+        // chat with, so the engineer starts with the same transcript a
+        // page refresh would show. priorMessageCount covers only the AI
+        // part, so the "Live chat started" divider sits before the opening
+        // message.
+        const seededMessages = acceptedSessionMessages(caseId, priorMessages, message);
         setCasesByCaseId((current) => {
           // eslint-disable-next-line no-console
           console.log(
@@ -482,7 +476,7 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
               conversationId,
               customerName,
               messages: seededMessages,
-              priorMessageCount: seededMessages.length,
+              priorMessageCount: priorMessages?.length ?? 0,
             },
           };
         });
