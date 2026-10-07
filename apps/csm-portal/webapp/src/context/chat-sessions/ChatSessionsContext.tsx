@@ -22,7 +22,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type JSX,
   type ReactNode,
@@ -164,15 +163,6 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
   // instead of silently clearing the session.
   const [convertErrorByCaseId, setConvertErrorByCaseId] = useState<Record<string, string>>({});
 
-  // TEMPORARY diagnostic mirror for the "accepted but no chat appears"
-  // investigation (2026-09) -- lets handleAlert log the pre-event local
-  // state without a stale closure or adding casesByCaseId as a dependency
-  // of handleAlert (which would churn the useChatAlertsStream subscription).
-  // Remove once root-caused.
-  const casesByCaseIdRef = useRef<Record<string, CaseEntry>>(casesByCaseId);
-  useEffect(() => {
-    casesByCaseIdRef.current = casesByCaseId;
-  }, [casesByCaseId]);
 
   const acceptMutation = useAcceptChatSession();
   const sendMutation = useSendChatMessage();
@@ -329,14 +319,6 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
           break;
         }
         case "session_accepted": {
-          // TEMPORARY diagnostic logging (2026-09 "accepted but no chat
-          // appears" investigation) -- logs arrival time, the identity
-          // comparison this handler gates on, and the local entry's kind at
-          // the moment this event is processed. Remove once root-caused.
-          // eslint-disable-next-line no-console
-          console.log(
-            `[ACCEPT-DEBUG] SSE session_accepted ARRIVED caseId=${event.caseId} engineerEmail=${JSON.stringify(event.engineerEmail)} myEmail=${JSON.stringify(myEmail)} emailsMatch=${event.engineerEmail === myEmail} beforeKind=${event.caseId ? casesByCaseIdRef.current[event.caseId]?.kind : undefined} t=${new Date().toISOString()}`,
-          );
           // Someone else took this case -- our own accept already
           // transitions us to the active session locally (see accept
           // below), so only clear when a *different* engineer's email
@@ -345,10 +327,6 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
           setCasesByCaseId((current) => {
             const entry = current[event.caseId as string];
             if (!entry || entry.kind !== "pending") return current;
-            // eslint-disable-next-line no-console
-            console.log(
-              `[ACCEPT-DEBUG] SSE session_accepted DELETING pending entry caseId=${event.caseId} t=${new Date().toISOString()}`,
-            );
             const next = { ...current };
             delete next[event.caseId as string];
             return next;
@@ -378,14 +356,6 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
           break;
         }
         case "session_closed": {
-          // TEMPORARY diagnostic logging (2026-09 investigation) -- this
-          // handler deletes ANY entry (pending or session) unconditionally
-          // by caseId, so it's the other candidate mechanism for a
-          // just-accepted session vanishing. Remove once root-caused.
-          // eslint-disable-next-line no-console
-          console.log(
-            `[ACCEPT-DEBUG] SSE session_closed ARRIVED caseId=${event.caseId} engineerEmail=${JSON.stringify(event.engineerEmail)} beforeKind=${event.caseId ? casesByCaseIdRef.current[event.caseId]?.kind : undefined} t=${new Date().toISOString()}`,
-          );
           if (!event.caseId) return;
           setCasesByCaseId((current) => {
             const entry = current[event.caseId as string];
@@ -396,10 +366,6 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
             if (entry.kind === "session" && !event.engineerEmail) {
               return { ...current, [entry.caseId]: { ...entry, endedByCustomer: true } };
             }
-            // eslint-disable-next-line no-console
-            console.log(
-              `[ACCEPT-DEBUG] SSE session_closed DELETING entry caseId=${event.caseId} kind=${entry.kind} t=${new Date().toISOString()}`,
-            );
             const next = { ...current };
             delete next[event.caseId as string];
             return next;
@@ -444,18 +410,8 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
   const accept = useCallback(
     async (alert: PendingAlert): Promise<boolean> => {
       const { caseId, conversationId, customerName, message, priorMessages } = alert;
-      // TEMPORARY diagnostic logging (2026-09 investigation). Remove once
-      // root-caused.
-      // eslint-disable-next-line no-console
-      console.log(
-        `[ACCEPT-DEBUG] accept() CALLED caseId=${caseId} beforeKind=${casesByCaseIdRef.current[caseId]?.kind} t=${new Date().toISOString()}`,
-      );
       try {
         await acceptMutation.mutateAsync({ caseId, conversationId });
-        // eslint-disable-next-line no-console
-        console.log(
-          `[ACCEPT-DEBUG] accept() mutateAsync RESOLVED caseId=${caseId} kindAtResolve=${casesByCaseIdRef.current[caseId]?.kind} t=${new Date().toISOString()}`,
-        );
         // Seed the new session with the customer's prior AI-chatbot
         // (Novera) transcript, if any, then the message they opened the
         // chat with, so the engineer starts with the same transcript a
@@ -464,10 +420,6 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
         // message.
         const seededMessages = acceptedSessionMessages(caseId, priorMessages, message);
         setCasesByCaseId((current) => {
-          // eslint-disable-next-line no-console
-          console.log(
-            `[ACCEPT-DEBUG] accept() WRITING session entry caseId=${caseId} kindJustBeforeWrite=${current[caseId]?.kind} t=${new Date().toISOString()}`,
-          );
           return {
             ...current,
             [caseId]: {
@@ -480,14 +432,8 @@ export function ChatSessionsProvider({ children }: { children: ReactNode }): JSX
             },
           };
         });
-        // eslint-disable-next-line no-console
-        console.log(`[ACCEPT-DEBUG] accept() SUCCESS RETURN caseId=${caseId} t=${new Date().toISOString()}`);
         return true;
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.log(
-          `[ACCEPT-DEBUG] accept() CAUGHT ERROR caseId=${caseId} status=${err instanceof BackendApiError ? err.status : "n/a"} err=${String(err)} t=${new Date().toISOString()}`,
-        );
         // A 409 means the routing service's Accept check found this case
         // isn't pending-for-this-engineer anymore (see HandleAcceptSession)
         // -- it was declined, reassigned, or already accepted elsewhere
