@@ -5,7 +5,7 @@ A drop-in **"Chat with Support"** web component, `<wso2-live-chat>`, that connec
 - **Same code in every product.** Products differ only in a JSON configuration (colors, position, size, wording), never in code.
 - **Works with any framework** (React, Angular, Vue, plain HTML), because it is a standard custom element.
 - **Isolated styling.** It renders inside a shadow root, so the host page's CSS cannot break it and its CSS cannot leak out.
-- **Batteries included.** It bundles [`@wso2/live-chat-client`](../sdk-ts), so a product installs one package.
+- **One package.** It bundles [`@wso2/live-chat-client`](../sdk-ts), so a product installs nothing else.
 
 It talks to `console-chat-bridge`'s `/v1/{tenant}/...` API. Your product needs a tenant row on the bridge first; see `apps/console-chat-bridge/backend/docs/TENANT_ONBOARDING.md`.
 

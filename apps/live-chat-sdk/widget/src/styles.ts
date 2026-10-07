@@ -43,9 +43,9 @@ export function layoutVariables(layout: LiveChatLayout): Record<string, string> 
   };
 }
 
-// Everything lives inside the element's shadow root, so none of it can leak
-// into the host product's page and the host page's CSS cannot break it. The
-// host can still restyle named pieces through ::part(...).
+// Scoped to the element's shadow root: it does not affect the host page, and
+// the host page's CSS does not affect it. Hosts can still style named parts
+// with ::part().
 export const STYLES = `
 :host {
   all: initial;

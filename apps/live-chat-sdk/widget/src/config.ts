@@ -20,8 +20,8 @@ export type LiveChatPosition = "bottom-right" | "bottom-left";
 /** Size and placement. All lengths are CSS pixels. */
 export interface LiveChatLayout {
   position: LiveChatPosition;
-  /** Show the floating launcher button. Turn off when your product opens
-   * the chat from its own button by calling `element.open()`. */
+  /** Shows the floating launcher button. Set to false when the host product
+   * opens the chat itself with `open()`. */
   showLauncher: boolean;
   /** Distance from the side edge of the window. */
   offsetX: number;
@@ -52,8 +52,8 @@ export interface LiveChatTheme {
   shadow: string;
 }
 
-/** Every piece of text the widget shows. `{engineer}` and `{caseId}` are
- * replaced where noted. */
+/** Every string the widget shows. `{engineer}` and `{caseId}` are filled in
+ * where noted. */
 export interface LiveChatTexts {
   title: string;
   subtitle: string;
@@ -90,9 +90,9 @@ export interface LiveChatTexts {
 }
 
 /**
- * What a product supplies, typically as a JSON configuration file. Only
- * `bridgeUrl` and `tenant` are required; everything else falls back to the
- * defaults below, key by key.
+ * Configuration supplied by the host product, usually from a JSON file. Only
+ * `bridgeUrl` and `tenant` are required; any other key falls back to its
+ * default.
  */
 export interface LiveChatWidgetConfig {
   /** console-chat-bridge base URL, e.g. "https://support.example.com". */
@@ -173,7 +173,7 @@ export const DEFAULT_TEXTS: LiveChatTexts = {
 
 const DEFAULT_CONVERSATION_PREFIX = "live-chat-";
 
-/** Thrown when a configuration is missing something it cannot work without. */
+/** Thrown when a configuration is not an object or lacks `bridgeUrl` or `tenant`. */
 export class LiveChatConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -185,9 +185,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// Copies only known keys whose value has the same type as the default, so a
-// typo or a wrong type in a hand-written JSON file falls back to the
-// default instead of breaking the widget.
+// pick copies only known keys whose value has the default's type, so a typo
+// in a hand-written config cannot break the widget.
 function pick<T extends object>(defaults: T, overrides: unknown): T {
   const result = { ...defaults };
   if (!isRecord(overrides)) return result;

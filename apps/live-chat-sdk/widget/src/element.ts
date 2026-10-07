@@ -60,8 +60,7 @@ export interface LiveChatEndedDetail {
   transcript: LiveChatTranscriptEntry[];
 }
 
-/** Names of the DOM events the element dispatches (they bubble and cross
- * shadow roots). */
+/** DOM events dispatched by the element. All of them bubble and are composed. */
 export const LIVE_CHAT_EVENTS = {
   open: "live-chat-open",
   close: "live-chat-close",
@@ -77,11 +76,12 @@ const CHAT_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 
 /**
- * `<wso2-live-chat>`: a self-contained "Chat with an Engineer" widget.
+ * LiveChatWidgetElement implements `<wso2-live-chat>`, a "Chat with Support"
+ * widget for any host product.
  *
- * Configure it with the `config` property (an object) or attribute (JSON),
- * or point `config-src` at a JSON file. Set `getAccessToken` to the
- * product's own token function; it is never part of the JSON config.
+ * It is configured through the `config` property or attribute, or a JSON file
+ * named by `config-src`. `getAccessToken` must be set from code, because a
+ * function cannot be expressed in JSON.
  */
 export class LiveChatWidgetElement extends HTMLElement {
   static get observedAttributes(): string[] {
@@ -199,7 +199,7 @@ export class LiveChatWidgetElement extends HTMLElement {
     this.applyConfig(value);
   }
 
-  /** Where the current chat is. */
+  /** The current phase, case id and whether the panel is open. */
   get state(): { phase: LiveChatPhase; caseId: string | null; open: boolean } {
     return { phase: this.phase, caseId: this.caseId, open: this.isOpen };
   }
@@ -222,8 +222,8 @@ export class LiveChatWidgetElement extends HTMLElement {
   }
 
   disconnectedCallback(): void {
-    // Leaving the page stops listening but does not end the chat: the
-    // customer may come back to it, and ending it is an explicit action.
+    // Stop listening without ending the chat; ending it is always an
+    // explicit customer action.
     this.stopListening();
   }
 
@@ -238,7 +238,8 @@ export class LiveChatWidgetElement extends HTMLElement {
     }
   }
 
-  /** Opens the panel. With priorMessages, the next chat started carries them. */
+  /** Opens the panel. Any priorMessages are sent with the next chat the
+   * customer starts. */
   open(options: LiveChatOpenOptions = {}): void {
     if (options.priorMessages && (this.phase === "idle" || this.phase === "ended")) {
       if (this.phase === "ended") this.resetChat();
@@ -290,8 +291,6 @@ export class LiveChatWidgetElement extends HTMLElement {
     this.ui.input.focus();
   }
 
-  // ----- configuration -----
-
   private applyConfig(value: unknown): void {
     try {
       this.resolved = resolveConfig(value);
@@ -336,8 +335,6 @@ export class LiveChatWidgetElement extends HTMLElement {
     }
     return this.client;
   }
-
-  // ----- chat flow -----
 
   private async submit(): Promise<void> {
     const text = this.ui.input.value.trim();
@@ -410,7 +407,8 @@ export class LiveChatWidgetElement extends HTMLElement {
         break;
       case "assigned": {
         const engineer = event.engineerEmail || null;
-        if (this.phase === "connected" && engineer === this.engineer) break; // repeated event
+        // Ignore a repeated assigned event for the same engineer.
+        if (this.phase === "connected" && engineer === this.engineer) break;
         this.phase = "connected";
         this.engineer = engineer;
         this.transcript.push({ from: "system", text: format(texts.engineerJoined, { engineer: this.engineerName() }) });
@@ -442,8 +440,8 @@ export class LiveChatWidgetElement extends HTMLElement {
     this.render();
   }
 
-  // Events sent while disconnected are not replayed, so reload the
-  // transcript before listening again.
+  // The bridge does not replay events missed while disconnected, so the
+  // transcript is reloaded before listening again.
   private async reconnect(): Promise<void> {
     const client = this.getClient();
     if (!client || !this.caseId) return;
@@ -459,7 +457,8 @@ export class LiveChatWidgetElement extends HTMLElement {
       if (restored.length > 0) this.transcript = restored;
       if (restored.some((m) => m.from === "engineer")) this.phase = "connected";
     } catch {
-      // The live stream below still restores future messages.
+      // History is best effort; the new subscription still delivers later
+      // messages.
     }
     this.listen(this.caseId);
     this.render();
@@ -500,8 +499,6 @@ export class LiveChatWidgetElement extends HTMLElement {
   private emit(name: string, detail: object): void {
     this.dispatchEvent(new CustomEvent(name, { detail, bubbles: true, composed: true }));
   }
-
-  // ----- rendering -----
 
   private render(): void {
     const texts = this.texts();

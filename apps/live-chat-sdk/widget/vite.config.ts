@@ -1,7 +1,7 @@
 import { defineConfig } from "vitest/config";
 
-// Library build: one self-contained ES module (the SDK is bundled in), so a
-// product vendors or installs a single package and imports one file.
+// Builds a single ES module with the SDK bundled in, so a product installs
+// one package and imports one file.
 export default defineConfig({
   build: {
     lib: {
