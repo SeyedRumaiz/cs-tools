@@ -35,6 +35,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/csmchat"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/stream"
+	"github.com/wso2-open-operations/cs-tools/apps/live-chat-sdk/sdk-go/pushevents"
 )
 
 const maxBodyBytes = 64 << 10 // 64 KiB
@@ -370,11 +371,18 @@ func (h *ChatsHandler) HandleChatEvents(w http.ResponseWriter, r *http.Request) 
 	}
 	var evt struct {
 		CaseID string `json:"caseId"`
+		Type   string `json:"type"`
 	}
 	if err := json.Unmarshal(body, &evt); err != nil || evt.CaseID == "" {
 		writeError(w, http.StatusBadRequest, "caseId is required.")
 		return
 	}
-	h.hub.Publish(evt.CaseID, string(body))
+	// Messages are not replayed to a later subscriber: it reloads them from
+	// the case history, so a replay would duplicate the last one.
+	if pushevents.Type(evt.Type) == pushevents.TypeEngineerMessage {
+		h.hub.PublishLive(evt.CaseID, string(body))
+	} else {
+		h.hub.Publish(evt.CaseID, string(body))
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "delivered"})
 }

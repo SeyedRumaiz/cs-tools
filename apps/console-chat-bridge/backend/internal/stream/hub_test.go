@@ -93,3 +93,43 @@ func TestReplayDoesNotLeakAcrossCases(t *testing.T) {
 	default:
 	}
 }
+
+// TestPublishLiveIsNotReplayed: a live-only payload reaches current
+// subscribers, and a later subscriber still gets the last replayable one.
+func TestPublishLiveIsNotReplayed(t *testing.T) {
+	h := NewHub()
+
+	live, unsubscribeLive := h.Subscribe("case-4")
+	defer unsubscribeLive()
+
+	h.Publish("case-4", `{"type":"engineer_assigned"}`)
+	h.PublishLive("case-4", `{"type":"engineer_message","message":"hi"}`)
+
+	for _, want := range []string{`{"type":"engineer_assigned"}`, `{"type":"engineer_message","message":"hi"}`} {
+		select {
+		case got := <-live:
+			if got != want {
+				t.Fatalf("live subscriber got %q, want %q", got, want)
+			}
+		default:
+			t.Fatalf("live subscriber missed %q", want)
+		}
+	}
+
+	late, unsubscribeLate := h.Subscribe("case-4")
+	defer unsubscribeLate()
+
+	select {
+	case got := <-late:
+		if got != `{"type":"engineer_assigned"}` {
+			t.Fatalf("late subscriber got %q, want only the assigned event", got)
+		}
+	default:
+		t.Fatal("late subscriber should get the assigned event")
+	}
+	select {
+	case got := <-late:
+		t.Fatalf("late subscriber should get nothing else, got %q", got)
+	default:
+	}
+}

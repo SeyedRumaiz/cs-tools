@@ -91,6 +91,20 @@ func (h *Hub) Publish(caseID, payload string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.last[caseID] = payload
+	h.fanOut(caseID, payload)
+}
+
+// PublishLive fans payload out like Publish but does not keep it for the
+// next Subscribe. Use it for chat messages: a client that connects later
+// loads them from the case history, so replaying one would show it twice.
+func (h *Hub) PublishLive(caseID, payload string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.fanOut(caseID, payload)
+}
+
+// fanOut must be called with h.mu held.
+func (h *Hub) fanOut(caseID, payload string) {
 	for ch := range h.subs[caseID] {
 		select {
 		case ch <- payload:
