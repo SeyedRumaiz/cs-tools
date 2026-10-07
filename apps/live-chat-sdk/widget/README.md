@@ -16,14 +16,14 @@ Not yet published to a registry. Build a package file and vendor it into your pr
 ```bash
 cd apps/live-chat-sdk/widget
 pnpm install && pnpm run build && pnpm pack
-# -> wso2-live-chat-widget-0.1.2.tgz
+# -> wso2-live-chat-widget-0.1.3.tgz
 ```
 
 Copy it to `<your-app>/vendor/` and add it to your `package.json`:
 
 ```json
 "dependencies": {
-  "@wso2/live-chat-widget": "file:./vendor/wso2-live-chat-widget-0.1.2.tgz"
+  "@wso2/live-chat-widget": "file:./vendor/wso2-live-chat-widget-0.1.3.tgz"
 }
 ```
 
@@ -45,6 +45,24 @@ document.body.appendChild(chat);
 That is all that is required: a launcher button appears in the bottom-right corner and opens the chat.
 
 `getAccessToken` is set in code because a function cannot live in a JSON file. It is called before every request and should return the signed-in user's current access token.
+
+### When the page cannot read the token
+
+Some sign-in libraries keep the token away from page scripts, for example the Asgardeo SDK with web-worker storage. Such a product sets `transport` instead of `getAccessToken`, and the widget sends every request through the product's own HTTP client:
+
+```ts
+chat.transport = {
+  requestTransport: {
+    getJson: (url) => myHttp.get(url),          // resolve { status, text }, even for a non-2xx status
+    postJson: (url, body) => myHttp.post(url, body),
+  },
+  streamTransport: {
+    openStream: (url, signal) => myHttp.stream(url, { signal }), // resolve a ReadableStream<Uint8Array>
+  },
+};
+```
+
+The types are exported as `LiveChatTransport`, `LiveChatRequestTransport` and `LiveChatStreamTransport`.
 
 ### Ways to pass the configuration
 
@@ -137,7 +155,7 @@ chat.open({
 });
 ```
 
-It is sent with the next chat the customer starts (at most 20 messages, 4,000 bytes each, 32 KiB in total).
+It is sent with the next chat the customer starts. The widget keeps it within the bridge's limits (20 messages, 4,000 bytes each, 32 KiB in total) by dropping the oldest turns and shortening any longer message.
 
 ## Events
 

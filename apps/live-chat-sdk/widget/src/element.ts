@@ -76,6 +76,71 @@ export const LIVE_CHAT_EVENTS = {
 
 export type AccessTokenProvider = () => Promise<string> | string;
 
+/** A response from the host's HTTP client. A non-2xx status resolves; only a
+ * failure to get any response rejects. */
+export interface LiveChatTransportResponse {
+  status: number;
+  text: string;
+}
+
+/** Sends authenticated JSON requests through the host's HTTP client. */
+export interface LiveChatRequestTransport {
+  getJson(url: string): Promise<LiveChatTransportResponse>;
+  postJson(url: string, body: unknown): Promise<LiveChatTransportResponse>;
+}
+
+/** Opens the authenticated event stream through the host's HTTP client.
+ * Rejects when no usable stream can be opened; `signal` aborts it. */
+export interface LiveChatStreamTransport {
+  openStream(url: string, signal: AbortSignal): Promise<ReadableStream<Uint8Array>>;
+}
+
+/**
+ * Sends the widget's requests through the host product's own HTTP client
+ * instead of attaching a token, for products whose sign-in keeps the token
+ * away from page scripts (for example the Asgardeo SDK's web-worker storage).
+ */
+export interface LiveChatTransport {
+  requestTransport: LiveChatRequestTransport;
+  streamTransport: LiveChatStreamTransport;
+}
+
+// The limits console-chat-bridge enforces on priorMessages. Starting a chat
+// with more than this fails, so older turns are dropped and long ones cut.
+const MAX_PRIOR_MESSAGES = 20;
+const MAX_PRIOR_MESSAGE_BYTES = 4000;
+const MAX_PRIOR_TOTAL_BYTES = 32 * 1024;
+
+const utf8 = new TextEncoder();
+
+function truncateUtf8(text: string, maxBytes: number): string {
+  if (utf8.encode(text).length <= maxBytes) return text;
+  const ellipsis = "…";
+  const budget = maxBytes - utf8.encode(ellipsis).length;
+  let bytes = 0;
+  let end = 0;
+  for (const char of text) {
+    const size = utf8.encode(char).length;
+    if (bytes + size > budget) break;
+    bytes += size;
+    end += char.length;
+  }
+  return text.slice(0, end) + ellipsis;
+}
+
+// fitPriorMessages keeps the most recent messages that fit the bridge's limits.
+function fitPriorMessages(messages: LiveChatPriorMessage[]): LiveChatPriorMessage[] {
+  const kept: LiveChatPriorMessage[] = [];
+  let total = 0;
+  for (const message of messages.slice(-MAX_PRIOR_MESSAGES).reverse()) {
+    const content = truncateUtf8(message.content, MAX_PRIOR_MESSAGE_BYTES);
+    total += utf8.encode(content).length;
+    if (total > MAX_PRIOR_TOTAL_BYTES) break;
+    kept.unshift({ role: message.role, content });
+  }
+  return kept;
+}
+
 const CHAT_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 
@@ -84,8 +149,8 @@ const CHAT_ICON =
  * widget for any host product.
  *
  * It is configured through the `config` property or attribute, or a JSON file
- * named by `config-src`. `getAccessToken` must be set from code, because a
- * function cannot be expressed in JSON.
+ * named by `config-src`. `getAccessToken` (or `transport`) must be set from
+ * code, because a function cannot be expressed in JSON.
  */
 export class LiveChatWidgetElement extends HTMLElement {
   static get observedAttributes(): string[] {
@@ -97,6 +162,7 @@ export class LiveChatWidgetElement extends HTMLElement {
   createClient: (config: LiveChatClientConfig) => LiveChatClient = createLiveChatClient;
 
   private tokenProvider: AccessTokenProvider | null = null;
+  private customTransport: LiveChatTransport | null = null;
   private restoreStarted = false;
   private resolved: ResolvedLiveChatConfig | null = null;
   private configError: string | null = null;
@@ -200,9 +266,17 @@ export class LiveChatWidgetElement extends HTMLElement {
 
   set getAccessToken(provider: AccessTokenProvider | null) {
     this.tokenProvider = provider;
-    this.client = null;
-    this.restoreStarted = false;
-    this.maybeRestore();
+    this.resetClient();
+  }
+
+  /** The host product's own HTTP client; used instead of getAccessToken when set. */
+  get transport(): LiveChatTransport | null {
+    return this.customTransport;
+  }
+
+  set transport(value: LiveChatTransport | null) {
+    this.customTransport = value;
+    this.resetClient();
   }
 
   /** The configuration in use, after defaults were applied. */
@@ -265,9 +339,11 @@ export class LiveChatWidgetElement extends HTMLElement {
   open(options: LiveChatOpenOptions = {}): void {
     if (options.priorMessages && (this.phase === "idle" || this.phase === "ended")) {
       if (this.phase === "ended") this.resetChat();
-      this.priorMessages = options.priorMessages
-        .filter((m) => (m.role === "customer" || m.role === "assistant") && typeof m.content === "string" && m.content.trim() !== "")
-        .map((m) => ({ role: m.role, content: m.content }));
+      this.priorMessages = fitPriorMessages(
+        options.priorMessages.filter(
+          (m) => (m.role === "customer" || m.role === "assistant") && typeof m.content === "string" && m.content.trim() !== "",
+        ),
+      );
     }
     if (!this.isOpen) {
       this.isOpen = true;
@@ -350,16 +426,32 @@ export class LiveChatWidgetElement extends HTMLElement {
   }
 
   private getClient(): LiveChatClient | null {
-    if (!this.resolved || !this.getAccessToken) return null;
+    if (!this.resolved) return null;
     if (!this.client) {
-      const getAccessToken = this.getAccessToken;
-      this.client = this.createClient({
-        baseUrl: this.resolved.bridgeUrl,
-        tenant: this.resolved.tenant,
-        getAccessToken: () => getAccessToken(),
-      });
+      const base = { baseUrl: this.resolved.bridgeUrl, tenant: this.resolved.tenant };
+      const transport = this.customTransport;
+      const getAccessToken = this.tokenProvider;
+      if (transport) {
+        this.client = this.createClient({
+          ...base,
+          requestTransport: transport.requestTransport,
+          streamTransport: transport.streamTransport,
+        });
+      } else if (getAccessToken) {
+        this.client = this.createClient({ ...base, getAccessToken: () => getAccessToken() });
+      } else {
+        return null;
+      }
     }
     return this.client;
+  }
+
+  // A new token function or transport needs a new client, and may now be
+  // able to find an open chat that could not be looked up before.
+  private resetClient(): void {
+    this.client = null;
+    this.restoreStarted = false;
+    this.maybeRestore();
   }
 
   private async submit(): Promise<void> {

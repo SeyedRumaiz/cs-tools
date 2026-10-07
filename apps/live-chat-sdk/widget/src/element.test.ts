@@ -148,6 +148,34 @@ describe("<wso2-live-chat>", () => {
     expect(fake.client.sendMessage).toHaveBeenCalledWith("case-1", { content: "thanks" });
   });
 
+  it("keeps the AI context within the bridge's limits", async () => {
+    const { el, fake, type } = mount();
+    const turns = Array.from({ length: 25 }, (_, i) => ({ role: "customer" as const, content: `turn ${i}` }));
+    const long = "é".repeat(3000); // 6,000 bytes
+    el.open({ priorMessages: [...turns, { role: "assistant", content: long }] });
+    await type("help");
+
+    const sent = fake.client.startChat.mock.calls[0]![0].priorMessages as { content: string }[];
+    expect(sent).toHaveLength(20);
+    expect(sent[0]!.content).toBe("turn 6");
+    const last = sent[19]!.content;
+    expect(new TextEncoder().encode(last).length).toBeLessThanOrEqual(4000);
+    expect(last.endsWith("…")).toBe(true);
+    expect(last.startsWith("éé")).toBe(true);
+  });
+
+  it("drops the oldest AI turns once the total would exceed 32 KiB", async () => {
+    const { el, fake, type } = mount();
+    const turns = Array.from({ length: 10 }, (_, i) => ({ role: "assistant" as const, content: `${i}`.repeat(4000) }));
+    el.open({ priorMessages: turns });
+    await type("help");
+
+    const sent = fake.client.startChat.mock.calls[0]![0].priorMessages as { content: string }[];
+    expect(sent).toHaveLength(8);
+    expect(sent[0]!.content[0]).toBe("2");
+    expect(sent.reduce((n, m) => n + m.content.length, 0)).toBeLessThanOrEqual(32 * 1024);
+  });
+
   it("shows the end immediately when the engineer ends the chat", async () => {
     const { el, fake, q, type } = mount();
     const ended = vi.fn();
@@ -226,6 +254,29 @@ describe("<wso2-live-chat>", () => {
     el.open();
     await type("help");
     expect(q(".error span").textContent).toBe("Live chat is not configured.");
+  });
+
+  it("sends requests through the host's transport instead of a token", async () => {
+    const transport = {
+      requestTransport: { getJson: vi.fn(), postJson: vi.fn() },
+      streamTransport: { openStream: vi.fn() },
+    };
+    const { el, fake, type } = mount();
+    el.getAccessToken = null;
+    el.transport = transport;
+    await settle();
+    expect(el.createClient).toHaveBeenLastCalledWith({
+      baseUrl: "https://bridge.example",
+      tenant: "my-product",
+      requestTransport: transport.requestTransport,
+      streamTransport: transport.streamTransport,
+    });
+    expect(fake.client.getCurrentChat).toHaveBeenCalled();
+
+    el.open();
+    await type("help");
+    expect(fake.client.startChat).toHaveBeenCalled();
+    expect(el.state.phase).toBe("queued");
   });
 
   describe("resuming an open chat", () => {
