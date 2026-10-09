@@ -207,7 +207,7 @@ response (a bridge without this route) is thrown, not reported as `null`.
 
 ### AI assistant: `isAssistantAvailable()`, `subscribeAssistant(conversationId, onEvent)`, `askAssistant(conversationId, message)`
 
-When the bridge is configured with an AI assistant (Novera by default), a product can answer questions with it before offering an engineer. The caller names the conversation (any ID of letters, digits, `.`, `_`, `-`, at most 100) and keeps using it so the assistant sees the earlier turns. Open the stream before asking: answers are not replayed.
+When the bridge is configured with an AI assistant (Novera by default, or the product's own AI service; see the bridge's `docs/ASSISTANT_PROVIDERS.md`), a product can answer questions with it before offering an engineer. The caller names the conversation (any ID of letters, digits, `.`, `_`, `-`, at most 100) and keeps using it so the assistant sees the earlier turns. Open the stream before asking: answers are not replayed.
 
 ```ts
 if (await client.isAssistantAvailable()) {

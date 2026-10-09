@@ -133,7 +133,7 @@ Any CSS color or font value.
 
 ### `assistant`
 
-When `console-chat-bridge` has an AI assistant configured for the product (Novera by default), the panel opens with it: the customer asks questions and the answers stream in. **Chat with an Engineer** hands the conversation to a support engineer in the same panel, with the assistant turns as context, and the panel returns to the assistant when that chat ends. Without an assistant on the bridge, the panel is the engineer chat alone.
+When `console-chat-bridge` has an AI assistant configured for the product (Novera by default, or the product's own AI service; see the bridge's `docs/ASSISTANT_PROVIDERS.md`), the panel opens with it: the customer asks questions and the answers stream in. **Chat with an Engineer** hands the conversation to a support engineer in the same panel, with the assistant turns as context, and the panel returns to the assistant when that chat ends. Without an assistant on the bridge, the panel is the engineer chat alone.
 
 | Key | Default | Meaning |
 |---|---|---|

@@ -48,6 +48,8 @@ type Event struct {
 
 // Turn is one customer message to answer.
 type Turn struct {
+	// TenantSlug is the product asking.
+	TenantSlug string
 	// AccountID scopes the model's usage budget; see AccountID.
 	AccountID string
 	// ConversationID keeps the turns of one conversation together, so the

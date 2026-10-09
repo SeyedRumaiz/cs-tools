@@ -304,6 +304,12 @@ func EnvSCIMSecretLookup(slug string) string {
 	return os.Getenv("TENANT_" + envSlug(slug) + "_SCIM_CLIENT_SECRET")
 }
 
+// EnvSlug is slug in the upper snake case used in per-tenant environment
+// variable names (acme-corp becomes ACME_CORP).
+func EnvSlug(slug string) string {
+	return envSlug(slug)
+}
+
 func envSlug(slug string) string {
 	return strings.Map(func(r rune) rune {
 		switch {

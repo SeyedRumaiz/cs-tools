@@ -60,45 +60,38 @@ var assistantConversationRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 // transport need nothing new. Streams are keyed by the caller's subject,
 // so one user can never read another's conversation.
 type AssistantHandler struct {
-	provider assistant.Provider
-	hub      *stream.Hub
-	// disabled lists tenant slugs that opted out of the assistant.
-	disabled map[string]bool
+	// providerFor returns a tenant's assistant, or nil when it has none.
+	providerFor func(tenantSlug string) assistant.Provider
+	hub         *stream.Hub
 
 	mu   sync.Mutex
 	busy map[string]bool
 }
 
-// NewAssistantHandler builds an AssistantHandler. A nil provider turns the
-// assistant off for every tenant.
-func NewAssistantHandler(provider assistant.Provider, hub *stream.Hub, disabledTenants []string) *AssistantHandler {
-	disabled := map[string]bool{}
-	for _, slug := range disabledTenants {
-		if slug = strings.TrimSpace(slug); slug != "" {
-			disabled[slug] = true
-		}
-	}
-	return &AssistantHandler{provider: provider, hub: hub, disabled: disabled, busy: map[string]bool{}}
+// NewAssistantHandler builds an AssistantHandler.
+func NewAssistantHandler(providerFor func(tenantSlug string) assistant.Provider, hub *stream.Hub) *AssistantHandler {
+	return &AssistantHandler{providerFor: providerFor, hub: hub, busy: map[string]bool{}}
 }
 
-// assistantContext resolves the tenant and caller, writing an error and
-// returning ok=false when the assistant cannot serve them.
-func (h *AssistantHandler) assistantContext(w http.ResponseWriter, r *http.Request) (t *tenant.Tenant, subject string, ok bool) {
+// assistantContext resolves the tenant, caller and the tenant's assistant,
+// writing an error and returning ok=false when it cannot serve them.
+func (h *AssistantHandler) assistantContext(w http.ResponseWriter, r *http.Request) (t *tenant.Tenant, subject string, provider assistant.Provider, ok bool) {
 	t, ok = tenant.FromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "Internal error.")
-		return nil, "", false
+		return nil, "", nil, false
 	}
 	subject = canonicalOwner(r)
 	if subject == "" {
 		writeError(w, http.StatusUnauthorized, "A user session is required for this action.")
-		return nil, "", false
+		return nil, "", nil, false
 	}
-	if h.provider == nil || h.disabled[t.Slug] {
+	provider = h.providerFor(t.Slug)
+	if provider == nil {
 		writeError(w, http.StatusNotFound, "The assistant is not available for this product.")
-		return nil, "", false
+		return nil, "", nil, false
 	}
-	return t, subject, true
+	return t, subject, provider, true
 }
 
 // assistantStreamKey is the hub key for one user's conversation.
@@ -108,7 +101,7 @@ func assistantStreamKey(tenantSlug, subject, conversationID string) string {
 
 // HandleStatusV1 handles GET /v1/{tenant}/assistant.
 func (h *AssistantHandler) HandleStatusV1(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := h.assistantContext(w, r); !ok {
+	if _, _, _, ok := h.assistantContext(w, r); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"enabled": true})
@@ -116,7 +109,7 @@ func (h *AssistantHandler) HandleStatusV1(w http.ResponseWriter, r *http.Request
 
 // HandleEventsV1 handles GET /v1/{tenant}/assistant/{conversationId}/events.
 func (h *AssistantHandler) HandleEventsV1(w http.ResponseWriter, r *http.Request) {
-	t, subject, ok := h.assistantContext(w, r)
+	t, subject, _, ok := h.assistantContext(w, r)
 	if !ok {
 		return
 	}
@@ -165,7 +158,7 @@ type assistantMessageRequest struct {
 // It answers 202 at once; the answer arrives on the events route. A
 // conversation answers one question at a time (409 while busy).
 func (h *AssistantHandler) HandleMessageV1(w http.ResponseWriter, r *http.Request) {
-	t, subject, ok := h.assistantContext(w, r)
+	t, subject, provider, ok := h.assistantContext(w, r)
 	if !ok {
 		return
 	}
@@ -200,6 +193,7 @@ func (h *AssistantHandler) HandleMessageV1(w http.ResponseWriter, r *http.Reques
 	h.mu.Unlock()
 
 	turn := assistant.Turn{
+		TenantSlug:     t.Slug,
 		AccountID:      assistant.AccountID(t.Slug, subject),
 		ConversationID: conversationID,
 		Message:        req.Message,
@@ -213,7 +207,7 @@ func (h *AssistantHandler) HandleMessageV1(w http.ResponseWriter, r *http.Reques
 			h.mu.Unlock()
 		}()
 		h.waitForSubscriber(ctx, key)
-		h.provider.Answer(ctx, turn, func(evt assistant.Event) {
+		provider.Answer(ctx, turn, func(evt assistant.Event) {
 			payload, err := json.Marshal(evt)
 			if err != nil {
 				slog.Error("assistant: encode event", "err", err)

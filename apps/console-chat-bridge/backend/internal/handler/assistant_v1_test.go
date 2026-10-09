@@ -32,6 +32,11 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/tokenvalidator"
 )
 
+// only gives every tenant the same provider.
+func only(p assistant.Provider) func(string) assistant.Provider {
+	return func(string) assistant.Provider { return p }
+}
+
 // blockingProvider answers only when released.
 type blockingProvider struct{ release chan struct{} }
 
@@ -57,7 +62,7 @@ func assistantRequest(t *testing.T, h http.HandlerFunc, method, path, body, subj
 
 func TestAssistant_AnswersOnTheUsersOwnStream(t *testing.T) {
 	hub := stream.NewHub()
-	h := NewAssistantHandler(assistant.Mock{}, hub, nil)
+	h := NewAssistantHandler(only(assistant.Mock{}), hub)
 
 	mine, unsubMine := hub.SubscribeSize(assistantStreamKey("devant", "sub-1", "conv-1"), assistantStreamBuffer)
 	defer unsubMine()
@@ -94,7 +99,7 @@ func TestAssistant_AnswersOnTheUsersOwnStream(t *testing.T) {
 
 func TestAssistant_OneQuestionAtATime(t *testing.T) {
 	release := make(chan struct{})
-	h := NewAssistantHandler(blockingProvider{release: release}, stream.NewHub(), nil)
+	h := NewAssistantHandler(only(blockingProvider{release: release}), stream.NewHub())
 	ask := func() int {
 		return assistantRequest(t, h.HandleMessageV1, http.MethodPost, "/v1/devant/assistant/conv-1/messages",
 			`{"message":"hi"}`, "sub-1", map[string]string{"conversationId": "conv-1"}).Code
@@ -116,7 +121,7 @@ func TestAssistant_OneQuestionAtATime(t *testing.T) {
 }
 
 func TestAssistant_RejectsBadInput(t *testing.T) {
-	h := NewAssistantHandler(assistant.Mock{}, stream.NewHub(), nil)
+	h := NewAssistantHandler(only(assistant.Mock{}), stream.NewHub())
 	cases := []struct {
 		name, conv, body string
 	}{
@@ -136,15 +141,20 @@ func TestAssistant_RejectsBadInput(t *testing.T) {
 
 func TestAssistant_OffOrOptedOutIsNotFound(t *testing.T) {
 	for name, h := range map[string]*AssistantHandler{
-		"no provider": NewAssistantHandler(nil, stream.NewHub(), nil),
-		"opted out":   NewAssistantHandler(assistant.Mock{}, stream.NewHub(), []string{"devant"}),
+		"no provider": NewAssistantHandler(only(nil), stream.NewHub()),
+		"this tenant has none": NewAssistantHandler(func(slug string) assistant.Provider {
+			if slug == "devant" {
+				return nil
+			}
+			return assistant.Mock{}
+		}, stream.NewHub()),
 	} {
 		w := assistantRequest(t, h.HandleStatusV1, http.MethodGet, "/v1/devant/assistant", "", "sub-1", nil)
 		if w.Code != http.StatusNotFound {
 			t.Errorf("%s: status %d, want 404", name, w.Code)
 		}
 	}
-	w := assistantRequest(t, NewAssistantHandler(assistant.Mock{}, stream.NewHub(), nil).HandleStatusV1,
+	w := assistantRequest(t, NewAssistantHandler(only(assistant.Mock{}), stream.NewHub()).HandleStatusV1,
 		http.MethodGet, "/v1/devant/assistant", "", "sub-1", nil)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"enabled":true`) {
 		t.Errorf("enabled: status %d body %s", w.Code, w.Body.String())
@@ -153,7 +163,7 @@ func TestAssistant_OffOrOptedOutIsNotFound(t *testing.T) {
 
 func TestAssistant_WaitsForTheStreamBeforeAnswering(t *testing.T) {
 	hub := stream.NewHub()
-	h := NewAssistantHandler(assistant.Mock{}, hub, nil)
+	h := NewAssistantHandler(only(assistant.Mock{}), hub)
 	w := assistantRequest(t, h.HandleMessageV1, http.MethodPost, "/v1/devant/assistant/conv-1/messages",
 		`{"message":"hi"}`, "sub-1", map[string]string{"conversationId": "conv-1"})
 	if w.Code != http.StatusAccepted {
