@@ -17,11 +17,13 @@
 import { defineLiveChatWidget } from "./element.js";
 
 export {
+  DEFAULT_ASSISTANT,
   DEFAULT_LAYOUT,
   DEFAULT_TEXTS,
   DEFAULT_THEME,
   LiveChatConfigError,
   resolveConfig,
+  type LiveChatAssistant,
   type LiveChatLayout,
   type LiveChatPosition,
   type LiveChatTexts,

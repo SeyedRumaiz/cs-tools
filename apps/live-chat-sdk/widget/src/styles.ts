@@ -156,6 +156,33 @@ export const STYLES = `
   background: var(--lc-surface);
   color: var(--lc-text);
 }
+.message[data-from="assistant"] {
+  align-self: flex-start;
+  background: var(--lc-surface);
+  color: var(--lc-text);
+  white-space: normal;
+}
+.message[data-from="assistant"] > :first-child { margin-top: 0; }
+.message[data-from="assistant"] > :last-child { margin-bottom: 0; }
+.message[data-from="assistant"] p, .message[data-from="assistant"] ul,
+.message[data-from="assistant"] ol, .message[data-from="assistant"] pre { margin: 0 0 8px; }
+.message[data-from="assistant"] ul, .message[data-from="assistant"] ol { padding-left: 20px; }
+.message[data-from="assistant"] code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  background: color-mix(in srgb, var(--lc-text) 8%, transparent);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.message[data-from="assistant"] pre {
+  overflow-x: auto;
+  padding: 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--lc-text) 8%, transparent);
+}
+.message[data-from="assistant"] pre code { background: none; padding: 0; }
+.message[data-from="assistant"] a { color: var(--lc-primary); }
+.thinking { margin: 0; color: var(--lc-muted); font-style: italic; font-size: 0.9em; }
 .message[data-from="system"] {
   align-self: center;
   max-width: 100%;

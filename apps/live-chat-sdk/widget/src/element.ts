@@ -20,6 +20,7 @@ import {
   type LiveChatClient,
   type LiveChatClientConfig,
   type LiveChatCurrentChat,
+  type LiveChatAssistantEvent,
   type LiveChatEvent,
 } from "@wso2/live-chat-client";
 import {
@@ -30,6 +31,7 @@ import {
   type LiveChatTexts,
   type ResolvedLiveChatConfig,
 } from "./config.js";
+import { renderMarkdown } from "./markdown.js";
 import { layoutVariables, STYLES, THEME_VARIABLES } from "./styles.js";
 
 /** One earlier AI-assistant turn handed to the engineer as context. */
@@ -45,13 +47,14 @@ export interface LiveChatOpenOptions {
 
 export type LiveChatPhase = "idle" | "starting" | "queued" | "connected" | "ended";
 
-/** Why a chat ended, as reported in the `live-chat-ended` event. "unknown"
+/** Why a chat ended, as reported in the `live-chat-ended` event. "inactive"
+ * means it was ended because the engineer was away too long; "unknown"
  * means it ended while the page was not listening, for example during a
  * reload. */
-export type LiveChatEndReason = "customer" | "engineer" | "converted" | "expired" | "unknown";
+export type LiveChatEndReason = "customer" | "engineer" | "inactive" | "converted" | "expired" | "unknown";
 
 export interface LiveChatTranscriptEntry {
-  from: "customer" | "engineer" | "system";
+  from: "customer" | "assistant" | "engineer" | "system";
   text: string;
 }
 
@@ -177,6 +180,16 @@ export class LiveChatWidgetElement extends HTMLElement {
   private priorMessages: LiveChatPriorMessage[] = [];
   private error: { text: string; canReconnect: boolean } | null = null;
 
+  // The AI assistant, when console-chat-bridge has one for this product.
+  private assistantAvailable = false;
+  private assistantConversationId: string | null = null;
+  private assistantUnsubscribe: (() => void) | null = null;
+  /** The answer being streamed into the transcript. */
+  private assistantPending: LiveChatTranscriptEntry | null = null;
+  /** Progress shown while an answer is prepared; null when not answering. */
+  private assistantStatus: string | null = null;
+  private assistantFailures = 0;
+
   private readonly root: ShadowRoot;
   private readonly ui: {
     launcher: HTMLButtonElement;
@@ -196,6 +209,7 @@ export class LiveChatWidgetElement extends HTMLElement {
     actions: HTMLDivElement;
     end: HTMLButtonElement;
     newChat: HTMLButtonElement;
+    engineer: HTMLButtonElement;
   };
 
   constructor() {
@@ -219,6 +233,7 @@ export class LiveChatWidgetElement extends HTMLElement {
           <button class="button send" type="button"></button>
         </div>
         <div class="actions" part="actions">
+          <button class="button secondary engineer" type="button"></button>
           <button class="button secondary end" type="button"></button>
           <button class="button new" type="button"></button>
         </div>
@@ -242,6 +257,7 @@ export class LiveChatWidgetElement extends HTMLElement {
       actions: q(".actions"),
       end: q(".end"),
       newChat: q(".new"),
+      engineer: q(".engineer"),
     };
 
     this.ui.launcher.addEventListener("click", () => this.toggle());
@@ -249,6 +265,7 @@ export class LiveChatWidgetElement extends HTMLElement {
     this.ui.send.addEventListener("click", () => void this.submit());
     this.ui.end.addEventListener("click", () => void this.endChat());
     this.ui.newChat.addEventListener("click", () => this.startNewChat());
+    this.ui.engineer.addEventListener("click", () => void this.escalate());
     this.ui.reconnect.addEventListener("click", () => void this.reconnect());
     this.ui.input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -321,6 +338,7 @@ export class LiveChatWidgetElement extends HTMLElement {
     // Stop listening without ending the chat; ending it is always an
     // explicit customer action.
     this.stopListening();
+    this.stopAssistant();
   }
 
   /** Fetches a JSON configuration file and applies it. */
@@ -457,11 +475,14 @@ export class LiveChatWidgetElement extends HTMLElement {
   private async submit(): Promise<void> {
     const text = this.ui.input.value.trim();
     if (!text) return;
-    if (this.phase === "idle") await this.start(text);
-    else if (this.phase === "queued" || this.phase === "connected") await this.send(text);
+    if (this.phase === "queued" || this.phase === "connected") await this.send(text);
+    else if (this.assistantMode()) await this.ask(text);
+    else if (this.phase === "idle") await this.start(text);
   }
 
-  private async start(message: string): Promise<void> {
+  // showAsCustomer is false when the opening message is sent on the
+  // customer's behalf, as when they ask for an engineer from the assistant.
+  private async start(message: string, showAsCustomer = true): Promise<void> {
     const client = this.getClient();
     if (!client || !this.resolved) {
       this.showError(this.texts().notConfigured, false);
@@ -478,8 +499,11 @@ export class LiveChatWidgetElement extends HTMLElement {
       });
       this.caseId = result.caseId;
       this.phase = "queued";
-      this.transcript.push({ from: "customer", text: message });
-      this.ui.input.value = "";
+      this.priorMessages = [];
+      if (showAsCustomer) {
+        this.transcript.push({ from: "customer", text: message });
+        this.ui.input.value = "";
+      }
       this.listen(result.caseId);
       this.emit(LIVE_CHAT_EVENTS.started, { caseId: result.caseId });
     } catch (err) {
@@ -542,10 +566,19 @@ export class LiveChatWidgetElement extends HTMLElement {
         if (this.phase === "queued") this.phase = "connected";
         this.transcript.push({ from: "engineer", text: event.content });
         break;
-      case "disconnected":
-        this.transcript.push({ from: "system", text: texts.endedByEngineer });
-        this.finish("engineer");
+      case "disconnected": {
+        const inactive = event.reason === "inactive";
+        this.transcript.push({ from: "system", text: inactive ? texts.endedInactive : texts.endedByEngineer });
+        this.finish(inactive ? "inactive" : "engineer");
         return;
+      }
+      case "engineerStatus": {
+        const text = { away: texts.engineerAway, back: texts.engineerBack, busy: texts.engineerBusy }[event.status];
+        if (this.phase === "connected" && this.transcript.at(-1)?.text !== text) {
+          this.transcript.push({ from: "system", text });
+        }
+        break;
+      }
       case "converted":
         this.transcript.push({ from: "system", text: format(texts.convertedToCase, { caseId: event.entityCaseId }) });
         this.finish("converted", event.entityCaseId);
@@ -586,14 +619,17 @@ export class LiveChatWidgetElement extends HTMLElement {
     const client = this.getClient();
     if (!client) return;
     this.restoreStarted = true;
-    client.getCurrentChat().then(
-      (chat) => {
-        if (chat && this.phase === "idle") void this.resume(chat, this.texts().chatResumed, this.wasOpen());
-      },
-      () => {
+    void (async () => {
+      await this.checkAssistant(client);
+      let chat: LiveChatCurrentChat | null;
+      try {
+        chat = await client.getCurrentChat();
+      } catch {
         // Best effort: starting a chat later still recovers an open one.
-      },
-    );
+        return;
+      }
+      if (chat && this.phase === "idle") await this.resume(chat, this.texts().chatResumed, this.wasOpen());
+    })();
   }
 
   // After a 409 on start: reopen the chat the server says is already open.
@@ -652,18 +688,186 @@ export class LiveChatWidgetElement extends HTMLElement {
   }
 
   // History also holds the AI-assistant conversation handed over when the
-  // chat started; only what follows it belongs in this transcript.
+  // chat started. With the assistant in this panel it is kept, above a
+  // divider; otherwise only what follows it belongs in this transcript.
   private async loadTranscript(caseId: string): Promise<LiveChatTranscriptEntry[]> {
     const client = this.getClient();
     if (!client) return [];
     try {
       const history = await client.getHistory(caseId);
-      const live = history.slice(history.map((m) => m.role).lastIndexOf("assistant") + 1);
-      return live.flatMap((m): LiveChatTranscriptEntry[] =>
-        m.role === "customer" || m.role === "engineer" ? [{ from: m.role, text: m.content }] : [],
-      );
+      const aiEnd = history.map((m) => m.role).lastIndexOf("assistant") + 1;
+      const entries = (from: number, to?: number): LiveChatTranscriptEntry[] =>
+        history.slice(from, to).flatMap((m): LiveChatTranscriptEntry[] =>
+          m.role === "customer" || m.role === "engineer" || (m.role === "assistant" && this.assistantMode())
+            ? [{ from: m.role, text: m.content }]
+            : [],
+        );
+      if (!this.assistantMode() || aiEnd === 0) return entries(aiEnd);
+      return [...entries(0, aiEnd), { from: "system", text: this.texts().assistantDivider }, ...entries(aiEnd)];
     } catch {
       return [];
+    }
+  }
+
+  // The assistant conversation is in this panel when the bridge has one for
+  // this product and the configuration has not turned it off.
+  private assistantMode(): boolean {
+    return this.assistantAvailable && (this.resolved?.assistant.enabled ?? false);
+  }
+
+  private async checkAssistant(client: LiveChatClient): Promise<void> {
+    if (!this.resolved?.assistant.enabled) return;
+    try {
+      this.assistantAvailable = await client.isAssistantAvailable();
+    } catch {
+      this.assistantAvailable = false;
+    }
+    if (this.assistantMode() && this.phase === "idle" && this.transcript.length === 0) this.restoreAssistant();
+    this.render();
+  }
+
+  // Sends a question to the assistant; the answer streams into the
+  // transcript through onAssistantEvent.
+  private async ask(text: string): Promise<void> {
+    const client = this.getClient();
+    if (!client || !this.resolved || this.assistantStatus !== null) return;
+    if (this.phase === "ended") this.phase = "idle";
+    if (!this.assistantConversationId) {
+      this.assistantConversationId = `${this.resolved.conversationIdPrefix}ai-${Date.now()}`;
+    }
+    const conversationId = this.assistantConversationId;
+    if (!this.assistantUnsubscribe) {
+      this.assistantUnsubscribe = client.subscribeAssistant(conversationId, (e) => this.onAssistantEvent(e));
+    }
+    this.ui.input.value = "";
+    this.error = null;
+    this.transcript.push({ from: "customer", text });
+    this.assistantPending = { from: "assistant", text: "" };
+    this.transcript.push(this.assistantPending);
+    this.assistantStatus = this.texts().assistantThinking;
+    this.render();
+    try {
+      await client.askAssistant(conversationId, text);
+    } catch (err) {
+      this.answerFailed(err instanceof LiveChatError && err.message ? err.message : this.texts().assistantFailed);
+    }
+  }
+
+  private onAssistantEvent(event: LiveChatAssistantEvent): void {
+    const pending = this.assistantPending;
+    switch (event.type) {
+      case "status":
+        if (pending) this.assistantStatus = event.text;
+        break;
+      case "token":
+        if (!pending) return;
+        pending.text += event.text;
+        this.assistantStatus = "";
+        break;
+      case "done":
+        if (!pending) return;
+        pending.text = event.text || pending.text;
+        this.assistantPending = null;
+        this.assistantStatus = null;
+        this.assistantFailures = 0;
+        this.persistAssistant();
+        break;
+      case "error":
+        this.answerFailed(event.text || this.texts().assistantFailed);
+        return;
+      case "disconnected":
+        this.assistantUnsubscribe = null;
+        if (pending) this.answerFailed(this.texts().connectionLost);
+        return;
+    }
+    this.render();
+  }
+
+  private answerFailed(text: string): void {
+    const pending = this.assistantPending;
+    if (pending && pending.text === "") this.transcript = this.transcript.filter((t) => t !== pending);
+    this.assistantPending = null;
+    this.assistantStatus = null;
+    this.assistantFailures++;
+    this.transcript.push({ from: "system", text });
+    this.persistAssistant();
+    this.render();
+  }
+
+  private stopAssistant(): void {
+    this.assistantUnsubscribe?.();
+    this.assistantUnsubscribe = null;
+  }
+
+  // Whether to offer "Chat with an Engineer" from the assistant right now.
+  private offerEngineer(): boolean {
+    if (!this.assistantMode() || this.assistantStatus !== null) return false;
+    if (this.phase !== "idle" && this.phase !== "ended") return false;
+    const config = this.resolved?.assistant;
+    return config?.offerEngineer !== "after-errors" || this.assistantFailures >= config.errorsBeforeEngineer;
+  }
+
+  // Hands the conversation to a support engineer in the same panel: the
+  // assistant turns go along as context.
+  private async escalate(): Promise<void> {
+    if (!this.offerEngineer()) return;
+    if (this.phase === "ended") {
+      this.phase = "idle";
+      this.caseId = null;
+      this.engineer = null;
+    }
+    const turns = this.transcript.flatMap((t): LiveChatPriorMessage[] =>
+      t.from === "customer" || t.from === "assistant" ? [{ role: t.from, content: t.text }] : [],
+    );
+    this.priorMessages = fitPriorMessages([...this.priorMessages, ...turns]);
+    this.transcript.push({ from: "system", text: this.texts().escalationNotice });
+    await this.start(this.texts().escalationMessage, false);
+    this.persistAssistant();
+  }
+
+  private assistantKey(): string | null {
+    return this.resolved ? `wso2-live-chat:${this.resolved.tenant}:assistant` : null;
+  }
+
+  // Keeps the assistant conversation for this browser tab, so a reload
+  // continues it. Storage can be unavailable; that just loses this.
+  private persistAssistant(): void {
+    const key = this.assistantKey();
+    if (!key || !this.assistantMode()) return;
+    try {
+      sessionStorage.setItem(
+        key,
+        JSON.stringify({
+          conversationId: this.assistantConversationId,
+          transcript: this.transcript.filter((t) => t !== this.assistantPending).slice(-60),
+        }),
+      );
+    } catch {
+      // Storage unavailable.
+    }
+  }
+
+  private restoreAssistant(): void {
+    const key = this.assistantKey();
+    if (!key) return;
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(key) ?? "null") as {
+        conversationId?: unknown;
+        transcript?: unknown;
+      } | null;
+      if (!saved) return;
+      if (typeof saved.conversationId === "string") this.assistantConversationId = saved.conversationId;
+      if (Array.isArray(saved.transcript)) {
+        this.transcript = saved.transcript.filter(
+          (t): t is LiveChatTranscriptEntry =>
+            typeof t === "object" &&
+            t !== null &&
+            ["customer", "assistant", "engineer", "system"].includes((t as LiveChatTranscriptEntry).from) &&
+            typeof (t as LiveChatTranscriptEntry).text === "string",
+        );
+      }
+    } catch {
+      // Storage unavailable or unreadable.
     }
   }
 
@@ -699,6 +903,7 @@ export class LiveChatWidgetElement extends HTMLElement {
     this.phase = "ended";
     if (reason === "customer") this.transcript.push({ from: "system", text: this.texts().endedByCustomer });
     this.error = null;
+    this.persistAssistant();
     this.render();
     this.emit(LIVE_CHAT_EVENTS.ended, {
       caseId: this.caseId ?? "",
@@ -744,9 +949,11 @@ export class LiveChatWidgetElement extends HTMLElement {
     ui.subtitle.textContent = texts.subtitle;
     ui.close.setAttribute("aria-label", texts.closeLabel);
 
-    ui.status.dataset.phase = this.phase;
-    ui.status.textContent =
-      this.phase === "connected"
+    const assistant = this.assistantMode() && (this.phase === "idle" || this.phase === "ended");
+    ui.status.dataset.phase = assistant ? "assistant" : this.phase;
+    ui.status.textContent = assistant
+      ? texts.statusAssistant
+      : this.phase === "connected"
         ? this.engineer
           ? format(texts.statusConnected, { engineer: this.engineer })
           : texts.statusConnectedAnonymous
@@ -770,9 +977,12 @@ export class LiveChatWidgetElement extends HTMLElement {
     const active = this.phase === "queued" || this.phase === "connected";
     ui.end.hidden = !active;
     ui.end.textContent = texts.endButton;
-    ui.newChat.hidden = this.phase !== "ended";
+    // With the assistant, an ended chat simply returns to it.
+    ui.newChat.hidden = this.phase !== "ended" || this.assistantMode();
     ui.newChat.textContent = texts.newChatButton;
-    ui.actions.hidden = ui.end.hidden && ui.newChat.hidden;
+    ui.engineer.hidden = !this.offerEngineer();
+    ui.engineer.textContent = texts.chatWithEngineerButton;
+    ui.actions.hidden = ui.end.hidden && ui.newChat.hidden && ui.engineer.hidden;
   }
 
   private renderMessages(): void {
@@ -784,17 +994,23 @@ export class LiveChatWidgetElement extends HTMLElement {
       p.textContent = text;
       return p;
     };
-    if (this.phase === "idle" || (this.phase === "starting" && this.transcript.length === 0)) {
+    if (this.assistantMode()) {
+      if (this.transcript.length === 0) nodes.push(paragraph("intro", texts.assistantIntro));
+    } else if (this.phase === "idle" || (this.phase === "starting" && this.transcript.length === 0)) {
       nodes.push(paragraph("intro", texts.intro));
       if (this.priorMessages.length > 0) nodes.push(paragraph("notice", texts.contextNotice));
     }
     for (const entry of this.transcript) {
+      if (entry === this.assistantPending && entry.text === "") continue;
       const div = document.createElement("div");
       div.className = "message";
       div.dataset.from = entry.from;
-      div.textContent = entry.text;
+      // Assistant answers are Markdown; everything else is plain text.
+      if (entry.from === "assistant") div.append(renderMarkdown(entry.text));
+      else div.textContent = entry.text;
       nodes.push(div);
     }
+    if (this.assistantStatus) nodes.push(paragraph("thinking", this.assistantStatus));
     this.ui.messages.replaceChildren(...nodes);
     this.ui.messages.scrollTop = this.ui.messages.scrollHeight;
   }
@@ -802,12 +1018,15 @@ export class LiveChatWidgetElement extends HTMLElement {
   private renderComposer(): void {
     const texts = this.texts();
     const { composer, input, send } = this.ui;
-    const usable = this.resolved !== null && this.phase !== "ended";
+    const assistant = this.assistantMode() && (this.phase === "idle" || this.phase === "ended");
+    const usable = this.resolved !== null && (this.phase !== "ended" || assistant);
     composer.hidden = !usable;
     input.placeholder = texts.inputPlaceholder;
     input.disabled = this.phase === "starting";
-    send.textContent = this.phase === "idle" || this.phase === "starting" ? texts.startButton : texts.sendButton;
-    send.disabled = this.phase === "starting" || input.value.trim() === "";
+    send.textContent =
+      !assistant && (this.phase === "idle" || this.phase === "starting") ? texts.startButton : texts.sendButton;
+    const answering = assistant && this.assistantStatus !== null;
+    send.disabled = this.phase === "starting" || answering || input.value.trim() === "";
   }
 }
 

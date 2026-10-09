@@ -1,6 +1,6 @@
 # @wso2/live-chat-widget
 
-A drop-in **"Chat with Support"** web component, `<wso2-live-chat>`, that connects a signed-in customer of any WSO2 product to a live support engineer.
+A drop-in **"Chat with Support"** web component, `<wso2-live-chat>`, that answers a signed-in customer of any WSO2 product with an AI assistant and, when they need one, connects them to a live support engineer in the same panel.
 
 - **Same code in every product.** Products differ only in a JSON configuration (colors, position, size, wording), never in code.
 - **Works with any framework** (React, Angular, Vue, plain HTML), because it is a standard custom element.
@@ -16,14 +16,14 @@ Not yet published to a registry. Build a package file and vendor it into your pr
 ```bash
 cd apps/live-chat-sdk/widget
 pnpm install && pnpm run build && pnpm pack
-# -> wso2-live-chat-widget-0.1.3.tgz
+# -> wso2-live-chat-widget-0.2.0.tgz
 ```
 
 Copy it to `<your-app>/vendor/` and add it to your `package.json`:
 
 ```json
 "dependencies": {
-  "@wso2/live-chat-widget": "file:./vendor/wso2-live-chat-widget-0.1.3.tgz"
+  "@wso2/live-chat-widget": "file:./vendor/wso2-live-chat-widget-0.2.0.tgz"
 }
 ```
 
@@ -131,9 +131,21 @@ Any CSS color or font value.
 | `borderRadius` | `12px` | Panel and message bubbles. |
 | `shadow` | soft drop shadow | Launcher and panel. |
 
+### `assistant`
+
+When `console-chat-bridge` has an AI assistant configured for the product (Novera by default), the panel opens with it: the customer asks questions and the answers stream in. **Chat with an Engineer** hands the conversation to a support engineer in the same panel, with the assistant turns as context, and the panel returns to the assistant when that chat ends. Without an assistant on the bridge, the panel is the engineer chat alone.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Set `false` to offer only the engineer chat. |
+| `offerEngineer` | `"always"` | `"always"`, or `"after-errors"` to offer the engineer only once the assistant has failed `errorsBeforeEngineer` times in a row. |
+| `errorsBeforeEngineer` | `3` | See `offerEngineer`. |
+
+The assistant conversation is kept for the browser tab, so a reload continues it. Its answers are Markdown, rendered without ever parsing HTML.
+
 ### `texts`
 
-Every visible string can be replaced, for wording or translation: `title`, `subtitle`, `launcherLabel`, `intro`, `contextNotice`, `inputPlaceholder`, `startButton`, `sendButton`, `endButton`, `newChatButton`, `reconnectButton`, `closeLabel`, `statusIdle`, `statusStarting`, `statusQueued`, `statusConnected`, `statusEnded`, `engineerJoined`, `endedByCustomer`, `endedByEngineer`, `convertedToCase`, `expired`, `connectionLost`, `startFailed`, `alreadyOpen`, `sendFailed`, `endFailed`, `notConfigured`, `statusConnectedAnonymous`, `chatResumed`, `alreadyOpenResumed`, `endedWhileAway`. `{engineer}` and `{caseId}` are filled in where they apply. See `DEFAULT_TEXTS` in `src/config.ts` for the defaults.
+Every visible string can be replaced, for wording or translation: `title`, `subtitle`, `launcherLabel`, `intro`, `contextNotice`, `inputPlaceholder`, `startButton`, `sendButton`, `endButton`, `newChatButton`, `reconnectButton`, `closeLabel`, `statusIdle`, `statusStarting`, `statusQueued`, `statusConnected`, `statusEnded`, `engineerJoined`, `endedByCustomer`, `endedByEngineer`, `endedInactive`, `engineerAway`, `engineerBack`, `engineerBusy`, `convertedToCase`, `expired`, `connectionLost`, `startFailed`, `alreadyOpen`, `sendFailed`, `endFailed`, `notConfigured`, `statusConnectedAnonymous`, `chatResumed`, `alreadyOpenResumed`, `endedWhileAway`, and for the assistant `assistantIntro`, `statusAssistant`, `assistantThinking`, `assistantFailed`, `chatWithEngineerButton`, `escalationNotice`, `escalationMessage`, `assistantDivider`. `{engineer}` and `{caseId}` are filled in where they apply. See `DEFAULT_TEXTS` in `src/config.ts` for the defaults.
 
 ## Opening it from your own UI
 
@@ -167,7 +179,7 @@ The element dispatches DOM events that bubble out of the shadow root:
 | `live-chat-started` | `{ caseId }` | A chat was created. |
 | `live-chat-resumed` | `{ caseId }` | A chat still open on the server was restored, for example after a page reload. |
 | `live-chat-assigned` | `{ caseId, engineerEmail }` | An engineer accepted it. |
-| `live-chat-ended` | `{ caseId, reason, entityCaseId?, transcript }` | The chat ended. `reason` is `customer`, `engineer`, `converted`, `expired`, or `unknown` when it ended while the page was not listening (for example during a reload). |
+| `live-chat-ended` | `{ caseId, reason, entityCaseId?, transcript }` | The chat ended. `reason` is `customer`, `engineer`, `inactive` (the engineer was away too long), `converted`, `expired`, or `unknown` when it ended while the page was not listening (for example during a reload). |
 | `live-chat-error` | `{ message }` | Starting failed or the connection dropped. |
 
 For example, to return the customer to your AI assistant when the chat ends:
@@ -188,6 +200,7 @@ The config covers most needs. For more, the host page can:
 ## Behaviour notes
 
 - **Reloads and other tabs.** On load the widget asks the bridge for the customer's open chat and, if there is one, restores its transcript and status and reconnects. The panel reopens only if it was open before the reload. Starting a chat while one is already open (for example in another tab) reopens that chat instead of failing.
+- **When the engineer goes quiet.** If the engineer's portal tab is closed and they have not written for a while, the customer is told they seem to have stepped away, and later that they are back. If they stay away, the chat is ended and the panel says why. An engineer with the portal open is never cut off; the customer is just told they are still looking into it. The limits are set on csm-portal (`ENGINEER_AWAY_WARN_SECONDS`, `ENGINEER_AWAY_END_SECONDS`, `ENGINEER_BUSY_NOTICE_SECONDS`).
 - **Ending is shown live on both sides.** When the engineer ends the chat or turns it into a case, the panel shows it immediately and offers "Start a new chat".
 - **Reconnect.** If the live connection drops, the panel shows "The connection was lost" with a Reconnect button that reloads the transcript and listens again.
 - **Leaving the page** stops listening but does not end the chat; ending is always an explicit action.

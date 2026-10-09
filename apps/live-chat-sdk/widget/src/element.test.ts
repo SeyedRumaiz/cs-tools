@@ -15,12 +15,13 @@
 // under the License.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LiveChatError, type LiveChatEvent } from "@wso2/live-chat-client";
+import { LiveChatError, type LiveChatAssistantEvent, type LiveChatEvent } from "@wso2/live-chat-client";
 import "./index.js";
 import { LIVE_CHAT_EVENTS, type LiveChatEndedDetail, type LiveChatWidgetElement } from "./element.js";
 
 function fakeClient() {
   let onEvent: ((e: LiveChatEvent) => void) | null = null;
+  let onAssistant: ((e: LiveChatAssistantEvent) => void) | null = null;
   const unsubscribe = vi.fn();
   const client = {
     startChat: vi.fn().mockResolvedValue({ caseId: "case-1", conversationId: "conv-1" }),
@@ -32,8 +33,19 @@ function fakeClient() {
     completeChat: vi.fn().mockResolvedValue(undefined),
     getHistory: vi.fn().mockResolvedValue([]),
     getCurrentChat: vi.fn().mockResolvedValue(null),
+    isAssistantAvailable: vi.fn().mockResolvedValue(false),
+    subscribeAssistant: vi.fn((_id: string, cb: (e: LiveChatAssistantEvent) => void) => {
+      onAssistant = cb;
+      return vi.fn();
+    }),
+    askAssistant: vi.fn().mockResolvedValue(undefined),
   };
-  return { client, unsubscribe, push: (e: LiveChatEvent) => onEvent?.(e) };
+  return {
+    client,
+    unsubscribe,
+    push: (e: LiveChatEvent) => onEvent?.(e),
+    answer: (e: LiveChatAssistantEvent) => onAssistant?.(e),
+  };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -192,6 +204,40 @@ describe("<wso2-live-chat>", () => {
     const detail = (ended.mock.calls[0]![0] as CustomEvent<LiveChatEndedDetail>).detail;
     expect(detail.reason).toBe("engineer");
     expect(detail.transcript.at(-1)?.text).toBe("The engineer ended the chat.");
+  });
+
+  it("tells the customer when the engineer steps away and comes back", async () => {
+    const { el, fake, type } = mount();
+    el.open();
+    await type("help");
+    fake.push({ type: "assigned", engineerEmail: "eng@example.com" });
+    fake.push({ type: "engineerStatus", status: "away" });
+    fake.push({ type: "engineerStatus", status: "away" });
+    fake.push({ type: "engineerStatus", status: "back" });
+    fake.push({ type: "engineerStatus", status: "busy" });
+
+    const notes = [...el.shadowRoot!.querySelectorAll('.message[data-from="system"]')].map((m) => m.textContent);
+    expect(notes).toEqual([
+      "eng@example.com joined the chat.",
+      "The engineer seems to have stepped away. You can keep waiting or end the chat.",
+      "The engineer is back.",
+      "The engineer is still looking into this.",
+    ]);
+    expect(el.state.phase).toBe("connected");
+  });
+
+  it("explains a chat ended because the engineer was away too long", async () => {
+    const { el, fake, q, type } = mount();
+    const ended = vi.fn();
+    el.addEventListener(LIVE_CHAT_EVENTS.ended, ended);
+    el.open();
+    await type("help");
+    fake.push({ type: "assigned", engineerEmail: "eng@example.com" });
+    fake.push({ type: "disconnected", engineerEmail: "", reason: "inactive" });
+
+    expect(el.state.phase).toBe("ended");
+    expect(q(".messages").textContent).toContain("The engineer was away for too long, so the chat was ended.");
+    expect((ended.mock.calls[0]![0] as CustomEvent<LiveChatEndedDetail>).detail.reason).toBe("inactive");
   });
 
   it("reports a conversion to a case with its id", async () => {
@@ -442,6 +488,154 @@ describe("<wso2-live-chat>", () => {
       expect(el.state.phase).toBe("connected");
       el.open();
       expect(el.state.open).toBe(true);
+    });
+  });
+
+  describe("with the AI assistant", () => {
+    const withAssistant = (f: ReturnType<typeof fakeClient>) => f.client.isAssistantAvailable.mockResolvedValue(true);
+    const bubbles = (el: LiveChatWidgetElement) =>
+      [...el.shadowRoot!.querySelectorAll(".message")].map((m) => `${(m as HTMLElement).dataset.from}: ${m.textContent}`);
+
+    it("answers in the panel, streaming and then formatting the answer", async () => {
+      const { el, fake, q, type } = mount(undefined, withAssistant);
+      await settle();
+      el.open();
+      expect(q(".intro").textContent).toContain("Ask a question");
+      expect(q(".status").textContent).toBe("AI assistant");
+
+      await type("How do I deploy?");
+      expect(fake.client.askAssistant).toHaveBeenCalledWith(expect.stringMatching(/^live-chat-ai-/), "How do I deploy?");
+      expect(fake.client.subscribeAssistant).toHaveBeenCalledOnce();
+      expect(q(".thinking").textContent).toBe("Thinking…");
+      expect(q<HTMLButtonElement>(".send").disabled).toBe(true);
+
+      fake.answer({ type: "status", text: "Searching the knowledge base" });
+      expect(q(".thinking").textContent).toBe("Searching the knowledge base");
+      fake.answer({ type: "token", text: "Use the " });
+      expect(bubbles(el)).toEqual(["customer: How do I deploy?", "assistant: Use the "]);
+      fake.answer({ type: "done", text: "Use the **Deploy** button, then run `deploy`." });
+
+      const answer = q('.message[data-from="assistant"]');
+      expect(answer.querySelector("strong")?.textContent).toBe("Deploy");
+      expect(answer.querySelector("code")?.textContent).toBe("deploy");
+      expect(q(".thinking")).toBeNull();
+      expect(q(".engineer").hidden).toBe(false);
+    });
+
+    it("hands the conversation to an engineer in the same panel, then returns to the assistant", async () => {
+      const { el, fake, q, type } = mount(undefined, withAssistant);
+      await settle();
+      el.open();
+      await type("It fails");
+      fake.answer({ type: "done", text: "Try restarting." });
+
+      q<HTMLButtonElement>(".engineer").click();
+      await settle();
+      expect(fake.client.startChat).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "I'd like to talk to a support engineer.",
+          priorMessages: [
+            { role: "customer", content: "It fails" },
+            { role: "assistant", content: "Try restarting." },
+          ],
+        }),
+      );
+      expect(el.state.phase).toBe("queued");
+      expect(bubbles(el)).toEqual([
+        "customer: It fails",
+        "assistant: Try restarting.",
+        "system: Connecting you to a support engineer. They will see this conversation.",
+      ]);
+      expect(q(".engineer").hidden).toBe(true);
+
+      await type("Still broken");
+      expect(fake.client.sendMessage).toHaveBeenCalledWith("case-1", { content: "Still broken" });
+      expect(fake.client.askAssistant).toHaveBeenCalledOnce();
+
+      fake.push({ type: "disconnected", engineerEmail: "eng@example.com" });
+      expect(el.state.phase).toBe("ended");
+      expect(q(".status").textContent).toBe("AI assistant");
+      expect(q(".new").hidden).toBe(true);
+      expect(q(".engineer").hidden).toBe(false);
+      expect(q(".composer").hidden).toBe(false);
+
+      await type("One more question");
+      expect(fake.client.askAssistant).toHaveBeenCalledTimes(2);
+      expect(fake.client.sendMessage).toHaveBeenCalledOnce();
+    });
+
+    it("offers an engineer only after repeated failures when configured", async () => {
+      const { el, fake, q, type } = mount(
+        { bridgeUrl: "https://bridge.example", tenant: "my-product", assistant: { offerEngineer: "after-errors", errorsBeforeEngineer: 2 } },
+        withAssistant,
+      );
+      await settle();
+      el.open();
+      expect(q(".engineer").hidden).toBe(true);
+      await type("a");
+      fake.answer({ type: "error", text: "Too many messages." });
+      expect(q(".engineer").hidden).toBe(true);
+      expect(bubbles(el)).toEqual(["customer: a", "system: Too many messages."]);
+      await type("b");
+      fake.answer({ type: "error", text: "Too many messages." });
+      expect(q(".engineer").hidden).toBe(false);
+    });
+
+    it("continues the assistant conversation after a reload", async () => {
+      const first = mount(undefined, withAssistant);
+      await settle();
+      first.el.open();
+      await first.type("Hello");
+      first.fake.answer({ type: "done", text: "Hi there." });
+      const conversationId = first.fake.client.askAssistant.mock.calls[0]![0];
+
+      document.body.replaceChildren();
+      const second = mount(undefined, withAssistant);
+      await settle();
+      second.el.open();
+      expect(bubbles(second.el)).toEqual(["customer: Hello", "assistant: Hi there."]);
+      await second.type("And then?");
+      expect(second.fake.client.askAssistant).toHaveBeenCalledWith(conversationId, "And then?");
+    });
+
+    it("keeps the assistant part above a divider when restoring an engineer chat", async () => {
+      const { el } = mount(undefined, (f) => {
+        withAssistant(f);
+        f.client.getCurrentChat.mockResolvedValue({ caseId: "c9", conversationId: "v9", status: "connected", engineerEmail: "e@x.com" });
+        f.client.getHistory.mockResolvedValue([
+          { role: "customer", content: "It fails" },
+          { role: "assistant", content: "Try restarting." },
+          { role: "customer", content: "I'd like to talk to a support engineer." },
+          { role: "engineer", content: "Hi!" },
+        ]);
+      });
+      await settle();
+      expect(bubbles(el)).toEqual([
+        "customer: It fails",
+        "assistant: Try restarting.",
+        "system: Support engineer chat",
+        "customer: I'd like to talk to a support engineer.",
+        "engineer: Hi!",
+        "system: Your chat was restored.",
+      ]);
+    });
+
+    it("can be turned off in the configuration", async () => {
+      const { el, fake, q } = mount({ bridgeUrl: "https://bridge.example", tenant: "my-product", assistant: { enabled: false } }, withAssistant);
+      await settle();
+      el.open();
+      expect(fake.client.isAssistantAvailable).not.toHaveBeenCalled();
+      expect(q(".intro").textContent).toContain("Describe what you need");
+      expect(q(".engineer").hidden).toBe(true);
+    });
+
+    it("shows a failure when the stream drops mid-answer", async () => {
+      const { el, fake, type } = mount(undefined, withAssistant);
+      await settle();
+      el.open();
+      await type("Hello");
+      fake.answer({ type: "disconnected", message: "network" });
+      expect(bubbles(el)).toEqual(["customer: Hello", "system: The connection was lost."]);
     });
   });
 });

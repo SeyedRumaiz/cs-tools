@@ -52,6 +52,18 @@ export interface LiveChatTheme {
   shadow: string;
 }
 
+/** The AI assistant shown before an engineer, when console-chat-bridge
+ * has one for this product. */
+export interface LiveChatAssistant {
+  /** Set to false to offer only the engineer chat. */
+  enabled: boolean;
+  /** When "Chat with an Engineer" is offered: "always", or only
+   * "after-errors" once the assistant has failed errorsBeforeEngineer times
+   * in a row. */
+  offerEngineer: "always" | "after-errors";
+  errorsBeforeEngineer: number;
+}
+
 /** Every string the widget shows. `{engineer}` and `{caseId}` are filled in
  * where noted. */
 export interface LiveChatTexts {
@@ -80,6 +92,14 @@ export interface LiveChatTexts {
   engineerJoined: string;
   endedByCustomer: string;
   endedByEngineer: string;
+  /** The chat was ended because the engineer was away too long. */
+  endedInactive: string;
+  /** The engineer seems to have stepped away. */
+  engineerAway: string;
+  /** The engineer is back after engineerAway. */
+  engineerBack: string;
+  /** The engineer has been quiet for a while but is still on the chat. */
+  engineerBusy: string;
   /** `{caseId}` is the new support case id. */
   convertedToCase: string;
   expired: string;
@@ -95,6 +115,21 @@ export interface LiveChatTexts {
   alreadyOpenResumed: string;
   /** Shown when a restored chat turns out to have ended meanwhile. */
   endedWhileAway: string;
+  /** Intro shown before the first question to the assistant. */
+  assistantIntro: string;
+  /** Status line while talking to the assistant. */
+  statusAssistant: string;
+  /** Shown while the assistant prepares an answer. */
+  assistantThinking: string;
+  assistantFailed: string;
+  chatWithEngineerButton: string;
+  /** Shown in the transcript when the customer asks for an engineer. */
+  escalationNotice: string;
+  /** Sent as the customer's opening message when they ask for an engineer
+   * from the assistant; the engineer also gets the assistant conversation. */
+  escalationMessage: string;
+  /** Marks where the assistant conversation ends in a restored chat. */
+  assistantDivider: string;
 }
 
 /**
@@ -110,6 +145,7 @@ export interface LiveChatWidgetConfig {
   layout?: Partial<LiveChatLayout>;
   theme?: Partial<LiveChatTheme>;
   texts?: Partial<LiveChatTexts>;
+  assistant?: Partial<LiveChatAssistant>;
   /** Prefix for the conversation ids the widget mints. */
   conversationIdPrefix?: string;
 }
@@ -120,6 +156,7 @@ export interface ResolvedLiveChatConfig {
   layout: LiveChatLayout;
   theme: LiveChatTheme;
   texts: LiveChatTexts;
+  assistant: LiveChatAssistant;
   conversationIdPrefix: string;
 }
 
@@ -170,6 +207,10 @@ export const DEFAULT_TEXTS: LiveChatTexts = {
   engineerJoined: "{engineer} joined the chat.",
   endedByCustomer: "You ended the chat.",
   endedByEngineer: "The engineer ended the chat.",
+  endedInactive: "The engineer was away for too long, so the chat was ended. You can start a new one.",
+  engineerAway: "The engineer seems to have stepped away. You can keep waiting or end the chat.",
+  engineerBack: "The engineer is back.",
+  engineerBusy: "The engineer is still looking into this.",
   convertedToCase: "The engineer turned this chat into support case {caseId}.",
   expired: "No engineer was available in time. Please try again.",
   connectionLost: "The connection was lost.",
@@ -181,6 +222,20 @@ export const DEFAULT_TEXTS: LiveChatTexts = {
   chatResumed: "Your chat was restored.",
   alreadyOpenResumed: "You already had an open chat, so it was reopened here.",
   endedWhileAway: "This chat ended while you were away.",
+  assistantIntro: "Ask a question and the assistant will answer right away. You can also chat with a support engineer.",
+  statusAssistant: "AI assistant",
+  assistantThinking: "Thinking…",
+  assistantFailed: "The assistant could not answer. Please try again.",
+  chatWithEngineerButton: "Chat with an Engineer",
+  escalationNotice: "Connecting you to a support engineer. They will see this conversation.",
+  escalationMessage: "I'd like to talk to a support engineer.",
+  assistantDivider: "Support engineer chat",
+};
+
+export const DEFAULT_ASSISTANT: LiveChatAssistant = {
+  enabled: true,
+  offerEngineer: "always",
+  errorsBeforeEngineer: 3,
 };
 
 const DEFAULT_CONVERSATION_PREFIX = "live-chat-";
@@ -229,12 +284,21 @@ export function resolveConfig(input: unknown): ResolvedLiveChatConfig {
     if (!Number.isFinite(layout[key]) || layout[key] < 0) layout[key] = DEFAULT_LAYOUT[key];
   }
 
+  const assistant = pick(DEFAULT_ASSISTANT, input.assistant);
+  if (assistant.offerEngineer !== "always" && assistant.offerEngineer !== "after-errors") {
+    assistant.offerEngineer = DEFAULT_ASSISTANT.offerEngineer;
+  }
+  if (!Number.isInteger(assistant.errorsBeforeEngineer) || assistant.errorsBeforeEngineer < 1) {
+    assistant.errorsBeforeEngineer = DEFAULT_ASSISTANT.errorsBeforeEngineer;
+  }
+
   return {
     bridgeUrl,
     tenant,
     layout,
     theme: pick(DEFAULT_THEME, input.theme),
     texts: pick(DEFAULT_TEXTS, input.texts),
+    assistant,
     conversationIdPrefix:
       typeof input.conversationIdPrefix === "string" ? input.conversationIdPrefix : DEFAULT_CONVERSATION_PREFIX,
   };
