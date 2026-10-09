@@ -378,10 +378,13 @@ func (h *ChatsHandler) HandleChatEvents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// Messages are not replayed to a later subscriber: it reloads them from
-	// the case history, so a replay would duplicate the last one.
-	if pushevents.Type(evt.Type) == pushevents.TypeEngineerMessage {
+	// the case history, so a replay would duplicate the last one. Status
+	// notices go stale, and replaying one would also displace the event a
+	// late subscriber does need (who accepted, or how the chat ended).
+	switch pushevents.Type(evt.Type) {
+	case pushevents.TypeEngineerMessage, pushevents.TypeEngineerStatus:
 		h.hub.PublishLive(evt.CaseID, string(body))
-	} else {
+	default:
 		h.hub.Publish(evt.CaseID, string(body))
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "delivered"})

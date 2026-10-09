@@ -27,7 +27,8 @@ import (
 
 // A browser that reconnects (for example after a page reload) loads the
 // messages from the case history, so only status events may be replayed
-// to it; replaying the last engineer message showed it twice.
+// to it; replaying the last engineer message showed it twice, and a stale
+// availability notice would mislead.
 func TestHandleChatEvents_ReplaysStatusButNotMessages(t *testing.T) {
 	hub := stream.NewHub()
 	h := NewChatsHandler(nil, hub)
@@ -43,6 +44,7 @@ func TestHandleChatEvents_ReplaysStatusButNotMessages(t *testing.T) {
 	assigned := `{"caseId":"case-1","type":"engineer_assigned","engineerEmail":"eng@example.com"}`
 	post(assigned)
 	post(`{"caseId":"case-1","type":"engineer_message","message":"Hi"}`)
+	post(`{"caseId":"case-1","type":"engineer_status","status":"away"}`)
 
 	ch, unsubscribe := hub.Subscribe("case-1")
 	defer unsubscribe()
@@ -57,7 +59,7 @@ func TestHandleChatEvents_ReplaysStatusButNotMessages(t *testing.T) {
 	}
 	select {
 	case got := <-ch:
-		t.Fatalf("the engineer message must not be replayed, got %q", got)
+		t.Fatalf("messages and status notices must not be replayed, got %q", got)
 	default:
 	}
 }
