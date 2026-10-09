@@ -39,6 +39,9 @@ const (
 	// Terminal and customer-facing, distinct from TypeEngineerDisconnected
 	// (where an engineer had connected before leaving).
 	TypeChatAbandoned Type = "chat_abandoned"
+	// TypeEngineerStatus tells the customer about the assigned engineer's
+	// availability during an accepted chat; Status says which. Not terminal.
+	TypeEngineerStatus Type = "engineer_status"
 
 	// Pushed via publishToEngineers/publishToEngineer — CSM-internal only,
 	// an engineer's own case-list/alert UI. Never reaches a tenant/product's
@@ -62,6 +65,24 @@ const (
 // chat-routing-service/sdk-go/routingclient.PriorMessageRole rather than
 // importing it, to keep this module free of any dependency on another
 // nested module.
+// EngineerStatus is ChatEvent.Status on a TypeEngineerStatus event.
+type EngineerStatus string
+
+const (
+	// EngineerAway: the engineer's tab is closed and they have not written
+	// for a while.
+	EngineerAway EngineerStatus = "away"
+	// EngineerBack: the engineer reopened their tab after EngineerAway.
+	EngineerBack EngineerStatus = "back"
+	// EngineerBusy: the engineer's tab is open but they have not written
+	// for a while, for example while reading logs.
+	EngineerBusy EngineerStatus = "busy"
+)
+
+// ReasonInactive is ChatEvent.Reason on a TypeEngineerDisconnected event
+// sent because the engineer was away too long, rather than ending the chat.
+const ReasonInactive = "inactive"
+
 type PriorMessageRole string
 
 const (
@@ -118,5 +139,10 @@ type ChatEvent struct {
 	// receiving engineer's browser can seed the chat with that context
 	// instead of starting cold.
 	PriorMessages []PriorMessage `json:"priorMessages,omitempty"`
-	Timestamp     string         `json:"timestamp"`
+	// Status is set only on TypeEngineerStatus.
+	Status EngineerStatus `json:"status,omitempty"`
+	// Reason is set on TypeEngineerDisconnected when the chat was ended for
+	// the engineer rather than by them (ReasonInactive).
+	Reason    string `json:"reason,omitempty"`
+	Timestamp string `json:"timestamp"`
 }
