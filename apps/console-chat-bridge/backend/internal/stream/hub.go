@@ -60,7 +60,14 @@ func NewHub() *Hub {
 // closes), it's replayed into the new channel immediately so the
 // subscriber catches up instead of missing it.
 func (h *Hub) Subscribe(caseID string) (ch chan string, unsubscribe func()) {
-	ch = make(chan string, 16)
+	return h.SubscribeSize(caseID, 16)
+}
+
+// SubscribeSize is Subscribe with a buffer of size payloads, for streams
+// that send many events in quick succession, such as an AI answer streamed
+// word by word: a subscriber whose buffer fills misses events.
+func (h *Hub) SubscribeSize(caseID string, size int) (ch chan string, unsubscribe func()) {
+	ch = make(chan string, size)
 	h.mu.Lock()
 	if h.subs[caseID] == nil {
 		h.subs[caseID] = make(map[chan string]struct{})
@@ -111,4 +118,11 @@ func (h *Hub) fanOut(caseID, payload string) {
 		default:
 		}
 	}
+}
+
+// Subscribers reports how many subscribers caseID has right now.
+func (h *Hub) Subscribers(caseID string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs[caseID])
 }

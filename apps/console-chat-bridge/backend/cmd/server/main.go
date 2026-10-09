@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/assistant"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/csmchat"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/handler"
 	"github.com/wso2-open-operations/cs-tools/apps/console-chat-bridge/backend/internal/introspect"
@@ -86,6 +87,41 @@ func loadDotEnv(path string) {
 	}
 }
 
+// assistantProvider picks the AI assistant from ASSISTANT_PROVIDER:
+// "novera" (the default when NOVERA_WS_BASE_URL is set), "mock" for local
+// development without a model, or "off". Nil means off.
+func assistantProvider() assistant.Provider {
+	name := strings.ToLower(strings.TrimSpace(os.Getenv("ASSISTANT_PROVIDER")))
+	if name == "" && os.Getenv("NOVERA_WS_BASE_URL") != "" {
+		name = "novera"
+	}
+	switch name {
+	case "novera":
+		if os.Getenv("NOVERA_WS_BASE_URL") == "" || os.Getenv("NOVERA_TOKEN_URL") == "" {
+			slog.Error("ASSISTANT_PROVIDER=novera needs NOVERA_WS_BASE_URL and NOVERA_TOKEN_URL")
+			os.Exit(1)
+		}
+		slog.Info("assistant: using Novera")
+		return assistant.NewNovera(assistant.NoveraConfig{
+			WSBaseURL:    os.Getenv("NOVERA_WS_BASE_URL"),
+			TokenURL:     os.Getenv("NOVERA_TOKEN_URL"),
+			ClientID:     os.Getenv("NOVERA_CLIENT_ID"),
+			ClientSecret: os.Getenv("NOVERA_CLIENT_SECRET"),
+			Scopes:       splitComma(os.Getenv("NOVERA_SCOPES")),
+		})
+	case "mock":
+		slog.Info("assistant: using the local mock")
+		return assistant.Mock{Delay: 40 * time.Millisecond}
+	case "", "off":
+		slog.Info("assistant: off")
+		return nil
+	default:
+		slog.Error("unknown ASSISTANT_PROVIDER", "value", name)
+		os.Exit(1)
+		return nil
+	}
+}
+
 func splitComma(s string) []string {
 	if s == "" {
 		return nil
@@ -131,6 +167,7 @@ func main() {
 
 	hub := stream.NewHub()
 	chatsHandler := handler.NewChatsHandler(csmClient, hub)
+	assistantHandler := handler.NewAssistantHandler(assistantProvider(), hub, splitComma(os.Getenv("ASSISTANT_DISABLED_TENANTS")))
 
 	// csmPortalM2MClientID is the OAuth2 client ID csm-portal/backend's own
 	// outbound push.
@@ -198,6 +235,10 @@ func main() {
 	mux.Handle("GET /v1/{tenant}/chats/{caseId}/events", v1Chain(chatsHandler.HandleStreamV1))
 	mux.Handle("GET /v1/{tenant}/chats/{caseId}/history", v1Chain(chatsHandler.HandleGetHistoryV1))
 	mux.Handle("POST /v1/{tenant}/chats/{caseId}/complete", v1Chain(chatsHandler.HandleCompleteV1))
+
+	mux.Handle("GET /v1/{tenant}/assistant", v1Chain(assistantHandler.HandleStatusV1))
+	mux.Handle("GET /v1/{tenant}/assistant/{conversationId}/events", v1Chain(assistantHandler.HandleEventsV1))
+	mux.Handle("POST /v1/{tenant}/assistant/{conversationId}/messages", v1Chain(assistantHandler.HandleMessageV1))
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

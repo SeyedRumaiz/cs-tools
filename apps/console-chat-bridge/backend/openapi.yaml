@@ -279,6 +279,99 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
 
+  /v1/{tenant}/assistant:
+    get:
+      summary: Whether the AI assistant is available in this tenant.
+      operationId: getV1TenantAssistant
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+      responses:
+        "200":
+          description: Ok — the assistant is available.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+        "404":
+          description: NotFound — no assistant is configured, or this tenant opted out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /v1/{tenant}/assistant/{conversationId}/events:
+    get:
+      summary: Live stream of the assistant's answers in one of the caller's conversations (Server-Sent Events).
+      description: >-
+        Each event's data is an AssistantEvent. Open it before posting a
+        question; answers are not replayed.
+      operationId: getV1TenantAssistantEvents
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+        - $ref: '#/components/parameters/AssistantConversationId'
+      responses:
+        "200":
+          description: Ok
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/AssistantEvent'
+        "400":
+          description: BadRequest — invalid conversation ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound — the assistant is not available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
+  /v1/{tenant}/assistant/{conversationId}/messages:
+    post:
+      summary: Ask the assistant a question; the answer arrives on the events stream.
+      operationId: postV1TenantAssistantMessages
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+        - $ref: '#/components/parameters/AssistantConversationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  description: 1 to 4,000 bytes.
+      responses:
+        "202":
+          description: Accepted — the answer is being streamed.
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: NotFound — the assistant is not available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "409":
+          description: Conflict — still answering the previous question in this conversation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+
   /v1/{tenant}/chats/{caseId}/messages:
     post:
       summary: Send a customer message on an existing /v1 chat.
@@ -478,6 +571,13 @@ components:
           scopes: {}
 
   parameters:
+    AssistantConversationId:
+      name: conversationId
+      in: path
+      required: true
+      description: Minted by the client; letters, digits, '.', '_' and '-', at most 100.
+      schema:
+        type: string
     CaseId:
       name: caseId
       in: path
@@ -631,6 +731,19 @@ components:
         createdAt:
           type: string
 
+    AssistantEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [status, token, done, error]
+          description: >-
+            status: progress such as "Searching the knowledge base"; token:
+            the next piece of the answer; done: the complete answer; error:
+            the answer failed, text is safe to show.
+        text:
+          type: string
     CurrentChatResponse:
       type: object
       required: [caseId, conversationId, status]
