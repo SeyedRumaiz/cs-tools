@@ -156,6 +156,15 @@ func main() {
 	})
 	chatHandler := handler.NewChatHandler(customerEntityClient, engineerHub, chatNotifiers, routingClient)
 	engineerTimeoutSweepInterval := envDurationSeconds("ENGINEER_TIMEOUT_SWEEP_INTERVAL_SECONDS", 15)
+	// When a quiet engineer's customer is told, and when the chat is ended
+	// for them; see handler.EngineerIdlePolicy.
+	idleDefaults := handler.DefaultEngineerIdlePolicy()
+	chatHandler.WithEngineerIdlePolicy(handler.EngineerIdlePolicy{
+		AwayWarnAfter:   envDurationSeconds("ENGINEER_AWAY_WARN_SECONDS", int(idleDefaults.AwayWarnAfter.Seconds())),
+		AwayEndAfter:    envDurationSeconds("ENGINEER_AWAY_END_SECONDS", int(idleDefaults.AwayEndAfter.Seconds())),
+		BusyNoticeAfter: envDurationSeconds("ENGINEER_BUSY_NOTICE_SECONDS", int(idleDefaults.BusyNoticeAfter.Seconds())),
+		TabClosedGrace:  envDurationSeconds("ENGINEER_TAB_CLOSED_GRACE_SECONDS", int(idleDefaults.TabClosedGrace.Seconds())),
+	})
 
 	dashboardHandler := handler.NewDashboardHandler()
 	metadataHandler := handler.NewMetadataHandler()

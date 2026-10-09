@@ -89,3 +89,10 @@ func (h *BroadcastHub) Publish(caseID, payload string) {
 		}
 	}
 }
+
+// Subscribers reports how many connections are registered under key.
+func (h *BroadcastHub) Subscribers(key string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs[key])
+}

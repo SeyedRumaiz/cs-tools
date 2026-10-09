@@ -20,13 +20,16 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/wso2-open-operations/cs-tools/apps/live-chat-sdk/sdk-go/pushevents"
 )
 
 // StartTimeoutSweeper polls chat-routing-service periodically for
 // engineers who were assigned a case (PENDING) and never accepted it
 // within that service's configured timeout, delivering any resulting
 // reassignment the same way a fresh escalation would arrive and clearing
-// the stale alert on the original engineer's screen. It runs until ctx is
+// the stale alert on the original engineer's screen. Each tick also runs
+// the engineer idle sweep (chat_engineer_idle.go). It runs until ctx is
 // cancelled.
 func (h *ChatHandler) StartTimeoutSweeper(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
@@ -37,6 +40,7 @@ func (h *ChatHandler) StartTimeoutSweeper(ctx context.Context, interval time.Dur
 			return
 		case <-ticker.C:
 			h.sweepTimeoutsOnce(ctx)
+			h.sweepEngineerIdleOnce(ctx, time.Now())
 		}
 	}
 }
@@ -90,16 +94,20 @@ func (h *ChatHandler) sweepTimeoutsOnce(ctx context.Context) {
 		slog.InfoContext(ctx, "chat: force-ended an accepted session that went idle too long",
 			"caseId", stale.CaseID, "conversationId", stale.ConversationID, "assigneeId", stale.AssigneeID)
 		now := time.Now().UTC().Format(time.RFC3339)
+		email := h.engineers.email(stale.AssigneeID)
 		h.publishToEngineers(chatEvent{
 			Type:           "session_closed",
 			CaseID:         stale.CaseID,
 			ConversationID: stale.ConversationID,
+			EngineerEmail:  email,
 			Timestamp:      now,
 		})
 		h.notifyOrigin(ctx, h.sourceForCase(ctx, stale.CaseID), chatEvent{
 			Type:           "engineer_disconnected",
 			CaseID:         stale.CaseID,
 			ConversationID: stale.ConversationID,
+			EngineerEmail:  email,
+			Reason:         pushevents.ReasonInactive,
 			Timestamp:      now,
 		})
 		if stale.AssignedCase != nil {

@@ -112,6 +112,8 @@ type routingService interface {
 	// FindOpenChat backs HandleFindOpenChat; nil means the customer has no
 	// open chat for the project.
 	FindOpenChat(ctx context.Context, customerEmail, projectID string) (*routingclient.OpenChat, error)
+	// ActiveChats backs the engineer idle sweep (see chat_engineer_idle.go).
+	ActiveChats(ctx context.Context) ([]routingclient.ActiveChat, error)
 }
 
 // ChatHandler implements the live-engineer-chat escalation endpoints.
@@ -126,13 +128,23 @@ type ChatHandler struct {
 	liveChatAlerts liveChatAlertSender
 	portalBaseURL  string
 	engineers      *engineerDirectory
+
+	// idlePolicy and idle drive the engineer idle sweep; see
+	// chat_engineer_idle.go.
+	idlePolicy EngineerIdlePolicy
+	idle       idleTracker
 }
 
 // NewChatHandler creates a ChatHandler. hub and routing must both be
 // non-nil: live engineer chat has no offline fallback, and HandleEscalate's
 // fallback path requires a routing client to have attempted and failed.
 func NewChatHandler(entity entityChatClient, hub *stream.BroadcastHub, notifiers map[string]ChatEventPusher, routing routingService) *ChatHandler {
-	return &ChatHandler{entity: entity, hub: hub, notifiers: notifiers, routing: routing, engineers: newEngineerDirectory()}
+	return &ChatHandler{
+		entity: entity, hub: hub, notifiers: notifiers, routing: routing,
+		engineers:  newEngineerDirectory(),
+		idlePolicy: DefaultEngineerIdlePolicy(),
+		idle:       newIdleTracker(),
+	}
 }
 
 // chatEvent is the JSON envelope for every event this feature publishes, to
@@ -160,7 +172,12 @@ type chatEvent struct {
 	// AI-chatbot transcript, so the receiving engineer can see prior
 	// context. See routingclient.PriorMessage.
 	PriorMessages []routingclient.PriorMessage `json:"priorMessages,omitempty"`
-	Timestamp     string                       `json:"timestamp"`
+	// Status is set only on engineer_status: away, back or busy.
+	Status string `json:"status,omitempty"`
+	// Reason is set on engineer_disconnected when the chat was ended for
+	// the engineer ("inactive") rather than by them.
+	Reason    string `json:"reason,omitempty"`
+	Timestamp string `json:"timestamp"`
 }
 
 // publish marshals evt and publishes it on the given hub key. Best-effort:
