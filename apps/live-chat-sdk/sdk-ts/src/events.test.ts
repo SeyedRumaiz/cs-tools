@@ -34,6 +34,26 @@ describe("normalizeWireEvent", () => {
     });
   });
 
+  it("maps an inactivity end, with or without the engineer's email", () => {
+    expect(
+      normalizeWireEvent({ type: "engineer_disconnected", engineerEmail: "eng@example.com", reason: "inactive" })
+    ).toEqual({ type: "disconnected", engineerEmail: "eng@example.com", reason: "inactive" });
+    expect(normalizeWireEvent({ type: "engineer_disconnected", reason: "inactive" })).toEqual({
+      type: "disconnected",
+      engineerEmail: "",
+      reason: "inactive"
+    });
+    expect(normalizeWireEvent({ type: "engineer_disconnected", reason: "other" })).toBeNull();
+  });
+
+  it("maps engineer_status -> engineerStatus", () => {
+    for (const status of ["away", "back", "busy"] as const) {
+      expect(normalizeWireEvent({ type: "engineer_status", status })).toEqual({ type: "engineerStatus", status });
+    }
+    expect(normalizeWireEvent({ type: "engineer_status", status: "sleeping" })).toBeNull();
+    expect(normalizeWireEvent({ type: "engineer_status" })).toBeNull();
+  });
+
   it("maps converted_to_case -> converted", () => {
     expect(
       normalizeWireEvent({

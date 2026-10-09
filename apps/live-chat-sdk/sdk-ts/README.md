@@ -205,6 +205,25 @@ it with `getHistory(caseId)` and `subscribe(caseId, ...)` to restore the
 transcript and keep listening. A `404` that is not the bridge's own JSON
 response (a bridge without this route) is thrown, not reported as `null`.
 
+### AI assistant: `isAssistantAvailable()`, `subscribeAssistant(conversationId, onEvent)`, `askAssistant(conversationId, message)`
+
+When the bridge is configured with an AI assistant (Novera by default), a product can answer questions with it before offering an engineer. The caller names the conversation (any ID of letters, digits, `.`, `_`, `-`, at most 100) and keeps using it so the assistant sees the earlier turns. Open the stream before asking: answers are not replayed.
+
+```ts
+if (await client.isAssistantAvailable()) {
+  const conversationId = `my-product-${crypto.randomUUID()}`;
+  let answer = "";
+  const stop = client.subscribeAssistant(conversationId, (e) => {
+    if (e.type === "token") answer += e.text;      // show it as it streams
+    if (e.type === "done") answer = e.text;        // the complete answer
+    if (e.type === "error") showError(e.text);     // safe to show
+  });
+  await client.askAssistant(conversationId, "How do I deploy an integration?");
+}
+```
+
+Events are `status` (progress such as "Searching the knowledge base"), `token`, `done` or `error`, plus a client-side `disconnected` when the stream itself fails. One question is answered at a time per conversation; asking again while busy fails with `409`.
+
 ## Event types
 
 Delivered via `subscribe`'s `onEvent` callback, one variant per outcome —
@@ -216,7 +235,8 @@ type LiveChatEvent =
   | { type: "queued"; message: string }
   | { type: "assigned"; engineerEmail: string }
   | { type: "message"; content: string; engineerEmail: string }
-  | { type: "disconnected"; engineerEmail: string }
+  | { type: "disconnected"; engineerEmail: string; reason?: "inactive" }
+  | { type: "engineerStatus"; status: "away" | "back" | "busy" }
   | { type: "converted"; engineerEmail: string; entityCaseId: string }
   | { type: "expired"; message: string }
   | { type: "error"; message: string };
@@ -227,7 +247,8 @@ type LiveChatEvent =
 | `queued` | The chat is waiting for an available engineer. `message` is server-supplied, human-readable. | Show a "you're in the queue" message. |
 | `assigned` | An engineer accepted the chat. | Show "connected", enable the message input. |
 | `message` | The assigned engineer sent a message. `content` is theirs, not yours. | Append to the transcript. |
-| `disconnected` | The engineer ended the session without converting it to a case. | Show "chat ended", disable the input. |
+| `disconnected` | The engineer ended the session without converting it to a case, or (`reason: "inactive"`) it was ended because the engineer was away too long; then `engineerEmail` may be empty. | Show "chat ended" (saying why for `inactive`), disable the input. |
+| `engineerStatus` | Not terminal. `away`: the engineer's portal tab is closed and they have been quiet; `back`: they returned; `busy`: quiet with the portal open. | Show a short notice in the transcript. |
 | `converted` | The engineer converted the chat into a real support case (`entityCaseId`). | Show "chat ended, case #… opened", link to it if your product can. |
 | `expired` | Nobody was ever assigned before the queue gave up (server-side timeout). Distinct from `disconnected`: no engineer was ever connected. | Consider returning to an idle/retry state rather than a terminal "ended" one — the chat never really started. |
 | `error` | **Client/transport-level only — never a wire event from the backend.** A failed connection attempt, a non-2xx response opening the stream, or the stream ending unexpectedly. | Surface it; decide whether to retry (see below). |

@@ -78,9 +78,11 @@ export { createLiveChatClient } from "./client.js";
 export { LiveChatError } from "./errors.js";
 export type {
   ChatMessage,
+  LiveChatAssistantEvent,
   LiveChatClient,
   LiveChatClientConfig,
   LiveChatCurrentChat,
+  LiveChatEngineerStatus,
   LiveChatEvent,
   LiveChatHistoryMessage,
   LiveChatRequestTransport,

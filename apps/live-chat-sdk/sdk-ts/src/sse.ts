@@ -52,6 +52,20 @@ export interface EventStreamTarget {
  * finished opening (the abort races the in-flight fetch and wins).
  */
 export function openEventStream(target: EventStreamTarget, onEvent: (event: LiveChatEvent) => void): () => void {
+  return openJsonEventStream(target, normalizeWireEvent, onEvent, (message) => onEvent({ type: "error", message }));
+}
+
+/**
+ * The general form of {@link openEventStream}: each frame's JSON data goes
+ * through parse (null skips the frame), and a transport failure goes to
+ * onError instead of becoming an event.
+ */
+export function openJsonEventStream<T>(
+  target: EventStreamTarget,
+  parse: (raw: unknown) => T | null,
+  onEvent: (event: T) => void,
+  onError: (message: string) => void
+): () => void {
   const controller = new AbortController();
   let closed = false;
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -94,11 +108,11 @@ export function openEventStream(target: EventStreamTarget, onEvent: (event: Live
       if (!response.ok) {
         const rawBody = await response.text().catch(() => "");
         const { message } = parseErrorBody(rawBody, `Failed to open the event stream (status ${response.status}).`);
-        onEvent({ type: "error", message });
+        onError(message);
         return;
       }
       if (!response.body) {
-        onEvent({ type: "error", message: "The server did not return a readable stream." });
+        onError("The server did not return a readable stream.");
         return;
       }
       body = response.body;
@@ -113,7 +127,7 @@ export function openEventStream(target: EventStreamTarget, onEvent: (event: Live
         const result = await reader.read();
         if (result.done) {
           if (!closed) {
-            onEvent({ type: "error", message: "The connection to the server was closed." });
+            onError("The connection to the server was closed.");
           }
           return;
         }
@@ -133,8 +147,8 @@ export function openEventStream(target: EventStreamTarget, onEvent: (event: Live
             continue; // malformed JSON — skip this one frame, not the stream
           }
 
-          const event = normalizeWireEvent(parsed);
-          if (event) onEvent(event);
+          const event = parse(parsed);
+          if (event !== null) onEvent(event);
         }
       }
     } catch (err) {
@@ -144,7 +158,7 @@ export function openEventStream(target: EventStreamTarget, onEvent: (event: Live
 
   function reportUnlessClosed(err: unknown): void {
     if (closed || isAbortError(err)) return;
-    onEvent({ type: "error", message: describeTransportError(err) });
+    onError(describeTransportError(err));
   }
 
   return close;

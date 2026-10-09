@@ -1,7 +1,8 @@
 import { errorFromResponse, LiveChatError } from "./errors.js";
-import { openEventStream } from "./sse.js";
+import { openEventStream, openJsonEventStream } from "./sse.js";
 import type {
   ChatMessage,
+  LiveChatAssistantEvent,
   LiveChatClient,
   LiveChatClientConfig,
   LiveChatCurrentChat,
@@ -27,6 +28,12 @@ function chatsUrl(config: LiveChatClientConfig): string {
 
 function caseUrl(config: LiveChatClientConfig, caseId: string, suffix: string): string {
   return `${chatsUrl(config)}/${encodeURIComponent(caseId)}${suffix}`;
+}
+
+function assistantUrl(config: LiveChatClientConfig, conversationId?: string, suffix = ""): string {
+  const base = config.baseUrl.replace(/\/+$/, "");
+  const url = `${base}/v1/${encodeURIComponent(config.tenant)}/assistant`;
+  return conversationId === undefined ? url : `${url}/${encodeURIComponent(conversationId)}${suffix}`;
 }
 
 /** Shared POST-JSON request plumbing for startChat/sendMessage/completeChat.
@@ -253,6 +260,62 @@ async function getCurrentChat(config: LiveChatClientConfig): Promise<LiveChatCur
   }
 }
 
+async function isAssistantAvailable(config: LiveChatClientConfig): Promise<boolean> {
+  try {
+    const raw = await getJson(config, assistantUrl(config));
+    return isRecord(raw) && raw.enabled === true;
+  } catch (err) {
+    // The bridge's own JSON 404 means no assistant here; a plain-text one
+    // means a bridge without these routes, which is the same answer.
+    if (err instanceof LiveChatError && err.status === 404) {
+      return false;
+    }
+    throw err;
+  }
+}
+
+/** Validates one assistant stream frame; anything unexpected is skipped. */
+export function parseAssistantEvent(raw: unknown): LiveChatAssistantEvent | null {
+  if (!isRecord(raw)) return null;
+  const text = typeof raw.text === "string" ? raw.text : "";
+  switch (raw.type) {
+    case "status":
+    case "token":
+    case "done":
+    case "error":
+      return { type: raw.type, text };
+    default:
+      return null;
+  }
+}
+
+function subscribeAssistant(
+  config: LiveChatClientConfig,
+  conversationId: string,
+  onEvent: (event: LiveChatAssistantEvent) => void
+): () => void {
+  requireNonEmpty(conversationId, "conversationId");
+  if (!config.streamTransport && typeof config.getAccessToken !== "function") {
+    throw new LiveChatError("getAccessToken or streamTransport is required.");
+  }
+  return openJsonEventStream(
+    {
+      url: assistantUrl(config, conversationId, "/events"),
+      getAccessToken: config.getAccessToken,
+      streamTransport: config.streamTransport
+    },
+    parseAssistantEvent,
+    onEvent,
+    (message) => onEvent({ type: "disconnected", message })
+  );
+}
+
+async function askAssistant(config: LiveChatClientConfig, conversationId: string, message: string): Promise<void> {
+  requireNonEmpty(conversationId, "conversationId");
+  requireNonEmpty(message, "message");
+  await postJson(config, assistantUrl(config, conversationId, "/messages"), { message });
+}
+
 /** Creates a {@link LiveChatClient} bound to config. Validates baseUrl/tenant
  * once, up front. getAccessToken/requestTransport/streamTransport are
  * validated lazily instead, by the calls that actually need them — a
@@ -275,6 +338,9 @@ export function createLiveChatClient(config: LiveChatClientConfig): LiveChatClie
     sendMessage: (caseId, message) => sendMessage(config, caseId, message),
     completeChat: (caseId) => completeChat(config, caseId),
     getHistory: (caseId) => getHistory(config, caseId),
-    getCurrentChat: () => getCurrentChat(config)
+    getCurrentChat: () => getCurrentChat(config),
+    isAssistantAvailable: () => isAssistantAvailable(config),
+    subscribeAssistant: (conversationId, onEvent) => subscribeAssistant(config, conversationId, onEvent),
+    askAssistant: (conversationId, message) => askAssistant(config, conversationId, message)
   };
 }

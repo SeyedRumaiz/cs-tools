@@ -93,11 +93,20 @@ export interface LiveChatHistoryMessage {
  * was ever available) are different outcomes a consuming UI needs to tell
  * apart, not interchangeable ways a chat can stop.
  */
+/** See the "engineerStatus" {@link LiveChatEvent}. */
+export type LiveChatEngineerStatus = "away" | "back" | "busy";
+
 export type LiveChatEvent =
   | { type: "queued"; message: string }
   | { type: "assigned"; engineerEmail: string }
   | { type: "message"; content: string; engineerEmail: string }
-  | { type: "disconnected"; engineerEmail: string }
+  /** The chat ended on the engineer's side. `reason` is "inactive" when it
+   * was ended for the engineer after they were away too long; then
+   * `engineerEmail` may be empty. */
+  | { type: "disconnected"; engineerEmail: string; reason?: "inactive" }
+  /** Not terminal: the engineer seems to have stepped away ("away"), came
+   * back ("back"), or has been quiet with the portal open ("busy"). */
+  | { type: "engineerStatus"; status: LiveChatEngineerStatus }
   | { type: "converted"; engineerEmail: string; entityCaseId: string }
   | { type: "expired"; message: string }
   /** Client/transport-level only — never a wire event from the backend.
@@ -224,4 +233,35 @@ export interface LiveChatClient {
    * after a page reload or in another tab.
    */
   getCurrentChat(): Promise<LiveChatCurrentChat | null>;
+
+  /** Whether the bridge has an AI assistant for this tenant:
+   * GET /v1/{tenant}/assistant. */
+  isAssistantAvailable(): Promise<boolean>;
+
+  /**
+   * Streams the assistant's answers in one of the caller's conversations:
+   * GET /v1/{tenant}/assistant/{conversationId}/events. Open it before
+   * asking; answers are not replayed. Returns an unsubscribe function.
+   */
+  subscribeAssistant(conversationId: string, onEvent: (event: LiveChatAssistantEvent) => void): () => void;
+
+  /** Asks the assistant a question in a conversation the caller names:
+   * POST /v1/{tenant}/assistant/{conversationId}/messages. The answer
+   * arrives on {@link subscribeAssistant}. */
+  askAssistant(conversationId: string, message: string): Promise<void>;
 }
+
+/** One step of an AI assistant's answer; see
+ * {@link LiveChatClient.subscribeAssistant}. An answer is any number of
+ * "status" and "token" events, then "done" or "error". */
+export type LiveChatAssistantEvent =
+  /** Progress worth showing, such as "Searching the knowledge base". */
+  | { type: "status"; text: string }
+  /** The next piece of the answer. */
+  | { type: "token"; text: string }
+  /** The complete answer; it replaces the streamed pieces. */
+  | { type: "done"; text: string }
+  /** The answer failed; text is safe to show. */
+  | { type: "error"; text: string }
+  /** Client-side only: the stream itself failed. */
+  | { type: "disconnected"; message: string };

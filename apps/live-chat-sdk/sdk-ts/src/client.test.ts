@@ -327,6 +327,64 @@ describe("getCurrentChat", () => {
   });
 });
 
+describe("assistant", () => {
+  it("reports whether the tenant has an assistant", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { enabled: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createLiveChatClient(baseConfig()).isAssistantAvailable()).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://support.example.com/v1/my-product/assistant",
+      expect.objectContaining({ method: "GET" })
+    );
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(404, { error: "Not available." })));
+    await expect(createLiveChatClient(baseConfig()).isAssistantAvailable()).resolves.toBe(false);
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("404 page not found", { status: 404 })));
+    await expect(createLiveChatClient(baseConfig()).isAssistantAvailable()).resolves.toBe(false);
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(502, { error: "down" })));
+    await expect(createLiveChatClient(baseConfig()).isAssistantAvailable()).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("asks a question in the named conversation", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(202, { conversationId: "conv 1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await createLiveChatClient(baseConfig()).askAssistant("conv 1", "How do I deploy?");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://support.example.com/v1/my-product/assistant/conv%201/messages");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ message: "How do I deploy?" });
+  });
+
+  it("streams answer events and reports a dropped stream", async () => {
+    const frames = [
+      `data: ${JSON.stringify({ type: "status", text: "Searching the knowledge base" })}\n\n`,
+      `data: ${JSON.stringify({ type: "token", text: "Hel" })}\n\n`,
+      `data: ${JSON.stringify({ type: "something_new", text: "x" })}\n\n`,
+      `data: ${JSON.stringify({ type: "done", text: "Hello." })}\n\n`,
+    ];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const f of frames) controller.enqueue(new TextEncoder().encode(f));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const events: unknown[] = [];
+    createLiveChatClient(baseConfig()).subscribeAssistant("conv-1", (e) => events.push(e));
+    await vi.waitFor(() => expect(events).toHaveLength(4));
+    expect(fetchMock.mock.calls[0]![0]).toBe("https://support.example.com/v1/my-product/assistant/conv-1/events");
+    expect(events).toEqual([
+      { type: "status", text: "Searching the knowledge base" },
+      { type: "token", text: "Hel" },
+      { type: "done", text: "Hello." },
+      { type: "disconnected", message: "The connection to the server was closed." },
+    ]);
+  });
+});
+
 describe("URL encoding", () => {
   it("URL-encodes the tenant segment", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(202, { caseId: "c1", conversationId: "c1" }));

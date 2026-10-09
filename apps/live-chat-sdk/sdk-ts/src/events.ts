@@ -13,7 +13,8 @@ import type { LiveChatEvent } from "./types.js";
  *   queued               -> { type: "queued", message }
  *   engineer_assigned    -> { type: "assigned", engineerEmail }
  *   engineer_message     -> { type: "message", content, engineerEmail }
- *   engineer_disconnected -> { type: "disconnected", engineerEmail }
+ *   engineer_disconnected -> { type: "disconnected", engineerEmail, reason? }
+ *   engineer_status      -> { type: "engineerStatus", status }
  *   converted_to_case    -> { type: "converted", engineerEmail, entityCaseId }
  *   chat_abandoned       -> { type: "expired", message }
  *
@@ -57,8 +58,21 @@ export function normalizeWireEvent(raw: unknown): LiveChatEvent | null {
         : null;
 
     case "engineer_disconnected":
+      // An inactivity end may not know the engineer's email.
+      if (raw.reason === "inactive") {
+        return {
+          type: "disconnected",
+          engineerEmail: isNonEmptyString(raw.engineerEmail) ? raw.engineerEmail : "",
+          reason: "inactive"
+        };
+      }
       return isNonEmptyString(raw.engineerEmail)
         ? { type: "disconnected", engineerEmail: raw.engineerEmail }
+        : null;
+
+    case "engineer_status":
+      return raw.status === "away" || raw.status === "back" || raw.status === "busy"
+        ? { type: "engineerStatus", status: raw.status }
         : null;
 
     case "converted_to_case":
