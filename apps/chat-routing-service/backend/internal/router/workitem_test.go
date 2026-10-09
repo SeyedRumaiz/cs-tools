@@ -521,3 +521,78 @@ func TestFindOpenChat_ReturnsTheCustomersChatUntilItEnds(t *testing.T) {
 		t.Fatalf("after the chat ended: found=%v err=%v, want none", found, err)
 	}
 }
+
+func TestActiveChats_TracksOnlyTheEngineersMessages(t *testing.T) {
+	r, pool := newTestRouter(t)
+	ctx := context.Background()
+	userID := testUserID(t, r, pool, "active-chats")
+	caseID := testCaseID(t, pool, "active-chats")
+	email := "active-chats-" + caseID + "@example.com"
+	ci := CaseInfo{
+		CaseID: caseID, ConversationID: "conv-" + caseID, Subject: "test",
+		CustomerEmail: email, ProjectID: "active-chats-project-" + caseID,
+	}
+	workItemFixture(t, r, pool, ci)
+
+	find := func() (ActiveChat, bool) {
+		t.Helper()
+		chats, err := r.ActiveChats(ctx)
+		if err != nil {
+			t.Fatalf("ActiveChats: %v", err)
+		}
+		for _, c := range chats {
+			if c.CaseID == caseID {
+				return c, true
+			}
+		}
+		return ActiveChat{}, false
+	}
+
+	if _, found := find(); found {
+		t.Fatal("a chat that was never accepted must not be listed")
+	}
+
+	caseInfoJSON, err := json.Marshal(ci)
+	if err != nil {
+		t.Fatalf("marshal case info: %v", err)
+	}
+	if err := r.withTx(ctx, func(tx pgx.Tx) error {
+		if _, err := insertQueueRow(ctx, tx, ci, caseInfoJSON, queueAssigned); err != nil {
+			return err
+		}
+		return assignCaseToEngineer(ctx, tx, userID, ci)
+	}); err != nil {
+		t.Fatalf("assign fixture: %v", err)
+	}
+	if res, err := r.Accept(ctx, userID, caseID); err != nil || !res.Applied {
+		t.Fatalf("Accept: %+v %v", res, err)
+	}
+
+	accepted, found := find()
+	if !found || accepted.AssigneeID != userID || accepted.ConversationID != "conv-"+caseID {
+		t.Fatalf("after accept: chat=%+v found=%v", accepted, found)
+	}
+
+	if err := r.AddComment(ctx, caseID, email, "hello?"); err != nil {
+		t.Fatalf("customer AddComment: %v", err)
+	}
+	if c, _ := find(); !c.EngineerActiveAt.Equal(accepted.EngineerActiveAt) {
+		t.Errorf("a customer message must not count as engineer activity: %v -> %v",
+			accepted.EngineerActiveAt, c.EngineerActiveAt)
+	}
+
+	if err := r.AddComment(ctx, caseID, "engineer@example.com", "On it."); err != nil {
+		t.Fatalf("engineer AddComment: %v", err)
+	}
+	if c, _ := find(); !c.EngineerActiveAt.After(accepted.EngineerActiveAt) {
+		t.Errorf("an engineer message must move EngineerActiveAt forward: %v -> %v",
+			accepted.EngineerActiveAt, c.EngineerActiveAt)
+	}
+
+	if _, err := r.Completed(ctx, userID, caseID); err != nil {
+		t.Fatalf("Completed: %v", err)
+	}
+	if _, found := find(); found {
+		t.Fatal("an ended chat must not be listed")
+	}
+}

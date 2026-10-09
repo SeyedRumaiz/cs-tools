@@ -611,3 +611,22 @@ func (h *RoutingHandler) FindOpenChat(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// activeChatsResponse is GET /route/active-chats's response shape.
+type activeChatsResponse struct {
+	Chats []router.ActiveChat `json:"chats"`
+}
+
+// ActiveChats handles GET /route/active-chats, returning every accepted
+// chat that has not ended, with the time its engineer last spoke.
+func (h *RoutingHandler) ActiveChats(w http.ResponseWriter, r *http.Request) {
+	chats, err := h.router.ActiveChats(r.Context())
+	if err != nil {
+		writeStorageError(w, "active-chats", err)
+		return
+	}
+	if chats == nil {
+		chats = []router.ActiveChat{}
+	}
+	writeJSON(w, http.StatusOK, activeChatsResponse{Chats: chats})
+}

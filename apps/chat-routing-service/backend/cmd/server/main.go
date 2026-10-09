@@ -85,13 +85,10 @@ func main() {
 	queueAbandonTimeout := envDurationSeconds("QUEUE_ABANDON_SECONDS", 1800)
 	// how long an accepted session can go with no activity (no message, no
 	// state change) before sweep-timeouts force-ends it — see router.Router.
-	// SweepStaleAcceptedSessions's own doc comment. Default of 24 hours is
-	// deliberately much longer than the other two timeouts: those bound an
-	// engineer's response window before a customer has anyone at all; this
-	// one only exists to eventually recover a session everyone forgot about
-	// (a crashed browser, a test session never completed), not to cut off a
-	// slow-but-genuine conversation.
-	staleSessionTimeout := envDurationSeconds("ACCEPTED_SESSION_IDLE_SECONDS", 86400)
+	// SweepStaleAcceptedSessions's own doc comment. This is the last-resort
+	// limit for a chat both sides went quiet on; csm-portal ends a chat much
+	// sooner when its engineer's tab is closed (ENGINEER_AWAY_END_SECONDS).
+	staleSessionTimeout := envDurationSeconds("ACCEPTED_SESSION_IDLE_SECONDS", 1800)
 	h := handler.NewRoutingHandler(r, pendingTimeout, queueAbandonTimeout, staleSessionTimeout)
 
 	mux := http.NewServeMux()
@@ -106,6 +103,7 @@ func main() {
 	mux.HandleFunc("POST /route/workitem", h.CreateWorkItem)
 	mux.HandleFunc("POST /route/workitem/{caseId}/info", h.GetCaseInfo)
 	mux.HandleFunc("GET /route/open-chat", h.FindOpenChat)
+	mux.HandleFunc("GET /route/active-chats", h.ActiveChats)
 	mux.HandleFunc("POST /route/comment", h.AddComment)
 	mux.HandleFunc("GET /route/debug/workitem/{caseId}", h.DebugWorkItem)
 	mux.HandleFunc("GET /route/debug/state", h.DebugState)

@@ -522,6 +522,26 @@ func (c *Client) FindOpenChat(ctx context.Context, customerEmail, projectID stri
 	return out.OpenChat, nil
 }
 
+// ActiveChat mirrors router.ActiveChat.
+type ActiveChat struct {
+	CaseID           string    `json:"caseId"`
+	ConversationID   string    `json:"conversationId"`
+	AssigneeID       string    `json:"assigneeId"`
+	EngineerActiveAt time.Time `json:"engineerActiveAt"`
+}
+
+// ActiveChats calls GET /route/active-chats, returning every accepted chat
+// that has not ended, with the time its engineer last spoke.
+func (c *Client) ActiveChats(ctx context.Context) ([]ActiveChat, error) {
+	var out struct {
+		Chats []ActiveChat `json:"chats"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/route/active-chats", nil, &out, nil); err != nil {
+		return nil, err
+	}
+	return out.Chats, nil
+}
+
 // ConvertToCaseResult mirrors router.ConvertToCaseResult.
 type ConvertToCaseResult struct {
 	// AssignedCase is set when converting freed a slot that was immediately

@@ -433,3 +433,47 @@ func (r *Router) FindOpenChat(ctx context.Context, customerEmail, projectID stri
 	chat.Accepted = acceptedAt != nil
 	return chat, true, nil
 }
+
+// ActiveChat is an accepted chat that has not ended, with the time its
+// engineer last spoke.
+type ActiveChat struct {
+	CaseID         string `json:"caseId"`
+	ConversationID string `json:"conversationId"`
+	AssigneeID     string `json:"assigneeId"`
+	// EngineerActiveAt is the engineer's latest message, or the accept
+	// time if they have not written yet.
+	EngineerActiveAt time.Time `json:"engineerActiveAt"`
+}
+
+// ActiveChats returns every accepted chat that has not ended. An engineer
+// message is any comment written by neither the customer nor the
+// assistant.
+func (r *Router) ActiveChats(ctx context.Context) ([]ActiveChat, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT c.case_id, c.conversation_id, c.assignee_id,
+		       GREATEST(c.accepted_at, COALESCE((
+		           SELECT max(m.created_at) FROM comment m
+		           WHERE m.work_item_id = c.work_item_id
+		             AND m.created_by <> COALESCE(c.case_info ->> 'customerEmail', '')
+		             AND m.created_by <> $1
+		       ), c.accepted_at))
+		FROM chat_conversation c
+		WHERE c.state = 'ACTIVE' AND c.accepted_at IS NOT NULL
+		  AND c.session_ended_at IS NULL AND c.assignee_id IS NOT NULL
+		ORDER BY c.accepted_at
+	`, priorMessageAssistantAuthor)
+	if err != nil {
+		return nil, fmt.Errorf("active chats: %w", err)
+	}
+	defer rows.Close()
+
+	var chats []ActiveChat
+	for rows.Next() {
+		var c ActiveChat
+		if err := rows.Scan(&c.CaseID, &c.ConversationID, &c.AssigneeID, &c.EngineerActiveAt); err != nil {
+			return nil, fmt.Errorf("active chats: scan: %w", err)
+		}
+		chats = append(chats, c)
+	}
+	return chats, rows.Err()
+}
