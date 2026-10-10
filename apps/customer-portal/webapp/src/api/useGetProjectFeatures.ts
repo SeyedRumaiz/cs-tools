@@ -18,6 +18,7 @@ import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { useAsgardeo } from "@asgardeo/react";
 import { useAuthApiClient } from "@/hooks/useAuthApiClient";
 import { ApiError } from "@utils/ApiError";
+import { CORRELATION_ID_HEADER, newCorrelationId } from "@utils/correlationId";
 import { useLogger } from "@hooks/useLogger";
 import { ApiQueryKeys } from "@constants/apiConstants";
 import type { ProjectFeatures } from "@features/project-hub/types/projects";
@@ -47,10 +48,12 @@ export default function useGetProjectFeatures(
           throw new Error("CUSTOMER_PORTAL_BACKEND_BASE_URL is not configured");
         }
 
+        const correlationId = newCorrelationId();
         const response = await authFetch(
           `${baseUrl}/projects/${projectId}/features`,
           {
             method: "GET",
+            headers: { [CORRELATION_ID_HEADER]: correlationId },
           },
         );
 
@@ -74,6 +77,7 @@ export default function useGetProjectFeatures(
             response.statusText,
             apiMessage ??
               `Error fetching project features: ${response.statusText}`,
+            response.headers.get(CORRELATION_ID_HEADER) ?? correlationId,
           );
         }
 

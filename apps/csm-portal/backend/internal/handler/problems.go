@@ -43,6 +43,7 @@ type entityProblemClient interface {
 // boundary; the original raw body is still forwarded to the entity service unchanged.
 type createProblemRequest struct {
 	Subject           string `json:"subject"`
+	Description       string `json:"description"`
 	Category          string `json:"category"`
 	Subcategory       string `json:"subcategory"`
 	OriginCaseID      string `json:"originCaseId"`

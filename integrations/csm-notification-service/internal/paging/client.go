@@ -1,0 +1,538 @@
+// Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+//
+// WSO2 LLC. licenses this file to you under the Apache License,
+// Version 2.0 (the "License"); you may not use this file except
+// in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package paging
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/apierror"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
+)
+
+// tokenFetchTimeout is the HTTP client timeout for token-endpoint requests.
+// Overridden in tests to keep them fast.
+var tokenFetchTimeout = 10 * time.Second
+
+// EntityConfig holds the configuration for the entity-service client below.
+// Same shape and same credential story as slaengine.EntityConfig: BaseURL and
+// Scopes are this client's own env vars, while TokenURL/ClientID/ClientSecret
+// are filled by cmd/server/main.go from the shared OAUTH2_* app.
+type EntityConfig struct {
+	BaseURL      string
+	TokenURL     string
+	ClientID     string
+	ClientSecret string
+	Scopes       []string
+	// NoteActorEmail is who a case's execution summary is written as. A
+	// machine caller adding a case comment must name one (entity-service's
+	// POST /cases/{id}/comments actorEmail), and this client's id must be in
+	// entity-service's M2M_CLIENT_IDS. Empty uses DefaultNoteActorEmail.
+	NoteActorEmail string
+}
+
+// DefaultNoteActorEmail is the system identity entity-service already uses for
+// machine-created records.
+const DefaultNoteActorEmail = "system-m2m@wso2.com"
+
+// EntityClient is a narrow entity-service client with exactly one job:
+// appending the execution summary to an incident as a work note (section
+// 11.0). A deliberate second client rather than a method on
+// slaengine.EntityClient — that one exists for the sla_clocks endpoints, which
+// have nothing to do with incidents.
+type EntityClient struct {
+	http    *http.Client
+	baseURL string
+	// tokens is the same client-credentials source the HTTP client uses. It is
+	// held separately so do() can put the access token in x-jwt-assertion as
+	// well as in Authorization -- see do() for why that header is the one that
+	// decides whether this caller counts as internal.
+	tokens oauth2.TokenSource
+	// noteActor is who a case work note is written as; see EntityConfig.
+	noteActor string
+}
+
+// NewEntityClient constructs an EntityClient authenticated via the OAuth2
+// client credentials grant. Never fails and never contacts the token endpoint
+// — a missing or invalid configuration only surfaces as an error the first
+// time AppendWorkNote is called.
+func NewEntityClient(cfg EntityConfig) *EntityClient {
+	cc := clientcredentials.Config{
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+		TokenURL:     cfg.TokenURL,
+		Scopes:       cfg.Scopes,
+	}
+
+	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient,
+		&http.Client{Timeout: tokenFetchTimeout})
+	httpClient := cc.Client(tokenCtx)
+	httpClient.Timeout = 25 * time.Second
+
+	return &EntityClient{
+		tokens:  cc.TokenSource(tokenCtx),
+		http:    httpClient,
+		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
+		noteActor: func() string {
+			if a := strings.TrimSpace(cfg.NoteActorEmail); a != "" {
+				return a
+			}
+			return DefaultNoteActorEmail
+		}(),
+	}
+}
+
+// updateIncidentRequest is the subset of entity-service's
+// PATCH /incidents/{id} body this client sends. Work notes only, and that
+// matters twice over for loop safety:
+//
+//   - A PATCH touching neither state nor priority publishes no escalation
+//     signal (see entity-service's publishEscalationSignals), so writing a
+//     summary cannot come back as a new trigger or an acknowledgement.
+//   - incident.comment_added is published by CreateComment, a different
+//     endpoint this client never calls — and even if it were reached, a work
+//     note carries IsPublic false, which the engine ignores.
+//
+// So the engine writing its own execution summary can never cancel a ladder,
+// including the one it is writing the summary for.
+type updateIncidentRequest struct {
+	WorkNotes string `json:"workNotes"`
+}
+
+// AppendWorkNote writes note onto the incident as a work note. ServiceNow
+// work-note fields are journals — a write appends an entry rather than
+// replacing the field — so this is additive despite being a PATCH.
+func (c *EntityClient) AppendWorkNote(ctx context.Context, incidentID, note string) error {
+	if strings.TrimSpace(incidentID) == "" {
+		return fmt.Errorf("escalation: incidentId is required")
+	}
+	body, err := json.Marshal(updateIncidentRequest{WorkNotes: note})
+	if err != nil {
+		return fmt.Errorf("escalation: encode work note: %w", err)
+	}
+	_, err = c.do(ctx, http.MethodPatch, "/incidents/"+url.PathEscape(incidentID), body)
+	return err
+}
+
+// caseCommentRequest is entity-service's POST /cases/{id}/comments body for a
+// machine caller.
+type caseCommentRequest struct {
+	Type       string `json:"type"`
+	Content    string `json:"content"`
+	ActorEmail string `json:"actorEmail"`
+}
+
+// AppendCaseWorkNote writes note onto a customer case as a work note.
+//
+// Loop-safe like AppendWorkNote: the comment is a work note, published as a
+// case.comment_added with isInternalNote set, and the engine never counts a
+// work note as an acknowledgement.
+func (c *EntityClient) AppendCaseWorkNote(ctx context.Context, caseID, note string) error {
+	if strings.TrimSpace(caseID) == "" {
+		return fmt.Errorf("escalation: caseId is required")
+	}
+	body, err := json.Marshal(caseCommentRequest{Type: "work_note", Content: note, ActorEmail: c.noteActor})
+	if err != nil {
+		return fmt.Errorf("escalation: encode case work note: %w", err)
+	}
+	_, err = c.do(ctx, http.MethodPost, "/cases/"+url.PathEscape(caseID)+"/comments", body)
+	return err
+}
+
+// teamMember is one row of GET /team-schedule/members.
+type teamMember struct {
+	TeamKey string `json:"teamKey"`
+	Role    string `json:"role"`
+	// TeamType is the team's ABT: cre-abt (seven teams), sre-abt (two), or
+	// cre for a team like Americas that belongs to no ABT at all.
+	TeamType string `json:"teamType,omitempty"`
+	// AlertTier is the standing alert-duty nomination (T1/T2/T3), empty when
+	// this member holds none. A different axis from Role -- see entity-service
+	// migration 0171 -- and what the ladder's first rung resolves from on the
+	// rules whose Level 0 is a nominated set rather than the rota.
+	AlertTier string `json:"alertTier,omitempty"`
+	UserID    string `json:"userId"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+}
+
+type teamMembersResponse struct {
+	Members []teamMember `json:"members"`
+}
+
+// TeamMembers returns everyone holding one of roles on one of teamKeys.
+//
+// An empty result is not an error: a team with nobody at that rank is a rung
+// that reaches nobody, which the ladder logs and climbs past.
+func (c *EntityClient) TeamMembers(ctx context.Context, teamKeys, roles, alertTiers, teamTypes []string) ([]teamMember, error) {
+	if len(teamKeys) == 0 && len(teamTypes) == 0 {
+		return nil, nil
+	}
+	q := url.Values{}
+	if len(teamKeys) > 0 {
+		q.Set("teamKeys", strings.Join(teamKeys, ","))
+	}
+	if len(teamTypes) > 0 {
+		q.Set("teamTypes", strings.Join(teamTypes, ","))
+	}
+	if len(roles) > 0 {
+		q.Set("roles", strings.Join(roles, ","))
+	}
+	if len(alertTiers) > 0 {
+		q.Set("alertTiers", strings.Join(alertTiers, ","))
+	}
+	raw, err := c.do(ctx, http.MethodGet, "/team-schedule/members?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp teamMembersResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("escalation: decode team members: %w", err)
+	}
+	return resp.Members, nil
+}
+
+// onDutyAssignment is the part of GET /team-schedule/on-duty this needs: who,
+// and which team they were rostered under.
+type onDutyAssignment struct {
+	Engineer struct {
+		UserID string `json:"userId"`
+		Name   string `json:"name"`
+		Email  string `json:"email"`
+	} `json:"engineer"`
+	TeamKey   string `json:"teamKey"`
+	ShiftCode string `json:"shiftCode"`
+	// OnLeave marks someone away that day, returned only with includeOnLeave.
+	OnLeave bool `json:"onLeave,omitempty"`
+	// Tier is the on-call tier the assignment holds (L1, L2, L3), or nil for
+	// someone working the window without one -- in which case the window's
+	// own tier, if it has one, is the answer. The SRE ladder reads it.
+	Tier *string `json:"tier,omitempty"`
+	// ZoneCode is the SRE zone (TZ1, TZ2, TZ3) the turn belongs to.
+	ZoneCode *string `json:"zoneCode,omitempty"`
+}
+
+type onDutyResponse struct {
+	Assignments []onDutyAssignment `json:"assignments"`
+}
+
+// OnDutyAt returns everyone whose rostered window covers at.
+//
+// Deliberately separate from TeamMembers rather than one endpoint answering
+// both: rank lives on the membership and changes rarely, the rota changes
+// daily, and folding rank into the rota response would widen a shape the Team
+// Schedule page already renders.
+//
+// includeOnLeave also returns the people away that day, marked OnLeave, for a
+// ladder whose onLeave is call; without it entity-service leaves them out.
+func (c *EntityClient) OnDutyAt(ctx context.Context, at time.Time, includeOnLeave bool) ([]onDutyAssignment, error) {
+	q := url.Values{}
+	if !at.IsZero() {
+		q.Set("at", at.UTC().Format(time.RFC3339))
+	}
+	if includeOnLeave {
+		q.Set("includeOnLeave", "true")
+	}
+	path := "/team-schedule/on-duty"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	raw, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp onDutyResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("escalation: decode on-duty: %w", err)
+	}
+	return resp.Assignments, nil
+}
+
+// absence is one row of POST /team-schedule/absences/search, as the ladders
+// read it: whose, and whether it moves them to another team for its span
+// (a Brazil-rotation or Migration span is work on that team, not leave).
+type absence struct {
+	Engineer struct {
+		Email string `json:"email"`
+	} `json:"engineer"`
+	HomeTeamKey *string `json:"homeTeamKey,omitempty"`
+}
+
+type absencesResponse struct {
+	Absences []absence `json:"absences"`
+}
+
+// AwayOn returns the lower-cased emails of everyone on leave on day
+// (YYYY-MM-DD) -- every absence kind but a span that moves them to another
+// team, the same rule the on-duty read applies.
+func (c *EntityClient) AwayOn(ctx context.Context, day string) (map[string]bool, error) {
+	body, err := json.Marshal(map[string]string{"from": day, "to": day})
+	if err != nil {
+		return nil, err
+	}
+	raw, err := c.do(ctx, http.MethodPost, "/team-schedule/absences/search", body)
+	if err != nil {
+		return nil, err
+	}
+	var resp absencesResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("escalation: decode absences: %w", err)
+	}
+	away := map[string]bool{}
+	for _, a := range resp.Absences {
+		if a.HomeTeamKey != nil && strings.TrimSpace(*a.HomeTeamKey) != "" {
+			continue // moved to another team for the span: working, not away
+		}
+		if e := strings.ToLower(strings.TrimSpace(a.Engineer.Email)); e != "" {
+			away[e] = true
+		}
+	}
+	return away, nil
+}
+
+// scheduleCatalogue is the part of GET /team-schedule/catalogue the resolver
+// reads: which family each team and each window belongs to, and which rota
+// (SRE_SAAS, SRE_IAAS, SME_...) each team and each zone is on.
+type scheduleCatalogue struct {
+	Teams  []catalogueTeam  `json:"teams"`
+	Shifts []catalogueShift `json:"shifts"`
+	Zones  []catalogueZone  `json:"zones"`
+}
+
+type catalogueTeam struct {
+	Key    string `json:"key"`
+	Name   string `json:"name"`
+	Family string `json:"family"`
+	// RotaCode is the rota the team's type belongs to; nil for a team on no
+	// named rota (every CRE team), and on an entity-service that predates
+	// rotas.
+	RotaCode *string `json:"rotaCode,omitempty"`
+}
+
+type catalogueShift struct {
+	Code     string  `json:"code"`
+	Family   string  `json:"family"`
+	ZoneCode *string `json:"zoneCode,omitempty"`
+	Tier     *string `json:"tier,omitempty"`
+}
+
+type catalogueZone struct {
+	Code string `json:"code"`
+	// RotaCode is the rota the zone belongs to (TZ1-TZ3 are SRE_SAAS,
+	// IAAS_D/IAAS_N are SRE_IAAS).
+	RotaCode *string `json:"rotaCode,omitempty"`
+}
+
+// hasRotas reports whether the catalogue names any rota at all. Without one
+// (an entity-service from before rotas) the SRE ladder cannot tell SaaS from
+// IaaS and reads every SRE window, as it always did.
+func (c scheduleCatalogue) hasRotas() bool {
+	for _, t := range c.Teams {
+		if deref(t.RotaCode) != "" {
+			return true
+		}
+	}
+	for _, z := range c.Zones {
+		if deref(z.RotaCode) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// teamRota is the rota a team key is on, "" when the catalogue does not say.
+func (c scheduleCatalogue) teamRota(key string) string {
+	for _, t := range c.Teams {
+		if strings.EqualFold(t.Key, key) {
+			return deref(t.RotaCode)
+		}
+	}
+	return ""
+}
+
+// zoneRotas maps each zone code to its rota.
+func (c scheduleCatalogue) zoneRotas() map[string]string {
+	out := make(map[string]string, len(c.Zones))
+	for _, z := range c.Zones {
+		out[z.Code] = deref(z.RotaCode)
+	}
+	return out
+}
+
+// ScheduleCatalogue returns the rota's teams and windows. It changes by
+// migration rather than daily; the resolver reads it once per ladder.
+func (c *EntityClient) ScheduleCatalogue(ctx context.Context) (scheduleCatalogue, error) {
+	raw, err := c.do(ctx, http.MethodGet, "/team-schedule/catalogue", nil)
+	if err != nil {
+		return scheduleCatalogue{}, err
+	}
+	var cat scheduleCatalogue
+	if err := json.Unmarshal(raw, &cat); err != nil {
+		return scheduleCatalogue{}, fmt.Errorf("escalation: decode catalogue: %w", err)
+	}
+	return cat, nil
+}
+
+// pagingContact is one row of GET /team-schedule/paging-contacts: a person's
+// numbers. Only what paging reads is decoded.
+type pagingContact struct {
+	UserID string `json:"userId"`
+	Email  string `json:"email"`
+	// DialPhone and DialSource are the number to call and where it comes
+	// from ("profile" or "paging"); absent from an entity-service that
+	// predates the profile number, which sends only Phone.
+	DialPhone  string  `json:"dialPhone"`
+	DialSource *string `json:"dialSource"`
+	// Phone is the paging-only number.
+	Phone string `json:"phone"`
+}
+
+type pagingContactsResponse struct {
+	Contacts []pagingContact `json:"contacts"`
+}
+
+// DialNumbers returns, keyed by lower-cased email, the number entity-service
+// says to call each of these people on: the one on their own CSM profile,
+// else their paging-only number. One request for the whole batch; someone
+// with no number is simply absent. From an entity-service that predates the
+// profile number the answer is the paging-only number, with no Source.
+func (c *EntityClient) DialNumbers(ctx context.Context, emails []string) (map[string]DialNumber, error) {
+	if len(emails) == 0 {
+		return nil, nil
+	}
+	q := url.Values{}
+	q.Set("emails", strings.Join(emails, ","))
+	raw, err := c.do(ctx, http.MethodGet, "/team-schedule/paging-contacts?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp pagingContactsResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("escalation: decode paging contacts: %w", err)
+	}
+	out := make(map[string]DialNumber, len(resp.Contacts))
+	for _, pc := range resp.Contacts {
+		e := strings.ToLower(strings.TrimSpace(pc.Email))
+		if e == "" {
+			continue
+		}
+		var d DialNumber
+		if pc.DialSource != nil {
+			d = DialNumber{Number: strings.TrimSpace(pc.DialPhone), Source: strings.TrimSpace(*pc.DialSource)}
+		} else {
+			d = DialNumber{Number: strings.TrimSpace(pc.Phone)}
+		}
+		if d.Number != "" {
+			out[e] = d
+		}
+	}
+	return out, nil
+}
+
+// pagingTestResultRequest is PUT /team-schedule/paging-contacts/{userId}/test-result.
+type pagingTestResultRequest struct {
+	Status   string `json:"status"`
+	TestedAt string `json:"testedAt"`
+}
+
+// PutPagingTestResult records how a paging-number test call ended:
+// completed, no-answer, busy or failed.
+func (c *EntityClient) PutPagingTestResult(ctx context.Context, userID, status string, testedAt time.Time) error {
+	if strings.TrimSpace(userID) == "" {
+		return fmt.Errorf("escalation: userId is required")
+	}
+	body, err := json.Marshal(pagingTestResultRequest{Status: status, TestedAt: testedAt.UTC().Format(time.RFC3339)})
+	if err != nil {
+		return fmt.Errorf("escalation: encode test result: %w", err)
+	}
+	_, err = c.do(ctx, http.MethodPut, "/team-schedule/paging-contacts/"+url.PathEscape(userID)+"/test-result", body)
+	return err
+}
+
+// do executes an authenticated HTTP request against entity-service and returns
+// the raw JSON response body, or an *apierror.Error for a non-2xx status.
+// Mirrors slaengine.EntityClient.do exactly.
+func (c *EntityClient) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	var reqBody io.Reader
+	if len(body) > 0 {
+		reqBody = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("escalation: build request %s %s: %w", method, path, err)
+	}
+	if len(body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	c.setClientAssertion(ctx, req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("escalation: %s %s: %w", method, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("escalation: read response body: %w", err)
+	}
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, &apierror.Error{StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
+	return respBody, nil
+}
+
+// setClientAssertion puts the access token in x-jwt-assertion as well as in
+// Authorization, which the OAuth2 transport sets on its own.
+//
+// entity-service decides whether a caller is internal -- and so whether it may
+// read the rota at all -- from x-jwt-assertion's client_id claim, not from
+// Authorization. In a Choreo deployment its gateway translates one into the
+// other before entity-service sees the request, so this works in production
+// whether or not the header is set here. Nothing translates it locally, so
+// without this every rota lookup is refused and every rung of a real ladder
+// resolves to nobody. Setting it is also what csm-portal-backend's own CORS
+// allow-list describes as intended: local testing that bypasses the gateway,
+// and defence in depth behind it.
+//
+// Best-effort: a token fetch that fails leaves the header off and lets the
+// request go, so the failure surfaces as the upstream's own status rather than
+// as a client-side error that hides it. The transport will fail the same fetch
+// a moment later anyway.
+func (c *EntityClient) setClientAssertion(ctx context.Context, req *http.Request) {
+	if c.tokens == nil {
+		return
+	}
+	tok, err := c.tokens.Token()
+	if err != nil || tok == nil || tok.AccessToken == "" {
+		slog.WarnContext(ctx, "escalation: could not attach the client assertion; "+
+			"entity-service will not see this caller as internal")
+		return
+	}
+	req.Header.Set("x-jwt-assertion", tok.AccessToken)
+}

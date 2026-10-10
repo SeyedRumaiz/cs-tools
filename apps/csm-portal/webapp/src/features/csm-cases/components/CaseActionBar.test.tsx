@@ -822,6 +822,15 @@ describe("acknowledge action", () => {
     expect(screen.queryByRole("button", { name: /acknowledge/i })).not.toBeInTheDocument();
   });
 
+  it("offers acknowledge on a security report analysis regardless of severity", () => {
+    renderBar({
+      caseType: "security_report_analysis",
+      severity: "unset",
+      acknowledgedBy: undefined,
+    });
+    expect(screen.getByRole("button", { name: /acknowledge/i })).toBeInTheDocument();
+  });
+
   it("hides acknowledge once the case is acknowledged — it is first-write-wins, so there is nothing left to do", () => {
     renderBar({ severity: "S1", acknowledgedBy: { name: "Jane Doe" } });
     expect(screen.queryByRole("button", { name: /acknowledge/i })).not.toBeInTheDocument();

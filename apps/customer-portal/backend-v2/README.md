@@ -172,7 +172,16 @@ A separate service (not entity-service, not SCIM) — see
 | `AUTH_ISSUER` | Expected `iss` claim value |
 | `AUTH_AUDIENCE` | Comma-separated accepted `aud` values |
 | `AUTH_TOKEN_VALIDATOR_ENABLED` | `false` skips JWT signature verification — **local development only**; `.env.example` ships `false` for local convenience. Production **must** set this to `true` with a real `AUTH_JWKS_ENDPOINT`/`AUTH_ISSUER`/`AUTH_AUDIENCE` |
-| `AUTH_ADMIN_ROLE` | The role string (from entity-service's `GET /users/me` `roles`) that grants admin privileges for registry-token and project-contact management |
+| `AUTH_ADMIN_ROLE` | The role string (from entity-service's `GET /users/me` `roles`) that grants admin privileges for registry-token management. Project-contact writes under `CSM_MIGRATION_PORTAL_CONTACTS_ENABLED` use the account admin roles `customer_admin` and `partner_admin` instead, together with an active membership on the project |
+
+### ServiceNow-to-CSM cutover
+
+Every flag for that cutover is named `CSM_MIGRATION_*`, is opt-in (on only when the value is exactly `true`), and is off in every environment until cutover day. Off means the portal behaves exactly as it does today: the guarded code is never entered, so no extra request leaves the process.
+
+| Variable | Description |
+|---|---|
+| `CSM_MIGRATION_FIRST_ACCESS_ENABLED` | After a profile load, ask entity-service (`POST /users/me/memberships/register`) to complete the caller's onboarding: clear their Salesforce lockout flag, set the membership to `REGISTERED`, refresh the CSM database. Runs after the response is written, on its own context; a failure is logged and dropped. entity-service only registers that route when its own `CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED` and membership-ingest flags are on |
+| `CSM_MIGRATION_PORTAL_CONTACTS_ENABLED` | Read the project contact list (`GET /projects/{id}/contacts`) and the admin check behind every contact write from the CSM database through entity-service, and send the writes (invite, role change, remove, and `POST /projects/{id}/contacts/{email}/resend-invitation`) to entity-service, which updates Postgres and Salesforce in one transaction. The invite pre-check `POST /projects/{id}/contacts/validate` asks entity-service's invitation dry run, which runs the same checks as the invite and writes nothing. Off, the list, validate, invite, role change and remove go to the pre-cutover onboarding service unchanged and resend answers `404`. entity-service only registers these routes when its own `CSM_MIGRATION_PORTAL_WRITES_ENABLED` is on and its `DATA_SOURCE` is exactly `postgres` |
 
 ### Server
 
@@ -180,6 +189,9 @@ A separate service (not entity-service, not SCIM) — see
 |---|---|
 | `PORT` | REST server listen port — a plain number, not an address (default `8080`) |
 | `WS_PORT` | WebSocket (`GET /ws`) listen port — a separate listener from `PORT`, must match the `customer-portal-websocket` endpoint in `.choreo/component.yaml` (default `8081`) |
+| `REST_READ_TIMEOUT` | REST server `ReadTimeout` as a Go duration (e.g. `60s`, `1m30s`); must be > 0 (default `60s`) |
+| `REST_WRITE_TIMEOUT` | REST server `WriteTimeout` as a Go duration; must be > 0 (default `60s`) |
+| `ENTITY_SERVICE_TIMEOUT` | Timeout of the entity-service HTTP client as a Go duration; must be > 0 (default `60s`); no ordering against `REST_WRITE_TIMEOUT` is enforced, but keeping it shorter lets the server return a clean error |
 
 ## Project Structure
 
@@ -347,7 +359,7 @@ backend-v2/
 - `POST /cases/{id}/activities/search` — search a case's activity feed (comments, attachments, field changes)
 - `POST /change-requests` — create a change request (ServiceNow data source only)
 - `POST /projects/{id}/change-requests/search` — search a project's change requests (ServiceNow data source only)
-- `GET /change-requests/{id}` — get change request by ID (ServiceNow data source only)
+- `GET /change-requests/{id}` — get change request by ID (ServiceNow data source only); carries `customerCanAnswer`, the signed-in customer's own "may I approve / reject (or confirm / fail the review of) this now" (absent, not false, when entity-service did not compute it — see CLAUDE.md) and `customerProposal`, the time a customer proposed and WSO2's answer (`pending` / `agreed` / `disagreed` / `unanswered`)
 - `PATCH /change-requests/{id}` — update a change request (restricted, customer-safe field subset — see CLAUDE.md; ServiceNow data source only)
 - `GET /change-requests/{id}/approvals` — get a change request's approval stages (ServiceNow data source only)
 - `POST /change-requests/{id}/approvals/decision` — approve/reject the caller's own pending approval (ServiceNow data source only)

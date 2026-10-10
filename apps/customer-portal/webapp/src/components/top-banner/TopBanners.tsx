@@ -14,7 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { useState, useEffect, type JSX } from "react";
+import { useState, useEffect, useMemo, type JSX } from "react";
 import { type TopBannerItem, topBannersConfig } from "@config/topBannersConfig";
 import { useLogger } from "@hooks/useLogger";
 
@@ -34,6 +34,16 @@ function persistDismissal(storageKey: string): void {
   }
 }
 
+// setTimeout stores its delay as a signed 32-bit int; larger values fire immediately.
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/** Epoch ms for a valid startsAt/expiresAt, or null when absent or unparseable. */
+function parseTimestamp(value: string | undefined): number | null {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
 interface BannerProps {
   banner: TopBannerItem;
 }
@@ -44,9 +54,7 @@ function Banner({ banner }: BannerProps): JSX.Element | null {
   const { html, closeable } = banner;
   const resolvedStorageKey = banner.storageKey || FALLBACK_STORAGE_KEY;
   const logger = useLogger();
-  const [closed, setClosed] = useState(() =>
-    closeable ? isDismissed(resolvedStorageKey) : false,
-  );
+  const [closedByUser, setClosedByUser] = useState(false);
 
   useEffect(() => {
     if (closeable && !banner.storageKey) {
@@ -57,11 +65,93 @@ function Banner({ banner }: BannerProps): JSX.Element | null {
     }
   }, [closeable, banner.storageKey, logger]);
 
-  if (closed) return null;
+  const startMs = useMemo(
+    () => parseTimestamp(banner.startsAt),
+    [banner.startsAt],
+  );
+  const expiryMs = useMemo(
+    () => parseTimestamp(banner.expiresAt),
+    [banner.expiresAt],
+  );
+  const [now, setNow] = useState(() => Date.now());
+
+  // startsAt >= expiresAt: the window is empty, the banner never shows.
+  const emptyWindow =
+    startMs !== null && expiryMs !== null && startMs >= expiryMs;
+  const inWindow =
+    !emptyWindow &&
+    (startMs === null || now >= startMs) &&
+    (expiryMs === null || now < expiryMs);
+
+  useEffect(() => {
+    if (banner.startsAt && startMs === null) {
+      logger.warn(
+        `A top banner has an invalid startsAt "${banner.startsAt}". ` +
+          "It is ignored and the banner is not delayed.",
+      );
+    }
+  }, [banner.startsAt, startMs, logger]);
+
+  useEffect(() => {
+    if (banner.expiresAt && expiryMs === null) {
+      logger.warn(
+        `A top banner has an invalid expiresAt "${banner.expiresAt}". ` +
+          "It is ignored and the banner will not auto-hide.",
+      );
+    }
+  }, [banner.expiresAt, expiryMs, logger]);
+
+  useEffect(() => {
+    if (emptyWindow) {
+      logger.warn(
+        `A top banner has startsAt "${banner.startsAt}" at or after expiresAt ` +
+          `"${banner.expiresAt}". It will never be shown.`,
+      );
+    }
+  }, [emptyWindow, banner.startsAt, banner.expiresAt, logger]);
+
+  // One scheduler for both boundaries: wake at the next of startsAt/expiresAt
+  // still in the future. The clock is re-read on every hop, so boundaries
+  // beyond the setTimeout limit are reached in chunks and an early-firing
+  // timer cannot change visibility too soon.
+  useEffect(() => {
+    if (emptyWindow) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = (): void => {
+      const current = Date.now();
+      // Re-render only when a boundary was actually crossed since the last render.
+      setNow((prev) =>
+        [startMs, expiryMs].some((t) => t !== null && prev < t && t <= current)
+          ? current
+          : prev,
+      );
+      const upcoming = [startMs, expiryMs].filter(
+        (t): t is number => t !== null && t > current,
+      );
+      if (upcoming.length === 0) return;
+      timer = setTimeout(
+        schedule,
+        Math.min(Math.min(...upcoming) - current, MAX_TIMEOUT_MS),
+      );
+    };
+    schedule();
+    return () => {
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [startMs, expiryMs, emptyWindow]);
+
+  // Dismissal is only consulted once the banner is actually in its window, so
+  // a not-yet-started banner never reads (or writes) stored state.
+  const dismissed = useMemo(
+    () => closeable && inWindow && isDismissed(resolvedStorageKey),
+    [closeable, inWindow, resolvedStorageKey],
+  );
+
+  if (!inWindow || closedByUser || dismissed) return null;
 
   const handleClose = (): void => {
     persistDismissal(resolvedStorageKey);
-    setClosed(true);
+    setClosedByUser(true);
   };
 
   return (

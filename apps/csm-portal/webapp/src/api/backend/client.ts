@@ -97,6 +97,14 @@ export interface BackendApi {
     options?: BackendApiPostOptions,
   ): Promise<TResponse>;
   patch<TRequest, TResponse>(path: string, body: TRequest): Promise<TResponse>;
+  delete(path: string, body?: unknown): Promise<void>;
+  /**
+   * Authenticated PUT. Added for the /customer-health/* endpoints
+   * (risk close, action-item status/update) — the only current callers of
+   * a full-replace verb in this app; every other mutation here uses PATCH
+   * or POST.
+   */
+  put<TRequest, TResponse>(path: string, body: TRequest): Promise<TResponse>;
   postEmpty<TResponse>(path: string): Promise<TResponse>;
   /** Authenticated DELETE. Returns the parsed JSON body (`null` on 204). */
   del<TResponse>(path: string): Promise<TResponse | null>;
@@ -161,6 +169,34 @@ export function useBackendApi(): BackendApi {
         const correlationId = newCorrelationId();
         const response = await authFetch(buildUrl(path), {
           method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            [CORRELATION_ID_HEADER]: correlationId,
+          },
+          body: JSON.stringify(body),
+        });
+        if (!response.ok) throw await readError(response, correlationId);
+        return (await response.json()) as TResponse;
+      },
+      async delete(path: string, body?: unknown): Promise<void> {
+        const correlationId = newCorrelationId();
+        const response = await authFetch(buildUrl(path), {
+          method: "DELETE",
+          headers: {
+            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+            [CORRELATION_ID_HEADER]: correlationId,
+          },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        });
+        if (response.status < 200 || response.status >= 300) throw await readError(response, correlationId);
+      },
+      async put<TRequest, TResponse>(
+        path: string,
+        body: TRequest,
+      ): Promise<TResponse> {
+        const correlationId = newCorrelationId();
+        const response = await authFetch(buildUrl(path), {
+          method: "PUT",
           headers: {
             "Content-Type": "application/json",
             [CORRELATION_ID_HEADER]: correlationId,

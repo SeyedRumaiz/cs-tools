@@ -34,10 +34,52 @@ export interface BePagination {
 }
 
 export interface BeErrorPayload {
+  /** The reason, worded for people: it can change, so never branch on it. */
   message?: string;
+  /**
+   * The stable machine-readable name of the refusal, when the backend names it
+   * (e.g. `change_request_approval_not_pending`): what a client may branch on.
+   * Absent for a refusal that has none, and for an older backend. Kept on
+   * {@link BackendApiError.payload}. The change request page branches on the codes of the
+   * answers to a proposed time (`ChangeRequestErrorCode` in `csm-operations/utils/changeRequests.ts`);
+   * every other caller keys on the status.
+   */
+  errorCode?: string;
+}
+
+/** CSM list that owns a saved filter view. Isolated so views never leak across lists. */
+export type BeSavedFilterListKey = "cases" | "incidents" | "change_requests" | "problems";
+
+/** Named bookmark of a list URL query string. `qs` is opaque. */
+export interface BeSavedFilterView {
+  name: string;
+  qs: string;
+}
+
+export interface BeSavedFilterViewList {
+  views: BeSavedFilterView[];
+}
+
+export interface BeSaveSavedFilterViewPayload {
+  listKey: BeSavedFilterListKey;
+  name: string;
+  qs: string;
+}
+
+export interface BeReorderSavedFilterViewPayload {
+  listKey: BeSavedFilterListKey;
+  name: string;
+  /** One-slot move. Omit when `position` is set. */
+  direction?: "up" | "down";
+  /** 0-based target index. Wins over `direction` when both are set. */
+  position?: number;
 }
 
 export interface BeSearchResponseBase {
+  /** Matching records, or -1 when the request set `skipTotal` and the count was
+   * skipped (not counted, not a lower bound: never display it). The ServiceNow
+   * data source and a grouped case search ignore `skipTotal` and report their own
+   * total, so only treat -1 as "no total", never the reverse. */
   total: number;
   limit: number;
   offset: number;
@@ -150,8 +192,9 @@ export type BeCaseSortField =
 /**
  * Where a case sits in the backing data source's staged auto-closure sequence
  * (DEFAULT -> FIRST_COMMENT -> ON_HOLD -> SECOND_COMMENT). Read-only — the
- * only supported write is `autocloseHoldUntil` on `PATCH /cases/{id}`
- * (ServiceNow only).
+ * only supported write is `autocloseHoldUntil` on `PATCH /cases/{id}`. Only
+ * `ON_HOLD` is a hold; the `*_COMMENT` steps are later stages of the countdown
+ * to closure.
  */
 export type BeCaseAutoclosureStep =
   | "DEFAULT"
@@ -416,7 +459,7 @@ export interface BeCaseView {
   autoclosureStep?: BeCaseAutoclosureStep | null;
   /**
    * When the auto-closure sequence next advances — e.g. the "eligible again
-   * after" date for a held case (ServiceNow only). Read-only.
+   * after" date for a held case. Read-only.
    */
   autoclosureStateTime?: string | null;
   /**
@@ -588,6 +631,8 @@ export interface BeAnnouncementCreatePayload {
   projectId: string;
   subject: string;
   description: string;
+  /** Decides the case's default email audience on the backend: SECURITY_CONTACT project-role contacts when true, PORTAL_USER contacts otherwise. */
+  isSecurityAnnouncement: boolean;
 }
 
 /**
@@ -1085,6 +1130,22 @@ export interface BeCaseSearchPayload {
     field?: BeCaseSortField;
     order?: "asc" | "desc";
   };
+  /**
+   * Skip counting every matching record: the response's `total` is then -1 and
+   * only the requested page is read. For callers that never show a total
+   * (the quick-nav palette lists a handful of hits). Needs an entity service
+   * that declares the field; it rejects unknown request fields.
+   */
+  skipTotal?: boolean;
+  /**
+   * The mirror image of `skipTotal`: skip the page query entirely and return
+   * `cases: []`, reading only `total`. For a count or pie/bar dashboard
+   * widget, whose only use for a search is `total` -- the page it would
+   * otherwise also pay for is never read. Rejected together with `skipTotal`.
+   * Needs an entity service that declares the field; it rejects unknown
+   * request fields.
+   */
+  countOnly?: boolean;
 }
 
 /**
@@ -1205,16 +1266,18 @@ export interface BeCreatedCaseEscalation {
 }
 
 /** Response for `GET /cases/{id}/escalations` -- the case's full escalation
- * history, newest first, plus who's authorized to de-escalate the current
- * level. Deliberately not `BeSearchResponseBase`: the wire response carries
- * no `offset`/`limit`/`hasMore` fields. */
+ * history, newest first, plus who's authorized to de-escalate it.
+ * Deliberately not `BeSearchResponseBase`: the wire response carries no
+ * `offset`/`limit`/`hasMore` fields. */
 export interface BeCaseEscalationSearchResponse {
   escalations: BeCaseEscalation[];
   total: number;
   /** The notified-users list of the case's most recent escalation record
-   * (empty/absent when the case has never been escalated). Only someone on
-   * this list is authorized to de-escalate the case's current level. */
+   * (empty/absent when the case has never been escalated). */
   currentNotifiedUsers?: BeCaseEscalationNotifiedUser[];
+  /** The leads of the case's account's CRE (ABT) team -- the only users who
+   * may de-escalate the case. */
+  teamLeads?: BeCaseEscalationNotifiedUser[];
 }
 
 /**
@@ -1282,17 +1345,35 @@ export interface BeComment {
   id: string;
   /** Parent reference id — the case id or conversation id per the endpoint. */
   referenceId?: string;
-  /** Rich-text HTML (case comment) or Markdown (Novera chat) body. */
+  /** Rich-text HTML (case comment) or Markdown (Novera chat) body. Once
+   * `isDeleted` is true, this is the literal string `"[deleted]"` for a
+   * non-admin internal caller, or the real (never-destroyed) content for an
+   * admin — the frontend renders whatever is given here, no client-side
+   * redaction. */
   content: string;
   /** Normalized comment type; `string` (not the enum) to tolerate new values. */
   type: string;
   createdOn: string;
   createdBy: BeUserReference | null;
+  /** ISO timestamp of the comment's most recent edit. Present once a comment
+   * has been edited at least once via `PATCH /comments/{id}`; absent on a
+   * never-edited comment. */
+  lastEditedOn?: string;
+  /** True once the comment has been soft-deleted via `DELETE /comments/{id}`.
+   * A customer-role caller never receives a soft-deleted row at all, so this
+   * only ever appears for an internal caller. `omitempty` on the wire — absent
+   * or false on a never-deleted comment. */
+  isDeleted?: boolean;
 }
 
 export interface BeCommentSearchResponse extends BeSearchResponseBase {
   /** Optional: the backend may omit the array on an empty result. */
   comments?: BeComment[];
+}
+
+/** Body of `PATCH /comments/{id}`. */
+export interface BeCommentPatchPayload {
+  content: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1384,6 +1465,13 @@ export interface BeSearchConversationsPayload {
   filters?: BeSearchConversationsFilters;
   sortBy?: { field: "createdOn" | "updatedOn"; order: "asc" | "desc" };
   pagination?: BePagination;
+  /**
+   * Skip counting every matching record: the response's `total` is then -1 and
+   * only the requested page is read. For callers that never show a total
+   * (the quick-nav palette lists a handful of hits). Needs an entity service
+   * that declares the field; it rejects unknown request fields.
+   */
+  skipTotal?: boolean;
 }
 
 /** No `hasMore` on this response (unlike {@link BeSearchResponseBase}) —
@@ -1534,6 +1622,15 @@ export interface BeAttachmentUploadTokenRequest {
   mimeType: string;
   sizeBytes: number;
   description?: string | null;
+  /**
+   * Reference entity type for the attachment being minted. Optional; the BE
+   * defaults to `"case"` when omitted. Only `"case"` is actually supported by
+   * direct-upload storage today — `"change_request"`/`"incident"` are
+   * authorized but rejected with a deterministic 422, so the webapp routes
+   * those two through the legacy base64 path instead of calling this
+   * endpoint at all.
+   */
+  referenceType?: BeReferenceType;
 }
 
 /**
@@ -1647,6 +1744,39 @@ export interface BeUser {
   userType?: BeUserType;
   createdAt?: string;
   updatedAt?: string;
+}
+
+/**
+ * `POST /users` request body. At least one of firstName/lastName is
+ * required. `roles` is accepted by the backend and, beyond the allow-list
+ * check every role goes through, is also how `AddUserDialog.tsx` sets the
+ * new user's type: entity-service derives `user_type` from role membership
+ * (no plain settable column exists), so sending `["internal"]`/`["external"]`
+ * is what resolves it to INTERNAL/EXTERNAL — see that service's own
+ * `user_service.go` doc comment on `recompute_user_type`.
+ */
+export interface BeCreateUserPayload {
+  firstName?: string;
+  lastName?: string;
+  email: string;
+  roles?: string[];
+  /**
+   * Portal role keys (see `GET /roles/grantable`) to additionally grant via
+   * SCIM once the user is created — admin-only, same as this whole endpoint.
+   * Distinct from `roles` above: this never reaches entity-service, it only
+   * controls which identity-provider role(s) the new user is added to.
+   */
+  grantRoles?: string[];
+}
+
+/** One portal role key `GET /roles/grantable` reports as grantable in this
+ * deployment — pass `key` back in `BeCreateUserPayload.grantRoles`. */
+export interface BeGrantableRole {
+  key: string;
+}
+
+export interface BeGrantableRolesResponse {
+  roles: BeGrantableRole[];
 }
 
 export interface BeUserSearchFilters {
@@ -1849,6 +1979,70 @@ export interface BeProjectContactSearchResponse {
   offset: number;
   limit: number;
   total: number;
+}
+
+// ---------------------------------------------------------------------------
+// Project onboarding steps (GET /projects/{id}/onboarding-steps — behind the
+// CSM_MIGRATION_ONBOARDING_STATUS_ENABLED flag on both backend and webapp)
+// ---------------------------------------------------------------------------
+
+/**
+ * One step of the customer onboarding flow, in the order it runs. DATABASE is
+ * the csm-platform write done by the Salesforce membership ingest; IDENTITY
+ * the Asgardeo user provisioned via the SCIM service; EMAIL the invitation
+ * email; REGISTRATION the member's first sign-in.
+ */
+export type BeOnboardingStepName = "IDENTITY" | "DATABASE" | "EMAIL" | "REGISTRATION";
+
+/** SKIPPED marks a step that does not apply (e.g. IDENTITY and EMAIL for an integration user). */
+export type BeOnboardingStepStatus = "SUCCEEDED" | "FAILED" | "SKIPPED";
+
+/**
+ * The latest recorded outcome of one onboarding step for one membership,
+ * exactly as the entity service's ledger holds it — nothing is derived.
+ */
+export interface BeProjectOnboardingStep {
+  step: BeOnboardingStepName;
+  status: BeOnboardingStepStatus;
+  /** How many times this step has been recorded for the membership; 1 on first write. */
+  attemptCount: number;
+  /**
+   * The error of the most recent FAILED write, null once the step succeeds.
+   * Upstream error text — render it as plain text only.
+   */
+  lastError: string | null;
+  /** The Salesforce event type (CREATED, UPDATED, RESTORED, ...) or caller-defined trigger. */
+  eventType: string;
+  eventModifiedOn: string;
+  updatedOn: string;
+}
+
+/**
+ * Every recorded onboarding step of one Salesforce Project_Contact__c
+ * membership (one invited email on this project), in flow order. Matched to
+ * a {@link BeProjectContact} row by lower-cased `email` — the contact row
+ * carries no membership or `project_contact` id.
+ */
+export interface BeProjectOnboardingMembership {
+  membershipSfId: string;
+  contactSfId: string | null;
+  /** The invited email, lower-cased. */
+  email: string;
+  /** csm-platform project_contact row, set once DATABASE succeeded. */
+  projectContactId: string | null;
+  steps: BeProjectOnboardingStep[];
+}
+
+export interface BeProjectOnboardingStepsResponse {
+  /** Ordered by email, then membership id. */
+  memberships: BeProjectOnboardingMembership[];
+  /** Number of memberships (not of step rows). */
+  total: number;
+  /**
+   * True when the project's ledger had more rows than the backend walks, so
+   * some memberships may be missing or incomplete.
+   */
+  truncated: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -2078,6 +2272,12 @@ export interface BeDeployedProductCreatePayload {
   cores?: number;
   tps?: number;
   description?: string;
+  /**
+   * Opaque category code ("pdp" | "ms" | "ps" | "cl" | "pc", case-insensitive
+   * on write). Postgres-only -- never mirrored to ServiceNow. Omit to leave
+   * it unset.
+   */
+  category?: string;
 }
 
 export interface BeDeployedProductCreateResponse {
@@ -2105,6 +2305,14 @@ export interface BeDeployedProductDetailUpdatePayload {
    * per-entry endpoint.
    */
   updates?: BeProductUpdate[] | null;
+  /**
+   * Opaque category code ("pdp" | "ms" | "ps" | "cl" | "pc", case-insensitive
+   * on write) -- unlike every other field on this payload, this one is
+   * set-only: the BE has no way to clear it back to unset once set (the
+   * underlying column is COALESCEd, not overwritten, on this field), so
+   * `null` is not an accepted value here. Omit to leave it unchanged.
+   */
+  category?: string;
   active?: never;
 }
 
@@ -2247,8 +2455,10 @@ export interface BeCreateCaseGithubIssuePayload {
   hotFixRequired?: boolean;
   /** Issue-type label to apply on GitHub (e.g. "Type/Patch", "Type/Incident"). */
   issueTypeLabel?: string;
-  /** Priority label, applied only when `issueTypeLabel` is "Type/Incident". */
+  /** Priority label, applied when the type is Discussion. */
   priorityLevel?: string;
+  /** Project onboarding status is In-Progress. Adds Onboarding/affected. */
+  onboardingInProgress?: boolean;
 }
 
 /** `POST /cases/{id}/github-issues` response. */
@@ -2264,36 +2474,13 @@ export interface BeCreateCaseGithubIssueResponse {
   };
 }
 
-/**
- * One entry of the config-driven "repository" catalogue offered by the
- * "Open Git issue" dialog's repo `Select` (cloud cases only — see
- * `CreateGithubIssueDialog`'s `showRepoField`). `value` is an opaque dropdown
- * key; `owner`/`repo` are the real GitHub org/repo an issue filed against
- * this option is created in, and are what populates
- * `BeCreateCaseGithubIssuePayload.repoOverride` — never derive owner/repo
- * from `value` itself. `githubLabel` is the real GitHub issue label that
- * should eventually be applied to an issue filed against this option
- * (distinct from `displayLabel`, which is only this dropdown's display
- * text) — not yet consumed anywhere on the frontend; the actual apply
- * step is a separate, larger follow-up outside this webapp.
- */
-export interface BeGithubIssueRepoOption {
-  value: string;
-  displayLabel: string;
+/** `GET /products/github-repo` — the repository an issue for this product is filed in. */
+export interface BeProductRepoMapping {
+  productName: string;
+  abbreviation?: string;
   owner: string;
-  repo: string;
+  repository: string;
   githubLabel: string;
-}
-
-/**
- * `GET /metadata` response: a single growable bag of reference/config data
- * the webapp fetches once, rather than a dedicated endpoint per field.
- * `githubIssueRepoOptions` is the first field — more are expected to be
- * added here over time as new frontend needs come up. Empty array when
- * unconfigured.
- */
-export interface BeMetadataResponse {
-  githubIssueRepoOptions: BeGithubIssueRepoOption[];
 }
 
 /**
@@ -2335,8 +2522,9 @@ export interface BeSearchCallRequestsResponse {
  *   required, `assignee` optional.
  * - `wso2_rejected` (agent reject) / `canceled`: `cancellationReason` optional
  *   (used as the reject/cancel reason).
- * - `concluded` (agent send notes): `notes` required, `plan`/`attendees`/
- *   `actionItems`/`actualDurationMin` optional.
+ * - `concluded`: agent "send call notes" supplies `notes` (plus optional
+ *   `plan`/`attendees`/`actionItems`/`actualDurationMin`); agent "mark as
+ *   completed" sends no notes at all.
  * - `pending_on_wso2` (reschedule request back to the customer): `utcTimes` +
  *   `durationInMinutes`.
  */
@@ -2352,7 +2540,9 @@ export interface BeUpdateCallRequestPayload {
   meetingDate?: string;
   /** Agent (or team) assigned to run the call; used for `scheduled`. */
   assignee?: string;
-  /** Call notes; required for `concluded`. */
+  /** Call notes for `concluded`. Optional: "Mark as completed" concludes a call
+   * with none (the backend then only accepts it for a scheduled / notes-pending
+   * call); "Send call notes" always supplies them. */
   notes?: string;
   /** Follow-up plan recorded alongside the call notes; used for `concluded`. */
   plan?: string;
@@ -2490,6 +2680,26 @@ export type BeChangeRequestType =
 
 export type BeChangeRequestPriority = "critical" | "high" | "moderate" | "low";
 
+/**
+ * Change-request `category` as accepted by `POST /change-requests` (the
+ * ServiceNow `category` choice list). The legacy ServiceNow form defaults it
+ * to `other`.
+ */
+export type BeChangeRequestCategory =
+  | "hardware"
+  | "software"
+  | "service"
+  | "system_software"
+  | "applications_software"
+  | "network"
+  | "telecom"
+  | "documentation"
+  | "other"
+  | "regular_release_cloud"
+  | "hotfix_release_cloud"
+  | "devops"
+  | "cloud_computing";
+
 /** List-item / shared shape for a change request (`POST /change-requests/search`). */
 export interface BeChangeRequestSearchView {
   id: string;
@@ -2524,6 +2734,19 @@ export interface BeChangeRequestDetail extends BeChangeRequestSearchView {
   testPlan?: string | null;
   hasCustomerApproved?: boolean;
   hasCustomerReviewed?: boolean;
+  /**
+   * The two ServiceNow-style creation checkboxes. `customerApprovalRequired`
+   * adds a `customer_approval` step after internal (CAB/Standard)
+   * approval and before `scheduled`; `customerReviewRequired` adds a
+   * `customer_review` step after `review` and before `closed`. Distinct from
+   * `hasCustomerApproved` / `hasCustomerReviewed`, which are the customer's
+   * confirmation outcome. Optional so a response from a backend that
+   * predates them still type-checks; absent is treated as `false`. An Emergency
+   * change acts without customer consent: both are `false` on it (a change of
+   * that type raised before the rule can still carry one set).
+   */
+  customerApprovalRequired?: boolean;
+  customerReviewRequired?: boolean;
   approvedBy?: BeEntityRef | null;
   approvedOn?: string | null;
   /**
@@ -2552,7 +2775,13 @@ export interface BeChangeRequestDetail extends BeChangeRequestSearchView {
    * {@link BeCreateChangeRequestPayload}; this is the read-back. */
   implementationPlan?: string | null;
   priority?: { id: number; label: string } | null;
-  category?: { id: string; label: string } | null;
+  /** The `category` enum value (`other`, `devops`, ...) as the Postgres data
+   * source returns it, or an `{ id, label }` ref as the ServiceNow-backed
+   * response did — read both through `changeRequestCategoryValue` /
+   * `changeRequestCategoryLabel`. Writable through
+   * {@link BeCreateChangeRequestPayload} / {@link BePatchChangeRequestPayload}
+   * `category`. */
+  category?: string | { id: string; label?: string; name?: string } | null;
   requestedBy?: BeEntityRef | null;
 
   /** Real SRE content the ServiceNow layer previously never surfaced. */
@@ -2561,9 +2790,15 @@ export interface BeChangeRequestDetail extends BeChangeRequestSearchView {
   /** Free-form; e.g. `"10 mins"`. Parsing into a structured duration, if
    * ever needed, is CSM policy, not something ServiceNow enforces. */
   rollbackDurationText?: string | null;
-  environments?: BeEntityRef[];
   deploymentProducts?: BeEntityRef[];
-  customerGroup?: BeEntityRef | null;
+  /**
+   * The change request's "Customer Group": the REGISTERED portal-user contacts
+   * of its Customer Project, derived live by the backend and READ-ONLY (never
+   * picked or sent back). Always an array on the PostgreSQL data source (empty
+   * without a project or without registered contacts); absent on other data
+   * sources. They are the customer's approvers at Customer Approval / Review.
+   */
+  customerContacts?: BeCustomerContact[];
 
   /**
    * Read-through only — no write path is exposed anywhere in the stack for
@@ -2580,8 +2815,26 @@ export interface BeChangeRequestDetail extends BeChangeRequestSearchView {
    * `likelihood` above, this one has a write path all the way down.
    */
   isPlanningVisibleToCustomers?: boolean;
+  /**
+   * WSO2's answer to the customer's proposed time (the confirmation of the proposed
+   * date, entity-service `change_request.customer_updated_date_confirmation`):
+   * `"agree"` or `"disagree"`, absent while
+   * nothing was answered. Read-through; the answer is given by the two actions
+   * of {@link BePatchChangeRequestPayload} (`confirmCustomerUpdatedDate`, or a
+   * Re-schedule that names a time), never by writing this field.
+   */
   confirmCustomerUpdatedDate?: string | null;
+  /** The customer's proposed planned START (the proposed date, entity-service `change_request.customer_updated_on`), when there is one. */
   customerUpdatedOn?: string | null;
+  /**
+   * The conversation about a time the customer proposed, derived by the backend
+   * from `customerUpdatedOn` and the answer: omitted when nobody proposed
+   * anything. `answer: "pending"` is the one that needs WSO2 (see
+   * {@link BeChangeRequestCustomerProposal}).
+   */
+  customerProposal?: BeChangeRequestCustomerProposal | null;
+  /** On hold: a change that is on hold cannot change state, Accept proposed time included. */
+  onHold?: boolean | null;
   /** `read_only` in the ServiceNow dictionary — inherently read-only. */
   labels?: string[];
   deployments?: BeEntityRef[];
@@ -2592,8 +2845,60 @@ export interface BeChangeRequestDetail extends BeChangeRequestSearchView {
   gitReference?: string | null;
 }
 
+/**
+ * Where the conversation about a customer's proposed time stands. Only
+ * `pending` is actionable by WSO2: the customer proposed a time (their own
+ * answer is outstanding too: the change stays in Customer Approval) and nobody
+ * at WSO2 has answered it. `agreed` / `disagreed` are WSO2's answers; `unanswered`
+ * is a proposal the change moved on without (the customer approved the planned
+ * time anyway, or a user of the previous system changed the date): history, no action.
+ */
+export type BeCustomerProposalAnswer = "pending" | "agreed" | "disagreed" | "unanswered";
+
+/**
+ * A time the customer proposed, as `GET /change-requests/{id}` derives it from
+ * the proposed date and its confirmation (`customer_updated_on` /
+ * `customer_updated_date_confirmation`, no extra table or column): the proposal
+ * waits in Customer Approval, the planned window stays what WSO2 planned until
+ * WSO2 answers.
+ */
+export interface BeChangeRequestCustomerProposal {
+  /** The proposed planned START, RFC 3339 (the customer proposes a start and keeps the planned length). */
+  startOn: string;
+  /** The proposed END (start + the planned length); present only while `answer` is `pending`. */
+  endOn?: string | null;
+  answer: BeCustomerProposalAnswer | string;
+  /**
+   * Whether the backend can name the proposer (present only while `answer` is `pending`): `true` while
+   * the change request's last writer is still a registered contact of its project (then that writer is
+   * the proposer); `false` when it is not knowable -- a date a WSO2 user wrote in the previous system, one left
+   * over from an older cycle, a proposal edited over since, or a sync rewrite. The page must then say
+   * the proposer is not recorded rather than guess. Absent on a backend that predates it: the page
+   * falls back to whether a name or an email came with it.
+   */
+  proposerRecorded?: boolean | null;
+  /** Who proposed it and when: only while `pending` and `proposerRecorded` is true (never an empty guess). */
+  proposedByName?: string | null;
+  proposedByEmail?: string | null;
+  proposedOn?: string | null;
+  /**
+   * Whether "Accept proposed time" would be accepted right now, while `pending`; when it would not,
+   * `acceptBlockedReason` says why in the words of the refusal the PATCH would give (the proposed
+   * start has passed, the change is on hold, the planned window has no length to keep). The server
+   * stays the authority: every act re-checks under the row lock.
+   */
+  canAccept?: boolean | null;
+  acceptBlockedReason?: string | null;
+}
+
 /** An approval stage seen on a change request, e.g. Assess, Authorize. */
 export type BeChangeRequestApprovalStage = "Assess" | "Authorize" | "Customer Approval";
+// Stage names are an open, backend-owned string (`BeChangeRequestApproval.stage`):
+// beyond the above, the Peer / CAB stages may arrive as "Peer Approval" or
+// "CAB Approval". An Emergency change has a single CAB stage; "ECAB Approval" /
+// "Emergency CAB" only remain on Emergency changes raised before ECAB was retired,
+// and are still tolerated (and shown as "ECAB Approval"). Labelled by
+// `approvalStageLabel` in `changeRequests.ts`.
 
 /** Who a change-request approval stage is assigned to. */
 export type BeChangeRequestApproverType = "STATIC_GROUP" | "DYNAMIC_CONTACT";
@@ -2609,7 +2914,28 @@ export interface BeChangeRequestApprover {
   id: string;
   name?: string | null;
   status: string;
+  createdOn?: string | null;
   respondedOn?: string | null;
+  comments?: string | null;
+  /**
+   * Set by the backend (Postgres source): true only on the caller's own
+   * REQUESTED row, and only when they may decide it (not the creator, not an
+   * external user on an internal stage, and the change request is still in the
+   * state the row's stage belongs to -- a REQUESTED row of a stage the change
+   * has moved past is `false`). `false` makes the UI disable Approve/Reject for
+   * that row; absent (ServiceNow source / older backend) means "unknown", and
+   * the UI falls back to its own creator check plus the backend's 403 / 409.
+   */
+  canDecide?: boolean;
+}
+
+/**
+ * The group an approval stage is assigned to (`assignmentGroup` on
+ * {@link BeChangeRequestApproval}); its `id` opens `GET /groups/{id}`.
+ */
+export interface BeChangeRequestApprovalGroup {
+  id: string;
+  name: string;
 }
 
 /** One approval stage on a change request, with its individual approvers. */
@@ -2617,6 +2943,14 @@ export interface BeChangeRequestApproval {
   stage: string;
   approverType: BeChangeRequestApproverType | string;
   approverName?: string | null;
+  /**
+   * The group this stage was provisioned from (PostgreSQL data source), so its
+   * members can be listed. `null`/absent for the Customer Approval / Customer
+   * Review stages -- their approvers are the project's registered contacts
+   * (`BeChangeRequestDetail.customerContacts`), not a group -- and on the
+   * ServiceNow data source.
+   */
+  assignmentGroup?: BeChangeRequestApprovalGroup | null;
   status: string;
   approvers: BeChangeRequestApprover[];
 }
@@ -2624,6 +2958,31 @@ export interface BeChangeRequestApproval {
 /** `GET /change-requests/{id}/approvals` response. */
 export interface BeChangeRequestApprovalsView {
   approvals: BeChangeRequestApproval[];
+}
+
+/** One active member of a group (`GET /groups/{id}`). */
+export interface BeGroupMember {
+  /** The member's user id. */
+  id: string;
+  name: string;
+  email?: string | null;
+  /** INTERNAL, EXTERNAL, ... ; null when unset. */
+  userType?: string | null;
+  /** `"lead"` when the user leads the group, else `"member"`. */
+  role?: "member" | "lead" | string | null;
+}
+
+/** `GET /groups/{id}` response: a group and its active members (name order). */
+export interface BeGroupDetail {
+  id: string;
+  name: string;
+  description?: string | null;
+  /** The group email. */
+  email?: string | null;
+  manager?: { id: string; name: string } | null;
+  members: BeGroupMember[];
+  /** Number of members. */
+  total: number;
 }
 
 /** Caller's decision on their own pending change-request approval. */
@@ -2651,21 +3010,34 @@ export interface BeChangeRequestApprovalDecisionResponse {
  * CR can't be created already past its own approval flow.
  * `plannedStartDate`/`plannedEndDate` are `YYYY-MM-DD HH:MM:SS` strings.
  *
- * `category`, `serviceId`, `serviceOfferingId`, `configurationItemId` and
- * `risk` are deliberately not part of this type even though the backend
- * still accepts them: the live ServiceNow CR form has no `Service`/
- * `Service offering`/`Configuration item`/`Risk` fields at all, and
- * `category` is left at its default on 99.9% of real change requests, so
- * neither belongs as an editable control in this portal (see
- * `notes/2026-08-19-sn-prod-cr-form-spec.md` and the field-usage census in
- * the planning repo). The backend contract is left untouched — only the
- * webapp stops sending them.
+ * `serviceId`, `serviceOfferingId`, `configurationItemId` and `risk` are
+ * deliberately not part of this type even though the backend still accepts
+ * them: the live ServiceNow CR form has no `Service`/`Service offering`/
+ * `Configuration item`/`Risk` fields at all (see
+ * `notes/2026-08-19-sn-prod-cr-form-spec.md` in the planning repo). The
+ * backend contract is left untouched — only the webapp stops sending them.
+ *
+ * `projectId`, `deploymentIds`, `deploymentProductIds`, `category`, `comment`
+ * and `workNote` mirror the real ServiceNow CR form's Customer Project /
+ * Deployments / Deployment products / Category / Additional comments
+ * (customer visible) / Work notes fields. Deployments and deployment products
+ * are scoped to the chosen project; the backend rejects an inconsistent
+ * combination with a 400 whose message the form shows verbatim. Every one is
+ * optional and is omitted (arrays when empty) rather than sent blank.
+ *
+ * There is deliberately no `customerGroupId` and no `environmentIds`: the
+ * Customer Group is derived from the project's registered contacts (read-only,
+ * see {@link BeCustomerContact}) and a deployment carries its environment; the
+ * backend answers a client that still sends either with a 400.
  */
 export interface BeCreateChangeRequestPayload {
   subject: string;
   priority?: BeChangeRequestPriority;
   impact?: BeChangeRequestImpact;
-  type?: BeChangeRequestType;
+  /** Required: one of "normal" | "standard" | "emergency" (the create form
+   * offers exactly these three). Drives the approval flow server-side: Normal =
+   * Peer then CAB, Standard = none, Emergency = a single CAB stage. */
+  type: BeChangeRequestType;
   state?: BeChangeRequestState;
   groupId?: string;
   assignedEngineerId?: string;
@@ -2678,10 +3050,74 @@ export interface BeCreateChangeRequestPayload {
   testPlan?: string;
   plannedStartDate?: string;
   plannedEndDate?: string;
+  /** "Additional comments (Customer visible)". */
   comment?: string;
+  /** "Work notes" (internal). */
   workNote?: string;
+  /** "Customer Project". */
+  projectId?: string;
+  /** Deployments of {@link projectId}. */
+  deploymentIds?: string[];
+  /** Deployment products derived from the chosen deployments. */
+  deploymentProductIds?: string[];
+  /** Defaults to `other` on the legacy ServiceNow form. */
+  category?: BeChangeRequestCategory;
   /** "Implementation Plan visible to customers" in this portal's UI. */
   isPlanningVisibleToCustomers?: boolean;
+  /** "Customer Approval" checkbox: adds a customer approval step after
+   * internal approval, before scheduling. The create form always sends it
+   * (`false` for an Emergency change, which proceeds without customer consent). */
+  customerApprovalRequired?: boolean;
+  /** "Customer Review" checkbox: adds a customer review step after Review,
+   * before closing. The create form always sends it (`false` for an Emergency
+   * change, which proceeds without customer consent). */
+  customerReviewRequired?: boolean;
+}
+
+/**
+ * `POST /change-requests/link-options` body: the lookup behind the change
+ * request form's Customer Project -> Deployments -> Deployment products
+ * cascade, plus the project's read-only Customer Group.
+ */
+export interface BeChangeRequestLinkOptionsPayload {
+  /** The selected Customer Project. */
+  projectId: string;
+  /** Deployments chosen so far; the response derives the deployment products
+   * from them. */
+  deploymentIds?: string[];
+}
+
+/** One selectable deployment of the project. */
+export interface BeChangeRequestDeploymentOption {
+  id: string;
+  name: string;
+  /** Deployment type, i.e. its environment role (primary_production, staging, qa, ...). */
+  type?: string;
+}
+
+/** A registered portal-user contact of a project: a member of the change request's read-only Customer Group. */
+export interface BeCustomerContact {
+  id: string;
+  name: string;
+  email?: string;
+}
+
+/** One deployment product (deployed product) that follows from the chosen deployments. */
+export interface BeChangeRequestDeploymentProductOption {
+  id: string;
+  /** "<product> <version>". */
+  name: string;
+  /** The chosen deployment this product is deployed in. */
+  deployment?: BeEntityRef;
+}
+
+export interface BeChangeRequestLinkOptionsResponse {
+  /** The project's deployments (all of them, regardless of the chosen ones). */
+  deployments: BeChangeRequestDeploymentOption[];
+  /** Deployment products that follow from the chosen deployments. */
+  deploymentProducts: BeChangeRequestDeploymentProductOption[];
+  /** The project's registered contacts — the read-only Customer Group (name order, empty when none). */
+  customerContacts?: BeCustomerContact[];
 }
 
 /** `POST /change-requests` response — the created identifiers. */
@@ -2710,7 +3146,13 @@ export interface BeGroup {
 }
 
 export interface BeGroupSearchPayload {
-  filters?: { searchQuery?: string };
+  filters?: {
+    searchQuery?: string;
+    /** Only groups that are the support group of at least one service — the
+     * groups an incident may be assigned to on create. Omitted (not `false`)
+     * when unset, so older callers send the same body as before. */
+    supportGroupsOnly?: boolean;
+  };
   pagination: BePagination;
 }
 
@@ -2846,9 +3288,9 @@ export interface BeConfigurationItemSearchResponse {
  * one field is required by the BE (`minProperties: 1`). `plannedStartOn` and
  * `plannedEndOn` are `YYYY-MM-DD HH:MM:SS` strings.
  *
- * `isCustomerApproved`, `isCustomerReviewed` and `requestApproval` are
- * mutually exclusive with each other — at most one of the three may be set in
- * a single patch.
+ * `isCustomerApproved` / `isCustomerReviewed` are deliberately not modeled:
+ * they ARE the customer's answer, which only the customer gives (in the
+ * Customer Portal), and the backend refuses them from staff outright.
  *
  * This is a subset of what the endpoint accepts, not the whole contract: only
  * the fields the portal actually writes are modeled here. Add a field when a
@@ -2857,8 +3299,6 @@ export interface BeConfigurationItemSearchResponse {
 export interface BePatchChangeRequestPayload {
   plannedStartOn?: string;
   plannedEndOn?: string;
-  isCustomerApproved?: boolean;
-  isCustomerReviewed?: boolean;
   assignedTeamId?: string;
   /** Individual assignee (portal user UUID). Distinct from `assignedTeamId`
    * (the assignment group) — a CR can carry both, one, or neither. */
@@ -2890,20 +3330,14 @@ export interface BePatchChangeRequestPayload {
   // The regular (non-bypass) branch on `PATCH /change-requests/{id}` still
   // only accepts `plannedStartOn`/`isCustomerApproved`/`isCustomerReviewed`/
   // `requestApproval`, unchanged; every CSM engineer using this portal is a
-  // bypass user, so these six reach the backend. `categoryKey`/`priorityKey`,
-  // `environmentIds`/`deploymentProductIds`, `comment`/`workNote` and
-  // `durationInput` are also accepted by the backend but are deliberately
-  // NOT modeled here yet:
-  //   - `categoryKey` never gets an editable control (see the doc comment on
-  //     `BeChangeRequestDetail.category`).
+  // bypass user, so these keys reach the backend. `priorityKey` and
+  // `durationInput` are also accepted by the backend but are deliberately NOT
+  // modeled here yet:
   //   - `priorityKey` has no picker in this portal yet (no metadata endpoint
   //     for the 4 SN priority choices) — left for a follow-up.
-  //   - `environmentIds`/`deploymentProductIds` have no search endpoint at
-  //     this BFF (`/environments/search`, `/deployment-products/search` do
-  //     not exist) — a picker cannot be built until one does.
-  //   - `comment`/`workNote` are journal fields; the existing CR comments
+  //   - `comment`/`workNote` append journal entries; the existing CR comments
   //     feature (`useCsmChangeRequestComments`, `/change-requests/{id}/comments`)
-  //     already covers that surface — this dialog should not duplicate it.
+  //     already covers that surface — the edit dialog does not duplicate it.
   //   - `durationInput` only succeeds when it exactly matches the effective
   //     planned window in whole seconds (see `CHANGES-cr-field-parity.md`
   //     §"durationInput"); building that validation is deferred rather than
@@ -2913,10 +3347,47 @@ export interface BePatchChangeRequestPayload {
   affectedServicesText?: string;
   affectedComponentsText?: string;
   rollbackDurationText?: string;
-  customerGroupId?: string;
   requestedById?: string;
+  category?: BeChangeRequestCategory;
+  /**
+   * Customer Project / Deployments / Deployment products. The
+   * backend validates them as a unit (deployments must belong to the project,
+   * deployment products must be exactly those of the chosen deployments) and
+   * refuses (400) any
+   * change once the CR has reached `implement`, so the edit dialog sends them
+   * together, and only when one of them changed.
+   */
+  projectId?: string;
+  deploymentIds?: string[];
+  deploymentProductIds?: string[];
   /** "Implementation Plan visible to customers" in this portal's UI. */
   isPlanningVisibleToCustomers?: boolean;
+  /** Customer Approval checkbox. The backend refuses (400) a change once the
+   * CR has reached `scheduled` or later, or is in `customer_approval`. */
+  customerApprovalRequired?: boolean;
+  /** Customer Review checkbox. The backend refuses (400) a change once the CR
+   * has reached `customer_review`, `closed`, `rollback` or `canceled`. */
+  customerReviewRequired?: boolean;
+  /**
+   * ACCEPT the customer's proposed time (WSO2's answer, the previous system's "Agree"):
+   * the proposal is applied to the planned window (the planned length kept) and the
+   * change goes straight to Scheduled in one step. No CAB approval, no new customer
+   * request: the change itself has not changed. Only `"agree"` exists (to decline a
+   * proposal, Re-schedule with `state: "authorize"`: the previous system's "Disagree"), and it
+   * cannot be combined with any field but the three `expected*` ones below, which
+   * are REQUIRED here (`expectedCustomerUpdatedOn`) or expected (the planned
+   * window: stale = 409). Staff only; never a state, so the no-Bypass rule is untouched.
+   */
+  confirmCustomerUpdatedDate?: "agree";
+  /**
+   * The customer's proposal the page is showing (`customerProposal.startOn`,
+   * as received): the version check of every staff answer to it (Accept, or a
+   * Re-schedule that counters or declines). Required with `confirmCustomerUpdatedDate`.
+   */
+  expectedCustomerUpdatedOn?: string;
+  /** The planned window the page is showing (as received); a changed window is a 409, never an answer to a time its reader did not see. */
+  expectedPlannedStartOn?: string;
+  expectedPlannedEndOn?: string;
 }
 
 /** `PATCH /change-requests/{id}` response — the touched identifiers. */
@@ -2977,6 +3448,13 @@ export interface BeChangeRequestSearchPayload {
     order?: "asc" | "desc";
   };
   pagination?: BePagination;
+  /**
+   * Skip counting every matching record: the response's `total` is then -1 and
+   * only the requested page is read. For callers that never show a total
+   * (the quick-nav palette lists a handful of hits). Needs an entity service
+   * that declares the field; it rejects unknown request fields.
+   */
+  skipTotal?: boolean;
 }
 
 /** Note: the CR search response carries no `hasMore` (unlike the other searches). */
@@ -3092,6 +3570,8 @@ export interface BeIncidentWatchListItem {
  * comments, and the watch list).
  */
 export interface BeIncidentDetail extends BeIncident {
+  /** ServiceNow's incident.description field — the full free-text body, separate from the shorter Subject. */
+  description?: string | null;
   subcategory?: BeIncidentSubcategory | null;
   service?: BeEntityRef | null;
   serviceOffering?: BeEntityRef | null;
@@ -3099,6 +3579,7 @@ export interface BeIncidentDetail extends BeIncident {
   contactType?: BeIncidentContactType | null;
   impact?: BeIncidentImpact | null;
   urgency?: BeIncidentUrgency | null;
+  environment?: string | null;
   changeRequest?: BeEntityRef | null;
   problem?: BeEntityRef | null;
   causedBy?: BeEntityRef | null;
@@ -3114,6 +3595,11 @@ export interface BeIncidentDetail extends BeIncident {
    * {@link BeSpecialistHandoffSummary}.
    */
   specialistHandoff?: BeSpecialistHandoffSummary | null;
+  /** Whether "Escalate to specialist team" applies now (In Progress, a
+   * routed service, not already with its Special Ops group) -- ServiceNow's
+   * canEscalateToSpecialOps. Absent when the backend does not say
+   * (ServiceNow data source), in which case the action stays offered. */
+  canHandOffToSpecialist?: boolean;
 }
 
 /**
@@ -3134,6 +3620,9 @@ export interface BeCreateIncidentPayload {
   contactType?: BeIncidentContactType;
   impact: BeIncidentImpact;
   urgency: BeIncidentUrgency;
+  /** Optional. When sent it must be the support group of some service (the
+   * backend 400s otherwise). When omitted the backend uses `serviceId`'s
+   * support group, else the Default service's support group. */
   assignmentGroupId?: string;
   assignedEngineerId?: string;
   subject: string;
@@ -3149,6 +3638,17 @@ export interface BeCreateIncidentPayload {
   changeRequestId?: string;
   problemId?: string;
   causedById?: string;
+  environment?: string;
+}
+
+/**
+ * `GET /incidents/create-defaults` — what the create form falls back to when
+ * the picked Service has no support group of its own: the Default service and
+ * its support group (the "default team"). Either is `null` when not configured.
+ */
+export interface BeIncidentCreateDefaults {
+  defaultServiceId: string | null;
+  defaultGroup: BeEntityRef | null;
 }
 
 /** `POST /incidents` response — the created identifiers. */
@@ -3218,6 +3718,7 @@ export interface BeUpdateIncidentPayload {
   changeRequestId?: string | null;
   problemId?: string | null;
   causedById?: string | null;
+  environment?: string | null;
 }
 
 /** `PATCH /incidents/{id}` response — the full updated incident. */
@@ -3289,6 +3790,13 @@ export interface BeIncidentSearchPayload {
     order?: "asc" | "desc";
   };
   pagination?: BePagination;
+  /**
+   * Skip counting every matching record: the response's `total` is then -1 and
+   * only the requested page is read. For callers that never show a total
+   * (the quick-nav palette lists a handful of hits). Needs an entity service
+   * that declares the field; it rejects unknown request fields.
+   */
+  skipTotal?: boolean;
 }
 
 export interface BeIncidentSearchResponse {
@@ -3384,6 +3892,13 @@ export interface BeProblemSearchFilters {
 export interface BeProblemSearchPayload {
   filters?: BeProblemSearchFilters;
   pagination?: BePagination;
+  /**
+   * Skip counting every matching record: the response's `total` is then -1 and
+   * only the requested page is read. For callers that never show a total
+   * (the quick-nav palette lists a handful of hits). Needs an entity service
+   * that declares the field; it rejects unknown request fields.
+   */
+  skipTotal?: boolean;
 }
 
 /** Note: mirrors the change-request/incident search responses — no `hasMore`. */
@@ -3404,6 +3919,8 @@ export interface BeProblemDetail {
   id: string;
   number?: string;
   subject?: string;
+  /** Free-text description of the problem. May be null/empty on many records — render blank gracefully, not as an awkward empty field. */
+  description?: string | null;
   state?: BeProblemState;
   priority?: string | null;
   /** May be null/empty on many records — render blank gracefully, not as an awkward empty field. */
@@ -3415,6 +3932,8 @@ export interface BeProblemDetail {
   linkedIncidents?: BeProblemRef[];
   linkedChangeRequest?: BeProblemRef | null;
   assignedTo?: BeEntityRef | null;
+  /** The problem's assignment group; null when it has none. */
+  assignmentGroup?: BeEntityRef | null;
   resolutionCode?: string | null;
   causeNotes?: string | null;
   fixNotes?: string | null;
@@ -3497,11 +4016,8 @@ export interface BePatchProblemResponse {
 }
 
 /**
- * List-item shape for `POST /incident-tasks/search`. No dedicated detail
- * page exists for incident tasks in this app (unlike problem/incident), so
- * there is no separate `BeIncidentTaskDetail` type yet — `description`,
- * `priority`, `openedOn`, `closedOn` are on the backend's own
- * `GET /incident-tasks/{id}` response but have no frontend consumer today.
+ * List-item shape for `POST /incident-tasks/search`. The detail page reads
+ * `GET /incident-tasks/{id}` instead (`BeIncidentTaskDetail`).
  * `stateLabel` is a pre-humanized display string the data source already
  * resolves server-side — prefer it over trying to humanize `state` (a raw,
  * data-source-specific integer with no stable domain enum here; see the
@@ -3523,6 +4039,43 @@ export interface BeIncidentTaskSearchView {
   assignedTo?: BeEntityRef | null;
 }
 
+/** `GET /incident-tasks/{id}` response: the search view plus the fields only
+ * the detail page shows. */
+export interface BeIncidentTaskDetail extends BeIncidentTaskSearchView {
+  description?: string | null;
+  /** CRITICAL | HIGH | MODERATE | LOW | PLANNING on Postgres. */
+  priority?: string | null;
+  openedOn?: string | null;
+  closedOn?: string | null;
+  closeNotes?: string | null;
+}
+
+/** incident_task_state_enum labels, as Postgres returns them in `state`. */
+export type BeIncidentTaskState =
+  | "PENDING"
+  | "OPEN"
+  | "WORK_IN_PROGRESS"
+  | "CLOSED_COMPLETE"
+  | "CLOSED_INCOMPLETE"
+  | "CLOSED_SKIPPED";
+
+/** `PATCH /incident-tasks/{id}` body; at least one field. Returns `BeIncidentTaskDetail`. */
+export interface BeUpdateIncidentTaskPayload {
+  state?: BeIncidentTaskState;
+  closeNotes?: string;
+}
+
+/** `POST /incident-tasks/search` body. The only per-incident filter is the
+ * generic `{ field: "incidentId", op: "in" }` entry; there is no flat key. */
+export interface BeIncidentTaskSearchPayload {
+  filters?: {
+    searchQuery?: string;
+    number?: string;
+    filters?: { field: "state" | "assignmentGroupId" | "incidentId"; op: "in"; values: string[] }[];
+  };
+  pagination: { offset: number; limit: number };
+}
+
 /** Note: mirrors the problem/change-request/incident search responses — no `hasMore`. */
 export interface BeIncidentTaskSearchResponse {
   incidentTasks: BeIncidentTaskSearchView[];
@@ -3539,6 +4092,10 @@ export interface BeIncidentTaskSearchResponse {
  */
 export interface BeCreateProblemPayload {
   subject: string;
+  // Sanitized rich-text HTML (see sanitizeRichTextHtml), same convention as
+  // BeCreateCaseRequest.description. Not yet forwarded to ServiceNow — see
+  // entity-service's own CreateProblem doc comment.
+  description?: string;
   category?: string;
   subcategory?: string;
   originCaseId?: string;
@@ -4311,6 +4868,14 @@ export interface BeOutage {
   affectedConfigurationItems: BeOutageConfigurationItemRef[] | null;
   publishesToStatusPage: boolean;
   statusPageCloud: string | null;
+  /** Opt-in for the internal-stakeholder notification email. */
+  notifyInternalStakeholders?: boolean;
+  /** Opt-in for the SRE outage-communication email. */
+  outageCommunication?: boolean;
+  /** "Impact:" line of the outage-communication email. */
+  impact?: string | null;
+  /** "Current Status:" line of the outage-communication email. */
+  state?: string | null;
   createdOn: string;
   createdBy: string;
   updatedOn: string;
@@ -4350,6 +4915,13 @@ export interface BeCreateOutagePayload {
   externalCommunication?: string;
   internalCommunication?: string;
   acknowledgePublicPublication?: boolean;
+  notifyInternalStakeholders?: boolean;
+  outageCommunication?: boolean;
+  impact?: string;
+  state?: string;
+  /** Service offerings this outage also affects (ServiceNow Affected CIs). On
+   *  PATCH the list replaces the whole set; [] clears it. */
+  affectedConfigurationItemIds?: string[];
 }
 
 /** `POST /outages` response. */
@@ -4373,6 +4945,15 @@ export interface BePatchOutagePayload {
   configurationItemId?: string | null;
   incidentId?: string | null;
   acknowledgePublicPublication?: boolean;
+  notifyInternalStakeholders?: boolean;
+  outageCommunication?: boolean;
+  /** An empty string clears it. */
+  impact?: string;
+  /** An empty string clears it. */
+  state?: string;
+  /** Service offerings this outage also affects (ServiceNow Affected CIs). On
+   *  PATCH the list replaces the whole set; [] clears it. */
+  affectedConfigurationItemIds?: string[];
 }
 
 /** `PATCH /outages/{id}` response. */
@@ -4417,6 +4998,9 @@ export interface BeSearchOutagesResponse {
 export interface BeAddOutageCommunicationPayload {
   channel: BeOutageCommunicationChannel;
   body: string;
+  /** Required by the backend (409 otherwise) only for an external entry on an
+   *  outage that publishes to the status page; omit it everywhere else. */
+  acknowledgePublicPublication?: boolean;
 }
 
 /** A single communication journal entry. `isPublic` is true only for the
@@ -4484,11 +5068,25 @@ export interface BeOutageMetadataResponse {
 // ---------------------------------------------------------------------------
 
 export type BeHandoffReasonCode = "no-runbook" | "runbook-not-working";
-export type BeHandoffEscalationTeam = "choreo-runtime-team" | "choreo-apim-team";
+/** A sub-team's key, e.g. "choreo-runtime-team". Teams are data
+ * (`GET /specialist-handoff-teams`), not a fixed list. */
+export type BeHandoffEscalationTeam = string;
+
+/** One `GET /specialist-handoff-teams` entry: `key` is sent as the handoff's
+ * `escalationTeam`, `label` is shown. */
+export interface BeSpecialistHandoffTeam {
+  key: BeHandoffEscalationTeam;
+  label: string;
+}
+
+export interface BeSpecialistHandoffTeamsResponse {
+  teams: BeSpecialistHandoffTeam[];
+}
 
 export interface BeHandOffIncidentPayload {
   reasonCode: BeHandoffReasonCode;
-  /** Choreo only; ignored (but not rejected) for any other service. */
+  /** A team key from `GET /specialist-handoff-teams`; a team the incident's
+   * service has no route for is ignored (the service's default team is used). */
   escalationTeam?: BeHandoffEscalationTeam;
   /** Defaults to `true` on the backend when omitted. */
   createGithubIssue?: boolean;

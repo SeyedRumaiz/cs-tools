@@ -30,6 +30,7 @@ import (
 // entityGroupClient abstracts the entity service group operations.
 type entityGroupClient interface {
 	SearchGroups(ctx context.Context, body []byte) ([]byte, error)
+	GetGroup(ctx context.Context, id string) ([]byte, error)
 }
 
 // GroupHandler handles HTTP requests for group operations.
@@ -71,6 +72,34 @@ func (h *GroupHandler) SearchGroups(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity SearchGroups failed", "userID", user.UserID, "err", err)
 		mapUpstreamErrorGeneric(w, err, "Failed to search groups.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// GetGroup handles GET /groups/{id}: one group and its members, opened from the
+// assignment group of a change request approval stage (the `assignmentGroup.id`
+// of GET /change-requests/{id}/approvals). The id is a "group" id, not a team
+// id (POST /groups/search lists teams). entity-service answers internal callers
+// only, so a caller it refuses is refused here too (403).
+func (h *GroupHandler) GetGroup(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" || !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
+		return
+	}
+
+	result, err := h.entity.GetGroup(r.Context(), id)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity GetGroup failed", "userID", user.UserID, "id", id, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to retrieve group.")
 		return
 	}
 

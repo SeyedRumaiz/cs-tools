@@ -20,12 +20,14 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/service"
 )
 
 // IncidentTaskHandler handles HTTP requests for the incident-tasks resource.
-// Search and get only -- there is no create/update path.
+// Search, get and PATCH (state/close notes); tasks are created by the
+// incident flows, not over HTTP.
 type IncidentTaskHandler struct {
 	svc service.IncidentTaskService
 }
@@ -71,6 +73,23 @@ func (h *IncidentTaskHandler) AggregateIncidentTasks(w http.ResponseWriter, r *h
 func (h *IncidentTaskHandler) GetIncidentTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	result, err := h.svc.GetIncidentTask(r.Context(), id)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+// PatchIncidentTask handles PATCH /incident-tasks/{id}.
+func (h *IncidentTaskHandler) PatchIncidentTask(w http.ResponseWriter, r *http.Request) {
+	var req domain.UpdateIncidentTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeServiceError(w, r, &apierror.ValidationError{Msg: "invalid request body"})
+		return
+	}
+	req.ID = r.PathValue("id")
+	result, err := h.svc.UpdateIncidentTask(r.Context(), req)
 	if err != nil {
 		writeServiceError(w, r, err)
 		return

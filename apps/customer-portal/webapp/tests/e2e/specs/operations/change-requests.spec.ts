@@ -35,6 +35,10 @@ import { test, expect, withSession } from "../../fixtures/test";
 import { ChangeRequestsPage } from "../../pages/ChangeRequestsPage";
 import { PROJECTS, ProjectType } from "../../config/testData";
 import { CHANGE_REQUESTS_LIST } from "../../utils/selectors";
+import {
+  RECORD_ID_PATTERN,
+  projectPathPattern,
+} from "../../utils/ids";
 
 withSession(test);
 
@@ -139,8 +143,9 @@ test.describe("Change Requests", () => {
     // A change request sysid is a 32-character hex string; anchoring rules out
     // landing back on the list.
     await expect(page).toHaveURL(
-      new RegExp(
-        `/projects/${project.id}/${CHANGE_REQUESTS_LIST.pathSegment}/[0-9a-f]{32}$`,
+      projectPathPattern(
+        project.id,
+        `${CHANGE_REQUESTS_LIST.pathSegment}/${RECORD_ID_PATTERN}$`,
       ),
     );
 

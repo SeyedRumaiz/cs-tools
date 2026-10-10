@@ -48,9 +48,39 @@ type GetUserMeResponse struct {
 	Roles     []string `json:"roles"`
 }
 
-// PatchUserMeRequest is the request body for PATCH /users/me.
+// SearchUsersFilters mirrors entity-service's own filter struct field-for-field,
+// but this backend only ever sets Emails — used to resolve a set of watch-list
+// email addresses (from the project-contact onboarding service, a different
+// identity space) to entity-service's own "user" table ids before they're
+// forwarded to CreateCase/UpdateCase, which require real UUIDs.
+type SearchUsersFilters struct {
+	Emails []string `json:"emails,omitempty"`
+}
+
+// SearchUsersRequest is the request body for POST /users/search.
+type SearchUsersRequest struct {
+	Pagination Pagination         `json:"pagination"`
+	Filters    SearchUsersFilters `json:"filters"`
+}
+
+// UserSummary is the subset of entity-service's user search result this
+// backend actually needs (id + email, for the watch-list resolution above).
+type UserSummary struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+}
+
+// SearchUsersResponse is entity-service's paginated response for POST /users/search.
+type SearchUsersResponse struct {
+	Users []UserSummary `json:"users"`
+}
+
+// PatchUserMeRequest is the request body for PATCH /users/me. At least one
+// field must be set. A nil field is omitted from the body and left untouched
+// by entity-service; a pointer to "" is sent as "" (for Phone, that clears it).
 type PatchUserMeRequest struct {
-	TimeZone string `json:"timeZone"`
+	TimeZone *string `json:"timeZone,omitempty"`
+	Phone    *string `json:"phone,omitempty"`
 }
 
 // PatchUserMeUpdated contains the key fields returned after a successful user update.
@@ -265,6 +295,8 @@ type ProjectMetadataResponse struct {
 	CaseTypes                   []ReferenceTableItem `json:"caseTypes"`
 	EngagementTypes             []ChoiceListItem     `json:"engagementTypes"`
 	EngagementPaymentTypes      []ChoiceListItem     `json:"engagementPaymentTypes"`
+	ResolutionCodes             []ChoiceListItem     `json:"resolutionCodes"`
+	Causes                      []ChoiceListItem     `json:"causes"`
 	Features                    ProjectFeatures      `json:"features"`
 }
 
@@ -336,6 +368,10 @@ type ProjectConversationStatsResponse struct {
 	TotalCount  int              `json:"totalCount"`
 	ActiveCount int              `json:"activeCount"`
 	StateCount  []ChoiceListItem `json:"stateCount"`
+	// ResolvedPastThirtyDays is the number of conversations Resolved and last updated
+	// in the past 30 days. A pointer: absent from an entity-service that predates it and
+	// from the ServiceNow data source, which is not the same as zero.
+	ResolvedPastThirtyDays *int `json:"resolvedPastThirtyDays,omitempty"`
 }
 
 // ProjectDeploymentStatsResponse is entity-service's response for
@@ -715,6 +751,12 @@ type WatchListUser struct {
 	UserName string `json:"userName"`
 	Name     string `json:"name,omitempty"`
 	Email    string `json:"email,omitempty"`
+	// Locked mirrors entity-service's own domain.WatchListUser.Locked: true
+	// when this watcher is one of the case's account's four named
+	// stakeholders, which entity-service always re-adds on the next write
+	// regardless of what a caller submits -- see dto.CaseWatchListUser.Locked
+	// for what the frontend does with this.
+	Locked bool `json:"locked"`
 }
 
 // UpdatedCase carries the case fields entity-service returns after a
@@ -843,6 +885,10 @@ type CaseView struct {
 	Duration        *string `json:"duration"`
 	EscalationLevel *string `json:"escalationLevel"`
 	IsEscalated     *bool   `json:"isEscalated"`
+	// AnnouncementType is only meaningful when Type is "announcement" --
+	// "GENERAL" or "SECURITY" (entity-service's announcement.announcement_type
+	// column). Nil for every other case-like type.
+	AnnouncementType *string `json:"announcementType"`
 }
 
 // --- deployments ---
@@ -853,6 +899,11 @@ type SearchDeploymentsRequest struct {
 	SearchQuery     string     `json:"searchQuery,omitempty"`
 	ProjectIDs      []string   `json:"projectIds,omitempty"`
 	DeploymentTypes []string   `json:"deploymentTypes,omitempty"`
+	// IDs filters by the deployment's own UUID -- used by
+	// handler.deploymentAttachmentIsVisible to resolve a single deployment
+	// with no project context at all. Postgres data source only (see
+	// entity-service's own SearchDeploymentsRequest.IDs doc comment).
+	IDs []string `json:"ids,omitempty"`
 }
 
 // DeploymentView is a single search result item from POST /deployments/search.
@@ -1023,10 +1074,13 @@ type DeployedProductFilters struct {
 }
 
 // SearchDeployedProductsRequest is the input for POST /deployed-products/search.
-// DeploymentIDs scopes results to the given deployments; it is the only filter besides pagination.
+// DeploymentIDs scopes results to the given deployments. ProductCategories optionally narrows
+// them by product category (e.g. "pdp"); the entity service combines it with DeploymentIDs and
+// normalizes the case itself.
 type SearchDeployedProductsRequest struct {
-	Pagination    Pagination `json:"pagination"`
-	DeploymentIDs []string   `json:"deploymentIds,omitempty"`
+	Pagination        Pagination `json:"pagination"`
+	DeploymentIDs     []string   `json:"deploymentIds,omitempty"`
+	ProductCategories []string   `json:"productCategories,omitempty"`
 }
 
 // DeployedProductVersionRef is the version sub-object in a DeployedProductView.
@@ -1427,10 +1481,16 @@ type CaseActivity struct {
 
 // SearchCaseActivitiesRequest is the input for POST /cases/{id}/activities/search.
 // CaseID is populated from the URL path parameter and is not part of the JSON body.
+// ExcludeWorkNotes is always forced true by the handler (CaseHandler.SearchCaseActivities),
+// never left to the caller's own request body: an internal WORK_NOTE comment must never
+// reach the customer portal, in the Total count or the page itself -- see that handler's
+// own comment for why this can't be left as a client-side array filter alone (it used to
+// filter work notes out of the array but still forward entity-service's unfiltered Total).
 type SearchCaseActivitiesRequest struct {
 	CaseID              string     `json:"-"`
 	Pagination          Pagination `json:"pagination"`
 	IncludeFieldChanges *bool      `json:"includeFieldChanges,omitempty"`
+	ExcludeWorkNotes    *bool      `json:"excludeWorkNotes,omitempty"`
 }
 
 // SearchCaseActivitiesResponse is entity-service's response for POST /cases/{id}/activities/search.
@@ -1767,6 +1827,10 @@ type SearchConversationsFilters struct {
 	States      []string `json:"states,omitempty"`
 	SearchQuery string   `json:"searchQuery,omitempty"`
 	CreatedByMe bool     `json:"createdByMe,omitempty"`
+	// StartUpdatedDate / EndUpdatedDate bound the conversation's last update time
+	// (RFC 3339, inclusive). Postgres data source only; see entity-service.
+	StartUpdatedDate *string `json:"startUpdatedDate,omitempty"`
+	EndUpdatedDate   *string `json:"endUpdatedDate,omitempty"`
 }
 
 // ConversationSort specifies the sort field and direction for conversation search results.
@@ -1898,6 +1962,10 @@ type SearchChangeRequestView struct {
 	CreatedOn        string     `json:"createdOn"`
 	UpdatedOn        string     `json:"updatedOn"`
 	UpdatedBy        string     `json:"updatedBy,omitempty"`
+	// OnHold is entity-service's change_request.is_on_hold: nil when it did not
+	// say (the ServiceNow data source, a row that was never held). The reason
+	// (onHoldReason) is deliberately not read: it is WSO2's note, not the customer's.
+	OnHold *bool `json:"onHold"`
 }
 
 // SearchChangeRequestsResponse is entity-service's response for POST /change-requests/search.
@@ -1925,6 +1993,41 @@ type ChangeRequest struct {
 	ApprovedBy          *EntityRef `json:"approvedBy"`
 	ApprovedOn          *string    `json:"approvedOn"`
 	LegalNextStates     []string   `json:"legalNextStates"`
+
+	// CustomerCanAnswer is entity-service's per-viewer answer to "may the caller
+	// answer this change request now" (approve / reject in Customer Approval,
+	// confirm / fail in Customer Review): true or false for a customer read on
+	// the PostgreSQL data source, absent (nil) when entity-service did not
+	// compute it (the ServiceNow data source, a staff caller, a failed check).
+	// Passed through unchanged -- see dto.ChangeRequestDetails.
+	CustomerCanAnswer *bool `json:"customerCanAnswer,omitempty"`
+
+	// CustomerProposal is entity-service's view of a time a customer proposed for the change
+	// request (kept as the proposed start and its confirmation, customer_updated_on /
+	// customer_updated_date_confirmation): the proposed start, whether WSO2 has answered, and -- for
+	// the signed-in customer only -- whether the proposal is theirs. Only the fields a customer may
+	// see are decoded here: the proposer's name and email, whether WSO2 could accept it and why not
+	// are staff facts that entity-service withholds from a customer and that this type has no field
+	// for, so they cannot reach the portal whatever the payload says. Absent when no time was
+	// proposed.
+	CustomerProposal *ChangeRequestCustomerProposal `json:"customerProposal,omitempty"`
+}
+
+// ChangeRequestCustomerProposal is the customer-visible part of entity-service's
+// customerProposal (see ChangeRequest.CustomerProposal).
+type ChangeRequestCustomerProposal struct {
+	// StartOn is the proposed plan start (RFC 3339); EndOn the proposed end, the start plus the
+	// planned length, present only while the proposal waits for WSO2.
+	StartOn string  `json:"startOn"`
+	EndOn   *string `json:"endOn,omitempty"`
+	// Answer is "pending" (waits for WSO2), "agreed" (WSO2 accepted it: the change is scheduled
+	// for it), "disagreed" (WSO2 asked for another time: the planned window is the new one) or
+	// "unanswered" (history).
+	Answer string `json:"answer"`
+	// ProposerRecorded / ProposedByViewer: while pending, whether the proposer can be named at
+	// all, and whether it is the signed-in customer.
+	ProposerRecorded *bool `json:"proposerRecorded,omitempty"`
+	ProposedByViewer *bool `json:"proposedByViewer,omitempty"`
 }
 
 // PatchChangeRequestRequest is the full field set entity-service accepts for
@@ -1954,6 +2057,11 @@ type PatchChangeRequestRequest struct {
 	IsCustomerApproved *bool   `json:"isCustomerApproved,omitempty"`
 	IsCustomerReviewed *bool   `json:"isCustomerReviewed,omitempty"`
 	RequestApproval    *bool   `json:"requestApproval,omitempty"`
+	// ExpectedPlannedStartOn / ExpectedPlannedEndOn go with a customer's answer
+	// only: the planned window the customer was shown. entity-service records the
+	// answer only while that is still the change's window (409 otherwise).
+	ExpectedPlannedStartOn *string `json:"expectedPlannedStartOn,omitempty"`
+	ExpectedPlannedEndOn   *string `json:"expectedPlannedEndOn,omitempty"`
 }
 
 // PatchChangeRequestResponse is entity-service's response for PATCH /change-requests/{id}.
@@ -2364,16 +2472,23 @@ type CaseFeedback struct {
 
 // AttachmentDetails is entity-service's response for GET /attachments/{id}.
 type AttachmentDetails struct {
-	ID          string    `json:"id"`
-	ReferenceID string    `json:"referenceId"`
-	Name        string    `json:"name"`
-	Type        string    `json:"type"`
-	SizeBytes   int       `json:"sizeBytes"`
-	Description *string   `json:"description"`
-	CreatedBy   string    `json:"createdBy"`
-	CreatedOn   time.Time `json:"createdOn"`
-	DownloadURL *string   `json:"downloadUrl"`
-	PreviewURL  *string   `json:"previewUrl"`
+	ID          string `json:"id"`
+	ReferenceID string `json:"referenceId"`
+	// ReferenceType identifies which entity type ReferenceID points at. Nil
+	// when entity-service's own lookup doesn't report one -- a caller
+	// authorizing access per referenced resource must treat a nil value as
+	// unknown and fail closed (see entity-service's own
+	// domain.AttachmentDetails.ReferenceType doc comment, and
+	// authorizeAttachmentAccess in internal/handler/attachments.go).
+	ReferenceType *ReferenceType `json:"referenceType"`
+	Name          string         `json:"name"`
+	Type          string         `json:"type"`
+	SizeBytes     int            `json:"sizeBytes"`
+	Description   *string        `json:"description"`
+	CreatedBy     string         `json:"createdBy"`
+	CreatedOn     time.Time      `json:"createdOn"`
+	DownloadURL   *string        `json:"downloadUrl"`
+	PreviewURL    *string        `json:"previewUrl"`
 	// Content is nil for a CSM-native (Postgres) data source attachment:
 	// entity-service holds no bytes for it, only its storage key. Always
 	// non-nil for ServiceNow-sourced attachments.

@@ -48,7 +48,6 @@ import {
   readChangeRequestFiltersFromUrl,
   writeChangeRequestFiltersToUrl,
 } from "@features/csm-operations/utils/changeRequestsFiltersUrl";
-import { changeRequestsSavedViews } from "@features/csm-operations/utils/changeRequestsSavedViews";
 import SavedViewsMenu from "@features/csm-operations/components/SavedViewsMenu";
 import MultiSelectField from "@components/MultiSelectField";
 import AsyncProjectMultiSelect from "@features/csm-cases/components/AsyncProjectMultiSelect";
@@ -73,6 +72,16 @@ function formatDateOnly(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+/** Today's UTC calendar date, as a local-midnight Date (see `parseDateOnly`)
+ * — the upper bound for both closed-date fields (`crDateOnlyToISOStart`/`End`
+ * send them to the backend as UTC day boundaries, same as
+ * `IncidentsFilterBar`'s created-date range), since a case can't close in
+ * the future. */
+function todayUTCDateOnly(): Date {
+  const now = new Date();
+  return new Date(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+}
+
 interface ChangeRequestsFilterBarProps {
   filters: ChangeRequestFilters;
   onChange: (next: ChangeRequestFilters) => void;
@@ -91,6 +100,14 @@ export default function ChangeRequestsFilterBar({
 }: ChangeRequestsFilterBarProps): JSX.Element {
   const activeCount = countActiveCRFilters(filters);
   const hasActive = activeCount > 0;
+
+  // Recomputed every render (not memoized) — a `useMemo(..., [])` would
+  // freeze this at the component's mount date and stop matching "today" for
+  // any session left open across a UTC midnight.
+  const today = todayUTCDateOnly();
+  const closedStartDate = parseDateOnly(filters.closedStartDate);
+  const closedEndDate = parseDateOnly(filters.closedEndDate);
+  const fromMaxDate = closedEndDate && closedEndDate < today ? closedEndDate : today;
 
   const stateOptions = useMemo(
     () =>
@@ -124,6 +141,31 @@ export default function ChangeRequestsFilterBar({
         .map((t) => ({ value: t.sreGroupId, label: t.name })),
     [teams],
   );
+
+  /**
+   * `minDate`/`maxDate` only constrain the calendar popup — MUI's DatePicker
+   * still fires `onChange` for an out-of-range value typed directly into the
+   * field, so each handler re-checks the same bound here before accepting it,
+   * rather than trusting the picker's UI-only validation.
+   */
+  const handleClosedStartChange = (date: unknown): void => {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+      onChange({ ...filters, closedStartDate: "" });
+      return;
+    }
+    if (date > fromMaxDate) return;
+    onChange({ ...filters, closedStartDate: formatDateOnly(date) });
+  };
+
+  const handleClosedEndChange = (date: unknown): void => {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+      onChange({ ...filters, closedEndDate: "" });
+      return;
+    }
+    if (date > today) return;
+    if (closedStartDate && date < closedStartDate) return;
+    onChange({ ...filters, closedEndDate: formatDateOnly(date) });
+  };
 
   return (
     <Paper sx={{ p: 2.5, display: "flex", flexDirection: "column", gap: 1.5 }}>
@@ -172,7 +214,7 @@ export default function ChangeRequestsFilterBar({
           activeCount={activeCount}
           hasSearch={filters.search.trim().length > 0}
           onApply={(qs) => onChange(readChangeRequestFiltersFromUrl(new URLSearchParams(qs)))}
-          store={changeRequestsSavedViews}
+          listKey="change_requests"
         />
 
         <Button
@@ -231,28 +273,6 @@ export default function ChangeRequestsFilterBar({
               />
             </Grid>
             <Grid size={{ xs: 12, sm: 6, md: 3 }}>
-              <LocalizationProvider dateAdapter={AdapterDateFns}>
-                <DatePicker
-                  label="Closed from"
-                  value={parseDateOnly(filters.closedStartDate)}
-                  maxDate={parseDateOnly(filters.closedEndDate) ?? undefined}
-                  onChange={(date) =>
-                    onChange({
-                      ...filters,
-                      closedStartDate:
-                        date instanceof Date && !Number.isNaN(date.getTime())
-                          ? formatDateOnly(date)
-                          : "",
-                    })
-                  }
-                  slotProps={{
-                    textField: { size: "small", fullWidth: true },
-                    field: { clearable: true },
-                  }}
-                />
-              </LocalizationProvider>
-            </Grid>
-            <Grid size={{ xs: 12, sm: 6, md: 3 }}>
               <AsyncProjectMultiSelect
                 id="cr-filter-project"
                 values={filters.projectIds}
@@ -262,18 +282,25 @@ export default function ChangeRequestsFilterBar({
             <Grid size={{ xs: 12, sm: 6, md: 3 }}>
               <LocalizationProvider dateAdapter={AdapterDateFns}>
                 <DatePicker
+                  label="Closed from"
+                  value={closedStartDate}
+                  maxDate={fromMaxDate}
+                  onChange={handleClosedStartChange}
+                  slotProps={{
+                    textField: { size: "small", fullWidth: true },
+                    field: { clearable: true },
+                  }}
+                />
+              </LocalizationProvider>
+            </Grid>
+            <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+              <LocalizationProvider dateAdapter={AdapterDateFns}>
+                <DatePicker
                   label="Closed to"
-                  value={parseDateOnly(filters.closedEndDate)}
-                  minDate={parseDateOnly(filters.closedStartDate) ?? undefined}
-                  onChange={(date) =>
-                    onChange({
-                      ...filters,
-                      closedEndDate:
-                        date instanceof Date && !Number.isNaN(date.getTime())
-                          ? formatDateOnly(date)
-                          : "",
-                    })
-                  }
+                  value={closedEndDate}
+                  minDate={closedStartDate ?? undefined}
+                  maxDate={today}
+                  onChange={handleClosedEndChange}
                   slotProps={{
                     textField: { size: "small", fullWidth: true },
                     field: { clearable: true },

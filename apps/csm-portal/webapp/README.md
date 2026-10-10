@@ -70,6 +70,7 @@ Runtime config is read from `window.config` set by `public/config.js`. Build-tim
 | `CSM_PORTAL_BACKEND_BASE_URL` | Backend API base URL (CSM BFF) | `http://localhost:9090` |
 | `CSM_PORTAL_THEME` | Theme (acrylicOrange, acrylicPurple, highContrast, classic) | `acrylicOrange` |
 | `CSM_PORTAL_LOG_LEVEL` | Logging level (DEBUG, INFO, WARN, ERROR) | `INFO` |
+| `CSM_MIGRATION_ONBOARDING_STATUS_ENABLED` | Customer-onboarding status column on a project's Contacts tab (worst status across the IDENTITY / DATABASE / EMAIL / REGISTRATION steps per contact, with step detail, attempt count and last error on hover). Only `true` (or the string `"true"`) turns it on; off is the default and means the column is not rendered and no request is made. The backend gates its `GET /projects/{id}/onboarding-steps` route under the same flag name, so both must be on | `false` |
 
 ### Import Aliases
 

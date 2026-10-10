@@ -13,6 +13,12 @@ hasn't resolved one), you get the general default dashboard instead. Some roles 
 onboarding or migration specialists) always land on their own dedicated dashboard regardless
 of team.
 
+The portal remembers the dashboard (and, for a team-based dashboard, the team) you last picked,
+in this browser only. The next time you open the Dashboard page from the sidebar you land on
+that same selection instead of the default. If the remembered dashboard or team no longer
+exists, you get the default instead, and a link that names a specific dashboard always wins
+over what's remembered.
+
 Whichever dashboard you're on is reflected in the URL, so a link to a specific dashboard (and,
 for team-based ones, a specific team) is shareable and survives a refresh.
 

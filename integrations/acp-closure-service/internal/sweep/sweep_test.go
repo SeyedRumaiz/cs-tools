@@ -50,7 +50,7 @@ func TestProcessProject_NoEndDateIsNoOp(t *testing.T) {
 
 // TestProcessProject_InternalOnlyWindowSkipsCustomerContactLookup covers a
 // 90-day window: internal-only per the confirmed audience matrix. Only one
-// notify.Send should occur, Recipients.Customer must stay nil, and no
+// notify.Send should occur, Recipients.Customers must stay empty, and no
 // contact-search calls should happen at all, since the customer side isn't
 // consulted for this window.
 func TestProcessProject_InternalOnlyWindowSkipsCustomerContactLookup(t *testing.T) {
@@ -79,8 +79,8 @@ func TestProcessProject_InternalOnlyWindowSkipsCustomerContactLookup(t *testing.
 	if len(ntf.sent) != 1 {
 		t.Fatalf("ntf.sent = %d, want 1", len(ntf.sent))
 	}
-	if ntf.sent[0].Recipients.Customer != nil {
-		t.Errorf("Recipients.Customer = %v, want nil for an internal-only window", ntf.sent[0].Recipients.Customer)
+	if len(ntf.sent[0].Recipients.Customers) != 0 {
+		t.Errorf("Recipients.Customers = %v, want none for an internal-only window", ntf.sent[0].Recipients.Customers)
 	}
 
 	if len(updater.calls) != 1 {
@@ -209,7 +209,7 @@ func TestProcessProject_SkipsNotifyWhenAlreadyClosedForAnyReason(t *testing.T) {
 func TestProcessProject_CustomerAudienceWindowNotifiesBusinessContact(t *testing.T) {
 	reader := &mockEntityReader{
 		searchProjectContactsFn: func(ctx context.Context, projectID string, body []byte) ([]byte, error) {
-			return []byte(`{"contacts":[{"name":"Bob","email":"bob@customer.example","roles":["business_contact"]}]}`), nil
+			return []byte(`{"contacts":[{"name":"Bob","email":"bob@customer.example","roles":["BUSINESS_CONTACT"]}]}`), nil
 		},
 	}
 	updater := &mockProjectUpdater{}
@@ -230,8 +230,8 @@ func TestProcessProject_CustomerAudienceWindowNotifiesBusinessContact(t *testing
 
 	internal, customer := ntf.sent[0], ntf.sent[1]
 
-	if internal.Recipients.Customer != nil {
-		t.Errorf("internal notice Recipients.Customer = %v, want nil", internal.Recipients.Customer)
+	if internal.Recipients.IsCustomerFacing() {
+		t.Errorf("internal notice Recipients.Customers = %v, want none", internal.Recipients.Customers)
 	}
 	// The fixture project has an account with no Name set, so the subject
 	// correctly omits the " of {AccountName}" clause entirely (regression
@@ -241,11 +241,11 @@ func TestProcessProject_CustomerAudienceWindowNotifiesBusinessContact(t *testing
 		t.Errorf("internal Subject = %q, want %q", internal.Subject, wantInternalSubject)
 	}
 
-	if customer.Recipients.Customer == nil {
-		t.Fatal("customer notice Recipients.Customer = nil, want populated")
+	if !customer.Recipients.IsCustomerFacing() {
+		t.Fatal("customer notice Recipients.Customers empty, want populated")
 	}
-	if customer.Recipients.Customer.Email != "bob@customer.example" {
-		t.Errorf("customer Recipients.Customer.Email = %q, want %q", customer.Recipients.Customer.Email, "bob@customer.example")
+	if customer.Recipients.Customers[0].Email != "bob@customer.example" {
+		t.Errorf("customer Recipients.Customers[0].Email = %q, want %q", customer.Recipients.Customers[0].Email, "bob@customer.example")
 	}
 	const wantCustomerSubject = "Upcoming Project Suspension Notice - Acme - Subscription"
 	if customer.Subject != wantCustomerSubject {
@@ -275,16 +275,16 @@ func TestProcessProject_CustomerAudienceWindowNotifiesBusinessContact(t *testing
 func TestProcessProject_RecordsIgnoredWhenOnlyCustomerNoticeWasntDelivered(t *testing.T) {
 	reader := &mockEntityReader{
 		searchProjectContactsFn: func(ctx context.Context, projectID string, body []byte) ([]byte, error) {
-			return []byte(`{"contacts":[{"name":"Bob","email":"bob@customer.example","roles":["business_contact"]}]}`), nil
+			return []byte(`{"contacts":[{"name":"Bob","email":"bob@customer.example","roles":["BUSINESS_CONTACT"]}]}`), nil
 		},
 	}
 	updater := &mockProjectUpdater{}
 	ntf := &mockNotifier{
 		sendFn: func(ctx context.Context, n notify.Notice) (bool, error) {
-			// Internal notice (no Customer) delivers; customer notice
-			// (Customer populated) gets filtered out — mirrors a real
+			// Internal notice (no customers) delivers; customer notice
+			// (customers listed) gets filtered out — mirrors a real
 			// non-WSO2 customer address in staging.
-			return n.Recipients.Customer == nil, nil
+			return !n.Recipients.IsCustomerFacing(), nil
 		},
 	}
 
@@ -360,8 +360,8 @@ func TestProcessProject_CustomerAudienceWindowSendsNoBusinessContactNoticeWhenNo
 
 	internal, nudge := ntf.sent[0], ntf.sent[1]
 
-	if internal.Recipients.Customer != nil {
-		t.Errorf("internal Recipients.Customer = %v, want nil", internal.Recipients.Customer)
+	if internal.Recipients.IsCustomerFacing() {
+		t.Errorf("internal Recipients.Customers = %v, want none", internal.Recipients.Customers)
 	}
 	if internal.Recipients.AccountOwner.Email != "jordan.perera@wso2.example" {
 		t.Errorf("internal Recipients.AccountOwner.Email = %q, want %q", internal.Recipients.AccountOwner.Email, "jordan.perera@wso2.example")
@@ -380,8 +380,8 @@ func TestProcessProject_CustomerAudienceWindowSendsNoBusinessContactNoticeWhenNo
 	if nudge.Recipients.TechnicalOwner.Email != "alex.fernando@wso2.example" {
 		t.Errorf("nudge Recipients.TechnicalOwner.Email = %q, want %q", nudge.Recipients.TechnicalOwner.Email, "alex.fernando@wso2.example")
 	}
-	if nudge.Recipients.Customer != nil {
-		t.Errorf("nudge Recipients.Customer = %v, want nil", nudge.Recipients.Customer)
+	if nudge.Recipients.IsCustomerFacing() {
+		t.Errorf("nudge Recipients.Customers = %v, want none", nudge.Recipients.Customers)
 	}
 	if nudge.Body == "" {
 		t.Error("nudge Body is empty, want the no-business-contact template populated")
@@ -427,8 +427,8 @@ func TestProcessProject_CustomerAudienceWindowSkipsAccountContactLookupWhenNoAcc
 	if len(ntf.sent) != 2 {
 		t.Fatalf("ntf.sent = %d, want 2 (reminder + no-business-contact)", len(ntf.sent))
 	}
-	if ntf.sent[0].Recipients.Customer != nil {
-		t.Errorf("reminder Recipients.Customer = %v, want nil (no account linked)", ntf.sent[0].Recipients.Customer)
+	if len(ntf.sent[0].Recipients.Customers) != 0 {
+		t.Errorf("reminder Recipients.Customers = %v, want none (no account linked)", ntf.sent[0].Recipients.Customers)
 	}
 }
 
@@ -548,7 +548,7 @@ func TestProcessProject_InvoiceCascadeErrorDoesNotBlockSubscriptionCascade(t *te
 func TestProcessProject_Day0SuccessfulNotifyThenSuspend(t *testing.T) {
 	reader := &mockEntityReader{
 		searchProjectContactsFn: func(ctx context.Context, projectID string, body []byte) ([]byte, error) {
-			return []byte(`{"contacts":[{"name":"Bob","email":"bob@customer.example","roles":["business_contact"]}]}`), nil
+			return []byte(`{"contacts":[{"name":"Bob","email":"bob@customer.example","roles":["BUSINESS_CONTACT"]}]}`), nil
 		},
 	}
 	updater := &mockProjectUpdater{}
@@ -721,7 +721,7 @@ func TestProcessProject_SuspendGuardSkipsWhenEndDateClosureStateIsClosed(t *test
 func TestProcessProject_SuspendProceedsWhenEndDateClosureStateIsExplicitlyOpen(t *testing.T) {
 	reader := &mockEntityReader{
 		searchProjectContactsFn: func(ctx context.Context, projectID string, body []byte) ([]byte, error) {
-			return []byte(`{"contacts":[{"name":"Bob","email":"bob@customer.example","roles":["business_contact"]}]}`), nil
+			return []byte(`{"contacts":[{"name":"Bob","email":"bob@customer.example","roles":["BUSINESS_CONTACT"]}]}`), nil
 		},
 	}
 	updater := &mockProjectUpdater{}

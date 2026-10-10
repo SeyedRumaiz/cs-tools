@@ -25,9 +25,7 @@ import (
 )
 
 // entityOpportunityClient abstracts the entity service opportunity operations used
-// by OpportunityHandler. ServiceNow data source only; read-only, so a pure M2M
-// caller succeeds here (unlike ServiceNow-backed write operations elsewhere in this
-// service).
+// by OpportunityHandler. Read-only and M2M-safe on both data sources.
 type entityOpportunityClient interface {
 	SearchOpportunities(ctx context.Context, body []byte) ([]byte, error)
 	GetOpportunity(ctx context.Context, id string) ([]byte, error)

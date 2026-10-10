@@ -14,7 +14,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { type Locator, type Page, expect } from "../fixtures/test";
+import {
+  type Download,
+  type Locator,
+  type Page,
+  expect,
+} from "../fixtures/test";
 import { CASES_LIST, CASE_DETAIL } from "../utils/selectors";
 import { expectSuccess } from "../utils/caseFlows";
 import { caseSearchResponse } from "../utils/listSearch";
@@ -74,6 +79,58 @@ export class CasesListPage {
 
     const match = this.main().getByText(subject, { exact: true });
     return (await match.count()) > 0;
+  }
+
+  /**
+   * Searches the list and waits for the results of THIS query.
+   *
+   * The same term-matched wait `hasCaseWithSubject` uses, but returning the row
+   * count rather than a subject match — the export spec searches by case
+   * number, which the row renders, whereas the subject check compares exact
+   * text that a number-only search will not produce.
+   *
+   * @param term - Case number, title or description fragment.
+   * @returns Number of rows the search returned.
+   */
+  async search(term: string): Promise<number> {
+    const searchResponse = caseSearchResponse(this.page, term);
+
+    await this.searchInput().fill(term);
+    const response = await searchResponse;
+
+    // A failed search renders no rows, which is indistinguishable from "no
+    // match" — assert it succeeded rather than reporting zero.
+    await expectSuccess(response, "case search");
+
+    // The response arriving is not the list having re-rendered. Counting rows
+    // here reads whatever is still on screen — the PREVIOUS search's results,
+    // or none at all — so the body's own total is used as the signal to wait
+    // against rather than a bare count.
+    const { totalRecords = 0 } = (await response.json()) as {
+      totalRecords?: number;
+    };
+
+    if (totalRecords === 0) {
+      await expect(
+        this.rows(),
+        "a search with no matches should render no rows",
+      ).toHaveCount(0, { timeout: LOAD_TIMEOUT_MS });
+      return 0;
+    }
+
+    // Rows are paginated, so the rendered count is capped — the assertion is
+    // that the list has caught up with the response, not that every match is
+    // on screen.
+    await expect
+      .poll(() => this.rows().count(), {
+        timeout: LOAD_TIMEOUT_MS,
+        message:
+          `the list should render results for "${term}" ` +
+          `(${totalRecords} matched)`,
+      })
+      .toBeGreaterThan(0);
+
+    return this.rows().count();
   }
 
   /** The list's heading, which names which list is on screen. */
@@ -165,5 +222,55 @@ export class CasesListPage {
     await expect(bar).toBeVisible({ timeout: LOAD_TIMEOUT_MS });
     const match = CASES_LIST.resultsCountPattern.exec(await bar.innerText());
     return match ? Number(match[2]) : null;
+  }
+
+  //
+  // Export. The button opens a menu; the menu item performs the download.
+  //
+
+  /** The Export button on the list toolbar. */
+  exportButton(): Locator {
+    return this.main().getByRole("button", {
+      name: CASES_LIST.export.button,
+      exact: true,
+    });
+  }
+
+  /** A format in the Export menu, e.g. "Export to CSV". */
+  exportMenuItem(label: string): Locator {
+    return this.page.getByRole("menuitem", { name: label, exact: true });
+  }
+
+  /**
+   * Opens the Export menu.
+   *
+   * Waits for the button to be enabled first: it is disabled while a previous
+   * export is still running and until the project id resolves, and a click in
+   * that window is silently dropped.
+   */
+  async openExportMenu(): Promise<void> {
+    await expect(this.exportButton()).toBeEnabled({ timeout: LOAD_TIMEOUT_MS });
+    await this.exportButton().click();
+    await expect(this.exportMenuItem(CASES_LIST.export.csvItem)).toBeVisible({
+      timeout: LOAD_TIMEOUT_MS,
+    });
+  }
+
+  /**
+   * Picks an export format and returns the file the browser received.
+   *
+   * The download is awaited alongside the click rather than after it: both
+   * formats build the file in-page and trigger an anchor click, so the event
+   * can land before a sequential `waitForEvent` starts listening.
+   *
+   * @param label - Menu item label, e.g. "Export to PDF".
+   * @returns The download, for asserting on its filename and contents.
+   */
+  async exportAs(label: string): Promise<Download> {
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: LOAD_TIMEOUT_MS }),
+      this.exportMenuItem(label).click(),
+    ]);
+    return download;
   }
 }

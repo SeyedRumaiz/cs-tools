@@ -16,10 +16,12 @@
 
 import { useNavigate, useLocation } from "react-router";
 import useNormalizedIdParam from "@hooks/useNormalizedIdParam";
-import { type JSX, useMemo, useState } from "react";
+import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DOMPurify from "dompurify";
 import { DESCRIPTION_PURIFY_CONFIG } from "@utils/common";
+import { useDarkMode } from "@utils/useDarkMode";
 import {
+  Alert,
   Box,
   Button,
   Stack,
@@ -50,22 +52,42 @@ import {
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import { useSuccessBanner } from "@context/success-banner/SuccessBannerContext";
 import ApiErrorState from "@components/error/ApiErrorState";
+import { isNotFoundError } from "@utils/ApiError";
 import useGetChangeRequestDetails from "@features/operations/api/useGetChangeRequestDetails";
 import { usePatchChangeRequest } from "@features/operations/api/usePatchChangeRequest";
 import ScheduledMaintenanceWindowCard from "@features/operations/components/change-requests/ScheduledMaintenanceWindowCard";
 import ProposeNewImplementationTimeModal from "@features/operations/components/change-requests/ProposeNewImplementationTimeModal";
+import ChangeRequestRejectConfirmDialog from "@features/operations/components/change-requests/ChangeRequestRejectConfirmDialog";
 import ChangeRequestDetailsLoadingSkeleton from "@features/operations/components/change-requests/ChangeRequestDetailsLoadingSkeleton";
 import {
+  CHANGE_REQUEST_NOT_FOUND_MESSAGE,
   buildChangeRequestWorkflowStages,
+  describeChangeRequestActionError,
   generateChangeRequestDetailsPdf,
+  getAnsweredWindow,
+  getCustomerDecisionLabels,
+  getCustomerDecisionMessages,
+  getProposalNote,
+  isAwaitingInternalReview,
+  resolveCustomerDecisionMode,
 } from "@features/operations/utils/changeRequests";
+import { getChangeRequestWindow } from "@features/operations/utils/changeRequestSchedule";
 import { formatDateTime } from "@features/support/utils/support";
 import {
   formatImpactLabel,
   getChangeRequestImpactColorShades,
 } from "@features/operations/utils/changeRequestUi";
-import { ChangeRequestStates } from "@features/operations/constants/operationsConstants";
-import { ChangeRequestDecisionMode } from "@features/operations/types/changeRequests";
+import {
+  ChangeRequestDecisionMode,
+  type ProposeNewTimeAvailability,
+} from "@features/operations/types/changeRequests";
+
+/**
+ * Where focus goes once the customer is done with an answer dialog or an answer
+ * attempt has ended (see `requestFocus`): the page heading, which is always there,
+ * or the answer button that was used, while it can still be used.
+ */
+type FocusAfterAnswer = "heading" | "trigger";
 
 /**
  * ChangeRequestDetailsPage component to display detailed information about a change request.
@@ -85,6 +107,28 @@ export default function ChangeRequestDetailsPage(): JSX.Element {
   const { showError } = useErrorBanner();
   const { showSuccess } = useSuccessBanner();
   const [proposeTimeOpen, setProposeTimeOpen] = useState(false);
+  const [rejectConfirmOpen, setRejectConfirmOpen] = useState(false);
+  const answerInFlightRef = useRef(false);
+  // Where focus goes whenever an answer attempt or one of the two dialogs ends,
+  // by whatever route -- given, refused for good, failed, or just closed. The
+  // buttons that had focus are gone, switched off or about to go by then (a
+  // refused answer re-reads the change request, and an answered one no longer
+  // offers any), so a keyboard or screen reader user would otherwise land on the
+  // document body and start again from the top. The page heading is always
+  // there; the answer button used last is where a customer who can still answer
+  // belongs (after a proposal that is the Propose New Time button: the change
+  // request stays in Customer Approval with its buttons). The outcome itself is
+  // announced by the banner (an alert).
+  const headingRef = useRef<HTMLElement | null>(null);
+  const answerTriggerRef = useRef<HTMLElement | null>(null);
+  const [pendingFocus, setPendingFocus] = useState<FocusAfterAnswer | null>(null);
+  const requestFocus = useCallback((target: FocusAfterAnswer) => {
+    // The heading is the stronger claim: an answer that is over leaves no button
+    // to return to, whatever else closed at the same time.
+    setPendingFocus((current) => (current === "heading" ? current : target));
+  }, []);
+  // The app's own dark-mode signal (<html data-color-scheme>), which theme.palette.mode does not follow.
+  const isDark = useDarkMode();
 
   const {
     data: changeRequest,
@@ -98,107 +142,131 @@ export default function ChangeRequestDetailsPage(): JSX.Element {
     () => buildChangeRequestWorkflowStages(changeRequest),
     [changeRequest],
   );
-  const currentStateLabel = changeRequest?.state?.label;
-
-  const decisionMode = ((): ChangeRequestDecisionMode => {
-    switch (currentStateLabel) {
-      case ChangeRequestStates.CUSTOMER_APPROVAL:
-        return changeRequest?.hasCustomerApproved === true
-          ? ChangeRequestDecisionMode.CUSTOMER_APPROVAL
-          : ChangeRequestDecisionMode.NONE;
-      case ChangeRequestStates.CUSTOMER_REVIEW:
-        return ChangeRequestDecisionMode.CUSTOMER_REVIEW;
-      default:
-        return ChangeRequestDecisionMode.NONE;
-    }
-  })();
-
+  const decisionMode = resolveCustomerDecisionMode(changeRequest);
   const canShowApprovalActions = decisionMode !== ChangeRequestDecisionMode.NONE;
   const canShowProposeNewTime = decisionMode === ChangeRequestDecisionMode.CUSTOMER_APPROVAL;
+  // A held change refuses a proposed time (but not an answer): offer the button
+  // switched off, with the reason beside it, rather than let a customer type a
+  // whole window and be refused.
+  const proposeBlockedByHold = canShowProposeNewTime && changeRequest?.isOnHold === true;
+  // A proposal moves the start and keeps the planned length, so a change request
+  // with no window (no start, no end, or an end that is not after the start) has
+  // nothing to move: the button is switched off with the reason beside it.
+  const proposeBlockedByNoWindow =
+    canShowProposeNewTime &&
+    !proposeBlockedByHold &&
+    changeRequest != null &&
+    getChangeRequestWindow(changeRequest).durationMs == null;
+  const proposeNoteId = proposeBlockedByHold
+    ? "cr-propose-hold-note"
+    : proposeBlockedByNoWindow
+      ? "cr-propose-nowindow-note"
+      : undefined;
+  // What the reject confirmation may say about proposing a different time: only
+  // what is true of the button beside it. A button that is switched off for want
+  // of a window to move is not pointed at, and the hold is the one reason that is
+  // worth saying (it passes).
+  const proposeNewTime: ProposeNewTimeAvailability = !canShowProposeNewTime
+    ? "unavailable"
+    : proposeBlockedByHold
+      ? "on_hold"
+      : proposeBlockedByNoWindow
+        ? "unavailable"
+        : "available";
+  const proposeDialogOpen = proposeTimeOpen && canShowProposeNewTime;
+  const rejectDialogOpen = rejectConfirmOpen && canShowApprovalActions;
+  // What the customer is told about a proposed time that waits for WSO2 or was not accepted.
+  const proposalNote = getProposalNote(changeRequest, canShowApprovalActions);
+  const { approve: approveLabel, reject: rejectLabel } =
+    getCustomerDecisionLabels(decisionMode);
 
-  const approveLabel = (() => {
-    switch (decisionMode) {
-      case ChangeRequestDecisionMode.CUSTOMER_REVIEW:
-        return "Successful";
-      default:
-        return "Approve";
-    }
-  })();
+  // Outlined answer buttons. Lighter shades in dark mode and darker ones in light:
+  // one fixed shade for both read 3.6 to 4.3 : 1 on the dark page (AA text needs 4.5).
+  const answerButtonSx = (hue: "blue" | "green" | "red") => ({
+    height: 32,
+    color: isDark ? colors[hue][300] : colors[hue][800],
+    borderColor: isDark ? colors[hue][400] : colors[hue][300],
+    "&:hover": {
+      bgcolor: alpha(colors[hue][500], isDark ? 0.16 : 0.08),
+      borderColor: isDark ? colors[hue][300] : colors[hue][400],
+    },
+  });
 
-  const rejectLabel = (() => {
-    switch (decisionMode) {
-      case ChangeRequestDecisionMode.CUSTOMER_REVIEW:
-        return "Unsuccessful";
-      default:
-        return "Reject";
+  // Runs once the dialogs have closed (so it is the last to move focus, after the
+  // dialog's own return of focus) and no answer is in flight (the answer buttons
+  // are switched off while one is, and cannot take focus).
+  useEffect(() => {
+    if (
+      !pendingFocus ||
+      proposeDialogOpen ||
+      rejectDialogOpen ||
+      patchChangeRequest.isPending
+    ) {
+      return;
     }
-  })();
+    setPendingFocus(null);
+    const trigger = answerTriggerRef.current;
+    const triggerUsable =
+      pendingFocus === "trigger" &&
+      trigger?.isConnected === true &&
+      !(trigger as HTMLButtonElement).disabled;
+    (triggerUsable ? trigger : headingRef.current)?.focus();
+  }, [pendingFocus, proposeDialogOpen, rejectDialogOpen, patchChangeRequest.isPending]);
+
+  // The error state replaces the whole page. A refused answer re-reads the change
+  // request, and that read can fail (the contact was deregistered meanwhile, the
+  // change request is gone: a 404): the heading or the button that had focus is then
+  // unmounted and focus would drop to the document body. So the error state takes it,
+  // but only when focus has nowhere else to be -- never from a control the customer
+  // has moved to since.
+  const errorStateShown = !!error && !isLoading && !isFetching;
+  const errorStateRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!errorStateShown) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    errorStateRef.current?.focus();
+  }, [errorStateShown]);
 
   const impactColor = getChangeRequestImpactColorShades(
     changeRequest?.impact?.label,
   );
 
-  const handleApproveChange = () => {
-    if (!changeRequest) return;
-    switch (decisionMode) {
-      case ChangeRequestDecisionMode.CUSTOMER_APPROVAL:
-        patchChangeRequest.mutate(
-          { isCustomerApproved: true },
-          {
-            onSuccess: () => {
-              showSuccess("Change request approved successfully.");
-              window.location.reload();
-            },
-            onError: (err) => showError(err?.message ?? "Failed to approve change request."),
-          },
-        );
-        break;
-      case ChangeRequestDecisionMode.CUSTOMER_REVIEW:
-        patchChangeRequest.mutate(
-          { isCustomerReviewed: true },
-          {
-            onSuccess: () => {
-              showSuccess("Change request marked as successful.");
-              window.location.reload();
-            },
-            onError: (err) => showError(err?.message ?? "Failed to update change request."),
-          },
-        );
-        break;
-      default:
-        break;
-    }
-  };
-
-  const handleRejectChange = () => {
-    if (!changeRequest) return;
-    switch (decisionMode) {
-      case ChangeRequestDecisionMode.CUSTOMER_APPROVAL:
-        patchChangeRequest.mutate(
-          { isCustomerApproved: false },
-          {
-            onSuccess: () => {
-              showSuccess("Change request rejected successfully.");
-              window.location.reload();
-            },
-            onError: (err) => showError(err?.message ?? "Failed to reject change request."),
-          },
-        );
-        break;
-      case ChangeRequestDecisionMode.CUSTOMER_REVIEW:
-        patchChangeRequest.mutate(
-          { isCustomerReviewed: false },
-          {
-            onSuccess: () => {
-              showSuccess("Change request marked as unsuccessful.");
-              window.location.reload();
-            },
-            onError: (err) => showError(err?.message ?? "Failed to update change request."),
-          },
-        );
-        break;
-      default:
-        break;
+  /**
+   * Sends the customer's answer. The patch hook refetches the change request
+   * before this resolves, so the page shows the new state (and no buttons) as
+   * soon as the message appears. Awaited rather than passed as `mutate`
+   * callbacks, which would be dropped if the refetch hid this page's buttons
+   * and unmounted whatever called us.
+   */
+  const submitAnswer = async (approved: boolean) => {
+    if (!changeRequest || answerInFlightRef.current) return;
+    const mode = decisionMode;
+    if (mode === ChangeRequestDecisionMode.NONE) return;
+    const messages = getCustomerDecisionMessages(mode, approved);
+    answerInFlightRef.current = true;
+    try {
+      // The answer names the schedule on screen: if it moved while the page was
+      // open (a re-schedule was approved behind it), it is refused, not given
+      // for a time the customer never saw.
+      const shown = getAnsweredWindow(changeRequest);
+      await patchChangeRequest.mutateAsync(
+        mode === ChangeRequestDecisionMode.CUSTOMER_REVIEW
+          ? { isCustomerReviewed: approved, ...shown }
+          : { isCustomerApproved: approved, ...shown },
+      );
+      showSuccess(messages.success);
+      requestFocus("heading");
+    } catch (err) {
+      const { message, terminal } = describeChangeRequestActionError(err, messages.failure);
+      showError(message);
+      // A refusal that ends the question (answered already, moved on, not yours to
+      // answer) leaves no answer to give: the heading. Any other failure leaves
+      // the buttons as they were: back to the one that was used.
+      requestFocus(terminal ? "heading" : "trigger");
+    } finally {
+      answerInFlightRef.current = false;
+      setRejectConfirmOpen(false);
     }
   };
 
@@ -224,7 +292,10 @@ export default function ChangeRequestDetailsPage(): JSX.Element {
   }
 
   // Error state - only show error if we have an actual error and not loading
-  if (error && !isLoading && !isFetching) {
+  if (errorStateShown) {
+    const errorMessage = isNotFoundError(error)
+      ? CHANGE_REQUEST_NOT_FOUND_MESSAGE
+      : "Could not load change request details.";
     return (
       <Stack spacing={3}>
         <Button
@@ -239,10 +310,16 @@ export default function ChangeRequestDetailsPage(): JSX.Element {
         >
           Back to Change Requests
         </Button>
-        <ApiErrorState
-          error={error}
-          fallbackMessage="Could not load change request details."
-        />
+        {/* The focus target of the error state (see `errorStateShown`): named after the message so a screen reader says what happened. */}
+        <Box
+          ref={errorStateRef}
+          tabIndex={-1}
+          role="group"
+          aria-label={errorMessage}
+          sx={{ outline: "none" }}
+        >
+          <ApiErrorState error={error} fallbackMessage={errorMessage} />
+        </Box>
       </Stack>
     );
   }
@@ -359,7 +436,13 @@ export default function ChangeRequestDetailsPage(): JSX.Element {
                     flexWrap: "wrap",
                   }}
                 >
-                  <Typography variant="h5" color="text.primary">
+                  <Typography
+                    variant="h5"
+                    color="text.primary"
+                    ref={headingRef}
+                    tabIndex={-1}
+                    sx={{ outline: "none" }}
+                  >
                     {changeRequest.title || "Not Available"}
                   </Typography>
                   {changeRequest.hasServiceOutage && (
@@ -454,70 +537,143 @@ export default function ChangeRequestDetailsPage(): JSX.Element {
                   </Button>
                 </Box>
                 {canShowApprovalActions && (
-                  <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-                    {canShowProposeNewTime && (
+                  <Box
+                    sx={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: { xs: "flex-start", sm: "flex-end" },
+                      gap: 0.75,
+                    }}
+                  >
+                    {decisionMode === ChangeRequestDecisionMode.CUSTOMER_REVIEW && (
+                      <Typography
+                        id="cr-answer-prompt"
+                        variant="body2"
+                        color="text.secondary"
+                      >
+                        This change has been implemented. Was it successful?
+                      </Typography>
+                    )}
+                    <Stack
+                      direction="row"
+                      spacing={1}
+                      useFlexGap
+                      flexWrap="wrap"
+                      role="group"
+                      aria-labelledby={
+                        decisionMode === ChangeRequestDecisionMode.CUSTOMER_REVIEW
+                          ? "cr-answer-prompt"
+                          : undefined
+                      }
+                      aria-label={
+                        decisionMode === ChangeRequestDecisionMode.CUSTOMER_REVIEW
+                          ? undefined
+                          : "Answer this change request"
+                      }
+                    >
+                      {canShowProposeNewTime && (
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          startIcon={<CalendarClock size={14} aria-hidden />}
+                          onClick={(event) => {
+                            answerTriggerRef.current = event.currentTarget;
+                            setProposeTimeOpen(true);
+                          }}
+                          disabled={
+                            patchChangeRequest.isPending ||
+                            proposeBlockedByHold ||
+                            proposeBlockedByNoWindow
+                          }
+                          aria-describedby={proposeNoteId}
+                          sx={answerButtonSx("blue")}
+                        >
+                          Propose New Time
+                        </Button>
+                      )}
                       <Button
                         size="small"
                         variant="outlined"
-                        startIcon={<CalendarClock size={14} aria-hidden />}
-                        onClick={() => setProposeTimeOpen(true)}
-                        disabled={patchChangeRequest.isPending}
-                        sx={{
-                          height: 32,
-                          color: colors.blue[700],
-                          borderColor: colors.blue[300],
-                          "&:hover": {
-                            bgcolor: alpha(colors.blue[500], 0.08),
-                            borderColor: colors.blue[400],
-                          },
+                        startIcon={<FileCheck size={14} aria-hidden />}
+                        onClick={(event) => {
+                          answerTriggerRef.current = event.currentTarget;
+                          void submitAnswer(true);
                         }}
+                        disabled={patchChangeRequest.isPending}
+                        sx={answerButtonSx("green")}
                       >
-                        Propose New Time
+                        {approveLabel}
                       </Button>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        startIcon={<X size={14} aria-hidden />}
+                        onClick={(event) => {
+                          answerTriggerRef.current = event.currentTarget;
+                          setRejectConfirmOpen(true);
+                        }}
+                        disabled={patchChangeRequest.isPending}
+                        sx={answerButtonSx("red")}
+                      >
+                        {rejectLabel}
+                      </Button>
+                    </Stack>
+                    {proposeBlockedByHold && (
+                      <Typography
+                        id="cr-propose-hold-note"
+                        variant="caption"
+                        color="text.secondary"
+                        role="note"
+                        sx={{ maxWidth: 360, textAlign: { sm: "right" } }}
+                      >
+                        WSO2 has this change request on hold, so a new time cannot
+                        be proposed right now. You can still approve or reject it.
+                      </Typography>
                     )}
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      startIcon={<FileCheck size={14} aria-hidden />}
-                      onClick={handleApproveChange}
-                      disabled={patchChangeRequest.isPending}
-                      sx={{
-                        height: 32,
-                        color: colors.green[800],
-                        borderColor: colors.green[300],
-                        "&:hover": {
-                          bgcolor: alpha(colors.green[500], 0.08),
-                          borderColor: colors.green[400],
-                        },
-                      }}
-                    >
-                      {approveLabel}
-                    </Button>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      startIcon={<X size={14} aria-hidden />}
-                      onClick={handleRejectChange}
-                      disabled={patchChangeRequest.isPending}
-                      sx={{
-                        height: 32,
-                        color: colors.red[800],
-                        borderColor: colors.red[300],
-                        "&:hover": {
-                          bgcolor: alpha(colors.red[500], 0.08),
-                          borderColor: colors.red[400],
-                        },
-                      }}
-                    >
-                      {rejectLabel}
-                    </Button>
-                  </Stack>
+                    {proposeBlockedByNoWindow && (
+                      <Typography
+                        id="cr-propose-nowindow-note"
+                        variant="caption"
+                        color="text.secondary"
+                        role="note"
+                        sx={{ maxWidth: 360, textAlign: { sm: "right" } }}
+                      >
+                        This change request has no planned time yet, so a new
+                        time cannot be proposed for it. You can still approve or
+                        reject it.
+                      </Typography>
+                    )}
+                  </Box>
                 )}
               </Box>
             </Box>
           </Box>
         </Paper>
       </Box>
+
+      {proposalNote && (
+        <Alert
+          severity="info"
+          role="status"
+          id={
+            proposalNote.kind === "waiting"
+              ? "cr-proposal-waiting-note"
+              : "cr-proposal-not-accepted-note"
+          }
+        >
+          {proposalNote.text}
+        </Alert>
+      )}
+
+      {/* Only a proposal made before a proposed time waited in Customer Approval
+          can leave a change request here: it goes back through WSO2's internal
+          approval and the customer is then asked again. */}
+      {isAwaitingInternalReview(changeRequest) && (
+        <Alert severity="info" role="status" id="cr-internal-review-note">
+          WSO2 is reviewing this change request internally. You will be asked to
+          approve the schedule once it is confirmed.
+        </Alert>
+      )}
 
       {/* Scrollable 2-Column Layout */}
       <Box
@@ -946,9 +1102,28 @@ export default function ChangeRequestDetailsPage(): JSX.Element {
       </Box>
 
       <ProposeNewImplementationTimeModal
-        open={proposeTimeOpen}
-        onClose={() => setProposeTimeOpen(false)}
+        open={proposeDialogOpen}
+        onClose={() => {
+          setProposeTimeOpen(false);
+          requestFocus("trigger");
+        }}
+        // A proposal leaves the change request in Customer Approval with its
+        // buttons, so focus goes back to the one that opened the dialog (the
+        // heading only when that button is gone: see the focus effect).
+        onProposed={() => requestFocus("trigger")}
+        onRefused={() => requestFocus("heading")}
         changeRequest={changeRequest}
+      />
+      <ChangeRequestRejectConfirmDialog
+        open={rejectDialogOpen}
+        mode={decisionMode}
+        proposeNewTime={proposeNewTime}
+        isPending={patchChangeRequest.isPending}
+        onClose={() => {
+          setRejectConfirmOpen(false);
+          requestFocus("trigger");
+        }}
+        onConfirm={() => void submitAnswer(false)}
       />
     </Box>
   );

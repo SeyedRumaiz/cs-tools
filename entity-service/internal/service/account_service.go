@@ -19,8 +19,10 @@ package service
 
 import (
 	"context"
+	"strings"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 )
@@ -73,6 +75,46 @@ func (s *accountService) GetAccountByID(ctx context.Context, id string) (domain.
 	return accountRowToDetail(row), nil
 }
 
+// UpdateAccountTeams implements AccountService.
+func (s *accountService) UpdateAccountTeams(ctx context.Context, req domain.UpdateAccountTeamsRequest) (domain.AccountDetail, error) {
+	if err := validateUUIDs("id", []string{req.ID}); err != nil {
+		return domain.AccountDetail{}, err
+	}
+	if req.CreTeamID == nil && req.SreTeamID == nil {
+		return domain.AccountDetail{}, &apierror.ValidationError{Msg: "at least one of creTeamId or sreTeamId must be provided"}
+	}
+	ids := []string{}
+	if req.CreTeamID != nil {
+		ids = append(ids, *req.CreTeamID)
+	}
+	if req.SreTeamID != nil {
+		ids = append(ids, *req.SreTeamID)
+	}
+	if err := validateUUIDs("creTeamId/sreTeamId", ids); err != nil {
+		return domain.AccountDetail{}, err
+	}
+
+	row, err := s.repo.UpdateAccountTeams(ctx, req.ID, req.CreTeamID, req.SreTeamID)
+	if err != nil {
+		return domain.AccountDetail{}, err
+	}
+	return accountRowToDetail(row), nil
+}
+
+// accountTeamRef builds an EntityRef from a joined "group" id/name pair,
+// returning nil when the id is absent (no team linked) -- same nil
+// convention as accountPersonRef, just for a group rather than a user.
+func accountTeamRef(id, name *string) *domain.EntityRef {
+	if id == nil || *id == "" {
+		return nil
+	}
+	var teamName string
+	if name != nil {
+		teamName = *name
+	}
+	return &domain.EntityRef{ID: *id, Name: teamName}
+}
+
 // accountPersonRef builds a PersonRef from a joined person id/name/email triple,
 // returning nil when the id is absent (no owner/manager linked).
 func accountPersonRef(id, name, email *string) *domain.PersonRef {
@@ -98,71 +140,95 @@ func boolOrFalse(b *bool) bool {
 	return b != nil && *b
 }
 
+// accountIsPartner applies the Salesforce membership mapping's partner rule
+// (classification "Partner") to the account row.
+func accountIsPartner(classification *string) *bool {
+	v := classification != nil && strings.EqualFold(strings.TrimSpace(*classification), salesforceAccountClassificationPartner)
+	return &v
+}
+
 // accountRowCommonFields maps the fields shared between the search view and
-// the account detail response. SupportTier, ArrToday, RenewalAccountManager,
-// CreTeam, and SreTeam are not available in the Postgres schema and are
-// always nil.
-func accountRowCommonFields(row repository.AccountRow) (classification string, technicalOwner, accountManager *domain.PersonRef) {
+// the account detail response. SupportTier and ArrToday are not available
+// in the Postgres schema and are always nil.
+func accountRowCommonFields(row repository.AccountRow) (classification string, technicalOwner, accountManager, renewalAccountManager, customerSuccessManager *domain.PersonRef, creTeam, sreTeam *domain.EntityRef) {
 	if row.Classification != nil {
 		classification = *row.Classification
 	}
 	technicalOwner = accountPersonRef(row.TechnicalOwnerID, row.TechnicalOwnerName, row.TechnicalOwnerEmail)
 	accountManager = accountPersonRef(row.AccountManagerID, row.AccountManagerName, row.AccountManagerEmail)
+	renewalAccountManager = accountPersonRef(row.RenewalAccountManagerID, row.RenewalAccountManagerName, row.RenewalAccountManagerEmail)
+	customerSuccessManager = accountPersonRef(row.CustomerSuccessManagerID, row.CustomerSuccessManagerName, row.CustomerSuccessManagerEmail)
+	creTeam = accountTeamRef(row.CreTeamID, row.CreTeamName)
+	sreTeam = accountTeamRef(row.SreTeamID, row.SreTeamName)
 	return
 }
 
 func accountRowToView(row repository.AccountRow) domain.AccountView {
-	classification, technicalOwner, accountManager := accountRowCommonFields(row)
+	classification, technicalOwner, accountManager, renewalAccountManager, customerSuccessManager, creTeam, sreTeam := accountRowCommonFields(row)
 	createdBy := row.CreatedBy
 
 	return domain.AccountView{
-		ID:                    row.ID,
-		Name:                  row.Name,
-		Classification:        classification,
-		Pod:                   row.Pod,
-		SfID:                  row.SfID,
-		Region:                row.Region,
-		SupportTier:           nil,
-		ArrToday:              nil,
-		TechnicalOwner:        technicalOwner,
-		AccountManager:        accountManager,
-		RenewalAccountManager: nil,
-		CreTeam:               nil,
-		SreTeam:               nil,
-		ActivationDate:        dateOnlyOrNil(row.ActivationDate),
-		DeactivationDate:      dateOnlyOrNil(row.DeactivationDate),
-		HasAgent:              boolOrFalse(row.HasAgent),
-		HasKbReferences:       boolOrFalse(row.HasKbReferences),
-		CreatedOn:             row.CreatedOn.Format(time.RFC3339),
-		CreatedBy:             &createdBy,
-		UpdatedOn:             row.UpdatedOn.Format(time.RFC3339),
+		ID:                     row.ID,
+		Name:                   row.Name,
+		Number:                 row.Number,
+		Classification:         classification,
+		Pod:                    row.Pod,
+		SfID:                   row.SfID,
+		Region:                 row.Region,
+		Country:                row.Country,
+		City:                   row.City,
+		DriveLocation:          row.DriveLocation,
+		SupportTier:            nil,
+		ArrToday:               nil,
+		TechnicalOwner:         technicalOwner,
+		AccountManager:         accountManager,
+		RenewalAccountManager:  renewalAccountManager,
+		CustomerSuccessManager: customerSuccessManager,
+		CreTeam:                creTeam,
+		SreTeam:                sreTeam,
+		ActivationDate:         dateOnlyOrNil(row.ActivationDate),
+		DeactivationDate:       dateOnlyOrNil(row.DeactivationDate),
+		HasAgent:               boolOrFalse(row.HasAgent),
+		HasKbReferences:        boolOrFalse(row.HasKbReferences),
+		CreatedOn:              row.CreatedOn.Format(time.RFC3339),
+		CreatedBy:              &createdBy,
+		UpdatedOn:              row.UpdatedOn.Format(time.RFC3339),
+		IsPartner:              accountIsPartner(row.Classification),
+		HasPrimaryPartner:      &row.HasPartner,
 	}
 }
 
 func accountRowToDetail(row repository.AccountRow) domain.AccountDetail {
-	classification, technicalOwner, accountManager := accountRowCommonFields(row)
+	classification, technicalOwner, accountManager, renewalAccountManager, customerSuccessManager, creTeam, sreTeam := accountRowCommonFields(row)
 	createdBy := row.CreatedBy
 
 	return domain.AccountDetail{
-		ID:                    row.ID,
-		Name:                  row.Name,
-		Classification:        classification,
-		Pod:                   row.Pod,
-		SfID:                  row.SfID,
-		Region:                row.Region,
-		SupportTier:           nil,
-		ArrToday:              nil,
-		TechnicalOwner:        technicalOwner,
-		AccountManager:        accountManager,
-		RenewalAccountManager: nil,
-		CreTeam:               nil,
-		SreTeam:               nil,
-		ActivationDate:        dateOnlyOrNil(row.ActivationDate),
-		DeactivationDate:      dateOnlyOrNil(row.DeactivationDate),
-		HasAgent:              boolOrFalse(row.HasAgent),
-		HasKbReferences:       boolOrFalse(row.HasKbReferences),
-		CreatedOn:             row.CreatedOn.Format(time.RFC3339),
-		CreatedBy:             &createdBy,
-		UpdatedOn:             row.UpdatedOn.Format(time.RFC3339),
+		ID:                     row.ID,
+		Name:                   row.Name,
+		Number:                 row.Number,
+		Classification:         classification,
+		Pod:                    row.Pod,
+		SfID:                   row.SfID,
+		Region:                 row.Region,
+		Country:                row.Country,
+		City:                   row.City,
+		DriveLocation:          row.DriveLocation,
+		SupportTier:            nil,
+		ArrToday:               nil,
+		TechnicalOwner:         technicalOwner,
+		AccountManager:         accountManager,
+		RenewalAccountManager:  renewalAccountManager,
+		CustomerSuccessManager: customerSuccessManager,
+		CreTeam:                creTeam,
+		SreTeam:                sreTeam,
+		ActivationDate:         dateOnlyOrNil(row.ActivationDate),
+		DeactivationDate:       dateOnlyOrNil(row.DeactivationDate),
+		HasAgent:               boolOrFalse(row.HasAgent),
+		HasKbReferences:        boolOrFalse(row.HasKbReferences),
+		CreatedOn:              row.CreatedOn.Format(time.RFC3339),
+		CreatedBy:              &createdBy,
+		UpdatedOn:              row.UpdatedOn.Format(time.RFC3339),
+		IsPartner:              accountIsPartner(row.Classification),
+		HasPrimaryPartner:      &row.HasPartner,
 	}
 }

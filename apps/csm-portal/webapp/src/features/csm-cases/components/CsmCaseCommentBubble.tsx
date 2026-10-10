@@ -14,28 +14,43 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { Avatar, Box, Chip, Paper, Skeleton, Typography, useTheme } from "@wso2/oxygen-ui";
-import { Bot, Lock } from "@wso2/oxygen-ui-icons-react";
-import { useCallback, useEffect, useMemo, useRef, type JSX } from "react";
+import {
+  Avatar,
+  Box,
+  Button,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  IconButton,
+  Menu,
+  MenuItem,
+  Paper,
+  Skeleton,
+  Tooltip,
+  Typography,
+  useTheme,
+} from "@wso2/oxygen-ui";
+import { Bot, Lock, MoreVertical, Pencil, Trash2 } from "@wso2/oxygen-ui-icons-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
 import RelativeTime from "@components/RelativeTime";
 import SemanticChip from "@components/SemanticChip";
 import UserRefLink from "@components/UserRefLink";
+import EditorWithSourceToggle from "@components/rich-text-editor/EditorWithSourceToggle";
+import { useCurrentUser } from "@context/current-user/CurrentUserContext";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
 import { pickAccessibleText } from "@utils/contrastText";
 import { sanitizeRichTextHtml, stripLightModeInlineStyles } from "@utils/sanitizeHtml";
 import { useDarkMode } from "@utils/useDarkMode";
-import { markdownToHtml } from "@utils/renderMarkdown";
 import { initialsOf } from "@utils/userClaims";
 import { useResolvedInlineImageHtml } from "@features/csm-cases/api/useResolvedInlineImageHtml";
 import { replaceCallRequestLinks } from "@features/csm-cases/utils/callRequestLinks";
 import { replaceSnLinks, type SnLinkType } from "@features/csm-cases/utils/snLinkRegistry";
 import {
-  convertCodeTagsToHtml,
   hasDisplayableContent,
-  hasSingleCodeWrapper,
   linkifyBareUrls,
-  stripAllCodeBlocks,
-  stripCodeWrapper,
-  stripCustomerCommentAddedLabel,
+  preprocessCommentBodyHtml,
 } from "@features/csm-cases/utils/commentContent";
 import type {
   CsmCaseComment,
@@ -56,6 +71,21 @@ interface CsmCaseCommentBubbleProps {
    * Activities tab and the chat transcript dialog have room for it, so this
    * defaults to off rather than changing either of those. */
   compact?: boolean;
+  /**
+   * Persist an edit to this comment's content (`PATCH /comments/{id}`, via
+   * whichever of `usePatchComment`'s callers owns this comment's aggregate).
+   * Omit to disable editing outright — e.g. `CasePreviewContent`'s read-only
+   * quick-look drawer never passes this. When supplied, the affordance is
+   * still only shown to this comment's own author or a caller holding the
+   * `admin` role (mirroring the backend's own author-or-admin rule) — this is
+   * a UI convenience only, the backend's 403 is the real gate.
+   */
+  onEditComment?: (content: string) => Promise<unknown>;
+  /**
+   * Soft-delete this comment (`DELETE /comments/{id}`). Same
+   * omit-to-disable/author-or-admin visibility rule as `onEditComment`.
+   */
+  onDeleteComment?: () => Promise<unknown>;
 }
 
 const SAFE_PROTOCOLS = ["http:", "https:"];
@@ -93,28 +123,32 @@ export default function CsmCaseCommentBubble({
   onCallRequestClick,
   onSnLinkClick,
   compact = false,
+  onEditComment,
+  onDeleteComment,
 }: CsmCaseCommentBubbleProps): JSX.Element | null {
   const theme = useTheme();
   const isDarkMode = useDarkMode();
   const contentRef = useRef<HTMLDivElement>(null);
+  const { user: currentUser } = useCurrentUser();
+  const portalAccess = usePortalAccess();
+  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editValue, setEditValue] = useState(comment.bodyHtml);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const isBot = comment.authorRole === "chatbot";
-  // A chatbot (Novera) message body is Markdown; render it to HTML first. Every
-  // other comment body is already rich-text HTML and goes through the same
-  // code-wrapper/label-stripping pipeline the customer portal uses, since bot
-  // replies never carry ServiceNow's [code] wrapper tags or the "Customer
-  // comment added" label.
-  const preprocessed = useMemo(() => {
-    if (isBot) return markdownToHtml(comment.bodyHtml);
-    const raw = comment.bodyHtml ?? "";
-    const isFullCodeWrap = hasSingleCodeWrapper(raw);
-    const codeBlockCount = raw.match(/\[code\]/gi)?.length ?? 0;
-    const afterCode = isFullCodeWrap
-      ? stripCodeWrapper(raw)
-      : codeBlockCount > 1
-        ? stripAllCodeBlocks(raw)
-        : convertCodeTagsToHtml(raw);
-    return stripCustomerCommentAddedLabel(afterCode);
-  }, [comment.bodyHtml, isBot]);
+  // A chatbot (Novera) message body is Markdown, and so is the description of
+  // a record raised from a GitHub issue; those are rendered to HTML first.
+  // Every other comment body is rich-text HTML and goes through the
+  // code-wrapper/label-stripping pipeline the customer portal uses (plus the
+  // laid-out-source whitespace clean-up), since Markdown bodies never carry
+  // ServiceNow's [code] wrapper tags or the "Customer comment added" label.
+  // The pipeline itself lives in `preprocessCommentBodyHtml`, shared with the
+  // PDF export so the two cannot drift.
+  const preprocessed = useMemo(() => preprocessCommentBodyHtml(comment), [comment]);
   const darkModeHtml = isDarkMode
     ? stripLightModeInlineStyles(preprocessed)
     : preprocessed;
@@ -250,6 +284,71 @@ export default function CsmCaseCommentBubble({
   ]);
 
   const isSystem = comment.authorRole === "system";
+
+  // Author-or-(admin/comment_updater) check — UI convenience only, the
+  // backend re-enforces the exact same rule on PATCH/DELETE and is the real
+  // gate (entity-service's own author-or-admin check, unaffected by the
+  // comment_updater role — see canUpdateDeleteAnyComment's own doc comment).
+  // Case-insensitive to match how the backend compares the author email. A
+  // synthetic (client-fabricated) or system entry never has a real backend
+  // comment id behind it, so neither can ever be edited/deleted regardless
+  // of role.
+  const isAuthor =
+    !!comment.authorEmail &&
+    !!currentUser?.email &&
+    comment.authorEmail.toLowerCase() === currentUser.email.toLowerCase();
+  const canModify =
+    !comment.synthetic &&
+    !isSystem &&
+    (isAuthor || portalAccess.canUpdateDeleteAnyComment);
+  const showEditAffordance =
+    canModify && !!onEditComment && !comment.isDeleted;
+  const showDeleteAffordance =
+    canModify && !!onDeleteComment && !comment.isDeleted;
+  const showMenu = showEditAffordance || showDeleteAffordance;
+
+  const openEdit = (): void => {
+    setMenuAnchor(null);
+    setEditValue(comment.bodyHtml);
+    setEditError(null);
+    setIsEditing(true);
+  };
+  const cancelEdit = (): void => {
+    setIsEditing(false);
+    setEditValue(comment.bodyHtml);
+    setEditError(null);
+  };
+  const saveEdit = async (): Promise<void> => {
+    if (!onEditComment) return;
+    setIsSavingEdit(true);
+    setEditError(null);
+    try {
+      await onEditComment(editValue);
+      setIsEditing(false);
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : "Failed to save the edit.");
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+  const confirmDelete = async (): Promise<void> => {
+    if (!onDeleteComment) return;
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      await onDeleteComment();
+      setDeleteConfirmOpen(false);
+    } catch (e) {
+      // Left open on failure so the engineer can retry, with an inline error
+      // (same pattern as saveEdit above) — the callers (CsmCaseDetailPage,
+      // CsmChangeRequestDetailPage, CsmIncidentDetailPage) pass
+      // deleteComment.mutateAsync directly with no error handling of their
+      // own, so this dialog has to surface the failure itself.
+      setDeleteError(e instanceof Error ? e.message : "Failed to delete the comment.");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   if (!hasDisplayableContent(comment)) {
     return null;
@@ -395,11 +494,110 @@ export default function CsmCaseCommentBubble({
           <Typography variant="caption" color="text.secondary">
             <RelativeTime iso={comment.createdAt} href={`#${comment.id}`} />
           </Typography>
+          {comment.isEdited && !comment.isDeleted && (
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ fontStyle: "italic" }}
+              title={
+                comment.lastEditedOn
+                  ? `Last edited ${comment.lastEditedOn}`
+                  : undefined
+              }
+            >
+              (edited)
+            </Typography>
+          )}
+          {comment.isDeleted && (
+            <Chip size="small" variant="outlined" label="Deleted" />
+          )}
+          {showMenu && !isEditing && (
+            <>
+              <Box sx={{ flexGrow: 1 }} />
+              <Tooltip title="Comment actions">
+                <IconButton
+                  size="small"
+                  aria-label="Comment actions"
+                  aria-haspopup="menu"
+                  onClick={(e) => setMenuAnchor(e.currentTarget)}
+                >
+                  <MoreVertical size={16} />
+                </IconButton>
+              </Tooltip>
+              <Menu
+                anchorEl={menuAnchor}
+                open={!!menuAnchor}
+                onClose={() => setMenuAnchor(null)}
+                anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                transformOrigin={{ vertical: "top", horizontal: "right" }}
+              >
+                {showEditAffordance && (
+                  <MenuItem onClick={openEdit}>
+                    <Pencil size={14} style={{ marginRight: 8 }} />
+                    Edit
+                  </MenuItem>
+                )}
+                {showDeleteAffordance && (
+                  <MenuItem
+                    onClick={() => {
+                      setMenuAnchor(null);
+                      setDeleteError(null);
+                      setDeleteConfirmOpen(true);
+                    }}
+                  >
+                    <Trash2 size={14} style={{ marginRight: 8 }} />
+                    Delete
+                  </MenuItem>
+                )}
+              </Menu>
+            </>
+          )}
         </Box>
+        {isEditing ? (
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+            <EditorWithSourceToggle
+              value={editValue}
+              onChange={setEditValue}
+              disabled={isSavingEdit}
+              minHeight={96}
+              maxHeight={260}
+              toolbarVariant="full"
+            />
+            {editError && (
+              <Typography variant="caption" color="error">
+                {editError}
+              </Typography>
+            )}
+            <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 1 }}>
+              <Button size="small" color="inherit" onClick={cancelEdit} disabled={isSavingEdit}>
+                Cancel
+              </Button>
+              <Button
+                size="small"
+                variant="contained"
+                onClick={() => {
+                  void saveEdit();
+                }}
+                disabled={isSavingEdit}
+              >
+                {isSavingEdit ? "Saving…" : "Save"}
+              </Button>
+            </Box>
+          </Box>
+        ) : (
         <Box
           sx={{
             minWidth: 0,
             maxWidth: "100%",
+            // A soft-deleted comment reads as muted/italic — distinct from a
+            // normal bubble — while still rendering whatever `content` the
+            // backend actually returned for this caller (the real text for an
+            // admin, the literal "[deleted]" for anyone else who can still
+            // see the row at all): no client-side branching on the text.
+            ...(comment.isDeleted && {
+              fontStyle: "italic",
+              color: "text.secondary",
+            }),
             // Newly generated comments no longer carry a per-run
             // `white-space: pre-wrap` inline style (digiops-cs#2933) — this
             // container declares it once instead, so multi-space runs and
@@ -491,13 +689,66 @@ export default function CsmCaseCommentBubble({
             "& th": { bgcolor: "action.hover", fontWeight: 600 },
           }}
         >
+          {comment.isDeleted && (
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ fontStyle: "italic", display: "block", mb: 0.5 }}
+            >
+              This comment was deleted.
+            </Typography>
+          )}
           {isImagesLoading ? (
             <Skeleton variant="rounded" width="100%" height={120} />
           ) : (
             <Box ref={contentRef} dangerouslySetInnerHTML={{ __html: renderHtml }} />
           )}
         </Box>
+        )}
       </Paper>
+      {showDeleteAffordance && (
+        <Dialog
+          open={deleteConfirmOpen}
+          onClose={() => {
+            if (!isDeleting) setDeleteConfirmOpen(false);
+          }}
+          maxWidth="xs"
+          fullWidth
+        >
+          <DialogTitle>Delete comment?</DialogTitle>
+          <DialogContent>
+            <Typography variant="body2">
+              This removes the comment from view for everyone except an
+              admin, who still sees the original text. This can&apos;t be
+              undone from here.
+            </Typography>
+            {deleteError && (
+              <Typography variant="caption" color="error" sx={{ display: "block", mt: 1 }}>
+                {deleteError}
+              </Typography>
+            )}
+          </DialogContent>
+          <DialogActions>
+            <Button
+              color="inherit"
+              onClick={() => setDeleteConfirmOpen(false)}
+              disabled={isDeleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              color="error"
+              onClick={() => {
+                void confirmDelete();
+              }}
+              disabled={isDeleting}
+            >
+              {isDeleting ? "Deleting…" : "Delete"}
+            </Button>
+          </DialogActions>
+        </Dialog>
+      )}
     </Box>
   );
 }

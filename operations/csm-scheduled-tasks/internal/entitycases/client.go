@@ -146,19 +146,19 @@ type Case struct {
 	UpdatedOn  time.Time
 }
 
-// searchPageSize is the page size SearchOpenCasesOlderThan requests —
-// entity-service's own case-search caps limit at 50 (see that service's
-// normalizePagination), so this just always asks for the largest page
-// allowed, to fetch the fewest pages possible.
+// searchPageSize is the page size searchCases requests — entity-service's
+// own case-search caps limit at 50 (see that service's normalizePagination),
+// so this just always asks for the largest page allowed, to fetch the fewest
+// pages possible.
 const searchPageSize = 50
 
-// maxSearchPages caps how many pages SearchOpenCasesOlderThan will fetch, as
-// a safety net against a huge or unexpectedly-shaped result turning one
-// report run into an unbounded loop. 20 pages at searchPageSize is 1,000
-// cases — an "open more than N days" report anywhere near that size has
-// bigger problems than this cap, but the cap keeps a malformed response
-// (e.g. Total always greater than what's actually returned) from looping
-// forever rather than just producing an incomplete report.
+// maxSearchPages caps how many pages searchCases will fetch, as a safety net
+// against a huge or unexpectedly-shaped result turning one report run into
+// an unbounded loop. 20 pages at searchPageSize is 1,000 cases — a report
+// like this anywhere near that size has bigger problems than this cap, but
+// the cap keeps a malformed response (e.g. Total always greater than what's
+// actually returned) from looping forever rather than just producing an
+// incomplete report.
 const maxSearchPages = 20
 
 // searchCasesRequest/searchCasesFilters/caseFieldFilter/caseSort/pagination
@@ -257,27 +257,48 @@ type searchCasesResponse struct {
 // and whose createdOn is at least olderThan in the past — the entity-service
 // query behind an "open too long" report. Sorted oldest-first (createdOn
 // ascending), so a caller building a report table can just take the
-// returned order as given. Paginates through entity-service's own 50-row
-// page cap internally (see searchPageSize/maxSearchPages); the caller
-// always gets one flat slice back.
+// returned order as given.
+func (c *Client) SearchOpenCasesOlderThan(ctx context.Context, olderThan time.Duration) ([]Case, error) {
+	cutoff := time.Now().Add(-olderThan).UTC().Format(time.RFC3339)
+	return c.searchCases(ctx, []caseFieldFilter{
+		{Field: "state", Op: "notIn", Values: []string{"closed"}},
+		{Field: "createdOn", Op: "lte", Values: []string{cutoff}},
+	})
+}
+
+// SearchCasesInStateCreatedBeforeYesterday returns every case whose state is
+// exactly state (not "not closed" — an exact match, e.g. "open") and whose
+// createdOn falls before the start of yesterday. Unlike
+// SearchOpenCasesOlderThan's rolling-duration cutoff, this is a calendar-day
+// boundary computed in UTC: a case created at 23:59 yesterday is excluded, one
+// created at 00:01 the day before is included, regardless of what time of day
+// this method itself is called — "before yesterday" is a calendar concept,
+// not a fixed number of hours ago. Sorted oldest-first, same as
+// SearchOpenCasesOlderThan.
+func (c *Client) SearchCasesInStateCreatedBeforeYesterday(ctx context.Context, state string) ([]Case, error) {
+	startOfToday := time.Now().UTC().Truncate(24 * time.Hour)
+	startOfYesterday := startOfToday.Add(-24 * time.Hour)
+	cutoff := startOfYesterday.Format(time.RFC3339)
+	return c.searchCases(ctx, []caseFieldFilter{
+		{Field: "state", Op: "in", Values: []string{state}},
+		{Field: "createdOn", Op: "lte", Values: []string{cutoff}},
+	})
+}
+
+// searchCases runs one case-search query to completion, paginating through
+// entity-service's own 50-row page cap internally (see
+// searchPageSize/maxSearchPages) and returning one flat, oldest-first slice.
 //
 // Returns an error, rather than a silently-truncated slice, if the result
 // set is still larger than maxSearchPages*searchPageSize after the last
 // allowed page — a caller building a report from a partial result would
 // otherwise under-report without any indication it happened.
-func (c *Client) SearchOpenCasesOlderThan(ctx context.Context, olderThan time.Duration) ([]Case, error) {
-	cutoff := time.Now().Add(-olderThan).UTC().Format(time.RFC3339)
-
+func (c *Client) searchCases(ctx context.Context, filters []caseFieldFilter) ([]Case, error) {
 	var all []Case
 	offset := 0
 	for page := 0; page < maxSearchPages; page++ {
 		reqBody, err := json.Marshal(searchCasesRequest{
-			Filters: searchCasesFilters{
-				Filters: []caseFieldFilter{
-					{Field: "state", Op: "notIn", Values: []string{"closed"}},
-					{Field: "createdOn", Op: "lte", Values: []string{cutoff}},
-				},
-			},
+			Filters:    searchCasesFilters{Filters: filters},
 			SortBy:     caseSort{Field: "createdOn", Order: "asc"},
 			Pagination: pagination{Limit: searchPageSize, Offset: offset},
 		})

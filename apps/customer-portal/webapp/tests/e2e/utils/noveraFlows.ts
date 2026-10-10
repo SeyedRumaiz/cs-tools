@@ -30,6 +30,21 @@ import { sessionOrigin } from "../fixtures/test";
 import { SettingsPage } from "../pages/SettingsPage";
 import { SETTINGS } from "./selectors";
 
+/**
+ * Settling time after submitting an issue, before anything else is done.
+ *
+ * A deliberate fixed wait, which these specs otherwise avoid. The conversation
+ * id landing proves the record exists, but the exchange behind it is still in
+ * flight — the assistant is mid-reply ("Thinking…") and the messages persist
+ * asynchronously, which is why a freshly created conversation lists as "0
+ * messages". There is no rendered signal for that settling, so acting straight
+ * away — navigating to the history, or clicking Create Case — races it.
+ *
+ * Shared rather than duplicated per spec: it is one property of the assistant,
+ * and two copies would drift the moment one is tuned.
+ */
+export const NOVERA_REPLY_SETTLE_MS = 50_000;
+
 /** How long to allow for the settings page and its post-mutation refetch. */
 const LOAD_TIMEOUT_MS = 30_000;
 

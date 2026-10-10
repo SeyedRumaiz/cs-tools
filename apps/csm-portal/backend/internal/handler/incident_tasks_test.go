@@ -22,6 +22,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/apierror"
 )
 
 const testIncidentTaskID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -258,5 +260,72 @@ func TestAggregateIncidentTasks(t *testing.T) {
 				assertContentType(t, w, "application/json")
 			})
 		}
+	})
+}
+
+func TestPatchIncidentTask(t *testing.T) {
+	t.Run("requires authenticated user", func(t *testing.T) {
+		h := NewIncidentTaskHandler(&mockEntityIncidentTaskClient{})
+		r := httptest.NewRequest(http.MethodPatch, "/incident-tasks/"+testIncidentTaskID, strings.NewReader(`{"state":"CLOSED_COMPLETE"}`))
+		r.SetPathValue("id", testIncidentTaskID)
+		w := httptest.NewRecorder()
+		h.PatchIncidentTask(w, r)
+		assertStatus(t, w, http.StatusUnauthorized)
+	})
+
+	t.Run("rejects malformed UUID", func(t *testing.T) {
+		h := NewIncidentTaskHandler(&mockEntityIncidentTaskClient{})
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/incident-tasks/not-a-uuid", strings.NewReader(`{}`)))
+		r.SetPathValue("id", "not-a-uuid")
+		w := httptest.NewRecorder()
+		h.PatchIncidentTask(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		assertErrorMessage(t, w, ErrMsgInvalidUUID)
+	})
+
+	t.Run("rejects invalid JSON body", func(t *testing.T) {
+		h := NewIncidentTaskHandler(&mockEntityIncidentTaskClient{})
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/incident-tasks/"+testIncidentTaskID, strings.NewReader(`not-json`)))
+		r.SetPathValue("id", testIncidentTaskID)
+		w := httptest.NewRecorder()
+		h.PatchIncidentTask(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		assertErrorMessage(t, w, ErrMsgBadRequest)
+	})
+
+	t.Run("forwards id and body to upstream and returns 200", func(t *testing.T) {
+		const payload = `{"state":"CLOSED_COMPLETE","closeNotes":"done"}`
+		var gotID string
+		var gotBody []byte
+		client := &mockEntityIncidentTaskClient{
+			updateIncidentTaskFn: func(_ context.Context, id string, body []byte) ([]byte, error) {
+				gotID, gotBody = id, body
+				return []byte(`{"id":"` + id + `","state":"CLOSED_COMPLETE"}`), nil
+			},
+		}
+		h := NewIncidentTaskHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/incident-tasks/"+testIncidentTaskID, strings.NewReader(payload)))
+		r.SetPathValue("id", testIncidentTaskID)
+		w := httptest.NewRecorder()
+		h.PatchIncidentTask(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if gotID != testIncidentTaskID || string(gotBody) != payload {
+			t.Errorf("upstream got id %q body %q, want %q %q", gotID, gotBody, testIncidentTaskID, payload)
+		}
+	})
+
+	t.Run("passes an upstream 400 message through", func(t *testing.T) {
+		client := &mockEntityIncidentTaskClient{
+			updateIncidentTaskFn: func(context.Context, string, []byte) ([]byte, error) {
+				return nil, &apierror.Error{StatusCode: http.StatusBadRequest, Body: `{"message":"state must be one of: PENDING, OPEN"}`}
+			},
+		}
+		h := NewIncidentTaskHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/incident-tasks/"+testIncidentTaskID, strings.NewReader(`{"state":"nope"}`)))
+		r.SetPathValue("id", testIncidentTaskID)
+		w := httptest.NewRecorder()
+		h.PatchIncidentTask(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		assertErrorMessage(t, w, "state must be one of: PENDING, OPEN")
 	})
 }

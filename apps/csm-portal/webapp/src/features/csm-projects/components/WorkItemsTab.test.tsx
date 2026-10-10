@@ -15,7 +15,7 @@
 // under the License.
 
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import WorkItemsTab from "@features/csm-projects/components/WorkItemsTab";
@@ -66,7 +66,21 @@ vi.mock("@features/csm-projects/components/ConversationsTab", () => ({
   default: ({ projectId }: { projectId: string }) => <div>Conversations for {projectId}</div>,
 }));
 
+// usePortalAccess transitively imports the real backend client/config, which
+// read window.config at module load (absent under vitest) -- mocked
+// directly instead. Default to a caller holding the staff view (e.g.
+// cs_engineer); the dedicated describe block below overrides it to exercise
+// the Chats gate.
+let mockCanViewWorkItemsStaffView = true;
+vi.mock("@context/current-user/usePortalAccess", () => ({
+  usePortalAccess: () => ({ canViewWorkItemsStaffView: mockCanViewWorkItemsStaffView }),
+}));
+
 describe("WorkItemsTab", () => {
+  beforeEach(() => {
+    mockCanViewWorkItemsStaffView = true;
+  });
+
   it("defaults to a single flat work-items list, locked to this project but unlocked on type", () => {
     renderWorkItemsTab();
 
@@ -128,5 +142,32 @@ describe("WorkItemsTab", () => {
 
     expect(screen.getByText("Conversations for proj-1")).toBeInTheDocument();
     expect(screen.queryByText(/IssuesView/)).not.toBeInTheDocument();
+  });
+});
+
+// Regression: Chats (the project's pre-case Novera conversations) must be
+// hidden for a caller without the Work items staff view (cs_engineer/admin/
+// timecard_approver) -- reported live. With only one sub-tab left, the
+// sub-tab strip itself disappears too.
+describe("WorkItemsTab — caller without the staff view", () => {
+  beforeEach(() => {
+    mockCanViewWorkItemsStaffView = false;
+  });
+
+  it("shows the issues list directly, with no Chats tab and no sub-tab strip at all", () => {
+    renderWorkItemsTab();
+
+    expect(screen.getByText("IssuesView: work items")).toBeInTheDocument();
+    expect(screen.queryByText("Chats")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+  });
+
+  it("never shows Chats even if a stale ?subTab=conversations is in the URL", () => {
+    renderWorkItemsTabWithLocationProbe(
+      "/customers/projects/proj-1?tab=workItems&subTab=conversations",
+    );
+
+    expect(screen.getByText("IssuesView: work items")).toBeInTheDocument();
+    expect(screen.queryByText(/Conversations for/)).not.toBeInTheDocument();
   });
 });

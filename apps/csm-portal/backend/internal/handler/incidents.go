@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
 )
 
@@ -38,6 +39,12 @@ type entityIncidentClient interface {
 	SearchComments(ctx context.Context, body []byte) ([]byte, error)
 	SearchIncidentActivities(ctx context.Context, id string, body []byte) ([]byte, error)
 	HandOffIncidentToSpecialist(ctx context.Context, id string, body []byte) ([]byte, error)
+	ListSpecialistHandoffTeams(ctx context.Context, serviceID string) ([]byte, error)
+	GetIncidentCreateDefaults(ctx context.Context) ([]byte, error)
+	// GetUserMe resolves the caller's own platform user record — needed by
+	// the close-ownership guard in PatchIncident; see resolveCurrentUserID
+	// (cases.go), shared with CaseHandler's own identical use.
+	GetUserMe(ctx context.Context) ([]byte, error)
 }
 
 // searchIncidentsRequest mirrors the enum/format-constrained fields of the documented
@@ -89,32 +96,39 @@ var (
 		"NEW": true, "IN_PROGRESS": true, "ON_HOLD": true, "RESOLVED": true, "CLOSED": true, "CANCELLED": true,
 	}
 
-	validHandoffReasonCodes     = map[string]bool{"no-runbook": true, "runbook-not-working": true}
-	validHandoffEscalationTeams = map[string]bool{"choreo-runtime-team": true, "choreo-apim-team": true}
+	validHandoffReasonCodes = map[string]bool{"no-runbook": true, "runbook-not-working": true}
 )
+
+// maxHandoffEscalationTeamLen bounds escalationTeam's shape. Which keys are
+// valid is the entity service's SPECIALIST_HANDOFF_CONFIG, per product, so
+// it -- not a list here -- decides, and answers 400 for an unknown team.
+const maxHandoffEscalationTeamLen = 64
 
 // createIncidentRequest mirrors the enum/format-constrained fields of the documented
 // CreateIncidentPayload schema. It is decoded only to validate those fields at the
 // boundary; the original raw body is still forwarded to the entity service unchanged.
 type createIncidentRequest struct {
-	CallerID            string   `json:"callerId"`
-	Category            string   `json:"category"`
-	Subcategory         string   `json:"subcategory"`
-	ServiceID           string   `json:"serviceId"`
-	ServiceOfferingID   string   `json:"serviceOfferingId"`
-	ConfigurationItemID string   `json:"configurationItemId"`
-	ContactType         string   `json:"contactType"`
-	Impact              string   `json:"impact"`
-	Urgency             string   `json:"urgency"`
-	AssignmentGroupID   string   `json:"assignmentGroupId"`
-	AssignedEngineerID  string   `json:"assignedEngineerId"`
-	Subject             string   `json:"subject"`
-	WatchList           []string `json:"watchList"`
-	ParentID            string   `json:"parentId"`
-	ParentIncidentID    string   `json:"parentIncidentId"`
-	ChangeRequestID     string   `json:"changeRequestId"`
-	ProblemID           string   `json:"problemId"`
-	CausedByID          string   `json:"causedById"`
+	CallerID            string `json:"callerId"`
+	Category            string `json:"category"`
+	Subcategory         string `json:"subcategory"`
+	ServiceID           string `json:"serviceId"`
+	ServiceOfferingID   string `json:"serviceOfferingId"`
+	ConfigurationItemID string `json:"configurationItemId"`
+	ContactType         string `json:"contactType"`
+	Impact              string `json:"impact"`
+	Urgency             string `json:"urgency"`
+	// AssignmentGroupID is optional. Only its shape is checked here; whether
+	// the group may be chosen (an active support group of some service) is
+	// the entity service's rule, answered there with 400.
+	AssignmentGroupID  string   `json:"assignmentGroupId"`
+	AssignedEngineerID string   `json:"assignedEngineerId"`
+	Subject            string   `json:"subject"`
+	WatchList          []string `json:"watchList"`
+	ParentID           string   `json:"parentId"`
+	ParentIncidentID   string   `json:"parentIncidentId"`
+	ChangeRequestID    string   `json:"changeRequestId"`
+	ProblemID          string   `json:"problemId"`
+	CausedByID         string   `json:"causedById"`
 }
 
 // validateCreateIncidentBody checks the required fields, enum fields (category, subcategory,
@@ -340,7 +354,7 @@ func validateHandOffIncidentBody(body []byte) bool {
 	if !validHandoffReasonCodes[req.ReasonCode] {
 		return false
 	}
-	if req.EscalationTeam != nil && *req.EscalationTeam != "" && !validHandoffEscalationTeams[*req.EscalationTeam] {
+	if req.EscalationTeam != nil && len(*req.EscalationTeam) > maxHandoffEscalationTeamLen {
 		return false
 	}
 	return true
@@ -350,11 +364,25 @@ func validateHandOffIncidentBody(body []byte) bool {
 // entity service for data access.
 type IncidentHandler struct {
 	entity entityIncidentClient
+	// access backs the inline-image redaction in every read response — see
+	// WithAccessGuard and CaseHandler's own field of the same name/reasoning.
+	// nil fails that check closed (redacts), never open.
+	access *AccessGuard
 }
 
 // NewIncidentHandler creates an IncidentHandler backed by the given entity client.
 func NewIncidentHandler(entity entityIncidentClient) *IncidentHandler {
 	return &IncidentHandler{entity: entity}
+}
+
+// WithAccessGuard wires the same guard that authorises every route into this
+// handler, so every read response can redact an embedded raw base64 inline
+// image (see redactRawBase64Images's own doc comment) for a caller who
+// lacks PermDownloadAttachment. Returns h for chaining at the construction
+// site.
+func (h *IncidentHandler) WithAccessGuard(g *AccessGuard) *IncidentHandler {
+	h.access = g
+	return h
 }
 
 // SearchIncidents handles POST /incidents/search.
@@ -392,6 +420,9 @@ func (h *IncidentHandler) SearchIncidents(w http.ResponseWriter, r *http.Request
 		slog.ErrorContext(r.Context(), "entity SearchIncidents failed", "userID", user.UserID, "err", err)
 		mapUpstreamErrorGeneric(w, err, "Failed to search incidents.")
 		return
+	}
+	if shouldRedactInlineImages(h.access, user.Roles) {
+		result = redactRawBase64Images(result)
 	}
 
 	// TODO: Unmarshal result and filter to only the fields required by the frontend.
@@ -471,11 +502,33 @@ func (h *IncidentHandler) CreateIncident(w http.ResponseWriter, r *http.Request)
 	result, err := h.entity.CreateIncident(r.Context(), body)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity CreateIncident failed", "userID", user.UserID, "err", err)
-		mapUpstreamErrorGeneric(w, err, "Failed to create incident.")
+		mapCreateIncidentError(w, err)
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, result)
+}
+
+// errCodeIncidentAssignmentGroupNotAllowed is the entity service's errorCode
+// for an assignmentGroupId that is not an active support group of any service.
+const errCodeIncidentAssignmentGroupNotAllowed = "incident_assignment_group_not_allowed"
+
+// mapCreateIncidentError maps a failed create. The one refusal the create form
+// has to show as such -- the chosen group is no longer an active support group
+// (errorCode incident_assignment_group_not_allowed) -- keeps its 400, its
+// message and its errorCode. Every other upstream error goes through
+// mapUpstreamErrorGeneric unchanged, so no other entity-service 400 message
+// (some quote database details) reaches the caller.
+func mapCreateIncidentError(w http.ResponseWriter, err error) {
+	var apiErr *apierror.Error
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
+		upstreamErrorCode(apiErr.Body) == errCodeIncidentAssignmentGroupNotAllowed {
+		if msg := upstreamErrorMessageStrict(apiErr.Body, ""); msg != "" {
+			writeErrorCode(w, http.StatusBadRequest, msg, errCodeIncidentAssignmentGroupNotAllowed)
+			return
+		}
+	}
+	mapUpstreamErrorGeneric(w, err, "Failed to create incident.")
 }
 
 // GetIncident handles GET /incidents/{id}.
@@ -497,6 +550,9 @@ func (h *IncidentHandler) GetIncident(w http.ResponseWriter, r *http.Request) {
 		slog.ErrorContext(r.Context(), "entity GetIncident failed", "userID", user.UserID, "incidentID", id, "err", err)
 		mapUpstreamErrorGeneric(w, err, "Failed to retrieve incident.")
 		return
+	}
+	if shouldRedactInlineImages(h.access, user.Roles) {
+		result = redactRawBase64Images(result)
 	}
 
 	writeJSON(w, http.StatusOK, result)
@@ -536,6 +592,56 @@ func (h *IncidentHandler) PatchIncident(w http.ResponseWriter, r *http.Request) 
 	if !validateUpdateIncidentBody(body) {
 		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
 		return
+	}
+
+	// Validate the state transition and (for a close) ownership before
+	// forwarding to the entity service — mirrors PatchCase's own shape in
+	// cases.go. One fetch of the current incident serves both checks.
+	var patch struct {
+		State *string `json:"state"`
+	}
+	patchErr := json.Unmarshal(body, &patch)
+	if patchErr == nil && patch.State != nil {
+		current, err := h.entity.GetIncident(r.Context(), id)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "entity GetIncident failed during state validation", "userID", user.UserID, "incidentID", id, "err", err)
+			mapUpstreamErrorGeneric(w, err, "Failed to update incident.")
+			return
+		}
+		var currentIncident struct {
+			State      string `json:"state"`
+			AssignedTo *struct {
+				ID string `json:"id"`
+			} `json:"assignedTo"`
+		}
+		if err := json.Unmarshal(current, &currentIncident); err != nil {
+			slog.ErrorContext(r.Context(), "failed to parse current incident state", "userID", user.UserID, "incidentID", id, "err", err)
+			writeError(w, http.StatusInternalServerError, ErrMsgInternal)
+			return
+		}
+
+		// Scenario 3: reject an illegal from→to transition before forwarding —
+		// previously nothing server-side checked this at all (only that the
+		// target value was a legal enum member), so a direct PATCH could jump
+		// straight from NEW to CLOSED.
+		if !isValidIncidentStateTransition(currentIncident.State, *patch.State) {
+			writeError(w, http.StatusBadRequest, ErrMsgInvalidTransition)
+			return
+		}
+
+		// Scenarios 1-2: closing an incident is restricted to its own
+		// assignee, unless the caller is admin (an operational override).
+		if *patch.State == incidentStateClosed && !(h.access != nil && h.access.Permits(PermAdmin, user.Roles)) {
+			currentUserID := resolveCurrentUserID(r.Context(), h.entity, user)
+			if currentUserID == "" {
+				writeError(w, http.StatusInternalServerError, ErrMsgInternal)
+				return
+			}
+			if currentIncident.AssignedTo == nil || currentIncident.AssignedTo.ID != currentUserID {
+				writeError(w, http.StatusForbidden, ErrMsgIncidentCloseNotOwnCase)
+				return
+			}
+		}
 	}
 
 	result, err := h.entity.PatchIncident(r.Context(), id, body)
@@ -643,6 +749,9 @@ func (h *IncidentHandler) SearchIncidentActivities(w http.ResponseWriter, r *htt
 		mapUpstreamErrorGeneric(w, err, "Failed to search incident activities.")
 		return
 	}
+	if shouldRedactInlineImages(h.access, user.Roles) {
+		result = redactRawBase64Images(result)
+	}
 
 	writeJSON(w, http.StatusOK, result)
 }
@@ -691,6 +800,9 @@ func (h *IncidentHandler) SearchIncidentComments(w http.ResponseWriter, r *http.
 		slog.ErrorContext(r.Context(), "entity SearchComments failed", "userID", user.UserID, "incidentID", id, "err", err)
 		mapUpstreamErrorGeneric(w, err, "Failed to search incident comments.")
 		return
+	}
+	if shouldRedactInlineImages(h.access, user.Roles) {
+		result = redactRawBase64Images(result)
 	}
 
 	writeJSON(w, http.StatusOK, result)
@@ -764,5 +876,49 @@ func (h *IncidentHandler) HandOffIncidentToSpecialist(w http.ResponseWriter, r *
 			"userID", user.UserID, "incidentID", id, "githubIssueError", *envelope.Handoff.GithubIssueError)
 	}
 
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ListSpecialistHandoffTeams handles GET /specialist-handoff-teams?serviceId=: the Special
+// Ops teams the "Escalate to specialist team" dialog offers for the incident's service,
+// passed through from the entity service. Several teams mean the user must pick one; one
+// team is the handoff's target with nothing to pick.
+func (h *IncidentHandler) ListSpecialistHandoffTeams(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+	serviceID := r.URL.Query().Get("serviceId")
+	if serviceID != "" && !uuidRe.MatchString(serviceID) {
+		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
+		return
+	}
+	result, err := h.entity.ListSpecialistHandoffTeams(r.Context(), serviceID)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity ListSpecialistHandoffTeams failed", "userID", user.UserID, "err", err)
+		mapUpstreamError(w, err, "Failed to load the specialist teams.")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// GetIncidentCreateDefaults handles GET /incidents/create-defaults: the
+// entity service's default service and its support group -- the team an
+// incident is assigned to when no group is chosen and its service has none --
+// so the create form can show it. Passed through untouched:
+// {"defaultServiceId": uuid|null, "defaultGroup": {"id","name"}|null}.
+func (h *IncidentHandler) GetIncidentCreateDefaults(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+	result, err := h.entity.GetIncidentCreateDefaults(r.Context())
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity GetIncidentCreateDefaults failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to load the incident defaults.")
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }

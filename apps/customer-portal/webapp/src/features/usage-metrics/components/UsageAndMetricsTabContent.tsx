@@ -14,11 +14,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { Box, Button, Typography } from "@wso2/oxygen-ui";
-import { Server, Upload } from "@wso2/oxygen-ui-icons-react";
+import { Box, Button, IconButton, Typography, useTheme } from "@wso2/oxygen-ui";
+import { ArrowLeft, ArrowRight, Server, Upload } from "@wso2/oxygen-ui-icons-react";
 import type { ReactNode } from "react";
 import type { JSX } from "react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { USAGE_METRICS_DEPLOYMENT_TAB_PREFIX } from "@features/usage-metrics/constants/usageMetricsConstants";
 import { useParams } from "react-router";
 import TabBar from "@components/tab-bar/TabBar";
@@ -40,6 +40,7 @@ import { getUsageOverviewAccentForTypeId } from "@features/usage-metrics/utils/u
  */
 export default function UsageAndMetricsTabContent(): JSX.Element {
   const { projectId } = useParams<{ projectId: string }>();
+  const theme = useTheme();
   const [timeRange, setTimeRange] = useState<UsageTimeRange>(
     UsageTimeRange.ONE_MONTH,
   );
@@ -47,6 +48,33 @@ export default function UsageAndMetricsTabContent(): JSX.Element {
   const [expandedProductIds, setExpandedProductIds] = useState<Set<string>>(
     () => new Set(),
   );
+
+  // The deployment tab strip scrolls horizontally once there are more
+  // deployments than fit (see the scroll container below) but, without
+  // these, gives no visual sign that there's more to see -- the last tab
+  // just looks abruptly clipped against the Upload button (a real,
+  // reported bug: digiops-cs#3241). canScrollLeft/Right drive a fade mask
+  // plus a scroll-by-one-page arrow button on whichever edge(s) still have
+  // hidden tabs.
+  const tabScrollRef = useRef<HTMLDivElement | null>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const updateTabScrollAffordance = useCallback(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    // 1px tolerance: scrollWidth/clientWidth can disagree by a sub-pixel
+    // rounding amount even when fully scrolled, which would otherwise leave
+    // a phantom arrow/fade visible at the resting position.
+    setCanScrollLeft(el.scrollLeft > 1);
+    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  }, []);
+
+  const scrollTabsBy = useCallback((direction: 1 | -1) => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    el.scrollBy({ left: direction * el.clientWidth * 0.8, behavior: "smooth" });
+  }, []);
 
   const [customStart, setCustomStart] = useState<string>("");
   const [customEnd, setCustomEnd] = useState<string>("");
@@ -65,20 +93,43 @@ export default function UsageAndMetricsTabContent(): JSX.Element {
     projectId ?? "",
   );
 
+  // Every active deployment gets a tab, regardless of productCount -- a
+  // deployment with zero deployed products still legitimately shows a
+  // "no products in this environment" empty state inside
+  // UsageEnvironmentProductsPanel, and staging's own tab bar confirms this:
+  // it lists deployments with productCount 0 (e.g. a QA/test deployment)
+  // right alongside ones with real products. Filtering here just hid tabs a
+  // customer should still be able to click into.
   const deploymentTabs = useMemo(
     () =>
-      (deploymentsData ?? [])
-        .filter((dep) => (dep.productCount ?? 0) > 0)
-        .map((dep) => ({
-          id: `${USAGE_METRICS_DEPLOYMENT_TAB_PREFIX}${dep.id}`,
-          label: dep.name,
-          icon: Server,
-          iconColor: getUsageOverviewAccentForTypeId(dep.type.id).iconColor,
-          instanceCount: dep.instanceCount ?? 0,
-          productCount: dep.productCount ?? 0,
-        })),
+      (deploymentsData ?? []).map((dep) => ({
+        id: `${USAGE_METRICS_DEPLOYMENT_TAB_PREFIX}${dep.id}`,
+        label: dep.name,
+        icon: Server,
+        iconColor: getUsageOverviewAccentForTypeId(dep.type.id).iconColor,
+        instanceCount: dep.instanceCount ?? 0,
+        productCount: dep.productCount ?? 0,
+      })),
     [deploymentsData],
   );
+
+  // Re-check once the actual tab buttons have rendered (deploymentTabs
+  // arrives asynchronously), on window resize, and when the scroller itself
+  // resizes. The latter covers layout changes such as expanding the sidebar.
+  useEffect(() => {
+    updateTabScrollAffordance();
+    window.addEventListener("resize", updateTabScrollAffordance);
+    const scroller = tabScrollRef.current;
+    const resizeObserver = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(updateTabScrollAffordance);
+    if (scroller) resizeObserver?.observe(scroller);
+
+    return () => {
+      window.removeEventListener("resize", updateTabScrollAffordance);
+      resizeObserver?.disconnect();
+    };
+  }, [deploymentTabs, updateTabScrollAffordance]);
 
   const defaultTab = deploymentTabs[0]?.id ?? "";
 
@@ -176,6 +227,7 @@ export default function UsageAndMetricsTabContent(): JSX.Element {
       >
         <Box
           sx={{
+            position: "relative",
             flex: 1,
             minWidth: 0,
             overflow: "hidden",
@@ -183,6 +235,8 @@ export default function UsageAndMetricsTabContent(): JSX.Element {
           }}
         >
           <Box
+            ref={tabScrollRef}
+            onScroll={updateTabScrollAffordance}
             sx={{
               overflowX: "auto",
               overflowY: "hidden",
@@ -201,6 +255,56 @@ export default function UsageAndMetricsTabContent(): JSX.Element {
               />
             </Box>
           </Box>
+          {/* Fade + arrow on each edge that still hides a tab, so a cut-off
+              tab reads as "more to scroll to" instead of a hard clip.
+              Uses CSS variable --oxygen-palette-background-paper so the
+              fade seamlessly adapts to both light and dark color schemes. */}
+          {canScrollLeft && (
+            <Box
+              sx={{
+                position: "absolute",
+                left: 0,
+                top: 0,
+                bottom: 0,
+                display: "flex",
+                alignItems: "center",
+                pr: 2,
+                background: `linear-gradient(to right, var(--oxygen-palette-background-paper, ${theme.palette.background.paper}) 40%, transparent)`,
+              }}
+            >
+              <IconButton
+                size="small"
+                aria-label="Scroll deployment tabs left"
+                onClick={() => scrollTabsBy(-1)}
+                sx={{ bgcolor: "background.paper", boxShadow: 1, "&:hover": { bgcolor: "background.paper" } }}
+              >
+                <ArrowLeft size={14} />
+              </IconButton>
+            </Box>
+          )}
+          {canScrollRight && (
+            <Box
+              sx={{
+                position: "absolute",
+                right: 0,
+                top: 0,
+                bottom: 0,
+                display: "flex",
+                alignItems: "center",
+                pl: 2,
+                background: `linear-gradient(to left, var(--oxygen-palette-background-paper, ${theme.palette.background.paper}) 40%, transparent)`,
+              }}
+            >
+              <IconButton
+                size="small"
+                aria-label="Scroll deployment tabs right"
+                onClick={() => scrollTabsBy(1)}
+                sx={{ bgcolor: "background.paper", boxShadow: 1, "&:hover": { bgcolor: "background.paper" } }}
+              >
+                <ArrowRight size={14} />
+              </IconButton>
+            </Box>
+          )}
         </Box>
         {uploadButton}
       </Box>

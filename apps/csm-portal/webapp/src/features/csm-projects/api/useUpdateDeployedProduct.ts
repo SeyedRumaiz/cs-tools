@@ -37,7 +37,7 @@ interface UpdateDeployedProductInput {
  * `PATCH /deployments/{deploymentId}/products/{productId}`.
  *
  * The BE accepts two mutually exclusive shapes per the `oneOf` spec:
- *  - Detail update: `{ cores?, tps?, description? }` (at least one, no `active`)
+ *  - Detail update: `{ cores?, tps?, description?, category? }` (at least one, no `active`)
  *  - Deactivate: `{ active: false }` (no other fields)
  *
  * The caller is responsible for sending exactly one shape. On success,

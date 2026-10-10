@@ -19,6 +19,7 @@ import { ApiQueryKeys, BE_MAX_PAGE_LIMIT } from "@constants/apiConstants";
 import { useBackendApi } from "@api/backend/client";
 import type { BeCommentSearchResponse } from "@api/backend/types";
 import { uiCommentFromBe } from "@api/backend/mappers";
+import { compareCommentsChronologically } from "@features/csm-cases/utils/caseActivityFeed";
 import type { CsmCaseComment } from "@features/csm-cases/types/csmCases";
 
 /**
@@ -35,6 +36,14 @@ import type { CsmCaseComment } from "@features/csm-cases/types/csmCases";
  * A single wide page (`limit` capped at BE_MAX_PAGE_LIMIT). Pre-case chats are
  * short; if one ever exceeds that, switch to a paginated wrapper rather than
  * chasing pages here.
+ *
+ * Sorted here with {@link compareCommentsChronologically} rather than left in
+ * the backend's own order: entity-service's `SearchComments` returns
+ * `created_on DESC` with a random-UUID tie-break, so a user's message and
+ * Novera's reply sharing a whole-second timestamp could otherwise render in
+ * either order. This is the single hook both the standalone conversation
+ * transcript pages and the case activity feed's merge consume, so sorting
+ * once here covers every consumer.
  */
 export function useGetCsmConversationMessages(
   conversationId: string | null | undefined,
@@ -50,9 +59,9 @@ export function useGetCsmConversationMessages(
         `/conversations/${encodeURIComponent(conversationId)}/messages` +
           `?limit=${BE_MAX_PAGE_LIMIT}&offset=0`,
       );
-      return (response?.comments ?? []).map((comment) =>
-        uiCommentFromBe(comment, { context: "conversation" }),
-      );
+      return (response?.comments ?? [])
+        .map((comment) => uiCommentFromBe(comment, { context: "conversation" }))
+        .sort(compareCommentsChronologically);
     },
     enabled: !!conversationId,
     staleTime: 30_000,

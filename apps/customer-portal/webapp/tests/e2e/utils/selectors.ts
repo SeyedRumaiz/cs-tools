@@ -27,12 +27,24 @@
  * menu. */
 export const GET_HELP_BUTTON = "Get Help";
 
+import { RECORD_ID_PATTERN } from "./ids";
+
 /** Case-creation form. Its field labels are sibling <Typography> nodes rather
  * than real <label for>, so `getByLabel` does not work here — the MUI Selects
  * are located by the placeholder text their `renderValue` emits, and the
  * inputs by their stable ids. */
 export const CREATE_CASE = {
   heading: "Complete Case Details",
+  /** Shown under Product Version when the chosen deployment has no products
+   * attached. The rest of the form does not render until a product is picked,
+   * so a deployment in this state blocks case creation entirely — and the
+   * project's deployments are not uniform: the auto-created "Automation Test
+   * Deployment <timestamp>" records left by the add-deployment spec frequently
+   * have none. */
+  noProductsMessage: "No products found for this deployment.",
+  /** The route the form lives at, under a project. Shared with the
+   * chat-originated variant, which is why the form arrives pre-populated. */
+  pathSegment: "support/chat/create-case",
   submitButton: "Create Support Case",
   successMessage: "Case created successfully",
   /** Maximum title length enforced by CreateCasePage's handleSubmit and shown
@@ -52,6 +64,11 @@ export const CREATE_CASE = {
     /** Reads "Select deployment first" until a deployment is chosen, and
      * "Select Product..." on Cloud Support projects. */
     productVersion: /Select Product Version|Select Product|Select deployment first/,
+    /** The gate specifically: shown while the product field is waiting on a
+     * deployment. It disappears once one is chosen — including when the
+     * deployment has exactly one product and the form auto-selects it, which is
+     * why "the product placeholder is now enabled" is NOT a safe assertion. */
+    productGatedOnDeployment: "Select deployment first",
   },
   ids: {
     title: "#title",
@@ -202,6 +219,11 @@ export const SETTINGS = {
        * is the section's label text. */
       toggleName: "AI Chat Assistant (Novera)",
       successMessage: "AI Chat Assistant (Novera) was updated successfully.",
+      /** Shown on the AI Assistant tab to anyone without the ServiceNow
+       * customer_admin role. The tab itself is visible to everyone — it is the
+       * SWITCH that is gated, by being rendered disabled, so a non-admin sees
+       * the setting and cannot change it. */
+      adminOnlyHint: "Users with Admin role can only update this setting",
       /**
        * Where Get Help leads once the assistant is on.
        *
@@ -362,7 +384,7 @@ export const NOVERA_CHAT = {
    * creation, leaving no chat entry behind. The id is the signal that it is
    * real.
    */
-  conversationIdPattern: /\/support\/chat\/[0-9a-f]{32}$/,
+  conversationIdPattern: new RegExp(`/support/chat/${RECORD_ID_PATTERN}$`),
   conversation: {
     /** Offered in two places on the chat page — beside the input and in the
      * escalation banner — both reading "Create Case", so a locator for it takes
@@ -410,16 +432,17 @@ export const NOVERA_CHAT = {
      * announcements status filter — so choosing an option closes the menu. */
     stateFilter: {
       selectId: "state",
-      label: "State",
+      label: "Status",
       /**
        * The list's first option, meaning "no filter".
        *
        * Choosing it on an unfiltered list is a no-op — no request is sent at all
-       * — so a spec must pick a real state instead. Verified live: the options
-       * are All States, Close, Abandoned, Converted, Open, Resolved, Active.
+       * — so a spec must pick a real state instead. Verified live, when this
+       * option still read "All States": the options are that one, Close,
+       * Abandoned, Converted, Open, Resolved, Active.
        * Note "Close" among them, the same wording the closed chip uses.
        */
-      allOption: "All States",
+      allOption: "All Statuses",
     },
     /** Sort controls, from the shared ListResultsBar. Both fields are
      * chronological, so the order labels read Newest/Oldest first throughout —
@@ -477,7 +500,9 @@ export const NOVERA_CHAT = {
    * the Resume action from it, so a direct visit to the same URL renders a
    * read-only view with no input. Verified live.
    */
-  resumedConversationPattern: /\/support\/conversations\/[0-9a-f]{32}$/,
+  resumedConversationPattern: new RegExp(
+    `/support/conversations/${RECORD_ID_PATTERN}$`,
+  ),
   /** The message box on an open conversation. */
   message: {
     inputPlaceholder: "Type your message...",
@@ -705,6 +730,8 @@ export const CHANGE_REQUESTS_LIST = {
     list: "List View",
     calendar: "Calendar View",
   },
+  /** The Operations hub's footer button that opens this list. */
+  hubViewAllButton: "View all change requests",
   /** Shown when the list has nothing to show — the second only once a search or
    * filter has been applied. */
   emptyMessage: "No change requests yet.",
@@ -719,6 +746,149 @@ export const CHANGE_REQUESTS_LIST = {
    * list reads as empty.
    */
   numberPattern: /CHG\d+/,
+} as const;
+
+/** A change request's detail page
+ * (`/projects/:projectId/operations/change-requests/:changeRequestId`), as a
+ * customer sees it while the change waits on them (Customer Approval / Customer
+ * Review).
+ *
+ * Every string here is the page's own copy (ChangeRequestDetailsPage,
+ * ChangeRequestRejectConfirmDialog, ProposeNewImplementationTimeModal and the
+ * helpers in features/operations/utils), kept in one place so a rewording is one
+ * edit. The answer buttons carry no test id: they are told apart by name. */
+export const CHANGE_REQUEST_DETAILS = {
+  /** The answer buttons. Customer Approval offers the first three, Customer
+   * Review the last two (it has no Propose New Time). */
+  buttons: {
+    approve: "Approve",
+    reject: "Reject",
+    proposeNewTime: "Propose New Time",
+    successful: "Successful",
+    unsuccessful: "Unsuccessful",
+  },
+  /** The lifecycle panel's stage names, as the page prints them. */
+  stages: {
+    new: "New",
+    assess: "Assess",
+    authorize: "Authorize",
+    customerApproval: "Customer Approval",
+    scheduled: "Scheduled",
+    implement: "Implement",
+    review: "Review",
+    customerReview: "Customer Review",
+    rollback: "Rollback",
+    closed: "Closed",
+    canceled: "Canceled",
+  },
+  /** The page's own marker for the stage the change is in. */
+  currentMarker: "Current",
+  /** The banners that answer a click (role "alert"). */
+  banners: {
+    approved: "Change request approved. It is now scheduled.",
+    rejected: "Change request rejected. It has been canceled.",
+    markedSuccessful: "Change request marked as successful. It is now closed.",
+    markedUnsuccessful:
+      "Change request marked as unsuccessful. It is now in rollback.",
+    /** HTTP 409 on an answer: somebody answered first, or nothing is asked any more. */
+    alreadyAnswered:
+      "This request was already answered or is no longer waiting for your answer.",
+    /** The toast after a proposal (the same for every change type: there is no CAB round trip). */
+    proposed:
+      "New time proposed. WSO2 will accept it or suggest a different time, and the answer will appear on this page.",
+    /** HTTP 409 on an answer: the schedule moved while the page was open. */
+    scheduleChanged:
+      "The schedule of this change request changed after you opened it. Review the updated schedule, then answer again.",
+  },
+  /** What the page says around the answer buttons. */
+  notes: {
+    /** Customer Review's question, which also names its two buttons' group. */
+    reviewPrompt: "This change has been implemented. Was it successful?",
+    /** The group of Customer Approval's three buttons. */
+    approvalGroup: "Answer this change request",
+    /** Beside a Propose New Time that is switched off because WSO2 holds the change. */
+    onHold:
+      "WSO2 has this change request on hold, so a new time cannot be proposed right now. You can still approve or reject it.",
+    /**
+     * Kept on the page for a proposal made BEFORE proposals waited in Customer Approval (the change went back to
+     * Authorize for a fresh CAB approval and finishes through it): a new proposal never shows it.
+     */
+    internalReview:
+      "WSO2 is reviewing this change request internally. You will be asked to approve the schedule once it is confirmed.",
+    /** Kept on the page (not a five-second toast) while a proposed time waits for WSO2: the id of the status note. */
+    waitingNoteId: "cr-proposal-waiting-note",
+    /** ...in the proposer's own words, or neutrally for a colleague's / an unrecorded proposer. */
+    waitingOwn: "Waiting for WSO2 to respond to your proposed time",
+    waitingOther: "was proposed for this change request and is waiting for WSO2's response",
+    /** Said to a customer who can still answer: Approve approves the CURRENT schedule. */
+    approvingNow: "Approving now approves the current schedule",
+    /** WSO2 did not accept the proposed time (it asked for another or kept its own): the id of the note. */
+    notAcceptedNoteId: "cr-proposal-not-accepted-note",
+    notAccepted: "WSO2 did not accept the proposed time",
+    /** ...says "current", never "new": a decline leaves the window as it was. */
+    notAcceptedBelow: "The current planned window is shown below: approve it, reject it, or propose another start.",
+    /** Under the planned start while a proposal waits (id), and the note once WSO2 accepted it (id). */
+    windowProposedStartId: "cr-window-proposed-start",
+    windowAcceptedId: "cr-window-proposal-accepted",
+    windowAccepted: "WSO2 accepted the proposed start",
+    /** Beside a Propose New Time that is off because the change has no window to move. */
+    noWindow:
+      "This change request has no planned time yet, so a new time cannot be proposed for it. You can still approve or reject it.",
+  },
+  /** What the lifecycle panel says under the Customer Approval step while a proposed time is in play. */
+  stageCaptions: {
+    customerApproval: "Customer approval received",
+    waitingOwn: "Waiting for WSO2 to respond to your proposed time",
+    waitingOther: "A proposed time is waiting for WSO2's response",
+    accepted: "Proposed time accepted by WSO2",
+  },
+  /** The window card's title: a plan until the change is scheduled. */
+  windowCard: {
+    planned: "Planned Maintenance Window",
+    scheduled: "Scheduled Maintenance Window",
+  },
+  /** The confirmation before the answers that cannot be taken back. */
+  rejectConfirm: {
+    approvalTitle: "Reject this change request?",
+    approvalMessage: "Rejecting cancels this change request.",
+    approvalHint:
+      "If you only need a different time, go back and use Propose New Time instead.",
+    /** What the hint says instead while WSO2 has the change on hold (Propose New Time is off). */
+    approvalHintOnHold:
+      "A new time cannot be proposed right now because WSO2 has this change request on hold.",
+    approvalConfirm: "Reject change request",
+    reviewTitle: "Mark this change as unsuccessful?",
+    reviewMessage: "Marking it unsuccessful sends the change into rollback.",
+    reviewConfirm: "Mark unsuccessful",
+    goBack: "Go back",
+  },
+  /** Propose New Implementation Time dialog. */
+  propose: {
+    title: "Propose New Implementation Time",
+    startLabel: "Proposed start",
+    /** Read-only: a proposal moves the START and keeps the planned length, so the end is shown, never typed. */
+    endLabel: "Proposed end",
+    submit: "Submit Proposal",
+    cancel: "Cancel",
+    /** The same for every change type (no CAB round trip, no second approval is promised). */
+    notice:
+      "You are proposing a new start time, not approving one. WSO2 will either accept it or suggest a different time.",
+    lengthStaysTheSame: "stays the same",
+    errors: {
+      startRequired: "Enter the proposed start date and time.",
+      startPast: "The proposed start must be in the future.",
+      /** The start equals the planned start (the backend refuses it too). */
+      unchanged: "This is the same as the current schedule. Choose a different start.",
+      /** The start equals the time that already waits for WSO2 (the backend refuses it too). */
+      alreadyProposed:
+        "That time is already proposed and is waiting for WSO2's response. Choose a different start.",
+      /** HTTP 409 on a proposal: nothing to move, the change has no planned window. */
+      noWindow: "This change request has no planned time yet, so a new time cannot be proposed for it.",
+      /** HTTP 409 on a proposal: WSO2 has the change on hold (an answer is still taken). */
+      onHold:
+        "This change request is on hold, so a new time cannot be proposed right now.",
+    },
+  },
 } as const;
 
 /** MUI TablePagination's default labels.
@@ -982,7 +1152,7 @@ export const SECURITY_CENTER = {
     filters: {
       severityLabel: "Severity",
       /** The no-filter option in each select — excluded when picking a real
-       * value, the same trap as the chat history's "All States". */
+       * value, the same trap as the chat history's "All Statuses". */
       severityAllOption: "All Severity",
       productLabel: "Product",
       productPlaceholder: "Select a Product",
@@ -1161,9 +1331,15 @@ export const DASHBOARD = {
    * Shares its title with the severity donut above it, so the subtitle is what
    * identifies this card specifically.
    *
-   * Each row is a `role="row"` carrying the case's number as "ID: CS…" — not as
-   * a bare "CS…", which is how the case detail page renders it. Clicking a row
-   * opens that case.
+   * Each row is a `role="row"` carrying the case's identifier as
+   * "ID: <number> | <WSO2 id>" — e.g. "ID: CS0441444 | AUTOMATIONTESTCUSSUB-53"
+   * — not as a bare "CS…", which is how the case detail page renders it.
+   * Clicking a row opens that case.
+   *
+   * ⚠️ The table is populated by its own request and takes appreciably longer
+   * than the 5s default assertion timeout to fill. Waiting for a row needs an
+   * explicit, generous timeout; without one the failure reads "element(s) not
+   * found", which looks like a wrong selector and is not.
    */
   casesTable: {
     subtitle: "Track and manage all active support tickets",
@@ -1221,6 +1397,10 @@ export const DASHBOARD = {
        * the match. */
       displayedRowsPattern: /(\d+)[–-](\d+) of (\d+)/,
     },
+    /** Shown in place of rows when the current view has none — notably after
+     * switching to My Cases as an account that raised no cases on this
+     * project, which is a legitimate state and not a failed filter. */
+    emptyMessage: "No outstanding cases.",
     /** Marks a data row; the header row has no case id. */
     rowIdPattern: /ID: CS\d+/,
     /** Captures the case number out of a row's text. */
@@ -1500,6 +1680,28 @@ export const CASES_LIST = {
   /** A filter offered on every cases list, whatever the query string. Used to
    * prove the panel is open, so "Created By is absent" cannot pass merely
    * because nothing is rendered. */
+  /** The Export control on the cases list (CaseListCsvExportButton).
+   *
+   * A button that opens a menu, not a direct download — so clicking "Export"
+   * alone does nothing but reveal the two formats. Its label flips to
+   * "Exporting..." while a file is being built, which is also when it is
+   * disabled.
+   *
+   * Both formats resolve to an anchor with a `download` attribute
+   * (`utils/csv.ts` and `utils/pdf.ts`), so Playwright observes them as real
+   * download events rather than navigations. */
+  export: {
+    button: "Export",
+    /** Shown while an export is in flight; the control is disabled meanwhile. */
+    busyButton: "Exporting...",
+    csvItem: "Export to CSV",
+    pdfItem: "Export to PDF",
+    /** `cases[-<project>]-YYYY-MM-DD.<ext>` — see downloadCaseListCsv. */
+    filenamePattern: (extension: string): RegExp =>
+      new RegExp(`^cases.*-\\d{4}-\\d{2}-\\d{2}\\.${extension}$`),
+    /** Shown instead of a download when the result set is empty. */
+    emptyMessagePattern: /no .*(cases|results)/i,
+  },
   severityFilterLabel: "Severity",
 } as const;
 
@@ -1509,6 +1711,30 @@ export const CASES_LIST = {
  * case offers the "Closed" action, rendered in present tense as "Close" by
  * `toPresentTenseActionLabel`. Clicking it opens a confirmation dialog rather
  * than closing outright. */
+/** The Knowledge Base tab of a case (CaseKnowledgeBaseRecommendations).
+ *
+ * Articles are recommended by the backend from the case's title, description
+ * and activity — so a case raised from a Novera conversation, which carries the
+ * question as its description, is the reliable way to get recommendations.
+ *
+ * Like Attachments and Calls, the tab label carries a live count, so it is
+ * matched by prefix and never exactly. */
+export const CASE_KNOWLEDGE_BASE = {
+  /** "Knowledge Base (3)" — matched by prefix. */
+  tab: /^Knowledge Base/,
+  /** The same label with the count captured. */
+  tabCountPattern: /^Knowledge Base \((\d+)\)/,
+  /** Shown when the backend returned no recommendations. */
+  emptyMessage: "No matching knowledge base articles were found for this case.",
+  /** The endpoint the tab calls. Asserting on it separates "the UI failed to
+   * render articles" from "the service returned none" — two very different
+   * defects that look identical on screen. */
+  recommendationsPath: "/conversations/recommendations/search",
+  /** Shown when the case carries too little text to recommend from. */
+  needsContentMessage:
+    "Add a title or description, or post activity on this case, to request",
+} as const;
+
 /** The Escalate Case action and its modal (CaseDetailsActionRow +
  * EscalateCaseModal).
  *

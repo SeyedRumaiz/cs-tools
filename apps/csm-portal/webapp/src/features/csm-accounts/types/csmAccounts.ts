@@ -72,6 +72,8 @@ export interface Account {
   hasKbReferences: boolean;
   createdOn: string;
   updatedOn: string;
+  /** Google Drive folder URL for the account's shared documents, when set. */
+  driveLocation?: string | null;
 }
 
 /**

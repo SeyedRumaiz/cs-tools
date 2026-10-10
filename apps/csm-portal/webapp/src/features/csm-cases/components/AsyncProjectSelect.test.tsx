@@ -121,3 +121,47 @@ describe("AsyncProjectSelect — filterProject pagination", () => {
     expect(screen.queryByText(/loading/i)).not.toBeInTheDocument();
   });
 });
+
+describe("AsyncProjectSelect — knownLabel, picked name, clearing", () => {
+  const idle = {
+    isFetching: false,
+    isFetchingNextPage: false,
+    hasNextPage: false,
+    isError: false,
+    fetchNextPage: vi.fn(),
+  };
+
+  it("labels a value that no search has returned with knownLabel instead of the raw id", () => {
+    mockedUseInfiniteProjectSearch.mockReturnValue({ ...idle, projects: [] });
+    render(<AsyncProjectSelect value="proj-x" knownLabel="Restored Project" onChange={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toHaveValue("Restored Project");
+  });
+
+  it("falls back to the id when there is neither a search result nor a knownLabel", () => {
+    mockedUseInfiniteProjectSearch.mockReturnValue({ ...idle, projects: [] });
+    render(<AsyncProjectSelect value="proj-x" onChange={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toHaveValue("proj-x");
+  });
+
+  it("reports the picked project's id and display name, and an empty id on clear", () => {
+    mockedUseInfiniteProjectSearch.mockReturnValue({ ...idle, projects: [SUBSCRIPTION_PROJECT] });
+    const onChange = vi.fn();
+    render(<AsyncProjectSelect value="" onChange={onChange} />);
+    fireEvent.mouseDown(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByRole("option", { name: "Subscription Only Co" }));
+    expect(onChange).toHaveBeenLastCalledWith("proj-subscription", "Subscription Only Co");
+  });
+
+  it("offers a clear button by default, and none with disableClearable", () => {
+    mockedUseInfiniteProjectSearch.mockReturnValue({ ...idle, projects: [SUBSCRIPTION_PROJECT] });
+    // MUI only shows the clear button on hover/focus, so it is looked up by
+    // its class rather than by role.
+    const first = render(<AsyncProjectSelect value="proj-subscription" onChange={vi.fn()} />);
+    expect(first.container.querySelector(".MuiAutocomplete-clearIndicator")).not.toBeNull();
+    first.unmount();
+    const second = render(
+      <AsyncProjectSelect value="proj-subscription" disableClearable onChange={vi.fn()} />,
+    );
+    expect(second.container.querySelector(".MuiAutocomplete-clearIndicator")).toBeNull();
+  });
+});

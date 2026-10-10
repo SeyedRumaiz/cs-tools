@@ -22,7 +22,6 @@ import Error403Page from "@components/error/Error403Page";
 import Error404Page from "@components/error/Error404Page";
 import Error500Page from "@components/error/Error500Page";
 import {
-  getApiErrorMessage,
   isBadRequestError,
   isForbiddenError,
   isNotFoundError,
@@ -37,6 +36,15 @@ export interface ApiErrorStateProps {
 
 /**
  * Renders a consistent API error state for support pages/panels.
+ *
+ * Deliberately does not surface the backend's own error reason text (via
+ * `getApiErrorMessage`) — each Error400/401/403/404/500Page shows its own
+ * generic, user-friendly copy instead. `fallbackMessage` is the one exception:
+ * it's caller-chosen UI copy for this specific loading context (e.g. "Could
+ * not load cases."), not backend-returned detail, so it's still passed
+ * through for 404/400. `error` is still forwarded to every page so its
+ * "Tracking ID" copy affordance can render when the error carries a
+ * correlation ID.
  *
  * @param {ApiErrorStateProps} props - Error payload and optional fallback copy.
  * @returns {JSX.Element} Error400/401/403/404/500 UI based on {@link ApiError} status.
@@ -58,7 +66,7 @@ export default function ApiErrorState({
   if (isUnauthorizedError(error)) {
     return (
       <Stack spacing={2} sx={mergedContainerSx}>
-        <Error401Page message={getApiErrorMessage(error)} />
+        <Error401Page error={error} />
       </Stack>
     );
   }
@@ -66,7 +74,7 @@ export default function ApiErrorState({
   if (isForbiddenError(error)) {
     return (
       <Stack spacing={2} sx={mergedContainerSx}>
-        <Error403Page message={getApiErrorMessage(error)} />
+        <Error403Page error={error} />
       </Stack>
     );
   }
@@ -74,7 +82,7 @@ export default function ApiErrorState({
   if (isNotFoundError(error)) {
     return (
       <Stack spacing={2} sx={mergedContainerSx}>
-        <Error404Page message={getApiErrorMessage(error) ?? fallbackMessage} />
+        <Error404Page message={fallbackMessage} error={error} />
       </Stack>
     );
   }
@@ -82,16 +90,14 @@ export default function ApiErrorState({
   if (isBadRequestError(error)) {
     return (
       <Stack spacing={2} sx={mergedContainerSx}>
-        <Error400Page message={getApiErrorMessage(error) ?? fallbackMessage} />
+        <Error400Page message={fallbackMessage} error={error} />
       </Stack>
     );
   }
 
   return (
     <Stack spacing={2} sx={mergedContainerSx}>
-      <Error500Page
-        message={getApiErrorMessage(error) ?? fallbackMessage}
-      />
+      <Error500Page message={fallbackMessage} error={error} />
     </Stack>
   );
 }

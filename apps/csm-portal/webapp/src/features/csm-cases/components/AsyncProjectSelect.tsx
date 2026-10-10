@@ -31,9 +31,17 @@ interface AsyncProjectSelectProps {
   label?: string;
   /** Selected project id ("" when none). */
   value: string;
-  onChange: (next: string) => void;
+  /** Called with the picked project's id ("" when cleared) and, when a
+   * project was picked from the list, its display name. */
+  onChange: (next: string, name?: string) => void;
+  /** Label for `value` when it didn't come from a search this component ran
+   * itself (e.g. restored from a draft or an existing record) — shown until
+   * a real search result for the same id replaces it. */
+  knownLabel?: string;
   required?: boolean;
   disabled?: boolean;
+  /** Hides the clear button, for places where "no project" is not a valid edit. */
+  disableClearable?: boolean;
   /**
    * Restricts the searchable/selectable options to projects matching this
    * predicate (e.g. by `subscriptionType`) — the backend search endpoint has
@@ -56,8 +64,10 @@ export default function AsyncProjectSelect({
   label = "Project",
   value,
   onChange,
+  knownLabel,
   required,
   disabled,
+  disableClearable,
   filterProject,
 }: AsyncProjectSelectProps): JSX.Element {
   // Search term tracked separately from the displayed input value (which MUI
@@ -99,8 +109,8 @@ export default function AsyncProjectSelect({
     if (picked && picked.id === value) return picked;
     const match = projects.find((p) => p.id === value);
     if (match) return { id: match.id, name: match.name || match.id };
-    return { id: value, name: value };
-  }, [value, picked, projects]);
+    return { id: value, name: knownLabel || value };
+  }, [value, picked, projects, knownLabel]);
 
   // Pool = the current selection (so it can render) + the search results,
   // de-duplicated by id. `filterProject` (when given) is applied to the
@@ -160,6 +170,9 @@ export default function AsyncProjectSelect({
       }}
       onClose={() => setOpen(false)}
       disabled={disabled}
+      // Typed as `false` so `value`/`onChange` keep their nullable shape; the
+      // runtime flag still hides the clear button.
+      disableClearable={disableClearable as false | undefined}
       // Spinner only while the first page loads; later pages append on scroll.
       loading={isFetching && projects.length === 0}
       // The backend already filtered by the typed term; don't re-filter locally.
@@ -169,7 +182,7 @@ export default function AsyncProjectSelect({
       slotProps={{ listbox: { onScroll: handleListboxScroll } }}
       onChange={(_event, next) => {
         setPicked(next);
-        onChange(next ? next.id : "");
+        onChange(next ? next.id : "", next?.name);
       }}
       onInputChange={(_event, val, reason) => {
         if (reason === "input") setSearchTerm(val);

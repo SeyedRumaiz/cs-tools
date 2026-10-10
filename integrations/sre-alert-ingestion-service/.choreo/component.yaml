@@ -1,12 +1,52 @@
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 schemaVersion: 1.2
 
 endpoints:
-  - name: sre-alert-ingestion-service-api
-    displayName: SRE Alert Ingestion Service API
+  - name: sre-alert-api
+    displayName: SRE Alert API
     service:
-      basePath: /
+      basePath: /api/wso2/v1/sre_alert_api
       port: 8080
     type: REST
     networkVisibilities:
       - Public
     schemaFilePath: openapi.yaml
+  - name: healthz
+    displayName: SRE Alert Ingestion Healthz
+    service:
+      basePath: /healthz
+      port: 8080
+    type: REST
+    networkVisibilities:
+      - Public
+  - name: livez
+    displayName: SRE Alert Ingestion Livez
+    service:
+      basePath: /livez
+      port: 8080
+    type: REST
+    networkVisibilities:
+      - Project
+  - name: dbz
+    displayName: SRE Alert Ingestion DB Health
+    service:
+      basePath: /dbz
+      port: 8080
+    type: REST
+    networkVisibilities:
+      - Public

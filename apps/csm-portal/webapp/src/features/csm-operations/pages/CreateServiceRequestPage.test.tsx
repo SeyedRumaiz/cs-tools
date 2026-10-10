@@ -100,7 +100,7 @@ vi.mock("@features/csm-operations/api/useSearchCatalogs", () => ({
   }),
 }));
 vi.mock("@features/csm-operations/api/useCatalogItemVariables", () => ({
-  useCatalogItemVariables: () => ({ data: [], isLoading: false, isError: false }),
+  useCatalogItemVariables: () => ({ data: [], isLoading: false, isError: false, isSuccess: true }),
 }));
 vi.mock("@features/csm-cases/components/ProjectSelectionField", () => ({
   default: ({

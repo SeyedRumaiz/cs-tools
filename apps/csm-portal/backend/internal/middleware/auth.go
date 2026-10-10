@@ -54,6 +54,26 @@ const userInfoKey contextKey = "user-info"
 type UserInfo struct {
 	Email  string
 	UserID string
+	// FirstName/LastName are the token's "given_name"/"family_name" claims.
+	// Optional -- never required for a token to validate, unlike Email/UserID
+	// below -- and so far only consumed by ensureUserProvisioned (see
+	// handler/ensure_user.go), which needs a display name to provision a
+	// worknote_creator-/escalator-only caller's entity-service "user" row.
+	// Empty when the token doesn't carry either claim.
+	FirstName string
+	LastName  string
+	// Roles is the token's "roles" claim, which portal authorisation checks
+	// (see handler.AccessGuard).
+	Roles []string
+	// Groups is the token's "groups" claim — restored here for the /spl/*
+	// (SupportPortalLite) routes only, which port the original Ballerina
+	// backend's raw Asgardeo-group-based authorization model
+	// (SPL_ALLOWED_GROUPS etc, see internal/splauth) rather than this app's
+	// newer roles-based one. Deliberate, not a leftover from before the
+	// roles migration — do not remove without checking internal/splauth's
+	// callers first. If/when SPL's authorization moves onto the same
+	// roles-based model as the rest of this app, this field (and the
+	// "groups" claim decode below) can go.
 	Groups []string
 }
 
@@ -69,9 +89,16 @@ type Config struct {
 // jwtClaims defines the expected JWT payload fields, mirroring the Ballerina
 // CustomJwtPayload in the authorization module.
 type jwtClaims struct {
-	Email  string   `json:"email"`
-	UserID string   `json:"userid"`
-	Groups []string `json:"groups"`
+	Email  string     `json:"email"`
+	UserID string     `json:"userid"`
+	Roles  stringList `json:"roles"`
+	// Groups — see UserInfo.Groups's doc comment for why this is still read.
+	Groups stringList `json:"groups"`
+	// FirstName/LastName — see UserInfo.FirstName's own doc comment. Neither
+	// is required: a token missing one or both still validates, same as
+	// Groups above.
+	FirstName string `json:"given_name"`
+	LastName  string `json:"family_name"`
 	jwt.RegisteredClaims
 }
 
@@ -163,6 +190,34 @@ func bearerTokenFromRequest(r *http.Request) string {
 	return strings.TrimSpace(auth[len(bearerAuthPrefix):])
 }
 
+// stringList decodes a claim that Asgardeo emits as a bare string when it holds
+// one value and as an array when it holds several (its "roles" claim does
+// this). A plain []string would reject a single-role user's whole token, so
+// both shapes are accepted; anything else fails the token.
+//
+// SCIM's own "roles" attribute was assumed to follow this same convention but
+// does not -- observed in practice as an array of {value, ...} objects, a
+// different-enough shape (see scim.scimRoles) that it isn't reused here.
+type stringList []string
+
+func (l *stringList) UnmarshalJSON(b []byte) error {
+	var one string
+	if err := json.Unmarshal(b, &one); err == nil {
+		if one == "" {
+			*l = nil
+		} else {
+			*l = []string{one}
+		}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(b, &many); err != nil {
+		return fmt.Errorf("claim must be a string or an array of strings: %w", err)
+	}
+	*l = many
+	return nil
+}
+
 // Auth returns an HTTP middleware that validates the x-jwt-assertion header on
 // every request and stores the resulting UserInfo in the request context.
 // When Config.TokenValidatorEnabled is false the token is only decoded without
@@ -197,8 +252,8 @@ func Auth(cfg Config) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			addSecurityHeaders(w)
 
-			// Skip auth for the health check endpoint.
-			if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			// Skip auth for both health check endpoints.
+			if r.Method == http.MethodGet && (r.URL.Path == "/health" || r.URL.Path == "/health/dependencies") {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -332,9 +387,12 @@ func extractUserInfo(tokenStr string, cfg Config, keyFunc jwt.Keyfunc) (*UserInf
 	}
 
 	return &UserInfo{
-		Email:  c.Email,
-		UserID: c.UserID,
-		Groups: c.Groups,
+		Email:     c.Email,
+		UserID:    c.UserID,
+		FirstName: c.FirstName,
+		LastName:  c.LastName,
+		Roles:     []string(c.Roles),
+		Groups:    []string(c.Groups),
 	}, nil
 }
 

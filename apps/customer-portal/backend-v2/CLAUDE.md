@@ -145,6 +145,22 @@ persist-reply-and-auto-resolve pattern is replicated in `SendConversationMessage
 messages — no recommendations call there; KB recommendations are attached only on a conversation's
 first message) and in `websocket.go`'s `handleMessage`.
 
+**The agent's `<thinking>` reasoning is removed before an answer leaves this backend.** The agent can
+put its reasoning inside the answer text as `<thinking>…</thinking>`, and an unfiltered answer would
+reach the browser and be stored as the conversation comment (which the CSM portal then renders too).
+`aichatagent.StripThinkingBlocks` (`internal/aichatagent/thinking.go`) removes it at the two places a
+complete answer arrives: `Client.CreateChat` (the REST turns) and the `final` event in
+`WSClient.StreamChat`, whose cleaned payload is also what the handler persists. Everything else
+`StreamChat` forwards is still verbatim, and a `final` event whose answer carried no reasoning is
+forwarded byte for byte. An answer that was *only* reasoning comes out empty, and entity-service
+rejects a comment with no content, so every place that stores the agent's reply skips it when empty
+(`websocket.go`'s `handleMessage`, and `CreateConversation` / `SendConversationMessage` in
+`ai_chat.go`) — the turn still succeeds and `resolved` is still honoured; the Ballerina `service.bal`
+does the same. **Streamed `token` events are not filtered**: they can still carry the
+reasoning until the `final` event replaces them, which the webapps cover by stripping it for display
+(that fallback also covers answers stored before this existed). The webapps and the Ballerina backend
+(`ai_chat_agent:stripThinkingBlocks`) carry the same rule; keep the behaviour in step.
+
 One gap remains, flagged with a doc comment at each call site rather than worked around — do not
 build a workaround for this; wait for `entity.CreateCommentRequest` to gain the field:
 
@@ -361,9 +377,12 @@ responses are fanned out into eight differently-shaped, purpose-built views rath
   passthrough endpoint in this backend at all; the metadata response is only ever exposed split into
   these two narrower views. `ChoiceListItem`/`ReferenceTableItem` (entity-service's two "list of
   valid options" shapes) both collapse into one `dto.ReferenceItem{id, label, count?}` for the
-  frontend. `/filters`' `changeRequestStates` additionally drops three internal ServiceNow workflow
-  state IDs (`dto.restrictedChangeRequestStateIDs`) that were never meant to be a customer-facing
-  filter option.
+  frontend. `/filters`' `changeRequestStates` additionally drops the three internal ServiceNow workflow
+  state IDs (`dto.restrictedChangeRequestStateIDs`: New `-5`, Assess `-4`, Authorize `-3`) that
+  were never meant to be a customer-facing filter option -- by their ServiceNow numeric id, so
+  only where the data source is ServiceNow. On Postgres the same states arrive as raw enum
+  labels, where only New and Assess are dropped and Authorize is kept (a designated change
+  request waits there after the customer proposed a new time).
 - **`/stats` and `/stats/support` are composite, graceful-degradation endpoints** — each combines
   multiple independent entity-service calls (`/stats` combines case/conversation/deployment/activity
   stats; `/stats/support` combines case/conversation stats) and returns `200` even if every one of
@@ -379,6 +398,17 @@ responses are fanned out into eight differently-shaped, purpose-built views rath
   many cases are in the *open* state") using this deployment's default ServiceNow state IDs. If
   cs-tools' ServiceNow instance uses different state IDs for these, these constants need to become
   configurable here too — they are not currently.
+  The breakdown a lookup reads is normalised to those ids first: on the Postgres data source
+  entity-service sends the raw enum label as the id (`{"id":"ACTIVE"}`), so `MapConversationStats`
+  runs `normalizeConversationStateChoices` before `countForState`, as `MapProjectCaseStats` does for
+  case states. Without it Support's Active Chats / Resolved via Chat cards were absent (0) while the
+  lists behind them, which filter on the same numeric state keys, held hundreds of conversations
+  (digiops-cs#3390). Active Chats is the Active state alone (ServiceNow's meaning, and what its list
+  shows), not entity-service's `activeCount` (Open + Active), which `GET /projects/{id}/stats` still passes through.
+  Resolved via Chat (Last 30d) is entity-service's `resolvedPastThirtyDays` (Resolved and updated in the past 30
+  days; a pointer, so an older entity-service or the ServiceNow data source, which send none, fall back to the
+  Resolved entry of the breakdown). Its list sends `filters.startUpdatedDate` (RFC 3339; anything else is a 400,
+  `ErrInvalidConversationDate`) on `POST /projects/{id}/conversations/search`, forwarded to entity-service.
 
 ## Middleware chain
 
@@ -415,12 +445,149 @@ and no `CORS`**: `Auth` is impossible there (a browser cannot send `x-jwt-assert
 handshake, so `WebSocketHandler` authenticates the token itself), and `CORS` is irrelevant since a
 WebSocket handshake is not subject to preflight. See "The AI chat agent" above.
 
+**REST timeouts are configurable** (`cmd/server/timeouts.go`): `REST_READ_TIMEOUT` (60s),
+`REST_WRITE_TIMEOUT` (60s) and `ENTITY_SERVICE_TIMEOUT` (60s), as Go duration strings. Each must parse
+and be > 0, otherwise the server exits at startup; no ordering between them is enforced. Advice only:
+keep the entity timeout shorter than the write timeout so the handler can return a clean error. The
+defaults are sized for create-case relaying ~15 MiB of inline attachments.
+
 **`CORS` must be outermost, wrapping everything including `Auth`.** A CORS preflight is a bare
 `OPTIONS` request with no JWT at all; if `Auth` ran before `CORS`, it would reject every preflight
 with 401 before the browser ever received a CORS header — which the browser then reports as
 "blocked by CORS policy", masking the real cause. `main.go` currently calls `middleware.CORS(nil)`
 (allow any origin, no env var) — `middleware.CORS` accepts an allow-list parameter if this ever
 needs to be restricted, but nothing in this backend currently sets one.
+
+## Permissions: who may answer a change request
+
+Route access comes from one matrix, `permissionMatrix` in `internal/middleware/rbac.go`
+(module x action -> canonical roles), enforced per route by `RequirePermission`. Change requests
+are the one module with a fifth action, **`decide`**: the customer's own answer on a change request
+that is waiting on them (approve / reject a Customer Approval, confirm / fail a Customer Review,
+propose a new implementation time) -- and nothing that edits one.
+
+| Action | Roles |
+|---|---|
+| `create`, `update` | admin, agent, internal |
+| `delete` | admin |
+| `read` | the above + customer_admin, customer_user, partner_admin, partner_user |
+| `decide` | admin, agent, internal + customer_admin, customer_user, partner_admin, partner_user |
+
+A role with no entry (the old "stakeholder", an unrecognised wire role) holds nothing. Customers
+answer in the customer portal -- the CSM portal is for WSO2 staff -- so customer-side roles
+need `decide` on exactly two routes:
+
+- `POST /change-requests/{id}/approvals/decision` -> `RequirePermission(..., ActionDecide)`.
+- `PATCH /change-requests/{id}` -> `RequirePermissionOneOf(..., ActionUpdate, ActionDecide)`, which
+  records the level that let the request in (`middleware.GrantedActionFromContext`). At `update` the
+  handler honours `dto.ChangeRequestUpdateRequest` as before (keys outside it, `state` and
+  `assignedTeamId` among them, are dropped by the decode) with one exception: a body that carries
+  `expectedPlannedStartOn` / `expectedPlannedEndOn` is a **400** (`errMsgStaffPatchExpected`), nothing
+  sent, because the window goes with a customer's answer, which staff cannot give -- dropping it would
+  silently lose a check the caller asked for (`TestPatchChangeRequest_StaffCannotCarryTheExpectedWindow`;
+  `null` reads as absent). `isCustomerApproved` / `isCustomerReviewed` from staff are forwarded and
+  entity-service refuses them (400) on its PostgreSQL data source; at anything else -- including a
+  request that never passed through the middleware, so the restriction cannot be lost by not
+  wiring it -- it decodes the body into `dto.ChangeRequestCustomerUpdateRequest` (exactly
+  `isCustomerApproved`, `isCustomerReviewed`, `plannedStartOn`, `plannedEndOn`, and the answer's
+  `expectedPlannedStartOn` / `expectedPlannedEndOn`, the window the customer was shown) with **unknown
+  fields refused (403)**, refuses an answer combined with a proposed time, both outcomes, or the expected
+  window without an answer (400), and builds the entity-service request from those six fields alone. Sending `title`, `state`,
+  `requestApproval`... with an answer cannot get them through: they are not fields of the struct.
+
+**Error body and the machine-readable `errorCode`.** The body of an error is `{"message": "..."}`, plus `"errorCode": "<snake_case name>"` for the few refusals the webapp has to tell apart (`errorBody.ErrorCode`, `writeErrorCode`; omitted when there is none). The message is wording for people (it can change, no client branches on it); the code is the contract. It comes from entity-service's error body (`apierror.Error.Code`, parsed by `apierror.NewUpstreamError` and kept only when it is a plain lower-case snake_case name of at most 64 characters: nothing else reaches a client through it) and `mapUpstreamError` puts it on the **400, 403, 409 and 422** it belongs to -- the 403 included, whose message stays the fixed `ErrMsgForbidden` -- and on no other status (never a 401, 404 or a failure of the upstream). This layer raises one itself: the 403 for a field a customer may not set carries `change_request_forbidden`. For PATCH `/change-requests/{id}` the codes are `change_request_on_hold` (409), `change_request_schedule_changed` (409), `change_request_approval_not_pending` (409), `change_request_not_proposable` (409), `change_request_proposal_not_now` (409: another approval is being asked too), `change_request_no_planned_window` (409: no planned window to move), `change_request_not_asked` (403) and `change_request_forbidden` (403); the full table, with what each means, is in entity-service's CLAUDE.md ("Error types"). An older entity-service names none and the body is as it always was; the webapp then says "something went wrong, refresh" for a 409, never "already answered". Pinned by `TestMapUpstreamError_PassesTheMachineReadableCodeThrough`, `TestPatchChangeRequest_EntityRefusalCodesReachTheCustomer` (the real entity client against a stand-in answering as entity-service does) and `TestNewUpstreamError_*`.
+
+`decide` is granted to every role that can read a change request on purpose: **this matrix is a
+coarse gate, entity-service decides who may answer which change request.** It resolves the caller
+from the forwarded `x-user-id-token` and accepts an answer only from a REGISTERED `PORTAL_USER`
+contact of that change request's own project (a customer of another project is refused, whatever
+role they hold here), only in the state the answer belongs to (409 otherwise, e.g. a second contact
+answering after the first), and only on the caller's own pending approval. entity-service also keeps
+its own whitelist for external callers, so a request that bypassed this layer still could not edit a
+change request. Route wiring is `registerChangeRequestRoutes` in `cmd/server/main.go`, covered by
+`TestChangeRequestRouteGating`.
+
+**A proposed time waits for WSO2: `customerProposal` on the detail.** The customer's `PATCH {plannedStartOn,
+plannedEndOn?}` ("propose new implementation time") is a proposal of a START: the change keeps its planned length,
+the portal sends the start plus the end that keeps it (start + planned length) and entity-service refuses any other
+end (400), a start alone is accepted, an end alone is a 400; this API forwards the window it validated
+(`ValidatePlannedWindow`, still-to-come, order) and nothing else. The change request STAYS in Customer Approval --
+a proposal writes one column, the proposed start (`customer_updated_on`) -- so the detail carries
+`customerProposal {startDate, endDate?, answer, proposerRecorded?, proposedByViewer?}`
+(`dto.ChangeRequestCustomerProposal`, mapped from `entity.ChangeRequestCustomerProposal`): `answer` is `pending`
+(waits for WSO2; the change's own `startDate` / `endDate` are still WSO2's plan and a colleague's Approve approves
+that plan), `agreed` (WSO2 accepted: the change is Scheduled for the proposal), `disagreed` (WSO2 asked for another
+time: the window is its new one and the customer is asked again) or `unanswered` (history). Only the customer's part
+of it is decoded: the proposer's name and email, `proposedOn`, `canAccept` and `acceptBlockedReason` are staff facts
+the entity type has no field for, so they cannot reach the portal whatever entity-service sends
+(`TestMapChangeRequestDetails_NeverPassesOnWhoProposedOrWSO2sOwnFacts`, `TestGetChangeRequest_CarriesTheCustomerProposal`);
+`proposerRecorded` is true whenever it is present for a customer: entity-service tells a customer a time is
+`pending` (waiting for WSO2) only when a registered contact is recorded as having proposed it, and reads a stored time
+nobody is recorded as having proposed (a WSO2 user's date, an old one) as `unanswered` (history), with neither field --
+so no page says WSO2 is deciding on a time the customer never proposed, and none can claim a colleague proposed it. A proposal is never mirrored to the previous system while the dual-write runs (it has no field for
+it): proposals and WSO2's answers are PostgreSQL-only until the sync stops, and the sync can rewrite the columns.
+
+**`customerCanAnswer` on the change-request detail.** `GET /change-requests/{id}` (`dto.ChangeRequestDetails`)
+passes through entity-service's per-caller `customerCanAnswer` (`entity.ChangeRequest.CustomerCanAnswer`, a
+`*bool`, `omitempty`): whether the signed-in customer may answer the change request right now -- approve or
+reject in Customer Approval, confirm or fail the review in Customer Review, and in Customer Approval propose a
+new implementation time unless the change is on hold (a held change refuses a proposal, so the detail also carries the boolean `isOnHold`, never the reason, and the webapp turns Propose off when it is true). It is the
+portal's source for showing those buttons: `hasCustomerApproved` / `hasCustomerReviewed` are the recorded
+OUTCOME and are false for as long as the change waits for the customer, so they cannot say "waiting for me".
+Contract: **present true/false** when entity-service computed it for this customer (PostgreSQL data source);
+**absent** when it did not (ServiceNow data source, a non-customer caller, a failed check) -- *absent is not
+false*, a client falls back to what it did before. The BFF adds nothing, drops nothing and recomputes nothing
+(`TestMapChangeRequestDetails_PassesCustomerCanAnswerThrough`, `TestGetChangeRequest_CarriesCustomerCanAnswer`),
+and the customer's detail still exposes none of the approvals or WSO2 approvers' identities: the detail's whole
+key set is pinned by `TestMapChangeRequestDetails_ExposesOnlyTheCustomerFields`, so a field added to the DTO has
+to be added there on purpose. The PATCH response is unchanged (id / updatedOn / updatedBy); the webapp re-reads
+the detail after an answer.
+
+**Which change requests a customer sees is entity-service's decision, never this API's.** A customer sees a
+change request once it was *designated* to them (it reached Customer Approval and/or Customer Review and they
+were one of the contacts asked), in every later state (Scheduled,
+Implement, Review, Closed, Rollback, Canceled), and nothing else: no change request before it first reached a
+customer stage, none that never needs the customer, none designated only to other contacts, none of another
+project. entity-service enforces that on every read and write (search, totals, stats, detail, approvals,
+decision, PATCH, comments): a change request that is not visible to the caller is a `404` there, so this API
+forwards the caller's own token and decides nothing. `POST /projects/{id}/change-requests/search` therefore
+sends **only the states the caller named** (`dto.BuildEntitySearchChangeRequestsRequest`; none named means no
+state filter, i.e. every change request the customer may see, in every state). It used to narrow every search to
+the states other than New / Assess / Authorize (`restrictToCustomerVisibleStates`); that was a stand-in for the
+rule above, hid a designated change request sitting in Authorize and showed a non-designated one in Customer
+Approval, and is gone. The state vocabulary a response may carry has `authorize` (`-3`, "Authorize") in it for the
+same reason; New and Assess have no response id or label (nothing visible is ever in them), and
+`GET /projects/{id}/filters` and the change-request stats leave them out (`isRestrictedChangeRequestState`), but a
+search that NAMES them (`-5`, `-4`, `crStateFilterOnlyIDs`) is forwarded as asked and answers "none" instead of
+silently becoming "no filter".
+
+**Authorize is Postgres-only here.** That paragraph is the Postgres data source's rule (designation). On the
+ServiceNow data source nothing is designated: a customer sees every state except New, Assess and **Authorize**, and
+ServiceNow's own search does not enforce that. entity-service applies it (a customer's search is narrowed to the
+visible states, and the project's metadata leaves the three out: `entity-service/CLAUDE.md`, "The ServiceNow data
+source"), and this API keeps the three ServiceNow ids (`-5`, `-4`, `-3`) out of the filter options and the stat counts
+as the second line, because the webapp builds every state it asks for from those options: offering `-3` there made
+the webapp ask ServiceNow for Authorize. The id is what tells the data sources apart (a Postgres id is a raw label),
+so Authorize survives under `AUTHORIZE` and not under `-3`. This API cannot tell the data sources apart on a search,
+so it does not narrow one.
+
+**A planned time is checked here first and again upstream.** `dto.ValidatePlannedWindow` (`planned_window.go`)
+refuses, with a readable 400 and before anything is sent, a `plannedStartOn` / `plannedEndOn` (PATCH) or
+`plannedStartDate` / `plannedEndDate` (create) that is not RFC 3339 or `YYYY-MM-DD HH:MM:SS` (UTC) in the years
+2000 to 2100 -- so `tomorrow`, `now`, `infinity`, a bare date and a zone name never leave the API. Both
+layouts work on every data source behind entity-service (its ServiceNow service converts an RFC 3339 value to
+the zoneless UTC layout before forwarding it). A customer's
+proposal (the `PATCH` the customer level serves) is held to two more rules, the ones entity-service applies to
+it: a bound must be still to come (`h.now`, a field so a test can fix the clock) and, with both bounds, the start
+must be before the end. A staff edit and a create are checked for form and range only. The messages are
+entity-service's own, so the webapp's mapping of a 400 reads either layer's answer. This is never the only layer:
+entity-service parses the window with the same two layouts and the same bounds, against the stored value too (an
+end-only proposal after the stored start has passed is refused there), and is the authority. The values the
+customer was SHOWN (`expectedPlannedStartOn` / `expectedPlannedEndOn`) are not proposed times and are not
+validated here.
+
+**When you add a field a customer may set, add it to `ChangeRequestCustomerUpdateRequest` and say
+why here; a field in `ChangeRequestUpdateRequest` is staff-only.**
 
 ## Response shaping — the "wrapper" pattern
 
@@ -624,6 +791,16 @@ Two more examples, both in this same "restrict, don't mirror" category:
   `filters.type: comment` on **read** too — entity-service's search endpoint returns `work_note`
   entries verbatim unless the caller filters them out, and those are internal WSO2 annotations that
   must never reach the customer regardless of which reference entity they're attached to.
+- `POST /cases/{id}/activities/search` (`CaseHandler.SearchCaseActivities`) forces
+  `ExcludeWorkNotes: true` onto every request it forwards, regardless of what the client sends —
+  the same restrict-don't-mirror shape as the generic comments endpoints above, for the case
+  activity feed specifically. Found live: entity-service's own `total` counted a
+  `WORK_NOTE`-type comment the same as a public one, while this handler's `dto.MapSearchCaseActivities`
+  already filtered work notes out of the *array* — so a case with one internal note showed
+  `totalRecords: 2` against one visible activity. Forcing the new flag server-side (entity-service's
+  own `SearchCaseActivitiesRequest.ExcludeWorkNotes`, nil/false everywhere else — see that repo's own
+  CLAUDE.md) makes `totalRecords` agree with what's actually rendered, instead of recomputing a count
+  client-side after the fact (which would only ever be correct for a single page, not across pages).
 
 **Not every field worth restricting is a security decision — some are just an entity-service scoping
 convenience, and the path (not the body) is the more reliable source for it.**
@@ -737,6 +914,13 @@ struct actually carries it), and a stray extra check on `PATCH` would just be de
   swallowing them loses real, actionable detail for no security benefit. 401/403/404 still always
   use a fixed message regardless of the upstream body — never pass through upstream text for those
   statuses.
+- **`GetMe` maps an upstream 404 to 403, not 404.** A 404 here means the caller's own authenticated
+  identity has no backing user row — not a missing resource the caller asked for by ID — and the
+  webapp's data-fetching hook for this endpoint had no handling for a bare 404, so it spun forever
+  instead of showing anything. Since "you don't have permission" is already a handled UI state,
+  `GetMe` treats this upstream 404 as 403 for the response while still logging the real cause at
+  `ERROR`. Follow this same substitution if another identity-bound "fetch my own X" endpoint hits
+  the same failure mode.
 - **Logging**: use `slog.ErrorContext` with `summarizeErr(err)`, never the raw error — an
   unrecognized error can stringify with the full request URL including query params.
   `summarizeErr` DOES include the upstream status and message for a typed `*apierror.Error` (e.g.
@@ -750,6 +934,27 @@ struct actually carries it), and a stray extra check on `PATCH` would just be de
   isn't the expected `{"message": "..."}` shape, relying on each caller's existing "empty Body → generic
   fallback" logic (`mapUpstreamError`'s 400 case, `writeUpstreamMessage`) — never add a new
   upstream-error construction site that falls back to a raw excerpt instead of calling this function.
+
+## ServiceNow-to-CSM cutover flags
+
+Flags named `CSM_MIGRATION_*` belong to the migration off ServiceNow onto the CSM database. They are **opt-in** — on only when the environment value is exactly `"true"` — and off in every environment until cutover day, which is a config change rather than a release. "Off" is stronger than "does nothing": the guarded block is never entered, so no client is built and no request leaves the process, and the portal's behaviour is bit-for-bit what it is today. Don't add one that defaults on, and don't fold one into an existing `!= "false"` killswitch, whose default is the opposite.
+
+`CSM_MIGRATION_FIRST_ACCESS_ENABLED` (`UserHandler`) — after `GET /users/me` has written its response, calls entity-service `POST /users/me/memberships/register`, which completes onboarding for any membership of the caller still in state `INVITED`: it clears the contact's Salesforce "Locked Out" flag, sets the membership to `REGISTERED` and refreshes the CSM database. Three deliberate properties, all of them load-bearing:
+
+- **It runs after the response.** `GetMe` writes the profile first and only then starts the call, on `context.WithoutCancel(r.Context())` with its own timeout, so it can neither delay the profile nor be killed when the request ends.
+- **Its failure is a log line.** entity-service being down — or not registering the route at all, which is the normal state before cutover — must be invisible. The Salesforce event that follows an invitation reaches entity-service by its own path anyway, so nothing is lost.
+- **It is a no-op for almost every call.** The profile is loaded on every page, but entity-service answers immediately for a caller with nothing `INVITED`, which is every caller after their first sign-in.
+
+The portal deliberately does **not** write to Salesforce itself for this. entity-service already holds the Sales Entity client and the ingest, so the logic lives there and the portal stays free of Salesforce write credentials.
+
+`CSM_MIGRATION_PORTAL_CONTACTS_ENABLED` (`ContactHandler`) — moves project contacts off the pre-cutover onboarding service: the contact list and the admin check read the CSM database, and the writes go to entity-service, which updates Postgres and Salesforce in one transaction. It is one flag on purpose: the admin check behind every write reads the same list, so the list and the writes must never point at different sources. The invite pre-check (`POST /projects/{id}/contacts/validate`) follows it too: on, it calls entity-service's dry run `POST /projects/{id}/contacts/validate` (same `InvitationValidator` as the invite, no writes) after `requireProjectAdmin`, and maps the verdict onto the unchanged webapp contract (200 + `isContactValid`, 409 with the fixed conflict message, 403/400 with entity-service's user-facing message; a failed check gets a generic message via `mapUpstreamError`).
+
+- **Invite, role change and remove** each have both paths. Off, they take the pre-cutover path unchanged, so the rollback is this flag. The flag is ANDed with the entity client being non-nil, so a misconfiguration cannot select a path with no client behind it.
+- **The portal authorizes every write itself.** entity-service only checks that the caller is an allow-listed internal client, so `requireProjectAdmin` refuses with `403` unless the caller both holds an account admin role (`customer_admin` or `partner_admin`, from `GET /users/me`) and has an active membership on the project being changed. Admin is a property of the person, as in ServiceNow; the membership check is what ties it to a project, since `user_role` has no project column. A per-project `ADMIN` role alone does not count. Never add a write on this path without it.
+- **Writes outlive the request.** Each entity-service write runs on `entityWriteContext`: the request's values without its cancellation, bounded by `entityWriteTimeout`. A closed tab or dropped connection must not abandon a write that has already reached Salesforce. When the invite outlasts the entity client's 25-second timeout, `CreateProjectContact` answers `202` with `status: PROCESSING` instead of an error, because entity-service keeps going and commits; the webapp keeps the row pending and refreshes the list. Role change, remove and resend still report a timeout as an error.
+- **Resend invitation** (`POST /projects/{id}/contacts/{email}/resend-invitation`) exists only on the new path, so with the flag off it answers `404` rather than pretending to have resent anything.
+- **Roles change vocabulary at the boundary.** The portal's wire contract is four booleans; entity-service takes the raw Salesforce `Role__c` labels. `internal/dto/membership_roles.go` is the only place the two meet, and its labels must equal entity-service's own constants exactly, because Salesforce matches the picklist by literal string.
+- **The contact list is read from the CSM database too.** `GET /projects/{id}/contacts` calls entity-service `POST /projects/{id}/contacts/search`, paging through its 50-row limit, instead of the onboarding service's live Salesforce query. The database row has no integration-user flag, no split first and last name and no account block, so `dto.MapEntityProjectContact` splits the name at its first space, reports `isCsIntegrationUser` as false and omits the partner badge.
 
 ## Security
 

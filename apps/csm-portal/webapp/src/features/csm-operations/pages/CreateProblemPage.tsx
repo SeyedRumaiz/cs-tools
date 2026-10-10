@@ -27,9 +27,12 @@ import {
   Typography,
 } from "@wso2/oxygen-ui";
 import { ArrowLeft } from "@wso2/oxygen-ui-icons-react";
-import { useState, type JSX } from "react";
+import { useMemo, useState, type JSX } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { BackendApiError } from "@api/backend/client";
+import { formatBytes } from "@utils/formatBytes";
+import { isBlankHtml } from "@utils/sanitizeHtml";
+import Editor from "@components/rich-text-editor/Editor";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import { usePostProblem } from "@features/csm-operations/api/usePostProblem";
 import { useSearchCasesForSelect } from "@features/csm-operations/api/useSearchCasesForSelect";
@@ -97,11 +100,21 @@ function incidentSearchLabel(i: BeIncident): string {
 
 const OPERATIONS_PROBLEMS_PATH = "/operations?tab=problems";
 
+// Cap the optional rich-text description, which can carry base64 inline
+// images — same reasoning and same 1 MiB backend cap (maxRequestBodyBytes)
+// as CsmCaseCreatePage.tsx's own MAX_DESCRIPTION_CONTENT_BYTES.
+const MAX_DESCRIPTION_BODY_BYTES = 1024 * 1024;
+const MAX_DESCRIPTION_CONTENT_BYTES = MAX_DESCRIPTION_BODY_BYTES - 4 * 1024;
+
 /**
  * Create-problem form against `POST /problems` (ServiceNow data source only).
- * `subject` is the only required field. There is no Priority field — priority
- * is not settable on create (SN computes/defaults it server-side, confirmed
- * by live testing).
+ * `subject` (labeled "Problem statement" — matching ServiceNow's own label
+ * for `short_description`, this field's real destination) is the only
+ * required field. `description` is optional rich text; it is validated and
+ * forwarded to the backend but not yet sent on to ServiceNow — see
+ * entity-service's own `CreateProblem` doc comment for why. There is no
+ * Priority field — priority is not settable on create (SN computes/defaults
+ * it server-side, confirmed by live testing).
  */
 export default function CreateProblemPage(): JSX.Element {
   const navigate = useNavigate();
@@ -139,6 +152,7 @@ export default function CreateProblemPage(): JSX.Element {
       ? `Problem from incident ${originIncidentState.incidentNumber ?? originIncidentState.incidentId}: ${originIncidentState.incidentSubject}`
       : "",
   );
+  const [description, setDescription] = useState("");
   const [category, setCategory] = useState<string>(UNSET);
   const [subcategory, setSubcategory] = useState<string>(UNSET);
   const [originCaseId, setOriginCaseId] = useState("");
@@ -146,6 +160,21 @@ export default function CreateProblemPage(): JSX.Element {
     originIncidentState?.incidentId ?? "",
   );
   const [touched, setTouched] = useState(false);
+
+  // UTF-8 byte size of the description; the BE caps the whole create body, so
+  // mirror it here to fail fast with a clear message instead of a 413.
+  const descriptionBytes = useMemo(
+    () => new TextEncoder().encode(description).length,
+    [description],
+  );
+  const descriptionOverLimit = descriptionBytes > MAX_DESCRIPTION_CONTENT_BYTES;
+  const descriptionError = descriptionOverLimit
+    ? `The description is too large (${formatBytes(
+        descriptionBytes,
+      )}). Maximum is ${formatBytes(
+        MAX_DESCRIPTION_BODY_BYTES,
+      )} — reduce the size or the number of inline images and try again.`
+    : null;
 
   // Display label for a pre-filled `primaryIncidentId` above until a fresh
   // search for the same id resolves one from the backend (see
@@ -171,7 +200,7 @@ export default function CreateProblemPage(): JSX.Element {
   };
 
   const isSubjectValid = subject.trim().length > 0;
-  const canSubmit = isSubjectValid && !postProblem.isPending;
+  const canSubmit = isSubjectValid && !descriptionOverLimit && !postProblem.isPending;
 
   const handleSubmit = (): void => {
     if (!canSubmit) {
@@ -180,6 +209,7 @@ export default function CreateProblemPage(): JSX.Element {
     }
 
     const payload: BeCreateProblemPayload = { subject: subject.trim() };
+    if (!isBlankHtml(description)) payload.description = description;
     if (category) payload.category = category;
     if (subcategory) payload.subcategory = subcategory;
     if (originCaseId) payload.originCaseId = originCaseId;
@@ -228,7 +258,7 @@ export default function CreateProblemPage(): JSX.Element {
           <Typography variant="subtitle2">Problem details</Typography>
 
           <TextField
-            label="Subject"
+            label="Problem statement"
             value={subject}
             onChange={(e) => setSubject(e.target.value)}
             onBlur={() => setTouched(true)}
@@ -239,6 +269,40 @@ export default function CreateProblemPage(): JSX.Element {
             disabled={postProblem.isPending}
             placeholder="Short summary of the problem"
           />
+
+          <Box>
+            <Typography
+              id="problem-description-label"
+              component="label"
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", mb: 0.5 }}
+            >
+              Description (optional)
+            </Typography>
+            {/* Editor doesn't accept an `id`, so associate the label by wrapping
+                the editor in a labelled group for assistive tech. */}
+            <Box role="group" aria-labelledby="problem-description-label">
+              <Editor
+                value={description}
+                onChange={setDescription}
+                placeholder="Add more detail — steps, impact, screenshots…"
+                minHeight={140}
+                maxHeight={360}
+                toolbarVariant="full"
+                disabled={postProblem.isPending}
+              />
+            </Box>
+            {descriptionError && (
+              <Typography
+                variant="caption"
+                color="error"
+                sx={{ display: "block", mt: 0.5 }}
+              >
+                {descriptionError}
+              </Typography>
+            )}
+          </Box>
 
           <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
             <FormControl

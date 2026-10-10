@@ -18,6 +18,7 @@ import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { useAsgardeo } from "@asgardeo/react";
 import { useAuthApiClient } from "@/hooks/useAuthApiClient";
 import { ApiError } from "@utils/ApiError";
+import { CORRELATION_ID_HEADER, newCorrelationId } from "@utils/correlationId";
 import { useLogger } from "@hooks/useLogger";
 import { ApiQueryKeys } from "@constants/apiConstants";
 import type { ChangeRequestDetails } from "@features/operations/types/changeRequests";
@@ -49,8 +50,10 @@ export default function useGetChangeRequestDetails(
         }
 
         const requestUrl = `${baseUrl}/change-requests/${encodeURIComponent(changeRequestId)}`;
+        const correlationId = newCorrelationId();
         const response = await authFetch(requestUrl, {
           method: "GET",
+          headers: { [CORRELATION_ID_HEADER]: correlationId },
         });
 
         if (!response.ok) {
@@ -67,6 +70,7 @@ export default function useGetChangeRequestDetails(
             response.status,
             response.statusText,
             apiMessage ?? `Error fetching change request details: ${response.statusText}`,
+            response.headers.get(CORRELATION_ID_HEADER) ?? correlationId,
           );
         }
 

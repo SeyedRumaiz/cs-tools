@@ -1,0 +1,93 @@
+/* Copyright (c) 2024, WSO2 LLC. (https://www.wso2.com). All Rights Reserved.
+
+This software is the property of WSO2 LLC. and its suppliers, if any.
+Dissemination of any information or reproduction of any material contained
+herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+You may not alter or remove any copyright or other notice from copies of this content. */
+
+ .sla-header {
+   text-align: center;
+   margin-bottom: 20px;
+ }
+ 
+ .sla-header-title {
+   width: 60%;
+   background-color: #007bff;
+   color: #fff;
+   padding: 10px 0;
+   margin: auto !important;
+   border-radius: 10px;
+ }
+ 
+ .table-container {
+   margin-top: 40px;
+   margin-bottom: 20px;
+ }
+ 
+ .case-table {
+   width: 100%;
+ }
+
+ .table-header th {
+   color: #fff !important;
+   background-color: #007bff;
+   font-size: 1em !important;
+   font-weight: bold !important;
+ }
+
+ .table-body tr {
+   line-height: 330px;
+ }
+ 
+ table {
+   margin-top: 15px;
+ }
+
+ .subheading {
+   margin-bottom: 10px;
+   font-weight: bold !important;
+ }
+ 
+ .table-info {
+   width: 50% !important;
+   margin: auto;
+   margin-bottom: 60px;
+   margin-top: 40px;
+ } 
+
+ .blur {
+   filter: blur(5px);
+   pointer-events: none; 
+}
+
+.centered-form {
+   position: fixed;
+   top: 50%;
+   left: 50%;
+   transform: translate(-50%, -50%);
+   z-index: 1000;
+   background-color: white;
+   padding: 20px;
+   border-radius: 10px;
+   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* This is the search-form overlay shown BEFORE a report is generated — app
+   chrome, not the printable report itself (that's wrapped in its own fixed-
+   light reportPaperTheme, see SplSlaReportPage.tsx), so it should follow the
+   app's live theme. Plain CSS has no theme access, so this hooks the same
+   data-color-scheme attribute oxygen-ui's own toggle sets on <html>. */
+[data-color-scheme="dark"] .centered-form {
+   background-color: #1e1e1e;
+}
+
+.backdrop {
+   position: fixed;
+   top: 0;
+   left: 0;
+   width: 100%;
+   height: 100%;
+   background: rgba(0, 0, 0, 0.5);
+   z-index: 999; 
+}
+

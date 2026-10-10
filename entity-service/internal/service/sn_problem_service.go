@@ -288,6 +288,7 @@ type snProblemDetailResponse struct {
 	ID                  string               `json:"id"`
 	Number              string               `json:"number"`
 	Subject             string               `json:"subject"`
+	Description         *string              `json:"description"`
 	State               *string              `json:"state"`
 	Priority            *string              `json:"priority"`
 	Category            *string              `json:"category"`
@@ -331,6 +332,7 @@ func (s *snProblemService) GetProblem(ctx context.Context, id string) (domain.Pr
 // snCreateProblemPayload is the Choreo POST /problems request body.
 type snCreateProblemPayload struct {
 	Subject           string  `json:"subject"`
+	Description       *string `json:"description,omitempty"`
 	Category          *string `json:"category,omitempty"`
 	Subcategory       *string `json:"subcategory,omitempty"`
 	OriginCaseID      *string `json:"originCaseId,omitempty"`
@@ -338,6 +340,11 @@ type snCreateProblemPayload struct {
 }
 
 // CreateProblem implements ProblemService for the ServiceNow data source.
+//
+// req.Description is forwarded to ServiceNow as-is via snCreateProblemPayload.Description:
+// the Choreo integration's POST /problems contract now accepts an optional description
+// field, and the underlying ServiceNow scripted API persists it, so no transform or
+// validation beyond what CreateProblemRequest already does is needed here.
 func (s *snProblemService) CreateProblem(ctx context.Context, req domain.CreateProblemRequest) (domain.ProblemDetail, error) {
 	token := middleware.UserIDTokenFromContext(ctx)
 
@@ -360,6 +367,7 @@ func (s *snProblemService) CreateProblem(ctx context.Context, req domain.CreateP
 
 	payload := snCreateProblemPayload{
 		Subject:     req.Subject,
+		Description: req.Description,
 		Category:    req.Category,
 		Subcategory: req.Subcategory,
 	}
@@ -401,6 +409,7 @@ func mapSNProblemDetailToView(p snProblemDetailResponse) domain.ProblemDetail {
 		ID:             &problemID,
 		Number:         &number,
 		Subject:        &subject,
+		Description:    p.Description,
 		State:          p.State,
 		Priority:       p.Priority,
 		Category:       p.Category,

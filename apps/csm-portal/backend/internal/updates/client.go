@@ -119,3 +119,11 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, query
 
 	return respBody, nil
 }
+
+// Health calls the updates service's own health-check endpoint and returns an
+// error unless it answers 200. Used by the portal's aggregating dependency
+// health check, never on the request path.
+func (c *Client) Health(ctx context.Context) error {
+	_, err := c.do(ctx, http.MethodGet, "/updates/health-check", nil, nil)
+	return err
+}

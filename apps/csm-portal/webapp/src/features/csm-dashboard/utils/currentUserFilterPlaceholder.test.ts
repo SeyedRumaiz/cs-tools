@@ -157,6 +157,39 @@ describe("resolveCurrentUserPlaceholder", () => {
   });
 });
 
+describe("mixed arrays (field predicates alongside another entry shape)", () => {
+  const mixed = {
+    filters: [
+      { field: "assignedUserId", op: "in", values: [CURRENT_USER_PLACEHOLDER] },
+      { preset: "activeCaseStates" },
+    ],
+  };
+
+  it("substitutes the placeholder in the predicates and leaves the other entries untouched", () => {
+    expect(resolveCurrentUserPlaceholder(mixed, CURRENT_USER_ID)).toEqual({
+      filters: [
+        { field: "assignedUserId", op: "in", values: [CURRENT_USER_ID] },
+        { preset: "activeCaseStates" },
+      ],
+    });
+  });
+
+  it("still fails closed when no user id is available", () => {
+    expect(resolveCurrentUserPlaceholder(mixed, undefined)).toBe(mixed);
+  });
+
+  it("is detected by hasCurrentUserPlaceholder until substituted", () => {
+    expect(hasCurrentUserPlaceholder(mixed)).toBe(true);
+    expect(hasCurrentUserPlaceholder(resolveCurrentUserPlaceholder(mixed, CURRENT_USER_ID))).toBe(
+      false,
+    );
+  });
+
+  it("does not report a placeholder when only the non-predicate entries are present", () => {
+    expect(hasCurrentUserPlaceholder({ filters: [{ preset: "activeCaseStates" }] })).toBe(false);
+  });
+});
+
 describe("hasCurrentUserPlaceholder", () => {
   it("detects the placeholder in the case-search DSL shape", () => {
     expect(

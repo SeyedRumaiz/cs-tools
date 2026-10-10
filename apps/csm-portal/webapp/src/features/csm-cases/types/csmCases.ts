@@ -58,6 +58,11 @@ export interface CsmCaseRow {
   /** Affected WSO2 product (e.g. "WSO2 Identity Server"). Used for list filtering. */
   product: string;
   /**
+   * Catalogue name (`deployedProduct.product.name`), without the version the
+   * display label appends. The GitHub repo lookup prefers this.
+   */
+  productCatalogueName?: string;
+  /**
    * `"unset"` when the source has no severity value at all (empty/missing),
    * or the value doesn't match anything `severityFromBe` recognizes — a
    * distinct fact from "the severity really is S3/Medium", never collapsed
@@ -140,9 +145,9 @@ export interface CaseEscalationRecord {
   reason?: string | null;
 }
 
-/** A user notified about the case's current escalation level -- the people
- * authorized to de-escalate it. `id` can be empty when the backing data
- * source couldn't resolve a platform user record; match by `email` then. */
+/** A user on a case's escalation (notified, or one of its ABT team leads).
+ * `id` can be empty when the backing data source couldn't resolve a platform
+ * user record; match by `email` then. */
 export interface CaseEscalationNotifiedUser {
   id?: string | null;
   name?: string | null;
@@ -150,10 +155,12 @@ export interface CaseEscalationNotifiedUser {
 }
 
 /** The response for `GET /cases/{id}/escalations`: the case's full escalation
- * history plus who's authorized to de-escalate its current level. */
+ * history, who was notified of its current level, and its ABT team leads --
+ * the only people authorized to de-escalate it. */
 export interface CaseEscalationHistory {
   escalations: CaseEscalationRecord[];
   currentNotifiedUsers: CaseEscalationNotifiedUser[];
+  teamLeads: CaseEscalationNotifiedUser[];
 }
 
 export interface CsmCasesListResponse {
@@ -201,6 +208,24 @@ export interface CsmCaseComment {
    * the real creator's role isn't known on the frontend, so nothing should be
    * claimed about it. */
   synthetic?: boolean;
+  /** `"markdown"` when {@link bodyHtml} is Markdown rather than rich-text
+   * HTML, so it is rendered through `markdownToHtml` like a chatbot message.
+   * Set on the synthesized description entry of a record raised from a GitHub
+   * issue, whose description is the issue body verbatim. Absent = HTML. */
+  bodyFormat?: "markdown";
+  /** True once this comment has been edited at least once. Derived from
+   * `BeComment.lastEditedOn` being present — see {@link lastEditedOn} for the
+   * actual timestamp used in the "(edited)" marker. */
+  isEdited?: boolean;
+  /** ISO timestamp of the comment's most recent edit, when {@link isEdited}
+   * is true. */
+  lastEditedOn?: string;
+  /** True once this comment has been soft-deleted (`BeComment.isDeleted`).
+   * `content`/`bodyHtml` still carries whatever the backend returned for this
+   * caller — an admin sees the real text, anyone else who can still see the
+   * row at all sees the literal "[deleted]". Render a "deleted" visual
+   * treatment on top; never redact/branch on the text client-side. */
+  isDeleted?: boolean;
 }
 
 export interface CaseAttachment {

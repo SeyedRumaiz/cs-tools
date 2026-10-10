@@ -136,3 +136,19 @@ skip gracefully when there's nothing to act on (e.g. no open case).
   each bucket right before sending. A user splitting a small amount across
   several activities may see some round down to 0h; the form shows a notice.
 - **Real login + TOTP + CI**: deferred; see the plan. This phase is local only.
+
+## Team Schedule: SME L1-L3 layers (real local stack)
+
+`specs/team-schedule/sme-tiers.spec.ts` drives the real stack: the roster's cell
+picker offers L1/L2/L3 for an SME team's Day and Night windows, and rostering an
+L1, an L2 and an L3 on one SME night clears exactly that night's three gaps on the
+Case Paging tab's SME chain (the same day's Day window keeps its gaps). It signs in
+through the local mock identity provider as the seeded `sme.rota.admin@example.com`
+and WRITES to Postgres (three fake people, `qa.sme.*@example.com`, tagged
+`qa-sme-e2e`, and their turns), removed before and after, so it is skipped unless
+the stack is named:
+
+```bash
+E2E_NO_WEBSERVER=1 E2E_POSTGRES_CONTAINER=csm-platform-postgres-1 \
+  npx playwright test tests/e2e/specs/team-schedule/sme-tiers.spec.ts
+```

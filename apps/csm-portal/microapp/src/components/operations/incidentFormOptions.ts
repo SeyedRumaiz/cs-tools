@@ -42,7 +42,12 @@ export const URGENCY_OPTIONS: Array<{ value: IncidentUrgency; label: string }> =
   { value: "LOW", label: "Low" },
 ];
 
-export const CONTACT_TYPE_OPTIONS: Array<{ value: IncidentContactType; label: string }> = [
+/**
+ * "Channel" — how the incident was reported. The values are ServiceNow's incident `contact_type`
+ * choices, which ServiceNow's own incident form also labels "Channel". Only the label is
+ * "Channel": the field is still `contactType` on the wire (IncidentCreatePayloadDto).
+ */
+export const CHANNEL_OPTIONS: Array<{ value: IncidentContactType; label: string }> = [
   { value: "SELF_SERVICE", label: "Self-service" },
   { value: "EMAIL", label: "Email" },
   { value: "WALK_IN", label: "Walk-in" },

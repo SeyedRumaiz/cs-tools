@@ -14,7 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JSX } from "react";
 import {
@@ -80,9 +80,19 @@ vi.mock("@context/error-banner/ErrorBannerContext", () => ({
   useErrorBanner: () => ({ showError: showErrorMock }),
 }));
 const CURRENT_USER_ID = "00000000-0000-0000-0000-00000000000c";
+// The signed-in user's portal roles. Defaults to a CS engineer, who can
+// do everything, so every test that isn't about role gating sees every control;
+// the role-gating describe below overrides it per test.
+const { currentUserRoles } = vi.hoisted(() => ({
+  currentUserRoles: { value: ["cs_engineer"] as string[] },
+}));
 vi.mock("@context/current-user/CurrentUserContext", () => ({
   useCurrentUser: () => ({
-    user: { id: CURRENT_USER_ID, email: "jane.doe@example.com" },
+    user: {
+      id: CURRENT_USER_ID,
+      email: "jane.doe@example.com",
+      roles: currentUserRoles.value,
+    },
     isLoading: false,
     isError: false,
     error: null,
@@ -201,10 +211,19 @@ vi.mock("@features/csm-cases/api/useFindMyOngoingCases", () => ({
   useFindMyOngoingCases: () => vi.fn(),
 }));
 const useGetCsmCaseCommentsMock = vi.fn();
+// Defaults to a resolved promise so every pre-existing call site (the
+// comment composer) keeps working unchanged; the Set-fix-ETA share tests
+// override this per test to control success/rejection.
+const postCommentMutateAsyncMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@features/csm-cases/api/useCsmCaseComments", () => ({
   useGetCsmCaseComments: (id: string | undefined) =>
     useGetCsmCaseCommentsMock(id),
-  usePostCsmCaseComment: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  usePostCsmCaseComment: () => ({
+    mutateAsync: postCommentMutateAsyncMock,
+    isPending: false,
+  }),
+  usePatchComment: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDeleteComment: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 function defaultCommentsImpl(): unknown {
   return {
@@ -329,7 +348,7 @@ vi.mock("@features/csm-cases/api/useCsmCaseGithubIssue", () => ({
 }));
 vi.mock("@features/csm-cases/api/useGetCsmCaseEscalations", () => ({
   useGetCsmCaseEscalations: () => ({
-    data: { escalations: [], currentNotifiedUsers: [] },
+    data: { escalations: [], currentNotifiedUsers: [], teamLeads: [] },
     isLoading: false,
     isError: false,
   }),
@@ -365,8 +384,24 @@ vi.mock("@features/csm-timecards/api/useTimeCards", () => ({
 }));
 
 // Simple presentational stubs — none of this test's assertions touch these.
+// Probe, not `null`: the role-based-controls tests below need to see which
+// lock props the page hands the composer (a work-note-only caller gets the
+// public-reply lock and no attachments). The composer's own behaviour is
+// covered in CsmCaseCommentInput.test.tsx.
 vi.mock("@features/csm-cases/components/CsmCaseCommentInput", () => ({
-  default: () => null,
+  default: ({
+    publicCommentDisabledReason,
+    attachmentsDisabled,
+  }: {
+    publicCommentDisabledReason?: string | null;
+    attachmentsDisabled?: boolean;
+  }) => (
+    <div
+      data-testid="comment-input-probe"
+      data-public-reason={publicCommentDisabledReason ?? ""}
+      data-attachments-disabled={String(!!attachmentsDisabled)}
+    />
+  ),
 }));
 // Probe, not `null`: the change_case_type and request_update tests below
 // need a way to open their dialogs the same way a real user would (via the
@@ -477,6 +512,32 @@ vi.mock("@features/csm-cases/components/SetFixEtaDialog", () => ({
       >
         stub save fix eta
       </button>
+      <button
+        type="button"
+        onClick={() =>
+          onSave({
+            bestCaseFixEta: "2099-06-16",
+            addPublicComment: true,
+            product: "WSO2 API Manager",
+            publicTicket: "https://github.com/example/example/issues/1",
+          })
+        }
+      >
+        stub save fix eta with share
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          onSave({
+            bestCaseFixEta: "2099-06-16",
+            addPublicComment: true,
+            product: '<img src=x onerror=alert(1)>',
+            publicTicket: "Tom & Jerry's <ticket>",
+          })
+        }
+      >
+        stub save fix eta with share (html input)
+      </button>
     </div>
   ),
 }));
@@ -499,11 +560,21 @@ vi.mock("@features/csm-cases/components/RequestUpdateDialog", () => ({
 vi.mock("@features/csm-cases/components/ChildCasesWidget", () => ({
   ChildCasesWidget: () => null,
 }));
+// Probe, not `null`: the viewer-role tests assert it isn't rendered for a role
+// that can't use Operations (its incident search would 403).
 vi.mock("@features/csm-cases/components/LinkedIncidentsListWidget", () => ({
-  LinkedIncidentsListWidget: () => null,
+  LinkedIncidentsListWidget: () => <div data-testid="linked-incidents-list-probe" />,
 }));
 vi.mock("@features/csm-cases/components/LinkedServiceRequestsWidget", () => ({
-  LinkedServiceRequestsWidget: () => null,
+  // A probe, not a stub: whether createDisabled reflects canWrite (alongside
+  // isClosed) is exactly what a CodeRabbit review caught missing once before
+  // — see "gates the service-request create control on canWrite" below.
+  LinkedServiceRequestsWidget: ({ createDisabled }: { createDisabled?: boolean }) => (
+    <div
+      data-testid="linked-service-requests-widget-probe"
+      data-create-disabled={createDisabled ? "true" : "false"}
+    />
+  ),
 }));
 vi.mock("@features/csm-cases/components/LinkedChangeRequestsWidget", () => ({
   LinkedChangeRequestsWidget: () => (
@@ -521,6 +592,8 @@ vi.mock("@features/csm-cases/components/CreateGithubIssueDialog", () => ({
 vi.mock("@features/csm-cases/components/CaseActivitiesFeed", () => ({
   default: ({
     comments,
+    onEditComment,
+    onDeleteComment,
   }: {
     comments: Array<{
       id: string;
@@ -529,8 +602,14 @@ vi.mock("@features/csm-cases/components/CaseActivitiesFeed", () => ({
       bodyHtml: string;
       synthetic?: boolean;
     }>;
+    onEditComment?: unknown;
+    onDeleteComment?: unknown;
   }) => (
-    <div data-testid="case-activities-feed-probe">
+    <div
+      data-testid="case-activities-feed-probe"
+      data-can-edit={String(!!onEditComment)}
+      data-can-delete={String(!!onDeleteComment)}
+    >
       {comments.map((c) => (
         <div key={c.id} data-testid={`comment-${c.id}`}>
           <span>{c.authorName}</span>
@@ -596,8 +675,12 @@ vi.mock("@features/csm-cases/components/CaseDetailWidgets", () => ({
     </div>
   ),
 }));
+// Probe: the viewer-role tests assert the page hands it `readOnly` when the
+// caller can't write (the backend 403s a call-request create/update).
 vi.mock("@features/csm-cases/components/CallRequestsWidget", () => ({
-  CallRequestsWidget: () => null,
+  CallRequestsWidget: ({ readOnly }: { readOnly?: boolean }) => (
+    <div data-testid="call-requests-widget-probe" data-read-only={String(!!readOnly)} />
+  ),
 }));
 vi.mock("@features/csm-cases/components/TasksWidget", () => ({
   TasksWidget: () => null,
@@ -1092,6 +1175,148 @@ describe("CsmCaseDetailPage — onboarding chip", () => {
   });
 });
 
+describe("CsmCaseDetailPage — auto-closure hold chip", () => {
+  function renderWithAutoclosure(
+    autoclosureStep: string | undefined,
+    autoclosureStateTime: string | undefined,
+  ): void {
+    useGetCsmCaseDetailMock.mockImplementation((id: string | undefined) => ({
+      ...(defaultCaseDetailImpl(id) as object),
+      data: id
+        ? { ...buildCase(id), autoclosureStep, autoclosureStateTime }
+        : undefined,
+    }));
+    renderPage();
+  }
+
+  it("shows the hold chip with its date for a case that is on hold", () => {
+    renderWithAutoclosure("ON_HOLD", "2099-06-15T00:00:00.000Z");
+
+    // The held calendar day, not a date-time shifted into the viewer's
+    // timezone (which reads as the previous evening west of UTC).
+    expect(screen.getByText("On hold until Jun 15, 2099")).toBeInTheDocument();
+  });
+
+  it("shows no hold chip while the case is only counting down to auto-closure", () => {
+    // FIRST_COMMENT / SECOND_COMMENT are later stages of the same sequence,
+    // not a pause; their state time is when the next stage fires, so an "On
+    // hold until" chip would be wrong for the thousands of cases sitting there.
+    for (const step of ["FIRST_COMMENT", "SECOND_COMMENT", "DEFAULT"]) {
+      renderWithAutoclosure(step, "2099-06-15T00:00:00.000Z");
+      expect(screen.queryByText(/On hold until/)).not.toBeInTheDocument();
+      expect(screen.queryByText("On auto-closure hold")).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  it("shows no hold chip for a case with no auto-closure step at all", () => {
+    renderWithAutoclosure(undefined, undefined);
+
+    expect(screen.queryByText(/On hold until/)).not.toBeInTheDocument();
+  });
+});
+
+describe("CsmCaseDetailPage — managed cloud and onboarding banners", () => {
+  const MANAGED_TITLE = "This is a WSO2 Managed Cloud deployment";
+  const ONBOARDING_TITLE = "Customer onboarding in progress";
+
+  function mockProject(data: Record<string, unknown> | undefined): void {
+    useGetProjectMock.mockImplementation(() => ({
+      data,
+      isLoading: false,
+      refetch: vi.fn(),
+      isFetching: false,
+    }));
+  }
+
+  it("shows only the managed cloud banner for a managed cloud project", () => {
+    mockProject({ subscriptionType: "managed_cloud_subscription" });
+    renderPage();
+
+    expect(screen.getByText(MANAGED_TITLE)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Check with the WSO2 MS team instead/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Do not move the case to Awaiting info/)).toBeInTheDocument();
+    expect(screen.queryByText(ONBOARDING_TITLE)).not.toBeInTheDocument();
+  });
+
+  it("shows the onboarding banner with the owner's name when onboarding is in progress", () => {
+    mockProject({
+      onboardingStatus: "In-Progress",
+      onboardingOwner: { id: "user-1", name: "Jane Doe", email: "jane.doe@example.com" },
+    });
+    renderPage();
+
+    expect(screen.getByText(ONBOARDING_TITLE)).toBeInTheDocument();
+    expect(screen.getByText(/onboarding owner \(Jane Doe\)/)).toBeInTheDocument();
+    expect(screen.queryByText(MANAGED_TITLE)).not.toBeInTheDocument();
+  });
+
+  it("falls back to 'Unassigned' in the onboarding banner when no owner is set", () => {
+    mockProject({ onboardingStatus: "In-Progress", onboardingOwner: null });
+    renderPage();
+
+    expect(screen.getByText(/onboarding owner \(Unassigned\)/)).toBeInTheDocument();
+  });
+
+  it("shows both banners when the project is managed cloud and onboarding is in progress", () => {
+    mockProject({
+      subscriptionType: "managed_cloud_subscription",
+      onboardingStatus: "In-Progress",
+    });
+    renderPage();
+
+    expect(screen.getByText(MANAGED_TITLE)).toBeInTheDocument();
+    expect(screen.getByText(ONBOARDING_TITLE)).toBeInTheDocument();
+    // Routine guidance must not announce assertively to screen readers.
+    expect(screen.getByTestId("case-managed-cloud-banner")).toHaveAttribute("role", "status");
+    expect(screen.getByTestId("case-onboarding-banner")).toHaveAttribute("role", "status");
+  });
+
+  it("shows no banner for a project that is neither", () => {
+    mockProject({ subscriptionType: "subscription", onboardingStatus: undefined });
+    renderPage();
+
+    expect(screen.queryByText(MANAGED_TITLE)).not.toBeInTheDocument();
+    expect(screen.queryByText(ONBOARDING_TITLE)).not.toBeInTheDocument();
+  });
+
+  it("shows no banner while the project has not loaded", () => {
+    mockProject(undefined);
+    renderPage();
+
+    expect(screen.queryByText(MANAGED_TITLE)).not.toBeInTheDocument();
+    expect(screen.queryByText(ONBOARDING_TITLE)).not.toBeInTheDocument();
+  });
+
+  it.each(["Completed", "Not-Applicable", "Not-Started"])(
+    "shows no onboarding banner for onboarding status %s",
+    (status) => {
+      mockProject({ onboardingStatus: status });
+      renderPage();
+
+      expect(screen.queryByText(ONBOARDING_TITLE)).not.toBeInTheDocument();
+    },
+  );
+
+  it("shows no banner on an announcement even when the project qualifies for both", () => {
+    mockProject({
+      subscriptionType: "managed_cloud_subscription",
+      onboardingStatus: "In-Progress",
+    });
+    renderCaseDetailPage(
+      "/announcements/case-1",
+      "/announcements/:caseId",
+      "announcement",
+      "<p>Advisory</p>",
+    );
+
+    expect(screen.queryByText(MANAGED_TITLE)).not.toBeInTheDocument();
+    expect(screen.queryByText(ONBOARDING_TITLE)).not.toBeInTheDocument();
+  });
+});
+
 describe("CsmCaseDetailPage — time-card edit dialog reset on case change", () => {
   it("stops showing the previous case's edit dialog once the route moves to a new case", () => {
     renderPage();
@@ -1499,6 +1724,167 @@ describe("CsmCaseDetailPage — announcement comment composer", () => {
   });
 });
 
+describe("CsmCaseDetailPage — role-based controls", () => {
+  afterEach(() => {
+    currentUserRoles.value = ["cs_engineer"];
+  });
+
+  it("a CS engineer sees the action bar and the reply composer", () => {
+    renderPage();
+    expect(screen.getByRole("button", { name: /stub request info/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /compose a reply|add an internal work note/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("a CS engineer's composer is not locked to internal notes", () => {
+    renderPage();
+    fireEvent.click(
+      screen.getByRole("button", { name: /compose a reply|add an internal work note/i }),
+    );
+    const probe = screen.getByTestId("comment-input-probe");
+    expect(probe.getAttribute("data-public-reason")).not.toMatch(/only add internal work notes/i);
+    expect(probe).toHaveAttribute("data-attachments-disabled", "false");
+  });
+
+  it("a viewer is read-only: neither the action bar nor any composer", () => {
+    currentUserRoles.value = ["viewer"];
+    renderPage();
+    expect(screen.queryByRole("button", { name: /stub request info/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /compose a reply|add an internal work note/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a worknote_creator has no action bar and can only add an internal work note", () => {
+    // Includes the role set a viewer holds in practice: viewer plus a few
+    // specialised read/act roles, with worknote_creator adding the one comment.
+    for (const roles of [
+      ["worknote_creator"],
+      ["viewer", "escalator", "attachment_downloader", "usage_metrics_viewer", "timecard_approver", "worknote_creator"],
+    ]) {
+      currentUserRoles.value = roles;
+      const { unmount } = renderPage();
+      expect(screen.queryByRole("button", { name: /stub request info/i })).not.toBeInTheDocument();
+      // Never offered a customer-visible reply, only the internal note.
+      expect(screen.queryByRole("button", { name: /compose a reply/i })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /add an internal work note/i }));
+      // The composer is locked to internal notes, with no attachments.
+      const probe = screen.getByTestId("comment-input-probe");
+      expect(probe).toHaveAttribute(
+        "data-public-reason",
+        "You can only add internal work notes on this case.",
+      );
+      expect(probe).toHaveAttribute("data-attachments-disabled", "true");
+      unmount();
+    }
+  });
+
+  it("an escalator role alone does not unlock replying or changing the case", () => {
+    currentUserRoles.value = ["escalator"];
+    renderPage();
+    expect(screen.queryByRole("button", { name: /stub request info/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /compose a reply|add an internal work note/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("the Time tracking tab needs CS engineer, admin or the time-card approver role", () => {
+    for (const role of ["viewer", "escalator", "attachment_downloader"]) {
+      currentUserRoles.value = [role];
+      const { unmount } = renderPage();
+      expect(screen.queryByRole("tab", { name: /time tracking/i })).not.toBeInTheDocument();
+      unmount();
+    }
+    for (const role of ["cs_engineer", "admin", "timecard_approver"]) {
+      currentUserRoles.value = [role];
+      const { unmount } = renderPage();
+      expect(screen.getByRole("tab", { name: /time tracking/i })).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("a ?tab=time deep link falls back to Activities for a user without time-card access", () => {
+    currentUserRoles.value = ["viewer"];
+    renderPageAt("/cases/case-1?tab=time");
+    expect(screen.queryByRole("tab", { name: /time tracking/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /activities/i })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("a ?tab=time deep link stays on Time tracking for a user with time-card access", () => {
+    for (const role of ["cs_engineer", "timecard_approver"]) {
+      currentUserRoles.value = [role];
+      const { unmount } = renderPageAt("/cases/case-1?tab=time");
+      expect(screen.getByRole("tab", { name: /time tracking/i })).toHaveAttribute("aria-selected", "true");
+      unmount();
+    }
+  });
+
+  it("a viewer's own note offers no edit or delete (both are write-only on the backend)", () => {
+    for (const [role, expected] of [["viewer", "false"], ["cs_engineer", "true"]] as const) {
+      currentUserRoles.value = [role];
+      const { unmount } = renderPage();
+      const feed = screen.getByTestId("case-activities-feed-probe");
+      expect(feed).toHaveAttribute("data-can-edit", expected);
+      expect(feed).toHaveAttribute("data-can-delete", expected);
+      unmount();
+    }
+  });
+
+  it("the Call requests tab is read-only for a viewer", () => {
+    for (const [role, expected] of [["viewer", "true"], ["cs_engineer", "false"]] as const) {
+      currentUserRoles.value = [role];
+      const { unmount } = renderPage();
+      fireEvent.click(screen.getByRole("tab", { name: /call requests/i }));
+      expect(screen.getByTestId("call-requests-widget-probe")).toHaveAttribute("data-read-only", expected);
+      unmount();
+    }
+  });
+
+  it("linked incidents (an Operations read) are not requested or shown for a viewer", () => {
+    currentUserRoles.value = ["viewer"];
+    const { unmount } = renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: /linked items/i }));
+    expect(screen.queryByTestId("linked-incidents-list-probe")).not.toBeInTheDocument();
+    unmount();
+
+    currentUserRoles.value = ["cs_engineer"];
+    renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: /linked items/i }));
+    expect(screen.getByTestId("linked-incidents-list-probe")).toBeInTheDocument();
+  });
+
+  it("a user with no roles sees no controls", () => {
+    currentUserRoles.value = [];
+    renderPage();
+    expect(screen.queryByRole("button", { name: /stub request info/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /compose a reply|add an internal work note/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("gates Export as PDF on canWrite", () => {
+    currentUserRoles.value = ["cs_engineer"];
+    const { unmount } = renderPage();
+    expect(screen.getByRole("button", { name: /export as pdf/i })).toBeInTheDocument();
+    unmount();
+
+    currentUserRoles.value = ["viewer"];
+    renderPage();
+    expect(screen.queryByRole("button", { name: /export as pdf/i })).not.toBeInTheDocument();
+  });
+
+  it("gates the service-request create control on canWrite, not just isClosed", () => {
+    currentUserRoles.value = ["viewer"];
+    renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: /linked items/i }));
+    expect(screen.getByTestId("linked-service-requests-widget-probe")).toHaveAttribute(
+      "data-create-disabled",
+      "true",
+    );
+  });
+});
+
 describe("CsmCaseDetailPage — Request details card", () => {
   function mockCaseType(caseType?: string): void {
     useGetCsmCaseDetailMock.mockImplementation((id: string | undefined) => ({
@@ -1612,6 +1998,26 @@ describe("CsmCaseDetailPage — Watchers tab", () => {
     // still showing the server's list.
     expect(screen.getByTestId("watchers-widget")).toBeInTheDocument();
   });
+
+  it("replaces the user id in the backend's message with 'that user'", () => {
+    openWatchers();
+    fireEvent.click(screen.getByRole("button", { name: /stub add watcher/i }));
+
+    const handlers = patchCaseMutateMock.mock.calls.at(-1)?.[1] as {
+      onError: (err: unknown) => void;
+    };
+    handlers.onError(
+      new BackendApiError(
+        400,
+        "user 00000000-0000-0000-0000-000000000001 is not a contact on this case's project",
+      ),
+    );
+
+    expect(showErrorMock).toHaveBeenCalledWith(
+      "That user is not a contact on this case's project",
+      expect.anything(),
+    );
+  });
 });
 
 describe("CsmCaseDetailPage — change case type", () => {
@@ -1643,6 +2049,45 @@ describe("CsmCaseDetailPage — change case type", () => {
       { severity: "high" },
       expect.anything(),
     );
+  });
+});
+
+describe("CsmCaseDetailPage — change case type: a refused transfer", () => {
+  function submitTransferAndGetHandlers(): { onError: (err: unknown) => void } {
+    // This file does not clear showErrorMock between tests, so a "generic message"
+    // assertion could otherwise be satisfied by a call an earlier test made.
+    showErrorMock.mockClear();
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /stub open change case type/i }));
+    fireEvent.click(screen.getByRole("button", { name: /stub transfer to engagement/i }));
+    return patchCaseMutateMock.mock.calls.at(-1)?.[1] as { onError: (err: unknown) => void };
+  }
+
+  it("shows the backend's own reason for a 4xx", () => {
+    const handlers = submitTransferAndGetHandlers();
+    handlers.onError(new BackendApiError(409, "This case has attachments that still point at its current type."));
+
+    expect(showErrorMock).toHaveBeenCalledTimes(1);
+    expect(showErrorMock).toHaveBeenCalledWith(
+      "This case has attachments that still point at its current type.",
+      expect.anything(),
+    );
+  });
+
+  it("keeps the generic message for a server error, whose text is not for the engineer", () => {
+    const handlers = submitTransferAndGetHandlers();
+    handlers.onError(new BackendApiError(500, "pq: connection refused"));
+
+    expect(showErrorMock).toHaveBeenCalledTimes(1);
+    expect(showErrorMock).toHaveBeenCalledWith("Could not change the case type.", expect.anything());
+  });
+
+  it("keeps the generic message for an error that is not the backend's", () => {
+    const handlers = submitTransferAndGetHandlers();
+    handlers.onError(new Error("Failed to fetch"));
+
+    expect(showErrorMock).toHaveBeenCalledTimes(1);
+    expect(showErrorMock).toHaveBeenCalledWith("Could not change the case type.", expect.anything());
   });
 });
 
@@ -1852,7 +2297,7 @@ describe("CsmCaseDetailPage — set fix ETA dialog closes on successful save", (
 
     // Share-with-customer off: the payload carries estimates only, no
     // addPublicComment — exactly the reported repro path.
-    fireEvent.click(screen.getByRole("button", { name: /stub save fix eta/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^stub save fix eta$/i }));
     expect(patchCaseMutateMock).toHaveBeenCalledTimes(1);
     const [payload, mutateOptions] = patchCaseMutateMock.mock.calls[0] as [
       Record<string, unknown>,
@@ -1868,6 +2313,166 @@ describe("CsmCaseDetailPage — set fix ETA dialog closes on successful save", (
     expect(
       screen.queryByTestId("set-fix-eta-dialog-probe"),
     ).not.toBeInTheDocument();
+  });
+});
+
+// Reported live (digiops-cs#3319): "Share fix ETA with customer" is
+// ServiceNow-only, and the backend rejects the *entire* PATCH when
+// addPublicComment is present on a deployment that isn't — bundled into one
+// call, that silently blocked saving the ETA dates too, which is what "the
+// ETA is not added to the ticket" actually was. Fixed by sending the ETA and
+// the share as two separate PATCHes, so the ETA always saves on its own.
+describe("CsmCaseDetailPage — fix ETA save and share-with-customer are independent", () => {
+  beforeEach(() => {
+    patchCaseMutateMock.mockClear();
+    postCommentMutateAsyncMock.mockClear();
+    postCommentMutateAsyncMock.mockResolvedValue(undefined);
+  });
+
+  it("saves the ETA via PATCH, then shares it as a real customer-visible comment", async () => {
+    renderPage();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /stub open set fix eta/i }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /^stub save fix eta with share$/i }),
+    );
+
+    // The only PATCH is the ETA alone, no addPublicComment -- this is the
+    // call that must succeed even when sharing can't.
+    expect(patchCaseMutateMock).toHaveBeenCalledTimes(1);
+    const [etaPayload, etaOptions] = patchCaseMutateMock.mock.calls[0] as [
+      Record<string, unknown>,
+      { onSuccess: () => void },
+    ];
+    expect(etaPayload).toEqual({ bestCaseFixEta: "2099-06-16" });
+
+    await act(async () => {
+      etaOptions.onSuccess();
+      await Promise.resolve();
+    });
+
+    // The dialog closes on the ETA save alone -- it must not wait on the
+    // share, which is a separate, independent request.
+    expect(
+      screen.queryByTestId("set-fix-eta-dialog-probe"),
+    ).not.toBeInTheDocument();
+
+    // The share goes out as a real comment (POST /cases/{id}/comments via
+    // usePostCsmCaseComment), not a second, doomed PATCH.
+    expect(patchCaseMutateMock).toHaveBeenCalledTimes(1);
+    expect(postCommentMutateAsyncMock).toHaveBeenCalledTimes(1);
+    const [commentInput] = postCommentMutateAsyncMock.mock.calls[0] as [
+      { bodyHtml: string; internal: boolean },
+    ];
+    expect(commentInput.internal).toBe(false);
+    expect(commentInput.bodyHtml).toContain("Product: WSO2 API Manager");
+    expect(commentInput.bodyHtml).toContain(
+      "Public git issue: https://github.com/example/example/issues/1",
+    );
+    expect(commentInput.bodyHtml).toContain("Best Case Estimate: 2099-06-16");
+  });
+
+  it("keeps the ETA saved even when the share comment post is rejected", async () => {
+    const shareError = new Error("network error");
+    postCommentMutateAsyncMock.mockRejectedValueOnce(shareError);
+    renderPage();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /stub open set fix eta/i }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /^stub save fix eta with share$/i }),
+    );
+
+    const [, etaOptions] = patchCaseMutateMock.mock.calls[0] as [
+      unknown,
+      { onSuccess: () => void },
+    ];
+
+    // The ETA's own success toast already fired; the dialog is already
+    // closed. The share comment post failing next must surface its own
+    // error, not reopen the dialog or undo the ETA save.
+    await act(async () => {
+      etaOptions.onSuccess();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.queryByTestId("set-fix-eta-dialog-probe"),
+    ).not.toBeInTheDocument();
+    // The share failure must be reported on its own, distinct from the
+    // already-succeeded ETA save — a future change that silently swallows it
+    // would leave the engineer with no idea the customer was never told.
+    expect(showErrorMock).toHaveBeenCalledWith(
+      "Fix ETA saved, but could not share it with the customer.",
+      shareError,
+    );
+  });
+
+  it("never posts a share comment when share-with-customer is off", async () => {
+    renderPage();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /stub open set fix eta/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^stub save fix eta$/i }));
+
+    // Only the plain ETA call -- no share comment follows a save that never
+    // asked to share.
+    expect(patchCaseMutateMock).toHaveBeenCalledTimes(1);
+    const [, etaOptions] = patchCaseMutateMock.mock.calls[0] as [
+      unknown,
+      { onSuccess: () => void },
+    ];
+    await act(async () => {
+      etaOptions.onSuccess();
+      await Promise.resolve();
+    });
+    expect(patchCaseMutateMock).toHaveBeenCalledTimes(1);
+    expect(postCommentMutateAsyncMock).not.toHaveBeenCalled();
+  });
+
+  // CodeRabbit catch: product/publicTicket are free-text form input that
+  // ends up in a customer-visible comment -- unescaped, a value containing
+  // HTML would be stored as live markup rather than literal text.
+  it("escapes HTML-significant characters in product/publicTicket before posting the share comment", async () => {
+    renderPage();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /stub open set fix eta/i }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /stub save fix eta with share \(html input\)/i,
+      }),
+    );
+
+    const [, etaOptions] = patchCaseMutateMock.mock.calls[0] as [
+      unknown,
+      { onSuccess: () => void },
+    ];
+    await act(async () => {
+      etaOptions.onSuccess();
+      await Promise.resolve();
+    });
+
+    expect(postCommentMutateAsyncMock).toHaveBeenCalledTimes(1);
+    const [commentInput] = postCommentMutateAsyncMock.mock.calls[0] as [
+      { bodyHtml: string },
+    ];
+    // Neither raw input survives as live markup...
+    expect(commentInput.bodyHtml).not.toContain("<img src=x onerror=alert(1)>");
+    expect(commentInput.bodyHtml).not.toContain("Tom & Jerry's <ticket>");
+    // ...it's escaped instead.
+    expect(commentInput.bodyHtml).toContain(
+      "Product: &lt;img src=x onerror=alert(1)&gt;",
+    );
+    expect(commentInput.bodyHtml).toContain(
+      "Public git issue: Tom &amp; Jerry&#039;s &lt;ticket&gt;",
+    );
   });
 });
 
@@ -1898,7 +2503,7 @@ describe("CsmCaseDetailPage — fix-ETA stale-callback guard", () => {
     fireEvent.click(
       screen.getByRole("button", { name: /stub open set fix eta/i }),
     );
-    fireEvent.click(screen.getByRole("button", { name: /stub save fix eta/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^stub save fix eta$/i }));
     expect(patchCaseMutateMock).toHaveBeenCalledTimes(1);
     const [, case1Options] = patchCaseMutateMock.mock.calls[0] as [
       unknown,
@@ -1927,5 +2532,65 @@ describe("CsmCaseDetailPage — fix-ETA stale-callback guard", () => {
     ).toBeInTheDocument();
     // …and case-1's toast must not surface on case-2 either.
     expect(screen.queryByText(/fix eta updated/i)).not.toBeInTheDocument();
+  });
+
+  // The share PATCH is a real side effect the engineer asked for -- it must
+  // still fire even once the view has gone stale, unlike the UI feedback
+  // above. A stale view should only suppress a *display* consequence
+  // (closing the dialog, a toast), never skip a request the engineer
+  // actually requested.
+  it("still posts the share comment for a stale ETA save, even though the view moved on", async () => {
+    patchCaseMutateMock.mockClear();
+    postCommentMutateAsyncMock.mockClear();
+    postCommentMutateAsyncMock.mockResolvedValue(undefined);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/cases/case-1"]}>
+          <NavigateBetweenCasesButtons />
+          <LocationProbe />
+          <Routes>
+            <Route path="/cases/:caseId" element={<CsmCaseDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    // Case-1: open the dialog and save with sharing on. The ETA PATCH is
+    // still in flight.
+    fireEvent.click(
+      screen.getByRole("button", { name: /stub open set fix eta/i }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /^stub save fix eta with share$/i }),
+    );
+    expect(patchCaseMutateMock).toHaveBeenCalledTimes(1);
+    const [, case1EtaOptions] = patchCaseMutateMock.mock.calls[0] as [
+      unknown,
+      { onSuccess: () => void },
+    ];
+
+    // Move to case-2 before case-1's ETA save resolves.
+    fireEvent.click(screen.getByRole("button", { name: /go to case 2/i }));
+    expect(screen.getByTestId("location-probe")).toHaveTextContent(
+      "/cases/case-2",
+    );
+
+    // Case-1's ETA save resolves now, with case-2 on screen -- a stale view.
+    await act(async () => {
+      case1EtaOptions.onSuccess();
+      await Promise.resolve();
+    });
+
+    // The stale view must not get case-1's own UI feedback...
+    expect(screen.queryByText(/fix eta updated/i)).not.toBeInTheDocument();
+    // ...but the share comment it requested must still have been posted.
+    expect(postCommentMutateAsyncMock).toHaveBeenCalledTimes(1);
+    const [commentInput] = postCommentMutateAsyncMock.mock.calls[0] as [
+      { internal: boolean },
+    ];
+    expect(commentInput.internal).toBe(false);
   });
 });

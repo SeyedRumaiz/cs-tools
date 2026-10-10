@@ -40,7 +40,7 @@ func TestCreateCommentReferenceTypes(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"message":"created","comment":{"id":"abc","createdOn":"2026-08-01 10:00:00","createdBy":"jane.doe@example.com"}}`))
 		}))
-		return NewServiceNowCommentService(client)
+		return NewServiceNowCommentService(client, nil)
 	}
 
 	req := func(refType domain.ReferenceType) domain.CreateCommentRequest {
@@ -93,6 +93,42 @@ func TestCreateCommentReferenceTypes(t *testing.T) {
 			if resp.Message != "created" {
 				t.Errorf("referenceType %q: got message %q, want %q", refType, resp.Message, "created")
 			}
+		}
+	})
+}
+
+// TestSNCommentSearchService_EditDeleteUnsupported covers the ServiceNow data
+// source's CommentService interface-satisfaction stub: comment edit/delete is
+// a net-new Postgres-only capability (ServiceNow's own sys_journal_field is
+// append-only), so every method must reject explicitly with a
+// ServiceUnavailableError rather than silently succeeding or panicking. None
+// of these methods touch the injected client or the event publisher, so nil
+// is fine for both here.
+func TestSNCommentSearchService_EditDeleteUnsupported(t *testing.T) {
+	svc := NewServiceNowCommentService(nil, nil)
+	ctx := context.Background()
+
+	t.Run("UpdateComment", func(t *testing.T) {
+		_, err := svc.UpdateComment(ctx, domain.UpdateCommentRequest{ID: testUUID, Content: "x"})
+		var sue *apierror.ServiceUnavailableError
+		if !errors.As(err, &sue) {
+			t.Fatalf("expected ServiceUnavailableError, got %v (%T)", err, err)
+		}
+	})
+
+	t.Run("DeleteComment", func(t *testing.T) {
+		err := svc.DeleteComment(ctx, testUUID)
+		var sue *apierror.ServiceUnavailableError
+		if !errors.As(err, &sue) {
+			t.Fatalf("expected ServiceUnavailableError, got %v (%T)", err, err)
+		}
+	})
+
+	t.Run("GetCommentEditHistory", func(t *testing.T) {
+		_, err := svc.GetCommentEditHistory(ctx, testUUID)
+		var sue *apierror.ServiceUnavailableError
+		if !errors.As(err, &sue) {
+			t.Fatalf("expected ServiceUnavailableError, got %v (%T)", err, err)
 		}
 	})
 }

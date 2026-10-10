@@ -105,7 +105,7 @@ func TestDoSuccess(t *testing.T) {
 // TestDoUpstreamError verifies a non-2xx upstream response is converted to an
 // *apierror.Error carrying the status code and a truncated body excerpt.
 func TestDoUpstreamError(t *testing.T) {
-	longBody := make([]byte, 512)
+	longBody := make([]byte, 8192)
 	for i := range longBody {
 		longBody[i] = 'x'
 	}
@@ -135,7 +135,7 @@ func TestDoUpstreamError(t *testing.T) {
 	if apiErr.StatusCode != http.StatusNotFound {
 		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusNotFound)
 	}
-	const maxErrBody = 256
+	const maxErrBody = 4096
 	if len(apiErr.Body) != maxErrBody {
 		t.Errorf("Body length = %d, want truncated to %d", len(apiErr.Body), maxErrBody)
 	}

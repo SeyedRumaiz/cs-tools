@@ -661,6 +661,16 @@ const Editor = ({
             "& .editor-text-strikethrough": {
               textDecoration: "line-through",
             },
+            // Mirrors the read-view "& code" rule (CsmCaseCommentBubble.tsx)
+            // so inline code looks the same while composing as it will once
+            // posted.
+            "& .editor-text-code": {
+              bgcolor: "background.default",
+              px: 0.5,
+              borderRadius: 0.5,
+              fontFamily: "monospace",
+              fontSize: "0.85em",
+            },
             "& .editor-list-ul": { ml: 3, listStyleType: "disc" },
             "& .editor-list-ol": { ml: 3, listStyleType: "decimal" },
             "& .editor-list-item-nested": { listStyleType: "none" },

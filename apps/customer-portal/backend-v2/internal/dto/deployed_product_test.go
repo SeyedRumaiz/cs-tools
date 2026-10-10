@@ -18,6 +18,7 @@ package dto
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -106,6 +107,54 @@ func TestBuildEntitySearchDeployedProductsRequest(t *testing.T) {
 		deps, ok := raw["deploymentIds"].([]any)
 		if !ok || len(deps) != 1 || deps[0] != expectedDashedID {
 			t.Errorf("expected root deploymentIds to contain %s, got: %v", expectedDashedID, raw["deploymentIds"])
+		}
+	})
+
+	t.Run("forwards filters.productCategories unchanged at the root", func(t *testing.T) {
+		req := DeployedProductSearchRequest{
+			Pagination: entity.Pagination{Limit: 10, Offset: 0},
+			Filters: &DeployedProductSearchFilters{
+				ProductCategories: []string{"ms", "pc"},
+			},
+		}
+		got := BuildEntitySearchDeployedProductsRequest("4e8431b11b8c03100bb3da47b04bcba6", req)
+
+		if want := []string{"ms", "pc"}; !reflect.DeepEqual(got.ProductCategories, want) {
+			t.Errorf("ProductCategories = %v, want %v", got.ProductCategories, want)
+		}
+		if len(got.DeploymentIDs) != 1 || got.DeploymentIDs[0] != "4e8431b1-1b8c-0310-0bb3-da47b04bcba6" {
+			t.Errorf("DeploymentIDs = %v, want the path id normalized to dashed form", got.DeploymentIDs)
+		}
+
+		data, err := json.Marshal(got)
+		if err != nil {
+			t.Fatalf("json.Marshal failed: %v", err)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		cats, ok := raw["productCategories"].([]any)
+		if !ok || len(cats) != 2 || cats[0] != "ms" || cats[1] != "pc" {
+			t.Errorf("serialized productCategories = %v, want [ms pc]", raw["productCategories"])
+		}
+	})
+
+	t.Run("nil filters and empty filters yield no categories", func(t *testing.T) {
+		for name, f := range map[string]*DeployedProductSearchFilters{
+			"nil":   nil,
+			"empty": {},
+		} {
+			got := BuildEntitySearchDeployedProductsRequest("4e8431b1-1b8c-0310-0bb3-da47b04bcba6", DeployedProductSearchRequest{Filters: f})
+			if len(got.ProductCategories) != 0 {
+				t.Errorf("%s filters: ProductCategories = %v, want none", name, got.ProductCategories)
+			}
+			data, _ := json.Marshal(got)
+			var raw map[string]any
+			_ = json.Unmarshal(data, &raw)
+			if _, has := raw["productCategories"]; has {
+				t.Errorf("%s filters: productCategories serialized, want omitted: %s", name, data)
+			}
 		}
 	})
 

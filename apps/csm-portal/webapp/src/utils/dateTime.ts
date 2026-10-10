@@ -272,6 +272,39 @@ export function zonedInputToUtcIso(
 }
 
 /**
+ * Serialises a `<input type="datetime-local">` / picker wall-clock value
+ * ("YYYY-MM-DDTHH:mm", entered in the resolved user timezone) to the backend's
+ * `YYYY-MM-DD HH:mm:ss` wire format, expressed in UTC. The backend stores and
+ * returns these fields as UTC and {@link normalizeBackendTimestamp} reads an
+ * unzoned value as UTC, so sending the raw wall-clock digits (as several forms
+ * did) shifted every value by the user's UTC offset.
+ *
+ * @param localValue - datetime-local value in the user's timezone.
+ * @param explicitTimeZone - Optional timezone override.
+ * @returns {string | null} "YYYY-MM-DD HH:mm:ss" in UTC, or null when unparseable.
+ */
+export function zonedInputToBackendUtc(
+  localValue: string,
+  explicitTimeZone?: string,
+): string | null {
+  const iso = zonedInputToUtcIso(localValue, explicitTimeZone);
+  return iso ? `${iso.slice(0, 10)} ${iso.slice(11, 19)}` : null;
+}
+
+/**
+ * Inverse of {@link zonedInputToBackendUtc}: a backend (UTC) timestamp as the
+ * "YYYY-MM-DDTHH:mm" wall-clock value in the resolved user timezone, for
+ * seeding an edit form's picker. Returns "" when the input is empty/unparseable.
+ */
+export function backendUtcToZonedInput(
+  rawTimestamp: string | null | undefined,
+  explicitTimeZone?: string,
+): string {
+  const date = parseBackendTimestamp(rawTimestamp);
+  return date ? utcMsToZonedInputValue(date.getTime(), explicitTimeZone) : "";
+}
+
+/**
  * Formats a UTC instant as a `<input type="datetime-local">` wall-clock value
  * ("YYYY-MM-DDTHH:mm") in the resolved user timezone. Inverse of
  * {@link zonedInputToUtcIso}; used for the input's `min` attribute.
@@ -327,6 +360,41 @@ export function formatAbsoluteForUser(
   } catch {
     return null;
   }
+}
+
+/**
+ * The UTC calendar day of a backend timestamp as "YYYY-MM-DD", for a field
+ * that is a calendar date with no time of day (the auto-closure hold: the
+ * backing system stores the picked day as that day at 00:00 UTC). Reading it
+ * in the viewer's timezone instead would show the previous day to anyone west
+ * of UTC.
+ *
+ * Returns `null` when the input is empty or unparseable.
+ */
+export function utcDateOnlyValue(
+  rawTimestamp: string | null | undefined,
+): string | null {
+  const date = parseBackendTimestamp(rawTimestamp);
+  return date ? date.toISOString().slice(0, 10) : null;
+}
+
+/**
+ * {@link utcDateOnlyValue} formatted for display, e.g. "Oct 22, 2026". Always
+ * the UTC calendar day, never shifted into the viewer's timezone.
+ *
+ * Returns `null` when the input is empty or unparseable.
+ */
+export function formatUtcDateForDisplay(
+  rawTimestamp: string | null | undefined,
+): string | null {
+  const date = parseBackendTimestamp(rawTimestamp);
+  if (!date) return null;
+  return new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(date);
 }
 
 /**
@@ -470,6 +538,27 @@ export function formatDateTimeLocal(date: Date): string {
  */
 export function isPastDateTime(date: Date | null): boolean {
   return !!date && !Number.isNaN(date.getTime()) && date.getTime() < Date.now();
+}
+
+/**
+ * True when a picker wall-clock value ("YYYY-MM-DDTHH:mm", entered in the
+ * resolved user timezone) is an instant strictly before now. Unlike
+ * `isPastDateTime(parseDateTimeLocal(value))`, which reads the digits in the
+ * BROWSER timezone, this converts through {@link zonedInputToUtcIso} so the
+ * check agrees with what is actually submitted whenever the profile timezone
+ * differs from the browser's. Empty/unparseable values are never flagged.
+ *
+ * @param localValue - Picker value in the user's timezone.
+ * @param explicitTimeZone - Optional timezone override.
+ * @returns {boolean} True when the value denotes an instant before now.
+ */
+export function isPastZonedInput(
+  localValue: string,
+  explicitTimeZone?: string,
+): boolean {
+  if (!localValue) return false;
+  const iso = zonedInputToUtcIso(localValue, explicitTimeZone);
+  return isPastDateTime(iso ? new Date(iso) : null);
 }
 
 /**

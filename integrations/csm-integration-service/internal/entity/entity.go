@@ -97,54 +97,72 @@ func (c *Client) PatchCase(ctx context.Context, id string, body []byte) ([]byte,
 	return c.do(ctx, http.MethodPatch, fmt.Sprintf("/cases/%s", url.PathEscape(id)), body)
 }
 
+// SearchCases calls POST /cases/search on the entity service, mirroring
+// SearchAccounts's shape. A generic passthrough — callers build whatever
+// filter/pagination shape they need (e.g. an exact-match filter on "number"
+// to resolve a case number to this platform's own case UUID, never a
+// ServiceNow sys_id, which the entity service's case model never exposes).
+// Postgres-backed; a pure M2M call succeeds here, no forwarded identity
+// required. Response is returned as raw JSON; typed response structs are
+// deferred.
+func (c *Client) SearchCases(ctx context.Context, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, "/cases/search", body)
+}
+
+// AddCaseTag calls POST /cases/{id}/tags on the entity service. Postgres-backed;
+// unlike PatchCase's general field set, tagging supports an M2M caller
+// supplying an actorEmail in the request body when no end-user identity token
+// is forwarded, provided that email is on entity-service's configured
+// M2M_TRUSTED_ACTOR_EMAILS allowlist (otherwise entity-service returns 403).
+// This client method forwards the body verbatim; the caller is responsible
+// for populating actorEmail. Response is returned as raw JSON; typed response
+// structs are deferred.
+func (c *Client) AddCaseTag(ctx context.Context, caseID string, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/cases/%s/tags", url.PathEscape(caseID)), body)
+}
+
 // CreateCaseComment calls POST /cases/{id}/comments on the entity service.
-// Unlike PatchCase, this entity-service operation requires a forwarded
-// end-user identity token unconditionally, on both data sources (the comment's
-// author is resolved from that token). This service is strictly M2M with no
-// mechanism to carry one, so this call is expected to always receive a mapped
-// 401 — kept for API-shape completeness, not because it currently succeeds.
-// Response is returned as raw JSON; typed response structs are deferred.
+// Mirrors AddCaseTag: on DATA_SOURCE=postgres, entity-service supports an
+// M2M caller supplying an actorEmail in the request body when no end-user
+// identity token is forwarded, provided that email is on entity-service's
+// configured M2M_TRUSTED_ACTOR_EMAILS allowlist (otherwise entity-service
+// returns 403). On DATA_SOURCE=servicenow, entity-service's ServiceNow path
+// still requires a forwarded end-user identity token unconditionally and
+// ignores actorEmail, so this service (strictly M2M, no mechanism to carry
+// one) still gets a mapped 401 there. This client method forwards the body
+// verbatim; the caller is responsible for populating actorEmail. Response is
+// returned as raw JSON; typed response structs are deferred.
 func (c *Client) CreateCaseComment(ctx context.Context, caseID string, body []byte) ([]byte, error) {
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/cases/%s/comments", url.PathEscape(caseID)), body)
 }
 
 // SearchOpportunities calls POST /opportunities/search on the entity service.
-// ServiceNow data source only; a pure M2M call succeeds here, unlike UpdateProject —
-// this operation does not require a forwarded end-user identity token. Response is
-// returned as raw JSON; typed response structs are deferred.
+// M2M-safe on both data sources (Postgres reads sf_opportunity). Raw JSON passthrough.
 func (c *Client) SearchOpportunities(ctx context.Context, body []byte) ([]byte, error) {
 	return c.do(ctx, http.MethodPost, "/opportunities/search", body)
 }
 
 // GetOpportunity calls GET /opportunities/{id} on the entity service.
-// ServiceNow data source only; a pure M2M call succeeds here (read-only, no
-// forwarded identity required). Response is returned as raw JSON; typed response
-// structs are deferred.
+// M2M-safe on both data sources (Postgres reads sf_opportunity). Raw JSON passthrough.
 func (c *Client) GetOpportunity(ctx context.Context, id string) ([]byte, error) {
 	return c.do(ctx, http.MethodGet, fmt.Sprintf("/opportunities/%s", url.PathEscape(id)), nil)
 }
 
 // SearchInvoices calls POST /invoices/search on the entity service.
-// ServiceNow data source only; a pure M2M call succeeds here (read-only, no
-// forwarded identity required). Response is returned as raw JSON; typed response
-// structs are deferred.
+// M2M-safe on both data sources (Postgres reads sf_invoice). Raw JSON passthrough.
 func (c *Client) SearchInvoices(ctx context.Context, body []byte) ([]byte, error) {
 	return c.do(ctx, http.MethodPost, "/invoices/search", body)
 }
 
 // GetInvoice calls GET /invoices/{id} on the entity service.
-// ServiceNow data source only; a pure M2M call succeeds here (read-only, no
-// forwarded identity required). Response is returned as raw JSON; typed response
-// structs are deferred.
+// M2M-safe on both data sources (Postgres reads sf_invoice). Raw JSON passthrough.
 func (c *Client) GetInvoice(ctx context.Context, id string) ([]byte, error) {
 	return c.do(ctx, http.MethodGet, fmt.Sprintf("/invoices/%s", url.PathEscape(id)), nil)
 }
 
 // SearchProjectOpportunityLinks calls POST /project-opportunity-links/search on the
-// entity service. ServiceNow data source only; a pure M2M call succeeds here
-// (read-only, no forwarded identity required). There is no by-id fetch for this
-// resource — the underlying ServiceNow data has no single-record endpoint. Response
-// is returned as raw JSON; typed response structs are deferred.
+// entity service. M2M-safe on both data sources (Postgres reads sf_opportunity_link).
+// Search only, no by-id fetch. Raw JSON passthrough.
 func (c *Client) SearchProjectOpportunityLinks(ctx context.Context, body []byte) ([]byte, error) {
 	return c.do(ctx, http.MethodPost, "/project-opportunity-links/search", body)
 }
@@ -200,4 +218,83 @@ func (c *Client) CreateAlertIncidentMapping(ctx context.Context, body []byte) ([
 // returned as raw JSON; typed response structs are deferred.
 func (c *Client) LookupAlertIncidentMappings(ctx context.Context, body []byte) ([]byte, error) {
 	return c.do(ctx, http.MethodPost, "/alert-incident-mappings/lookup", body)
+}
+
+// UpdateIncident calls PATCH /incidents/{id} on the entity service. Unlike
+// PatchCase, this operation has no Postgres-data-source path at all: on
+// DATA_SOURCE=postgres, entity-service's incidentService.UpdateIncident
+// unconditionally returns a 503 (not supported on this data source yet, no
+// field combination succeeds — several fields have no backing Postgres
+// column, and others would need comment-table side effects not implemented
+// there); on DATA_SOURCE=servicenow, it goes through the same M2M-fallback
+// mechanism as CreateIncident/SearchIncidents/SearchITServices above (a
+// separately-configured M2M ServiceNow credential is used when no end-user
+// identity token is forwarded, and only 401s if that fallback credential is
+// itself unconfigured in the target environment). So this call is
+// unconditionally ServiceNow-backed with no Postgres fallback path: whether
+// it succeeds depends entirely on the target environment's data source and,
+// on ServiceNow, its M2M credential configuration — not on which fields are
+// sent, unlike PatchCase's field-dependent behavior. Response is returned as
+// raw JSON; typed response structs are deferred.
+func (c *Client) UpdateIncident(ctx context.Context, id string, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPatch, fmt.Sprintf("/incidents/%s", url.PathEscape(id)), body)
+}
+
+// SearchITServices calls POST /services/search on the entity service. This
+// targets a ServiceNow-backed operation with the same M2M-fallback
+// mechanism as CreateIncident/SearchIncidents above: when no end-user
+// identity token is forwarded, it uses a separately-configured M2M
+// ServiceNow credential instead of erroring, and only 401s if that fallback
+// credential is itself unconfigured in the target environment. This service
+// carries no forwarded end-user identity by design (see this file's own
+// CreateIncident doc comment), so whether this 401s depends on the target
+// environment's M2M credential configuration, not on this service's M2M-only
+// design per se. Response is returned as raw JSON; typed response structs
+// are deferred.
+func (c *Client) SearchITServices(ctx context.Context, body []byte) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, "/services/search", body)
+}
+
+// GetCloudStatusMonitors calls GET /cloud-status/monitors on the entity
+// service. Response is returned as raw JSON; typed response structs are
+// deferred, as elsewhere here.
+//
+// The cloud is passed through as a query parameter rather than validated: the
+// entity service owns the list of valid clouds and returns a 400 for anything
+// else, and duplicating that list here would give two places to update when a
+// cloud is added.
+func (c *Client) GetCloudStatusMonitors(ctx context.Context, cloud string) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, "/cloud-status/monitors?cloud="+url.QueryEscape(cloud), nil)
+}
+
+// GetCloudStatusIncidents calls GET /cloud-status/incidents on the entity
+// service.
+func (c *Client) GetCloudStatusIncidents(ctx context.Context, cloud string) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, "/cloud-status/incidents?cloud="+url.QueryEscape(cloud), nil)
+}
+
+// GetCloudStatusAvailabilities calls GET /cloud-status/availabilities on the
+// entity service -- the weighted uptime figures the dashboard prints beside
+// each region.
+func (c *Client) GetCloudStatusAvailabilities(ctx context.Context, cloud string) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, "/cloud-status/availabilities?cloud="+url.QueryEscape(cloud), nil)
+}
+
+// GetCloudStatusIncidentDetail calls GET /cloud-status/incidents/{id} on the
+// entity service -- one outage's public detail view.
+//
+// The id is forwarded as given. The entity service accepts both the dashed
+// uuid and the 32-hex sys_id form, so a link created before the cutover
+// still resolves after it; normalising here would put that rule in two
+// places.
+func (c *Client) GetCloudStatusIncidentDetail(ctx context.Context, id, cloud string) ([]byte, error) {
+	return c.do(ctx, http.MethodGet,
+		"/cloud-status/incidents/"+url.PathEscape(id)+"?cloud="+url.QueryEscape(cloud), nil)
+}
+
+// GetCloudStatusAvailabilityHistory calls GET
+// /cloud-status/availability-history on the entity service -- the 90-day
+// daily chart.
+func (c *Client) GetCloudStatusAvailabilityHistory(ctx context.Context, cloud string) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, "/cloud-status/availability-history?cloud="+url.QueryEscape(cloud), nil)
 }

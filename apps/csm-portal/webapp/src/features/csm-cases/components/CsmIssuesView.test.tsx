@@ -33,8 +33,17 @@ vi.mock("@api/backend/client", () => ({
 vi.mock("@config/apiConfig", () => ({
   apiConfig: { backendUrl: "https://example.test" },
 }));
+// Mutable so a later describe block can exercise a caller with
+// comment_updater (which also mirrors PermViewSecurityCenter, see
+// visibleCaseTypes's own doc comment) without affecting the other tests,
+// which rely on the default of no roles at all.
+let mockUserRoles: string[] | undefined;
 vi.mock("@context/current-user/CurrentUserContext", () => ({
-  useCurrentUser: () => ({ user: { id: "user-1" }, isLoading: false, isError: false }),
+  useCurrentUser: () => ({
+    user: { id: "user-1", roles: mockUserRoles },
+    isLoading: false,
+    isError: false,
+  }),
 }));
 vi.mock("@context/error-banner/ErrorBannerContext", () => ({
   useErrorBanner: () => ({ showError: vi.fn() }),
@@ -87,12 +96,13 @@ vi.mock("@components/RefreshButton", () => ({
 }));
 
 import CsmIssuesView from "@features/csm-cases/components/CsmIssuesView";
-import { ALL_CASE_TYPES } from "@features/csm-cases/utils/caseType";
+import { visibleCaseTypes } from "@features/csm-cases/utils/caseType";
 
 beforeEach(() => {
   window.localStorage.clear();
   useGetCsmCasesMock.mockClear();
   casesFilterBarPropsSpy.mockClear();
+  mockUserRoles = undefined;
 });
 
 function LocationProbe() {
@@ -318,12 +328,13 @@ describe("CsmIssuesView defaultCaseTypes (Support page's case-type default, digi
     // User clears the type control back to "every type" -- `types` drops out
     // of the URL, identical in shape to the original fresh-visit URL. The
     // default must NOT reassert itself here: the query goes out for every
-    // known type (CsmIssuesView's own "empty selection means no type filter"
+    // type this (unmocked, no-Security-Center-access-by-default) caller can
+    // see (CsmIssuesView's own "empty selection means no type filter"
     // fallback), not back to the single-type default.
     await act(async () => { await router.navigate("/cases"); });
     await waitFor(() =>
       expect(useGetCsmCasesMock).toHaveBeenLastCalledWith(
-        expect.objectContaining({ caseTypes: ALL_CASE_TYPES }),
+        expect.objectContaining({ caseTypes: visibleCaseTypes(false) }),
         expect.anything(),
         expect.anything(),
         expect.anything(),
@@ -358,12 +369,51 @@ describe("CsmIssuesView defaultCaseTypes (Support page's case-type default, digi
       ),
     );
 
-    // User clears the type control -- must expand to every type, not snap
-    // back to `defaultCaseTypes`.
+    // User clears the type control -- must expand to every type this caller
+    // can see, not snap back to `defaultCaseTypes`.
     await act(async () => { await router.navigate("/cases"); });
     await waitFor(() =>
       expect(useGetCsmCasesMock).toHaveBeenLastCalledWith(
-        expect.objectContaining({ caseTypes: ALL_CASE_TYPES }),
+        expect.objectContaining({ caseTypes: visibleCaseTypes(false) }),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      ),
+    );
+  });
+
+  // PermViewSecurityCenter (access.go) is held by comment_updater as well as
+  // cs_engineer/admin -- visibleCaseTypes's eligibility check has to mirror
+  // that exactly, not just canUseSecurityCenter, or a comment_updater-only
+  // caller would get the same 403-on-every-type bug this fallback exists to
+  // prevent.
+  it("includes security_report_analysis for a comment_updater-only caller even without Security Center access", async () => {
+    mockUserRoles = ["comment_updater"];
+    const router = createMemoryRouter(
+      [{ path: "/cases", element: <CsmIssuesView title="Cases" defaultCaseTypes={["case"]} /> }],
+      { initialEntries: ["/cases?types=service_request"] },
+    );
+    render(<RouterProvider router={router} />);
+
+    await waitFor(() =>
+      expect(useGetCsmCasesMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ caseTypes: ["service_request"] }),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      ),
+    );
+
+    // Clearing the type control expands to every type this caller can see --
+    // must include security_report_analysis for comment_updater.
+    await act(async () => { await router.navigate("/cases"); });
+    await waitFor(() =>
+      expect(useGetCsmCasesMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ caseTypes: visibleCaseTypes(true) }),
         expect.anything(),
         expect.anything(),
         expect.anything(),

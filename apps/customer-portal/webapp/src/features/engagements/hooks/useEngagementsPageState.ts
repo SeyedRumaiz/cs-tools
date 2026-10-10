@@ -86,6 +86,18 @@ export function useEngagementsPageState() {
   const [activeStatKey, setActiveStatKey] = useState<
     EngagementsStatKey | undefined
   >(undefined);
+  // Arriving via a dashboard chart click seeds the engagement-type/status
+  // filters from navigation state (see chartNavStatusIds/initialEngagementTypeKeys
+  // below), but location.state never clears itself -- without these flags,
+  // that seed re-applied on every render for the rest of the page's mounted
+  // lifetime, silently overriding anything the user picked in either
+  // dropdown afterward. The dropdowns themselves kept updating correctly
+  // (their value comes straight from filters), only the actual search
+  // request kept reverting to the original chart-derived filter. Once the
+  // user explicitly changes (or clears) a filter, its own chart-nav seed
+  // must never reapply again, including if they clear it back to empty.
+  const [userSetEngagementType, setUserSetEngagementType] = useState(false);
+  const [userSetStatus, setUserSetStatus] = useState(false);
 
   const { data: project, isLoading: isProjectLoading } = useGetProjectDetails(
     projectId || "",
@@ -150,18 +162,20 @@ export function useEngagementsPageState() {
       sortField,
       sortOrder,
     );
-    const withEngagementType = initialEngagementTypeKeys
-      ? {
-          ...base,
-          filters: {
-            ...base.filters,
-            engagementTypeKeys: initialEngagementTypeKeys,
-          },
-        }
-      : base;
-    // Apply outstanding filter for chart navigation (non-closed states).
+    const withEngagementType =
+      initialEngagementTypeKeys && !userSetEngagementType
+        ? {
+            ...base,
+            filters: {
+              ...base.filters,
+              engagementTypeKeys: initialEngagementTypeKeys,
+            },
+          }
+        : base;
+    // Apply outstanding filter for chart navigation (non-closed states) --
+    // only until the user picks their own Status filter.
     const withChartStatus =
-      isChartNavigation && chartNavStatusIds
+      isChartNavigation && chartNavStatusIds && !userSetStatus
         ? {
             ...withEngagementType,
             filters: {
@@ -189,6 +203,8 @@ export function useEngagementsPageState() {
     initialEngagementTypeKeys,
     isChartNavigation,
     chartNavStatusIds,
+    userSetEngagementType,
+    userSetStatus,
   ]);
 
   const {
@@ -253,6 +269,8 @@ export function useEngagementsPageState() {
   };
 
   const handleFilterChange = (field: string, value: string | string[]) => {
+    if (field === "engagementTypeKey") setUserSetEngagementType(true);
+    if (field === "statusIds") setUserSetStatus(true);
     setFilters((prev) => ({
       ...prev,
       [field]: Array.isArray(value)
@@ -267,6 +285,8 @@ export function useEngagementsPageState() {
     setSearchTerm("");
     setFixedStatusIds(undefined);
     setActiveStatKey(undefined);
+    setUserSetEngagementType(true);
+    setUserSetStatus(true);
     setPage(1);
   };
 
@@ -333,11 +353,16 @@ export function useEngagementsPageState() {
 
   const engagementTypeOptions = useMemo(() => {
     if (!stats?.engagementTypeCount) return [];
+    // Must cover all 5 engagement types the backend can return (see
+    // backend-v2's caseEngagementTypeDisplayLabels) -- a type missing here
+    // isn't just unlabeled, the loop below drops it from the options list
+    // entirely, so it can never be filtered on.
     const DISPLAY_NAMES = [
       "Consultancy",
       "Onboarding",
       "Migration",
       "Follow Up",
+      "New Feature Improvement",
     ];
     const DISPLAY_BY_LOWER = new Map(
       DISPLAY_NAMES.map((n) => [n.toLowerCase(), n]),

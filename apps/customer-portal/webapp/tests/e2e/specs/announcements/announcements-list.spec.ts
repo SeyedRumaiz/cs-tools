@@ -37,6 +37,10 @@ import {
   caseSearchWithSort,
   caseSearchWithStatusFilter,
 } from "../../utils/listSearch";
+import {
+  RECORD_ID_PATTERN,
+  projectPathPattern,
+} from "../../utils/ids";
 
 withSession(test);
 
@@ -315,11 +319,14 @@ test.describe("Announcements", () => {
 
         await announcements.rows().first().click();
 
-        // An announcement sysid is a 32-character hex string; anchoring rules out
-        // landing back on the list.
+        // Anchored so landing back on the list cannot pass. The id is matched in
+        // BOTH spellings — the portal renders record ids UUID-hyphenated while the
+        // API returns plain 32-hex, and pinning one silently breaks when the other
+        // is shown.
         await expect(page).toHaveURL(
-          new RegExp(
-            `/projects/${project.id}/${ANNOUNCEMENTS_LIST.pathSegment}/[0-9a-f]{32}$`,
+          projectPathPattern(
+            project.id,
+            `${ANNOUNCEMENTS_LIST.pathSegment}/${RECORD_ID_PATTERN}$`,
           ),
         );
 

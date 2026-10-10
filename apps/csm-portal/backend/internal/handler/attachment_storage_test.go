@@ -44,6 +44,21 @@ type mockSftpgoClient struct {
 	createShareCalls  []string // records the storageKey passed on each call
 	createShareScopes []int    // records the scope passed on each CreateShare call
 	uploadBytesCalls  []string // records the storageKey passed on each UploadBytes call
+	removeFileCalls   []string // records the storageKey passed on each RemoveFile call
+	removeFileCtxErrs []error  // records ctx.Err() at the time of each RemoveFile call
+
+	removeFileFn func(ctx context.Context, accessToken, storageKey string) error
+}
+
+// RemoveFile satisfies inlineImageSftpgoClient's rollback byte-cleanup
+// operation (see inline_images.go).
+func (m *mockSftpgoClient) RemoveFile(ctx context.Context, accessToken, storageKey string) error {
+	m.removeFileCalls = append(m.removeFileCalls, storageKey)
+	m.removeFileCtxErrs = append(m.removeFileCtxErrs, ctx.Err())
+	if m.removeFileFn != nil {
+		return m.removeFileFn(ctx, accessToken, storageKey)
+	}
+	return nil
 }
 
 // UploadBytes satisfies inlineImageSftpgoClient (see inline_images.go) in
@@ -543,6 +558,185 @@ func TestMintUploadTokenSkipsShareWhenEntityCreateFails(t *testing.T) {
 	// call sequence; what matters is that CreateShare itself never fires.
 }
 
+// TestMintUploadTokenExplicitCaseReferenceType verifies referenceType "case"
+// sent explicitly behaves exactly like the default: the case write guard
+// runs and the persisted row carries referenceType "case".
+func TestMintUploadTokenExplicitCaseReferenceType(t *testing.T) {
+	t.Parallel()
+	const caseID = "11111111-1111-1111-1111-111111111111"
+	var getCaseCalls int
+	var persistedReferenceType string
+	entity := &mockEntityCaseClient{
+		getCaseFn: func(ctx context.Context, id string) ([]byte, error) {
+			getCaseCalls++
+			return []byte(`{"state":"work_in_progress"}`), nil
+		},
+		createCaseAttachmentFn: func(ctx context.Context, body []byte) ([]byte, error) {
+			var req struct {
+				ReferenceID   string `json:"referenceId"`
+				ReferenceType string `json:"referenceType"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatalf("decode CreateCaseAttachment body: %v; raw: %s", err, body)
+			}
+			persistedReferenceType = req.ReferenceType
+			if req.ReferenceID != caseID {
+				t.Errorf("referenceId = %q, want %q", req.ReferenceID, caseID)
+			}
+			return createCaseAttachmentFnPending(ctx, body)
+		},
+	}
+	sftpgoMock := &mockSftpgoClient{}
+	h := NewAttachmentStorageHandler(entity, sftpgoMock)
+
+	body := strings.NewReader(`{"filename":"report.pdf","mimeType":"application/pdf","sizeBytes":1024,"referenceType":"case"}`)
+	req := withUser(httptest.NewRequest(http.MethodPost, "/cases/"+caseID+"/attachments/upload-token", body))
+	req.SetPathValue("id", caseID)
+	req.Header.Set("x-jwt-assertion", "raw-jwt")
+	w := httptest.NewRecorder()
+
+	h.MintUploadToken(w, req)
+
+	assertStatus(t, w, http.StatusOK)
+	if getCaseCalls != 1 {
+		t.Errorf("GetCase (case write guard) was called %d times; want 1", getCaseCalls)
+	}
+	if persistedReferenceType != "case" {
+		t.Errorf("persisted referenceType = %q, want %q", persistedReferenceType, "case")
+	}
+}
+
+// TestMintUploadTokenChangeRequestReference verifies the mint endpoint's
+// change_request handling: the caller's access to the change request is
+// checked first (an inaccessible CR yields the upstream's own 403/404, never
+// a capability hint), and an accessible one yields a clear 422 — the
+// direct-upload storage mode cannot persist CR attachments yet — with no row
+// created and no SFTPGo call made.
+func TestMintUploadTokenChangeRequestReference(t *testing.T) {
+	t.Parallel()
+	const crID = "44444444-4444-4444-4444-444444444444"
+
+	newRequest := func() (*http.Request, *httptest.ResponseRecorder) {
+		body := strings.NewReader(`{"filename":"report.pdf","mimeType":"application/pdf","sizeBytes":1024,"referenceType":"change_request"}`)
+		req := withUser(httptest.NewRequest(http.MethodPost, "/cases/"+crID+"/attachments/upload-token", body))
+		req.SetPathValue("id", crID)
+		req.Header.Set("x-jwt-assertion", "raw-jwt")
+		return req, httptest.NewRecorder()
+	}
+
+	t.Run("accessible CR yields 422 unsupported", func(t *testing.T) {
+		t.Parallel()
+		var crLookups []string
+		var createCalls int
+		entity := &mockEntityCaseClient{
+			getChangeRequestFn: func(ctx context.Context, id string) ([]byte, error) {
+				crLookups = append(crLookups, id)
+				return []byte(`{}`), nil
+			},
+			createCaseAttachmentFn: func(ctx context.Context, body []byte) ([]byte, error) {
+				createCalls++
+				return createCaseAttachmentFnPending(ctx, body)
+			},
+			getCaseFn: func(ctx context.Context, id string) ([]byte, error) {
+				t.Error("GetCase must not be called for a change_request reference")
+				return []byte(`{}`), nil
+			},
+		}
+		sftpgoMock := &mockSftpgoClient{}
+		h := NewAttachmentStorageHandler(entity, sftpgoMock)
+		req, w := newRequest()
+
+		h.MintUploadToken(w, req)
+
+		assertStatus(t, w, http.StatusUnprocessableEntity)
+		assertErrorMessage(t, w, ErrMsgAttachmentStorageUnsupportedRef)
+		if len(crLookups) != 1 || crLookups[0] != crID {
+			t.Errorf("GetChangeRequest lookups = %v, want exactly [%q]", crLookups, crID)
+		}
+		if createCalls != 0 {
+			t.Errorf("CreateCaseAttachment was called %d times; want 0", createCalls)
+		}
+		if len(sftpgoMock.mintTokenCalls) != 0 || len(sftpgoMock.createShareCalls) != 0 {
+			t.Errorf("sftpgo was called (mint=%d, share=%d); want 0", len(sftpgoMock.mintTokenCalls), len(sftpgoMock.createShareCalls))
+		}
+	})
+
+	t.Run("inaccessible CR yields upstream 404", func(t *testing.T) {
+		t.Parallel()
+		entity := &mockEntityCaseClient{
+			getChangeRequestFn: func(ctx context.Context, id string) ([]byte, error) {
+				return nil, &apierror.Error{StatusCode: http.StatusNotFound, Body: "not found"}
+			},
+		}
+		sftpgoMock := &mockSftpgoClient{}
+		h := NewAttachmentStorageHandler(entity, sftpgoMock)
+		req, w := newRequest()
+
+		h.MintUploadToken(w, req)
+
+		assertStatus(t, w, http.StatusNotFound)
+	})
+}
+
+// TestMintUploadTokenIncidentReference mirrors the change_request behavior
+// for referenceType "incident": access checked via GetIncident, then a clear
+// 422 for the unsupported storage mode.
+func TestMintUploadTokenIncidentReference(t *testing.T) {
+	t.Parallel()
+	const incidentID = "55555555-5555-5555-5555-555555555555"
+	var incidentLookups []string
+	entity := &mockEntityCaseClient{
+		getIncidentFn: func(ctx context.Context, id string) ([]byte, error) {
+			incidentLookups = append(incidentLookups, id)
+			return []byte(`{}`), nil
+		},
+	}
+	sftpgoMock := &mockSftpgoClient{}
+	h := NewAttachmentStorageHandler(entity, sftpgoMock)
+
+	body := strings.NewReader(`{"filename":"report.pdf","mimeType":"application/pdf","sizeBytes":1024,"referenceType":"incident"}`)
+	req := withUser(httptest.NewRequest(http.MethodPost, "/cases/"+incidentID+"/attachments/upload-token", body))
+	req.SetPathValue("id", incidentID)
+	req.Header.Set("x-jwt-assertion", "raw-jwt")
+	w := httptest.NewRecorder()
+
+	h.MintUploadToken(w, req)
+
+	assertStatus(t, w, http.StatusUnprocessableEntity)
+	assertErrorMessage(t, w, ErrMsgAttachmentStorageUnsupportedRef)
+	if len(incidentLookups) != 1 || incidentLookups[0] != incidentID {
+		t.Errorf("GetIncident lookups = %v, want exactly [%q]", incidentLookups, incidentID)
+	}
+}
+
+// TestMintUploadTokenRejectsUnknownReferenceType verifies an unrecognised
+// referenceType is rejected with 400 before any upstream call.
+func TestMintUploadTokenRejectsUnknownReferenceType(t *testing.T) {
+	t.Parallel()
+	const id = "11111111-1111-1111-1111-111111111111"
+	entity := &mockEntityCaseClient{
+		getCaseFn: func(ctx context.Context, caseID string) ([]byte, error) {
+			t.Error("GetCase must not be called for an unrecognised reference type")
+			return []byte(`{}`), nil
+		},
+	}
+	sftpgoMock := &mockSftpgoClient{}
+	h := NewAttachmentStorageHandler(entity, sftpgoMock)
+
+	body := strings.NewReader(`{"filename":"report.pdf","mimeType":"application/pdf","sizeBytes":1024,"referenceType":"deployment"}`)
+	req := withUser(httptest.NewRequest(http.MethodPost, "/cases/"+id+"/attachments/upload-token", body))
+	req.SetPathValue("id", id)
+	req.Header.Set("x-jwt-assertion", "raw-jwt")
+	w := httptest.NewRecorder()
+
+	h.MintUploadToken(w, req)
+
+	assertStatus(t, w, http.StatusBadRequest)
+	if len(sftpgoMock.mintTokenCalls) != 0 {
+		t.Errorf("MintToken was called %d times; want 0", len(sftpgoMock.mintTokenCalls))
+	}
+}
+
 // ----- CreateAttachmentShare -----
 
 func TestCreateAttachmentShareRequiresAuth(t *testing.T) {
@@ -600,6 +794,166 @@ func TestCreateAttachmentShareEnforcesReadAccessBeforeMinting(t *testing.T) {
 	if len(sftpgoMock.mintTokenCalls) != 0 || len(sftpgoMock.createShareCalls) != 0 {
 		t.Errorf("sftpgo was called (mint=%d, share=%d); want 0 — access must be checked before minting/sharing",
 			len(sftpgoMock.mintTokenCalls), len(sftpgoMock.createShareCalls))
+	}
+}
+
+// TestCreateAttachmentShareDeniesEmptyReferenceType verifies the fail-closed
+// authorization: an attachment whose details carry NO referenceType (as
+// reported for attachments on the data source that predates the field) must
+// be denied outright — never assumed to be a case — and nothing may reach
+// the SFTPGo client. This closes the bypass where an unpopulated
+// referenceType skipped the read-access check entirely and let any
+// authenticated user mint a public share URL for any attachment id.
+func TestCreateAttachmentShareDeniesEmptyReferenceType(t *testing.T) {
+	t.Parallel()
+	var getCaseCalls int
+	entity := &mockEntityCaseClient{
+		getCaseAttachmentFn: func(ctx context.Context, attachmentID string) ([]byte, error) {
+			return []byte(`{"referenceId":"22222222-2222-2222-2222-222222222222","storageKey":"/attachments/att-1"}`), nil
+		},
+		getCaseFn: func(ctx context.Context, id string) ([]byte, error) {
+			getCaseCalls++
+			return []byte(`{}`), nil
+		},
+	}
+	sftpgoMock := &mockSftpgoClient{}
+	h := NewAttachmentStorageHandler(entity, sftpgoMock)
+
+	attachmentID := "11111111-1111-1111-1111-111111111111"
+	req := withUser(httptest.NewRequest(http.MethodPost, "/attachments/"+attachmentID+"/share", nil))
+	req.SetPathValue("id", attachmentID)
+	req.Header.Set("x-jwt-assertion", "raw-jwt")
+	w := httptest.NewRecorder()
+
+	h.CreateAttachmentShare(w, req)
+
+	assertStatus(t, w, http.StatusNotFound)
+	if getCaseCalls != 0 {
+		t.Errorf("GetCase was called %d times; want 0 — an empty referenceType must never be treated as a case", getCaseCalls)
+	}
+	if len(sftpgoMock.mintTokenCalls) != 0 || len(sftpgoMock.createShareCalls) != 0 {
+		t.Errorf("sftpgo was called (mint=%d, share=%d); want 0 — an unverifiable reference must fail closed",
+			len(sftpgoMock.mintTokenCalls), len(sftpgoMock.createShareCalls))
+	}
+}
+
+// TestCreateAttachmentShareDeniesUnrecognisedReferenceType verifies a
+// reference type this handler has no access check for is denied rather than
+// let through unauthorized.
+func TestCreateAttachmentShareDeniesUnrecognisedReferenceType(t *testing.T) {
+	t.Parallel()
+	entity := &mockEntityCaseClient{
+		getCaseAttachmentFn: func(ctx context.Context, attachmentID string) ([]byte, error) {
+			return []byte(`{"referenceId":"22222222-2222-2222-2222-222222222222","referenceType":"deployment","storageKey":"/attachments/att-1"}`), nil
+		},
+	}
+	sftpgoMock := &mockSftpgoClient{}
+	h := NewAttachmentStorageHandler(entity, sftpgoMock)
+
+	attachmentID := "11111111-1111-1111-1111-111111111111"
+	req := withUser(httptest.NewRequest(http.MethodPost, "/attachments/"+attachmentID+"/share", nil))
+	req.SetPathValue("id", attachmentID)
+	req.Header.Set("x-jwt-assertion", "raw-jwt")
+	w := httptest.NewRecorder()
+
+	h.CreateAttachmentShare(w, req)
+
+	assertStatus(t, w, http.StatusNotFound)
+	if len(sftpgoMock.mintTokenCalls) != 0 || len(sftpgoMock.createShareCalls) != 0 {
+		t.Errorf("sftpgo was called (mint=%d, share=%d); want 0", len(sftpgoMock.mintTokenCalls), len(sftpgoMock.createShareCalls))
+	}
+}
+
+// TestCreateAttachmentShareChangeRequestReference verifies a change_request
+// attachment's read check goes through GetChangeRequest (not GetCase), both
+// denying on upstream 403 and proceeding on success.
+func TestCreateAttachmentShareChangeRequestReference(t *testing.T) {
+	t.Parallel()
+	crID := "22222222-2222-2222-2222-222222222222"
+	attachmentID := "11111111-1111-1111-1111-111111111111"
+
+	newRequest := func() (*http.Request, *httptest.ResponseRecorder) {
+		req := withUser(httptest.NewRequest(http.MethodPost, "/attachments/"+attachmentID+"/share", nil))
+		req.SetPathValue("id", attachmentID)
+		req.Header.Set("x-jwt-assertion", "raw-jwt")
+		return req, httptest.NewRecorder()
+	}
+	newEntity := func(getCR func(ctx context.Context, id string) ([]byte, error)) *mockEntityCaseClient {
+		return &mockEntityCaseClient{
+			getCaseAttachmentFn: func(ctx context.Context, attachmentID string) ([]byte, error) {
+				return []byte(`{"referenceId":"` + crID + `","referenceType":"change_request","storageKey":"/attachments/att-1"}`), nil
+			},
+			getCaseFn: func(ctx context.Context, id string) ([]byte, error) {
+				t.Error("GetCase must not be called for a change_request reference")
+				return []byte(`{}`), nil
+			},
+			getChangeRequestFn: getCR,
+		}
+	}
+
+	t.Run("denied on upstream 403", func(t *testing.T) {
+		t.Parallel()
+		sftpgoMock := &mockSftpgoClient{}
+		h := NewAttachmentStorageHandler(newEntity(func(ctx context.Context, id string) ([]byte, error) {
+			return nil, &apierror.Error{StatusCode: http.StatusForbidden, Body: "forbidden"}
+		}), sftpgoMock)
+		req, w := newRequest()
+
+		h.CreateAttachmentShare(w, req)
+
+		assertStatus(t, w, http.StatusForbidden)
+		if len(sftpgoMock.createShareCalls) != 0 {
+			t.Errorf("createShareCalls = %v, want 0", sftpgoMock.createShareCalls)
+		}
+	})
+
+	t.Run("allowed when readable", func(t *testing.T) {
+		t.Parallel()
+		var crLookups []string
+		sftpgoMock := &mockSftpgoClient{}
+		h := NewAttachmentStorageHandler(newEntity(func(ctx context.Context, id string) ([]byte, error) {
+			crLookups = append(crLookups, id)
+			return []byte(`{}`), nil
+		}), sftpgoMock)
+		req, w := newRequest()
+
+		h.CreateAttachmentShare(w, req)
+
+		assertStatus(t, w, http.StatusCreated)
+		if len(crLookups) != 1 || crLookups[0] != crID {
+			t.Errorf("GetChangeRequest lookups = %v, want exactly [%q]", crLookups, crID)
+		}
+	})
+}
+
+// TestCreateAttachmentShareIncidentReferenceDenied verifies an incident
+// attachment's read check goes through GetIncident and denies on upstream
+// 404.
+func TestCreateAttachmentShareIncidentReferenceDenied(t *testing.T) {
+	t.Parallel()
+	incidentID := "22222222-2222-2222-2222-222222222222"
+	entity := &mockEntityCaseClient{
+		getCaseAttachmentFn: func(ctx context.Context, attachmentID string) ([]byte, error) {
+			return []byte(`{"referenceId":"` + incidentID + `","referenceType":"incident","storageKey":"/attachments/att-1"}`), nil
+		},
+		getIncidentFn: func(ctx context.Context, id string) ([]byte, error) {
+			return nil, &apierror.Error{StatusCode: http.StatusNotFound, Body: "not found"}
+		},
+	}
+	sftpgoMock := &mockSftpgoClient{}
+	h := NewAttachmentStorageHandler(entity, sftpgoMock)
+
+	attachmentID := "11111111-1111-1111-1111-111111111111"
+	req := withUser(httptest.NewRequest(http.MethodPost, "/attachments/"+attachmentID+"/share", nil))
+	req.SetPathValue("id", attachmentID)
+	req.Header.Set("x-jwt-assertion", "raw-jwt")
+	w := httptest.NewRecorder()
+
+	h.CreateAttachmentShare(w, req)
+
+	assertStatus(t, w, http.StatusNotFound)
+	if len(sftpgoMock.mintTokenCalls) != 0 {
+		t.Errorf("MintToken was called %d times; want 0", len(sftpgoMock.mintTokenCalls))
 	}
 }
 

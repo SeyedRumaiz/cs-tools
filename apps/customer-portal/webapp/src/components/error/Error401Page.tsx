@@ -20,6 +20,7 @@ import illustration from "@assets/error/error-401.svg";
 
 interface Error401PageProps {
   message?: string;
+  error?: unknown;
 }
 
 /**
@@ -51,7 +52,7 @@ function formatUnauthorizedMessage(message?: string): string | undefined {
   return normalized;
 }
 
-export default function Error401Page({ message }: Error401PageProps): JSX.Element {
+export default function Error401Page({ message, error }: Error401PageProps): JSX.Element {
   return (
     <ErrorPage
       illustration={illustration}
@@ -60,6 +61,7 @@ export default function Error401Page({ message }: Error401PageProps): JSX.Elemen
         formatUnauthorizedMessage(message) ??
         "You need to sign in to view this page.\nPlease authenticate and try again."
       }
+      error={error}
     />
   );
 }

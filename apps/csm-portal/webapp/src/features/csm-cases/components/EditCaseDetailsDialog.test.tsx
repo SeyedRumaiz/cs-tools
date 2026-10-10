@@ -14,7 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import EditCaseDetailsDialog from "@features/csm-cases/components/EditCaseDetailsDialog";
@@ -120,5 +120,55 @@ describe("EditCaseDetailsDialog — change gating and sequential per-field submi
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
     expect(await screen.findByText(/subject saved\./i)).toBeInTheDocument();
     expect(await screen.findByText(/deployment: sla conflict/i)).toBeInTheDocument();
+  });
+
+  describe("onAllSaved", () => {
+    function renderAndSave(
+      results: Array<{ field: string; ok: boolean; error?: string }>,
+      onAllSaved: () => void,
+    ): void {
+      setupHooks();
+      render(
+        <EditCaseDetailsDialog
+          projectId="prj-1"
+          currentSubject="Original subject"
+          currentDescriptionHtml="<p>Original</p>"
+          isSaving={false}
+          onClose={() => {}}
+          onAllSaved={onAllSaved}
+          onSubmit={vi.fn().mockResolvedValue(results)}
+        />,
+      );
+      fireEvent.change(screen.getByLabelText(/^subject$/i), {
+        target: { value: "Updated subject" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    }
+
+    it("is called once every changed field has saved", async () => {
+      const onAllSaved = vi.fn();
+      renderAndSave([{ field: "subject", ok: true }], onAllSaved);
+      await waitFor(() => expect(onAllSaved).toHaveBeenCalledTimes(1));
+    });
+
+    it("is not called on a partial failure, and the per-field results stay on screen", async () => {
+      const onAllSaved = vi.fn();
+      renderAndSave(
+        [
+          { field: "subject", ok: true },
+          { field: "deploymentId", ok: false, error: "SLA conflict" },
+        ],
+        onAllSaved,
+      );
+      expect(await screen.findByText(/deployment: sla conflict/i)).toBeInTheDocument();
+      expect(onAllSaved).not.toHaveBeenCalled();
+    });
+
+    it("is not called when the submission reports no results", async () => {
+      const onAllSaved = vi.fn();
+      renderAndSave([], onAllSaved);
+      await waitFor(() => expect(screen.getByRole("button", { name: /save changes/i })).toBeInTheDocument());
+      expect(onAllSaved).not.toHaveBeenCalled();
+    });
   });
 });

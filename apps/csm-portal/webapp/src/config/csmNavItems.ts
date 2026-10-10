@@ -17,9 +17,12 @@
 import {
   AlertOctagon,
   AlertTriangle,
+  BarChart3,
   Briefcase,
+  BookOpen,
   Bug,
   Building2,
+  CalendarDays,
   ChartColumn,
   Clock,
   ClipboardList,
@@ -27,6 +30,7 @@ import {
   FileWarning,
   GitPullRequest,
   Headset,
+  HeartPulse,
   KeyRound,
   LifeBuoy,
   Megaphone,
@@ -35,10 +39,12 @@ import {
   Settings,
   Shield,
   UserCog,
+  UserSearch,
   Users,
   UsersRound,
 } from "@wso2/oxygen-ui-icons-react";
 import type { ComponentType } from "react";
+import type { PortalAccess } from "@context/current-user/portalAccess";
 
 /**
  * One entry in the navigation tree: either a top-level sidebar section or one
@@ -46,6 +52,8 @@ import type { ComponentType } from "react";
  * feature flags; `featureFlags.ts` resolves a {@link CsmNavNode.id} to a
  * visibility state.
  */
+import { PLG_NAV_SECTION } from "@features/plg/config/plgNavItems";
+
 export interface CsmNavNode {
   /**
    * Stable, dotted identifier: `"operations"` for a section,
@@ -57,6 +65,12 @@ export interface CsmNavNode {
   label: string;
   /** Where selecting this node navigates. May carry a `?tab=` query. */
   href: string;
+  /**
+   * The {@link PortalAccess} capability a user needs to see this node; without
+   * it the node is hidden for that user (nav entry and route), and so is
+   * everything under it. Per user, unlike the per-deployment feature flags.
+   */
+  requires?: keyof PortalAccess;
   /**
    * For sections whose tab strip lives in a query parameter rather than in
    * child routes (Operations, Security Center): the `?tab=` value that selects
@@ -120,6 +134,7 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
     id: "operations",
     label: "Operations",
     href: "/operations",
+    requires: "canUseOperations",
     icon: Cog,
     children: [
       {
@@ -143,7 +158,7 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
         label: "Incidents",
         href: "/operations?tab=incidents",
         tab: "incidents",
-        routes: ["/operations/incidents"],
+        routes: ["/operations/incidents", "/operations/incident-tasks"],
         icon: AlertTriangle,
       },
       {
@@ -171,10 +186,17 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
     icon: Briefcase,
   },
   {
+    id: "announcements",
+    label: "Announcements",
+    href: "/announcements",
+    icon: Megaphone,
+  },
+  {
     id: "security-center",
     label: "Security Center",
     href: "/security-center",
     icon: Shield,
+    requires: "canUseSecurityCenter",
     children: [
       {
         id: "security-center.reports",
@@ -195,24 +217,6 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
     ],
   },
   {
-    id: "updates",
-    label: "Updates",
-    href: "/updates",
-    icon: RefreshCw,
-  },
-  {
-    id: "time-cards",
-    label: "Time cards",
-    href: "/time-cards",
-    icon: Clock,
-  },
-  {
-    id: "announcements",
-    label: "Announcements",
-    href: "/announcements",
-    icon: Megaphone,
-  },
-  {
     id: "customers",
     label: "Customers",
     href: "/customers",
@@ -231,9 +235,100 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
     ],
   },
   {
+    id: "kb-articles",
+    label: "Knowledge",
+    href: "/knowledge",
+    // Staff-only -- see canViewStaffSections's own doc comment.
+    requires: "canViewStaffSections",
+    icon: BookOpen,
+    children: [
+      {
+        id: "kb-articles.all",
+        label: "All",
+        href: "/knowledge/all",
+      },
+      {
+        id: "kb-articles.to-review",
+        label: "To Review",
+        href: "/knowledge/to-review",
+      },
+      {
+        id: "kb-articles.my",
+        label: "My",
+        href: "/knowledge/my-articles",
+      },
+      {
+        id: "kb-articles.admin",
+        label: "Admin",
+        href: "/knowledge/admin",
+      },
+    ],
+  },
+  // PLG Customer Success Portal. Declared in
+  // features/plg/config/plgNavItems so a change to PLG's pages does not
+  // touch this file. Hide the whole section with
+  // CSM_PORTAL_FEATURE_OVERRIDES: { "plg": "hidden" }.
+  PLG_NAV_SECTION,
+  {
+    id: "updates",
+    label: "Updates",
+    href: "/updates",
+    requires: "canUseTimeCardsAndUpdates",
+    icon: RefreshCw,
+  },
+  {
+    id: "time-cards",
+    label: "Time cards",
+    href: "/time-cards",
+    requires: "canUseTimeCardsAndUpdates",
+    icon: Clock,
+  },
+  {
+    id: "team-schedule",
+    label: "Team Schedule",
+    href: "/team-schedule",
+    // An explicit allow-list (cs_engineer/admin/comment_updater), not just
+    // "not a plain viewer" -- see canViewTeamSchedule's own doc comment.
+    // Editing it is a lead's job and will gate on its own flag when the
+    // write routes land.
+    requires: "canViewTeamSchedule",
+    icon: CalendarDays,
+  },
+  {
+    id: "customer-health",
+    label: "Customer Health",
+    href: "/customer-health",
+    // Ex-Support Portal Lite section with no modern/entity-service-backed
+    // equivalent -- stays limited to the same audience it always had
+    // (PermViewerAccess server-side: the viewer role, regardless of what
+    // else the caller holds). See isSplAudience's own doc comment.
+    requires: "isSplAudience",
+    icon: HeartPulse,
+  },
+  {
+    id: "usage-metrics",
+    label: "Usage Metrics",
+    href: "/usage-metrics",
+    // Reported live: unlike its ex-Support-Portal-Lite siblings, a plain
+    // viewer must NOT see this one -- only cs_engineer/admin and the
+    // dedicated usage_metrics_viewer role do. See canViewUsageMetrics's own
+    // doc comment.
+    requires: "canViewUsageMetrics",
+    icon: BarChart3,
+  },
+  {
+    id: "user-scan",
+    label: "User Scan",
+    href: "/user-scan",
+    requires: "isSplAudience",
+    icon: UserSearch,
+  },
+  {
     id: "admin",
     label: "Settings",
     href: "/admin",
+    // Staff-only -- see canViewStaffSections's own doc comment.
+    requires: "canViewStaffSections",
     icon: Settings,
     children: [
       {
@@ -311,15 +406,31 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
       },
       { id: "help.dashboard", label: "Dashboard", href: "/help#dashboard" },
       { id: "help.support", label: "Support", href: "/help#support" },
-      { id: "help.operations", label: "Operations", href: "/help#operations" },
+      {
+        id: "help.operations",
+        label: "Operations",
+        href: "/help#operations",
+        requires: "canUseOperations",
+      },
       { id: "help.engagements", label: "Engagements", href: "/help#engagements" },
       {
         id: "help.security-center",
         label: "Security Center",
         href: "/help#security-center",
+        requires: "canUseSecurityCenter",
       },
-      { id: "help.updates", label: "Updates", href: "/help#updates" },
-      { id: "help.time-cards", label: "Time cards", href: "/help#time-cards" },
+      {
+        id: "help.updates",
+        label: "Updates",
+        href: "/help#updates",
+        requires: "canUseTimeCardsAndUpdates",
+      },
+      {
+        id: "help.time-cards",
+        label: "Time cards",
+        href: "/help#time-cards",
+        requires: "canUseTimeCardsAndUpdates",
+      },
       {
         id: "help.announcements",
         label: "Announcements",
@@ -331,7 +442,12 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
         label: "People & project access",
         href: "/help#people-access",
       },
-      { id: "help.settings", label: "Settings", href: "/help#settings" },
+      {
+        id: "help.settings",
+        label: "Settings",
+        href: "/help#settings",
+        requires: "canViewStaffSections",
+      },
     ],
   },
 ];
@@ -409,6 +525,14 @@ export interface CsmNavMatch {
  * prefix. `/operations/incidents/42` resolves to the Incidents tab rather than
  * to Operations, which is what lets a single finished tab stay reachable inside
  * an otherwise-unfinished section.
+ *
+ * On a length tie, the later match wins (`>=`, not `>`) — `flattenNavNodes`
+ * yields parents before their children, and a section whose `href` is just an
+ * alias for its own landing child (e.g. "plg"'s href and "plg.dashboard"'s
+ * href are both "/plg/dashboard", since the section has no dedicated landing
+ * page of its own) would otherwise have the parent win a same-length tie
+ * against the more specific child it's aliasing — surfacing as the child
+ * never being the one reported active for its own path.
  */
 export function navNodeMatchForPath(pathname: string): CsmNavMatch | undefined {
   let best: CsmNavMatch | undefined;
@@ -417,7 +541,7 @@ export function navNodeMatchForPath(pathname: string): CsmNavMatch | undefined {
     for (const prefix of navNodeRoutes(node)) {
       if (
         matchesPrefix(pathname, prefix) &&
-        prefix.length > (best?.prefix.length ?? -1)
+        prefix.length >= (best?.prefix.length ?? -1)
       ) {
         best = { node, prefix };
       }

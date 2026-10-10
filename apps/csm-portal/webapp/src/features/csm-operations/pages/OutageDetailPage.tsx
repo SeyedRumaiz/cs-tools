@@ -54,7 +54,11 @@ import {
   outageTypeColor,
   outageTypeLabel,
 } from "@features/csm-operations/utils/outages";
-import type { BeOutageCommunicationChannel, BeOutageConfigurationItemRef } from "@api/backend/types";
+import type {
+  BeAddOutageCommunicationPayload,
+  BeOutageCommunicationChannel,
+  BeOutageConfigurationItemRef,
+} from "@api/backend/types";
 import { useNavTransition } from "@hooks/useNavTransition";
 import { useNormalizedIdParam } from "@hooks/useNormalizedIdParam";
 import { useRecordRecentView } from "@features/csm-recent/hooks/useRecentViews";
@@ -186,8 +190,22 @@ export default function OutageDetailPage(): JSX.Element {
 
   const onPostCommunication = (): void => {
     if (!id || !canPostCommunication) return;
+
+    // *** THE ACKNOWLEDGEMENT HAS TO BE SENT, NOT JUST COLLECTED. ***
+    // canPostCommunication already refuses to enable the button until the
+    // engineer ticks the box, but the flag was then left out of the payload,
+    // so the backend's publication gate rejected the post with a 409 and the
+    // consent the engineer had just given was discarded in the browser.
+    //
+    // Sent only when it is actually required, mirroring CreateOutagePage:
+    // an internal note on a publicly visible outage is still internal, and
+    // claiming consent to publish where none is needed would be a lie in the
+    // request body.
+    const payload: BeAddOutageCommunicationPayload = { channel, body: body.trim() };
+    if (requiresAckToPostExternal) payload.acknowledgePublicPublication = ackExternal;
+
     addCommunication.mutate(
-      { outageId: id, payload: { channel, body: body.trim() } },
+      { outageId: id, payload },
       {
         onSuccess: () => {
           setBody("");
@@ -237,7 +255,7 @@ export default function OutageDetailPage(): JSX.Element {
                 startIcon={<CheckCircle size={14} />}
                 onClick={() => setCloseOpen(true)}
               >
-                Close outage
+                End outage
               </Button>
             ) : (
               <Button
@@ -299,6 +317,18 @@ export default function OutageDetailPage(): JSX.Element {
             ) : (
               <Typography variant="body2">—</Typography>
             )}
+          </MetaCell>
+          <MetaCell label="Internal stakeholder emails">
+            <Typography variant="body2">{outage.notifyInternalStakeholders ? "On" : "Off"}</Typography>
+          </MetaCell>
+          <MetaCell label="Outage communication emails">
+            <Typography variant="body2">{outage.outageCommunication ? "On" : "Off"}</Typography>
+          </MetaCell>
+          <MetaCell label="Impact">
+            <Typography variant="body2">{outage.impact || "—"}</Typography>
+          </MetaCell>
+          <MetaCell label="Current status">
+            <Typography variant="body2">{outage.state || "—"}</Typography>
           </MetaCell>
           <MetaCell label="Created">
             <Typography variant="body2">{formatDateTime(outage.createdOn)} · {outage.createdBy || "—"}</Typography>

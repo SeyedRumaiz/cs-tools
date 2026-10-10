@@ -16,17 +16,22 @@
 
 import { type JSX } from "react";
 import { Box, Stack, Typography } from "@wso2/oxygen-ui";
+import TrackingIdCopy from "./TrackingIdCopy";
 
 interface ErrorPageProps {
   illustration: string;
   illustrationAlt: string;
   description?: string;
+  /** Pass the raw error object through so a "Tracking ID" copy affordance can
+   *  render when it carries a correlation ID — see {@link TrackingIdCopy}. */
+  error?: unknown;
 }
 
 export default function ErrorPage({
   illustration,
   illustrationAlt,
   description,
+  error,
 }: ErrorPageProps): JSX.Element {
   return (
     <Box
@@ -58,6 +63,7 @@ export default function ErrorPage({
             {description}
           </Typography>
         )}
+        <TrackingIdCopy error={error} />
       </Stack>
     </Box>
   );

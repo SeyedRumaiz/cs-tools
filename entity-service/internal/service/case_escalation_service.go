@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 )
 
@@ -41,6 +40,26 @@ const caseEscalationSearchPageSize = 50
 type caseEscalationService struct {
 	escalations EscalationService
 	caseSvc     CaseService
+	// teamLeads resolves the case's ABT team leads for TeamLeads. nil unless
+	// wired via WithCaseTeamLeads (a Postgres-backed deployment); TeamLeads
+	// is then always empty.
+	teamLeads caseTeamLeadReader
+}
+
+// caseTeamLeadReader is what caseEscalationService needs from
+// repository.EscalationRepository for TeamLeads.
+type caseTeamLeadReader interface {
+	CaseTeamLeads(ctx context.Context, caseID string) ([]domain.EscalationNotifiedUser, error)
+}
+
+// WithCaseTeamLeads attaches the ABT team-lead lookup GET
+// /cases/{id}/escalations returns as TeamLeads -- who may de-escalate. A
+// no-op if svc is not a *caseEscalationService or r is nil.
+func WithCaseTeamLeads(svc CaseEscalationService, r caseTeamLeadReader) CaseEscalationService {
+	if cs, ok := svc.(*caseEscalationService); ok && r != nil {
+		cs.teamLeads = r
+	}
+	return svc
 }
 
 // NewCaseEscalationService constructs a CaseEscalationService: a case-scoped
@@ -87,10 +106,20 @@ func (s *caseEscalationService) SearchCaseEscalations(ctx context.Context, caseI
 		currentNotifiedUsers = escalations[0].NotificationSentTo
 	}
 
+	teamLeads := []domain.EscalationNotifiedUser{}
+	if s.teamLeads != nil {
+		leads, err := s.teamLeads.CaseTeamLeads(ctx, caseID)
+		if err != nil {
+			return domain.CaseEscalationHistory{}, err
+		}
+		teamLeads = leads
+	}
+
 	return domain.CaseEscalationHistory{
 		Escalations:          escalations,
 		Total:                total,
 		CurrentNotifiedUsers: currentNotifiedUsers,
+		TeamLeads:            teamLeads,
 	}, nil
 }
 
@@ -120,7 +149,15 @@ func (s *caseEscalationService) CreateCaseEscalation(ctx context.Context, caseID
 	if action != nil {
 		effectiveAction = domain.EscalationAction(strings.ToUpper(string(*action)))
 	}
-	if _, err := s.caseSvc.CreateCaseComment(ctx, domain.CreateCaseCommentRequest{
+	//
+	// This is an internal write: a WORK_NOTE is an internal record (migration
+	// 0191 refuses an external caller both reading and writing one), and a
+	// customer can escalate their own case. CreateInternalCaseComment writes the
+	// row as the system identity. The escalation above already ran under the
+	// caller's identity, so caseID is a case they are allowed to act on, and
+	// nothing from this call is returned to the caller, who gets the escalation
+	// only.
+	if _, err := s.caseSvc.CreateInternalCaseComment(ctx, domain.CreateCaseCommentRequest{
 		CaseID:  caseID,
 		Type:    domain.CommentTypeWorkNote,
 		Content: caseEscalationWorkNoteContent(effectiveAction, resp.Escalation),
@@ -149,35 +186,4 @@ func caseEscalationWorkNoteContent(action domain.EscalationAction, e domain.Crea
 		content += fmt.Sprintf(" Reason: %s.", *e.Reason)
 	}
 	return content
-}
-
-// caseEscalationUnavailableMsg is the reason returned by every
-// unavailableCaseEscalationService method. It matches the 503 description the
-// OpenAPI spec documents for the case-escalation endpoints.
-const caseEscalationUnavailableMsg = "case escalations are only supported for the ServiceNow data source"
-
-// unavailableCaseEscalationService is the Postgres-data-source stand-in for
-// CaseEscalationService. Case escalations live only in the ServiceNow backing
-// store, so every operation reports a 503 rather than the route being left
-// unregistered: an unregistered route answers 404, which the OpenAPI spec
-// does not document for these paths and which callers cannot distinguish
-// from a genuinely missing resource. Mirrors unavailableTaskService's
-// handling of the same ServiceNow-only situation for tasks.
-type unavailableCaseEscalationService struct{}
-
-// NewUnavailableCaseEscalationService returns a CaseEscalationService that
-// reports every case-escalation operation as unavailable for the current
-// data source.
-func NewUnavailableCaseEscalationService() CaseEscalationService {
-	return &unavailableCaseEscalationService{}
-}
-
-// SearchCaseEscalations implements CaseEscalationService.
-func (s *unavailableCaseEscalationService) SearchCaseEscalations(_ context.Context, _ string) (domain.CaseEscalationHistory, error) {
-	return domain.CaseEscalationHistory{}, &apierror.ServiceUnavailableError{Msg: caseEscalationUnavailableMsg}
-}
-
-// CreateCaseEscalation implements CaseEscalationService.
-func (s *unavailableCaseEscalationService) CreateCaseEscalation(_ context.Context, _ string, _ *string, _ *domain.EscalationAction) (domain.CreatedEscalation, error) {
-	return domain.CreatedEscalation{}, &apierror.ServiceUnavailableError{Msg: caseEscalationUnavailableMsg}
 }

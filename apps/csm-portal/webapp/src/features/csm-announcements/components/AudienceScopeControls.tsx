@@ -120,19 +120,6 @@ export default function AudienceScopeControls({
             tracked project except the ones excluded below. Review the resolved list
             before sending.
           </Typography>
-          {excludedProjectKeys.length > 0 && (
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
-              <Typography variant="caption" color="text.secondary">
-                Also always excludes these projects — configured, read-only, can&apos;t
-                be turned off here (change via CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS):
-              </Typography>
-              <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap", gap: 0.5 }}>
-                {excludedProjectKeys.map((key) => (
-                  <Chip key={key} label={key} size="small" variant="outlined" />
-                ))}
-              </Stack>
-            </Box>
-          )}
           <FormControlLabel
             control={
               <Checkbox
@@ -155,6 +142,26 @@ export default function AudienceScopeControls({
             }
             label="Exclude Restricted / Suspended projects"
           />
+          {excludedProjectKeys.length > 0 && (
+            <Box>
+              <FormControlLabel
+                control={<Checkbox size="small" checked disabled />}
+                label="Exclude these configured projects (mandatory, can't be turned off here)"
+              />
+              <Stack
+                direction="row"
+                spacing={0.5}
+                sx={{ flexWrap: "wrap", gap: 0.5, ml: 4.5, mt: -0.5 }}
+              >
+                {excludedProjectKeys.map((key) => (
+                  <Chip key={key} label={key} size="small" variant="outlined" />
+                ))}
+              </Stack>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", ml: 4.5 }}>
+                Change via CSM_ANNOUNCEMENT_EXCLUDED_PROJECT_KEYS.
+              </Typography>
+            </Box>
+          )}
         </Box>
       )}
     </Box>

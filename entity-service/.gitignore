@@ -11,3 +11,7 @@ vendor/
 
 # OS files
 .DS_Store
+
+# Generated one-time handoff artifact (scripts/generate_schema_bootstrap.sh) -
+# never committed, regenerate on demand.
+/dist/

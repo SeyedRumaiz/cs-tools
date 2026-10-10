@@ -18,32 +18,30 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { CreateGithubIssueDialog } from "@features/csm-cases/components/CreateGithubIssueDialog";
-import { useGetGithubIssueRepoOptions } from "@features/csm-cases/api/useGetGithubIssueRepoOptions";
+import { useGetProductRepoMapping } from "@features/csm-cases/api/useGetProductRepoMapping";
 
 // CreateGithubIssueDialog consumes this hook directly; mock the hook module
 // itself (per this app's testing convention — mock the hook when testing a
 // component that just consumes an already-built hook) rather than the
-// backend client it wraps.
-vi.mock("@features/csm-cases/api/useGetGithubIssueRepoOptions", () => ({
-  useGetGithubIssueRepoOptions: vi.fn(),
+// backend client it wraps. Product-name matching lives in the entity service.
+vi.mock("@features/csm-cases/api/useGetProductRepoMapping", () => ({
+  useGetProductRepoMapping: vi.fn(),
 }));
 
-const mockUseGetGithubIssueRepoOptions = vi.mocked(useGetGithubIssueRepoOptions);
+const mockUseGetProductRepoMapping = vi.mocked(useGetProductRepoMapping);
 
-const REPO_OPTIONS_FIXTURE = [
-  { value: "asgardeo", displayLabel: "Asgardeo", owner: "wso2-enterprise", repo: "wso2-iam-internal" },
-  {
-    value: "choreo",
-    displayLabel: "WSO2 Developer Platform (Choreo)",
-    owner: "wso2-enterprise",
-    repo: "choreo",
-  },
-];
+const MAPPING_FIXTURE = {
+  productName: "Alpha",
+  owner: "example-org",
+  repository: "example-repo",
+  githubLabel: "Alpha",
+};
 
 beforeEach(() => {
-  mockUseGetGithubIssueRepoOptions.mockReturnValue({
-    data: REPO_OPTIONS_FIXTURE,
+  mockUseGetProductRepoMapping.mockReturnValue({
+    data: MAPPING_FIXTURE,
     isLoading: false,
+    isError: false,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any);
 });
@@ -53,17 +51,17 @@ function selectType(typeLabel: string): void {
   fireEvent.click(screen.getByRole("option", { name: typeLabel }));
 }
 
-/** Fills every field required for the simplest type (Query — no Severity or
- * Hotfix Required involved) so tests unrelated to the per-type rules don't
- * need to know about them. */
+/** Fills Type, Subject, Description, and the Discussion severity. */
 function fillRequiredFields(): void {
-  selectType("Query");
+  selectType("Discussion");
   fireEvent.change(screen.getByLabelText(/subject/i), {
     target: { value: "Token issuance is slow" },
   });
   fireEvent.change(screen.getByLabelText(/description/i), {
     target: { value: "Latency spiked after the last deploy." },
   });
+  fireEvent.mouseDown(screen.getByRole("combobox", { name: /severity/i }));
+  fireEvent.click(screen.getByRole("option", { name: /P1 - Critical/i }));
 }
 
 describe("CreateGithubIssueDialog — required fields gate submission", () => {
@@ -71,6 +69,7 @@ describe("CreateGithubIssueDialog — required fields gate submission", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         onClose={() => {}}
@@ -78,7 +77,7 @@ describe("CreateGithubIssueDialog — required fields gate submission", () => {
       />,
     );
     expect(screen.getByRole("button", { name: /create issue/i })).toBeDisabled();
-    selectType("Query");
+    selectType("Discussion");
     expect(screen.getByRole("button", { name: /create issue/i })).toBeDisabled();
     fireEvent.change(screen.getByLabelText(/subject/i), {
       target: { value: "Token issuance is slow" },
@@ -87,37 +86,44 @@ describe("CreateGithubIssueDialog — required fields gate submission", () => {
     fireEvent.change(screen.getByLabelText(/description/i), {
       target: { value: "Latency spiked after the last deploy." },
     });
+    expect(screen.getByRole("button", { name: /create issue/i })).toBeDisabled();
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /severity/i }));
+    fireEvent.click(screen.getByRole("option", { name: /P2 - High/i }));
     expect(screen.getByRole("button", { name: /create issue/i })).toBeEnabled();
   });
 });
 
 describe("CreateGithubIssueDialog — per-type field rules", () => {
-  it("Query hides Severity and Hotfix Required", () => {
+  it("does not offer Query or Incident", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         onClose={() => {}}
         onSubmit={() => {}}
       />,
     );
-    selectType("Query");
-    expect(screen.queryByRole("combobox", { name: /severity/i })).not.toBeInTheDocument();
-    expect(screen.queryByText("Hotfix Required")).not.toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /^type/i }));
+    expect(screen.queryByRole("option", { name: "Query" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Incident" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Patch" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Discussion" })).toBeInTheDocument();
   });
 
-  it("Incident requires Severity and hides Hotfix Required", () => {
+  it("Discussion requires Severity and hides Hotfix Required and Regression", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         onClose={() => {}}
         onSubmit={() => {}}
       />,
     );
-    selectType("Incident");
+    selectType("Discussion");
     fireEvent.change(screen.getByLabelText(/subject/i), {
       target: { value: "Token issuance is slow" },
     });
@@ -125,6 +131,7 @@ describe("CreateGithubIssueDialog — per-type field rules", () => {
       target: { value: "Latency spiked after the last deploy." },
     });
     expect(screen.queryByText("Hotfix Required")).not.toBeInTheDocument();
+    expect(screen.queryByText("Regression")).not.toBeInTheDocument();
     // Severity is required for Incident — Create issue stays disabled without it.
     expect(screen.getByRole("button", { name: /create issue/i })).toBeDisabled();
     fireEvent.mouseDown(screen.getByRole("combobox", { name: /severity/i }));
@@ -132,10 +139,11 @@ describe("CreateGithubIssueDialog — per-type field rules", () => {
     expect(screen.getByRole("button", { name: /create issue/i })).toBeEnabled();
   });
 
-  it("Patch hides Severity and requires Update Level + Public Git Issue", () => {
+  it("Patch hides Severity, shows Regression, and requires Update Level + Public Git Issue", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         onClose={() => {}}
@@ -151,6 +159,7 @@ describe("CreateGithubIssueDialog — per-type field rules", () => {
     });
     expect(screen.queryByRole("combobox", { name: /severity/i })).not.toBeInTheDocument();
     expect(screen.getByText("Hotfix Required")).toBeInTheDocument();
+    expect(screen.getByText("Regression")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /create issue/i })).toBeDisabled();
 
     fireEvent.change(screen.getByLabelText(/update level/i), {
@@ -171,6 +180,7 @@ describe("CreateGithubIssueDialog — stale per-type fields don't leak into the 
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         onClose={() => {}}
@@ -181,7 +191,9 @@ describe("CreateGithubIssueDialog — stale per-type fields don't leak into the 
     fireEvent.click(screen.getByRole("switch", { name: /hotfix required/i }));
     // Switching away from Patch hides the control, but the toggled-on state
     // must not still ride along in the submitted payload.
-    selectType("Query");
+    selectType("Discussion");
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /severity/i }));
+    fireEvent.click(screen.getByRole("option", { name: /P1 - Critical/i }));
     fireEvent.change(screen.getByLabelText(/subject/i), {
       target: { value: "Token issuance is slow" },
     });
@@ -194,6 +206,38 @@ describe("CreateGithubIssueDialog — stale per-type fields don't leak into the 
       expect.not.objectContaining({ hotFixRequired: true }),
     );
   });
+
+  it("drops regression once Type is switched away from Patch after toggling it on", () => {
+    const onSubmit = vi.fn();
+    render(
+      <CreateGithubIssueDialog
+        open
+        productName="Alpha"
+        submitting={false}
+        error={null}
+        onClose={() => {}}
+        onSubmit={onSubmit}
+      />,
+    );
+    selectType("Patch");
+    fireEvent.click(screen.getByRole("switch", { name: /regression/i }));
+    // Switching away from Patch hides the control, but the toggled-on state
+    // must not still ride along in the submitted payload.
+    selectType("Discussion");
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /severity/i }));
+    fireEvent.click(screen.getByRole("option", { name: /P1 - Critical/i }));
+    fireEvent.change(screen.getByLabelText(/subject/i), {
+      target: { value: "Token issuance is slow" },
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: "Latency spiked after the last deploy." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /create issue/i }));
+    fireEvent.click(screen.getByRole("button", { name: /file issue/i }));
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.not.objectContaining({ regression: true }),
+    );
+  });
 });
 
 describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
@@ -202,6 +246,7 @@ describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         showRepoField
@@ -210,13 +255,11 @@ describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
       />,
     );
     fillRequiredFields();
-    fireEvent.mouseDown(screen.getByRole("combobox", { name: /choose repository/i }));
-    fireEvent.click(screen.getByRole("option", { name: "Asgardeo" }));
     fireEvent.click(screen.getByRole("button", { name: /create issue/i }));
     fireEvent.click(screen.getByRole("button", { name: /file issue/i }));
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({
-        repoOverride: { owner: "wso2-enterprise", repo: "wso2-iam-internal" },
+        repoOverride: { owner: "example-org", repo: "example-repo" },
       }),
     );
   });
@@ -225,6 +268,7 @@ describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         showRepoField
@@ -233,19 +277,17 @@ describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
       />,
     );
     fillRequiredFields();
-    fireEvent.mouseDown(screen.getByRole("combobox", { name: /choose repository/i }));
-    fireEvent.click(screen.getByRole("option", { name: "Asgardeo" }));
     fireEvent.click(screen.getByRole("button", { name: /create issue/i }));
     const confirmDialog = screen.getByRole("dialog", {
       name: /file this github issue/i,
     });
     expect(
-      within(confirmDialog).getByText(/wso2-enterprise\/wso2-iam-internal \(Asgardeo\)/),
+      within(confirmDialog).getByText(/example-org\/example-repo \(Alpha\)/),
     ).toBeInTheDocument();
   });
 
   it("disables the repo select while options are loading, instead of rendering broken values", () => {
-    mockUseGetGithubIssueRepoOptions.mockReturnValue({
+    mockUseGetProductRepoMapping.mockReturnValue({
       data: undefined,
       isLoading: true,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -253,6 +295,7 @@ describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         showRepoField
@@ -260,14 +303,13 @@ describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
         onSubmit={() => {}}
       />,
     );
-    expect(screen.getByRole("combobox", { name: /choose repository/i })).toHaveAttribute(
-      "aria-disabled",
-      "true",
-    );
+    expect(screen.queryByRole("combobox", { name: /choose repository/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/looking up the github repository/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /create issue/i })).toBeDisabled();
   });
 
   it("keeps Create issue disabled while repo options are still loading, even with every other field filled", () => {
-    mockUseGetGithubIssueRepoOptions.mockReturnValue({
+    mockUseGetProductRepoMapping.mockReturnValue({
       data: undefined,
       isLoading: true,
       isError: false,
@@ -276,6 +318,7 @@ describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         showRepoField
@@ -290,7 +333,7 @@ describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
   });
 
   it("keeps Create issue disabled when the repo options fetch has failed", () => {
-    mockUseGetGithubIssueRepoOptions.mockReturnValue({
+    mockUseGetProductRepoMapping.mockReturnValue({
       data: undefined,
       isLoading: false,
       isError: true,
@@ -299,6 +342,7 @@ describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         showRepoField
@@ -308,6 +352,93 @@ describe("CreateGithubIssueDialog — repo options (showRepoField)", () => {
     );
     fillRequiredFields();
     expect(screen.getByRole("button", { name: /create issue/i })).toBeDisabled();
+  });
+
+  it("keeps Create issue disabled when the lookup finds no mapping", () => {
+    mockUseGetProductRepoMapping.mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: false,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    render(
+      <CreateGithubIssueDialog
+        open
+        productName="Totally Unknown Product"
+        submitting={false}
+        error={null}
+        onClose={() => {}}
+        onSubmit={() => {}}
+      />,
+    );
+    fillRequiredFields();
+    expect(screen.getByText(/no github repository is mapped/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /create issue/i })).toBeDisabled();
+  });
+
+  it("shows the repository the lookup returned", () => {
+    mockUseGetProductRepoMapping.mockReturnValue({
+      data: {
+        productName: "Beta",
+        owner: "example-org",
+        repository: "other-repo",
+        githubLabel: "Beta",
+      },
+      isLoading: false,
+      isError: false,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    render(
+      <CreateGithubIssueDialog
+        open
+        productName="Beta"
+        submitting={false}
+        error={null}
+        onClose={() => {}}
+        onSubmit={() => {}}
+      />,
+    );
+    expect(
+      screen.getByText(/example-org\/other-repo \(Beta\)/),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps Create issue disabled while a linked project's status is still loading", () => {
+    render(
+      <CreateGithubIssueDialog
+        open
+        productName="Alpha"
+        projectStatusPending
+        submitting={false}
+        error={null}
+        onClose={() => {}}
+        onSubmit={() => {}}
+      />,
+    );
+    fillRequiredFields();
+    expect(screen.getByText(/waiting for this case's project status/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /create issue/i })).toBeDisabled();
+  });
+
+  it("keeps Create issue disabled when the project lookup failed, until retry", () => {
+    const onRetryProjectStatus = vi.fn();
+    render(
+      <CreateGithubIssueDialog
+        open
+        productName="Alpha"
+        projectStatusFailed
+        onRetryProjectStatus={onRetryProjectStatus}
+        submitting={false}
+        error={null}
+        onClose={() => {}}
+        onSubmit={() => {}}
+      />,
+    );
+    fillRequiredFields();
+    expect(screen.getByText(/could not load this case's project status/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /create issue/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    expect(onRetryProjectStatus).toHaveBeenCalledOnce();
   });
 });
 
@@ -319,6 +450,7 @@ describe("CreateGithubIssueDialog — confirm step before filing a real issue", 
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         onClose={() => {}}
@@ -338,6 +470,7 @@ describe("CreateGithubIssueDialog — confirm step before filing a real issue", 
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         onClose={() => {}}
@@ -352,7 +485,9 @@ describe("CreateGithubIssueDialog — confirm step before filing a real issue", 
         reason: "default",
         title: "Token issuance is slow",
         description: "Latency spiked after the last deploy.",
-        issueTypeLabel: "Type/Query",
+        issueTypeLabel: "Type/Discussion",
+        priorityLevel: "Priority/Critical",
+        repoOverride: { owner: "example-org", repo: "example-repo" },
       }),
     );
   });
@@ -362,6 +497,7 @@ describe("CreateGithubIssueDialog — confirm step before filing a real issue", 
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         onClose={() => {}}
@@ -387,6 +523,7 @@ describe("CreateGithubIssueDialog — confirm step before filing a real issue", 
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error="Something went wrong filing the issue."
         onClose={() => {}}
@@ -408,6 +545,7 @@ describe("CreateGithubIssueDialog — confirm step before filing a real issue", 
     const { rerender } = render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         onClose={() => {}}
@@ -420,6 +558,7 @@ describe("CreateGithubIssueDialog — confirm step before filing a real issue", 
     rerender(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting
         error={null}
         onClose={() => {}}
@@ -440,11 +579,12 @@ describe("CreateGithubIssueDialog — success view", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         createdIssue={{
           message: "Issue created.",
-          issue: { url: "https://github.com/wso2-enterprise/example/issues/42", number: 42, repo: "example" },
+          issue: { url: "https://github.com/example-org/example/issues/42", number: 42, repo: "example" },
         }}
         onClose={onClose}
         onSubmit={() => {}}
@@ -456,7 +596,7 @@ describe("CreateGithubIssueDialog — success view", () => {
     const link = screen.getByRole("link", { name: /example#42/i });
     expect(link).toHaveAttribute(
       "href",
-      "https://github.com/wso2-enterprise/example/issues/42",
+      "https://github.com/example-org/example/issues/42",
     );
     expect(onClose).not.toHaveBeenCalled();
 
@@ -468,6 +608,7 @@ describe("CreateGithubIssueDialog — success view", () => {
     render(
       <CreateGithubIssueDialog
         open
+        productName="Alpha"
         submitting={false}
         error={null}
         createdIssue={{ message: "Filed, awaiting SN sync." }}

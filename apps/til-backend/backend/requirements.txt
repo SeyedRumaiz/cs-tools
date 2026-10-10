@@ -1,0 +1,16 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+httpx==0.25.2
+python-dotenv==1.0.0
+joserfc==0.9.0
+PyMySQL==1.1.0
+bleach==6.1.0
+# Known DoS advisory (GHSA-pp6c-gr5w-3c5g, unbounded multipart part header
+# parsing) is fixed only in 0.0.27+ -- NOT bumped yet because every 0.0.27+
+# release requires Python >=3.10, and this project currently targets 3.9.
+# Mitigated in the meantime by main.py's own Content-Length-based request
+# size gate (reject_oversized_requests), which runs before this library
+# ever sees the body. Revisit this pin once/if the project moves to
+# Python 3.10+.
+python-multipart==0.0.20
+pytest==7.4.3

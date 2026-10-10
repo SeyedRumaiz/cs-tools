@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/servicenow"
 )
 
 var uuidRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -84,6 +85,9 @@ type entityCaseClient interface {
 	SearchFeedback(ctx context.Context, body []byte) ([]byte, error)
 	AggregateFeedback(ctx context.Context, body []byte) ([]byte, error)
 	GetCase(ctx context.Context, caseID string) ([]byte, error)
+	// GetProductRepoMapping calls GET /products/github-repo?name= on the
+	// entity service. The response is the GitHub repository for that product.
+	GetProductRepoMapping(ctx context.Context, name string) ([]byte, error)
 	CreateCaseAttachment(ctx context.Context, body []byte) ([]byte, error)
 	SearchCaseAttachments(ctx context.Context, body []byte) ([]byte, error)
 	GetCaseAttachmentContent(ctx context.Context, attachmentID string) ([]byte, string, error)
@@ -109,6 +113,11 @@ type entityCaseClient interface {
 	// call that backs GET /users/me. Needed by the public-comment ownership
 	// guard; see CaseHandler.resolveCurrentUserID.
 	GetUserMe(ctx context.Context) ([]byte, error)
+	// CreateUser calls POST /users on the entity service — used alongside
+	// GetUserMe by ensureUserProvisioned (see that function's own doc
+	// comment) to provision a worknote_creator-/escalator-only caller who
+	// has no "user" row yet.
+	CreateUser(ctx context.Context, body []byte) ([]byte, error)
 }
 
 // CaseHandler handles HTTP requests for case operations, delegating to the
@@ -121,11 +130,41 @@ type CaseHandler struct {
 	// CreateCaseComment's behavior completely unchanged from before this
 	// feature existed.
 	inlineImages *InlineImageProcessor
+	// engineering, when non-nil, files GitHub issues from a case instead of
+	// the entity service — see WithEngineeringClient.
+	engineering engineeringGitIssueClient
+	// access backs the security-report type check in SearchCases -- see
+	// WithAccessGuard. nil fails that check closed (denied), never open:
+	// unlike UsersHandler's own optional use of this field (a display-only
+	// enrichment, harmless if skipped), this one gates real access to data.
+	access *AccessGuard
 }
 
 // NewCaseHandler creates a CaseHandler backed by the given entity client.
 func NewCaseHandler(entity entityCaseClient) *CaseHandler {
 	return &CaseHandler{entity: entity}
+}
+
+// WithAccessGuard wires the same guard that authorises every route into this
+// handler, so SearchCases can additionally require PermViewSecurityCenter for
+// a security_report_analysis-typed request — a restriction PermView alone
+// (the route-level permission it already carries, shared with every other
+// case-type view) cannot express. Returns h for chaining at the construction
+// site.
+//
+// GetCase deliberately gets no equivalent check: CaseView.type is only
+// populated for ServiceNow cases (null on Postgres — see entity-service's own
+// openapi.yaml), so there is no reliable way to tell a security-report case
+// apart from any other by inspecting its GetCase response alone, and a
+// broken check would be worse than none. A caller who already knows a
+// security-report case's id (from before this restriction, or by guessing)
+// can still fetch it directly by id; the real access boundary this change
+// adds is discovery via search, not a hard per-case-type ACL. Closing this
+// fully would need entity-service to resolve and enforce it (it has reliable
+// type data either data source), not this BFF layer.
+func (h *CaseHandler) WithAccessGuard(g *AccessGuard) *CaseHandler {
+	h.access = g
+	return h
 }
 
 // WithInlineImageProcessor enables server-side inline-image extraction on
@@ -142,9 +181,18 @@ func (h *CaseHandler) WithInlineImageProcessor(p *InlineImageProcessor) *CaseHan
 	return h
 }
 
+// userMeGetter is satisfied by any entity client exposing GetUserMe — both
+// entityCaseClient and entityIncidentClient do, which is what lets
+// resolveCurrentUserID below be shared by CaseHandler and IncidentHandler
+// without either depending on the other's full interface.
+type userMeGetter interface {
+	GetUserMe(ctx context.Context) ([]byte, error)
+}
+
 // resolveCurrentUserID returns the caller's platform user id — the id
 // GET /users/me resolves via the entity service — for comparing against a
-// platform record's own user references (e.g. a case's assigned engineer).
+// platform record's own user references (e.g. a case's assigned engineer,
+// or an incident's assignedTo).
 //
 // This is deliberately NOT user.UserID from the JWT: that claim is whatever
 // identity value the gateway/identity provider embeds, an identifier from a
@@ -157,21 +205,21 @@ func (h *CaseHandler) WithInlineImageProcessor(p *InlineImageProcessor) *CaseHan
 // Returns an empty id when the lookup fails or yields nothing, so callers
 // gating on it fail closed rather than falling back to an id that can never
 // match.
-func (h *CaseHandler) resolveCurrentUserID(r *http.Request, user *middleware.UserInfo) string {
-	raw, err := h.entity.GetUserMe(r.Context())
+func resolveCurrentUserID(ctx context.Context, entity userMeGetter, user *middleware.UserInfo) string {
+	raw, err := entity.GetUserMe(ctx)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "entity GetUserMe failed while resolving the caller's platform user id", "userID", user.UserID, "err", err)
+		slog.ErrorContext(ctx, "entity GetUserMe failed while resolving the caller's platform user id", "userID", user.UserID, "err", err)
 		return ""
 	}
 	var me struct {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(raw, &me); err != nil {
-		slog.ErrorContext(r.Context(), "entity GetUserMe: parse response failed while resolving the caller's platform user id", "userID", user.UserID, "err", err)
+		slog.ErrorContext(ctx, "entity GetUserMe: parse response failed while resolving the caller's platform user id", "userID", user.UserID, "err", err)
 		return ""
 	}
 	if me.ID == "" {
-		slog.ErrorContext(r.Context(), "entity GetUserMe returned an empty id while resolving the caller's platform user id", "userID", user.UserID)
+		slog.ErrorContext(ctx, "entity GetUserMe returned an empty id while resolving the caller's platform user id", "userID", user.UserID)
 	}
 	return me.ID
 }
@@ -235,35 +283,33 @@ func validateCaseEscalationBody(body []byte) (action string, ok bool) {
 	return action, true
 }
 
-// callerIsNotifiedOnCurrentEscalation reports whether the caller is one of the
-// people notified about the case's current (most recent) escalation level --
-// the only people authorized to de-escalate it. Escalating stays open to any
-// authenticated user; only de-escalation is gated this way.
+// callerIsCaseTeamLead reports whether the caller is one of the case's ABT
+// team leads (entity-service's teamLeads: team_member role 'lead' on the
+// account's CRE team) -- the only people authorized to de-escalate it.
+// Escalating is open to any internal engineer (PermEscalate); only
+// de-escalation is gated this way.
 //
-// Fails closed (returns false) on any lookup/parse error or when the case has
-// no escalation history at all (nothing to de-escalate, nobody was notified).
-// Matches by the caller's platform user id first (GET /users/me's own id
-// against a notified user's id, both platform UUIDs), falling back to a
-// case-insensitive email match when either id is empty -- the notified-user
-// id can be empty when the backing data source could not resolve a platform
-// record for that recipient.
-func (h *CaseHandler) callerIsNotifiedOnCurrentEscalation(r *http.Request, caseID string, user *middleware.UserInfo) bool {
+// Fails closed (returns false) on any lookup/parse error or when the case's
+// team has no lead. Matches by the caller's platform user id first (GET
+// /users/me's own id against a lead's id, both platform UUIDs), falling back
+// to a case-insensitive email match when either id is empty.
+func (h *CaseHandler) callerIsCaseTeamLead(r *http.Request, caseID string, user *middleware.UserInfo) bool {
 	raw, err := h.entity.SearchCaseEscalations(r.Context(), caseID)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity SearchCaseEscalations failed while checking de-escalation authorization", "userID", user.UserID, "caseID", caseID, "err", err)
 		return false
 	}
 	var history struct {
-		CurrentNotifiedUsers []struct {
+		TeamLeads []struct {
 			ID    string `json:"id"`
 			Email string `json:"email"`
-		} `json:"currentNotifiedUsers"`
+		} `json:"teamLeads"`
 	}
 	if err := json.Unmarshal(raw, &history); err != nil {
 		slog.ErrorContext(r.Context(), "entity SearchCaseEscalations: parse response failed while checking de-escalation authorization", "userID", user.UserID, "caseID", caseID, "err", err)
 		return false
 	}
-	if len(history.CurrentNotifiedUsers) == 0 {
+	if len(history.TeamLeads) == 0 {
 		return false
 	}
 
@@ -281,17 +327,17 @@ func (h *CaseHandler) callerIsNotifiedOnCurrentEscalation(r *http.Request, caseI
 		return false
 	}
 
-	for _, notified := range history.CurrentNotifiedUsers {
-		if caller.ID != "" && notified.ID != "" && caller.ID == notified.ID {
+	for _, lead := range history.TeamLeads {
+		if caller.ID != "" && lead.ID != "" && caller.ID == lead.ID {
 			return true
 		}
 		// Only fall back to email when an id is unavailable on either side --
 		// two different platform users must never be treated as the same
 		// person just because both ids happen to be missing and their emails
 		// happen to match by coincidence or staleness on one side.
-		if (caller.ID == "" || notified.ID == "") &&
-			caller.Email != "" && notified.Email != "" &&
-			strings.EqualFold(caller.Email, notified.Email) {
+		if (caller.ID == "" || lead.ID == "") &&
+			caller.Email != "" && lead.Email != "" &&
+			strings.EqualFold(caller.Email, lead.Email) {
 			return true
 		}
 	}
@@ -358,6 +404,18 @@ func (h *CaseHandler) CreateCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// POST /cases is the one generic create route, and it creates an
+	// announcement (the dry-run case and every per-project case of a publish)
+	// just as readily as a support case, so the announcement-creator gate has to
+	// be applied to the body rather than the route. It is checked on top of the
+	// route's own PermWrite; a nil guard fails closed, like the Security Center
+	// check in SearchCases.
+	if caseCreateTargetsAnnouncement(body) && !(h.access != nil && h.access.Permits(PermCreateAnnouncement, user.Roles)) {
+		slog.WarnContext(r.Context(), "access denied: creating an announcement needs the announcement creator role", "userID", user.UserID)
+		writeError(w, http.StatusForbidden, ErrMsgForbidden)
+		return
+	}
+
 	// Strip any client-supplied createdBy to prevent identity spoofing.
 	body, err = stripField(body, "createdBy")
 	if err != nil {
@@ -414,9 +472,51 @@ func (h *CaseHandler) CreateCaseComment(w http.ResponseWriter, r *http.Request) 
 
 	// Work notes are internal-only and exempt from the state gate.
 	var reqMeta struct {
-		Type string `json:"type"`
+		Type    string `json:"type"`
+		Content string `json:"content"`
 	}
 	_ = json.Unmarshal(body, &reqMeta) // body is already validated JSON
+
+	// The route's own permission (PermCreateWorkNote) is deliberately
+	// broader than this: it also admits a worknote_creator-only caller, who
+	// must NOT be able to post anything but a work_note. Narrow back down
+	// to full PermWrite for every other type -- see PermCreateWorkNote's
+	// own doc comment.
+	hasFullWrite := h.access != nil && h.access.Permits(PermWrite, user.Roles)
+	if reqMeta.Type != "work_note" && !hasFullWrite {
+		writeError(w, http.StatusForbidden, ErrMsgForbidden)
+		return
+	}
+
+	// A worknote-creator-only caller is only ever allowed to reach here with
+	// type=work_note (just checked above) -- but body is still the
+	// caller-supplied raw bytes, forwarded to the entity service unchanged
+	// below. encoding/json's handling of a duplicate "type" key (last one
+	// wins) is an implementation detail, not a wire-format guarantee the
+	// entity service is bound by; if it parses the same bytes differently,
+	// a body like {"type":"comment","type":"work_note"} could pass this
+	// check yet be stored as a customer-visible comment. Rebuild the body
+	// from what THIS check actually approved rather than forwarding the
+	// ambiguous original, so there is no decoder for the two services to
+	// disagree on. Full-PermWrite callers are unaffected: they may post any
+	// type, so there is nothing narrower here to enforce for them.
+	if !hasFullWrite {
+		rebuilt, err := json.Marshal(struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		}{Type: "work_note", Content: reqMeta.Content})
+		if err != nil {
+			slog.ErrorContext(r.Context(), "failed to rebuild work-note comment body", "userID", user.UserID, "caseID", caseID, "err", err)
+			writeError(w, http.StatusInternalServerError, ErrMsgInternal)
+			return
+		}
+		body = rebuilt
+
+		// A worknote_creator-only caller (not cs_engineer/admin, who already
+		// hold full PermWrite and are assumed provisioned) may have no "user"
+		// row yet — see ensureUserProvisioned's own doc comment.
+		ensureUserProvisioned(r.Context(), h.entity, user)
+	}
 
 	if reqMeta.Type != "work_note" {
 		current, err := h.entity.GetCase(r.Context(), caseID)
@@ -458,7 +558,7 @@ func (h *CaseHandler) CreateCaseComment(w http.ResponseWriter, r *http.Request) 
 			// against the identity provider's user id on the JWT. Resolved here,
 			// after the state gate, so the extra lookup is only paid on a request
 			// that would otherwise be accepted.
-			currentUserID := h.resolveCurrentUserID(r, user)
+			currentUserID := resolveCurrentUserID(r.Context(), h.entity, user)
 			if currentUserID == "" {
 				// The caller's identity could not be established, so ownership
 				// cannot be decided either way: fail closed, but as a server-side
@@ -566,6 +666,9 @@ func (h *CaseHandler) SearchCaseComments(w http.ResponseWriter, r *http.Request)
 		mapUpstreamErrorGeneric(w, err, "Failed to search case comments.")
 		return
 	}
+	if shouldRedactInlineImages(h.access, user.Roles) {
+		result = redactRawBase64Images(result)
+	}
 
 	writeJSON(w, http.StatusOK, result)
 }
@@ -608,8 +711,114 @@ func (h *CaseHandler) SearchCaseActivities(w http.ResponseWriter, r *http.Reques
 		mapUpstreamErrorGeneric(w, err, "Failed to search case activities.")
 		return
 	}
+	if shouldRedactInlineImages(h.access, user.Roles) {
+		result = redactRawBase64Images(result)
+	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// securityReportCaseType is the one case type value Security Center is
+// restricted to — see caseSearchTargetsSecurityReports's own doc comment.
+const securityReportCaseType = "security_report_analysis"
+
+// caseFieldFilterFragment is the subset of CaseFieldFilter (entity-service's
+// openapi.yaml) this handler needs to read out of an otherwise-opaque,
+// forwarded-verbatim request body: which field a predicate names and what
+// values it matches. Untyped fields (op, and every other CaseFieldFilter
+// property) are simply not decoded.
+type caseFieldFilterFragment struct {
+	Field  string   `json:"field"`
+	Values []string `json:"values"`
+}
+
+// announcementCaseType is the case type entity-service creates an announcement
+// work item for. Compared case-insensitively below, which is wider than
+// entity-service's own exact-lowercase match on purpose: a guard may deny
+// too much, never too little.
+const announcementCaseType = "announcement"
+
+// caseCreateTargetsAnnouncement reports whether a POST /cases body asks for a
+// work item of type announcement. It reads the top-level keys as a token
+// stream, so EVERY "type" in the body is judged, not just the one a map would
+// keep: entity-service's decoder (encoding/json) matches a key to a field
+// without regard to case and reads a repeated one as the last reached, so a
+// guard that looked at one spelling, or only the winning one, could be walked
+// around by a body that names the field twice. Any of them being announcement
+// counts. A body that is not a JSON object, or a "type" that is not a string,
+// is left to entity-service to reject: neither can create an announcement there.
+func caseCreateTargetsAnnouncement(body []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return false
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		key, _ := keyTok.(string)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return false
+		}
+		if !strings.EqualFold(key, "type") {
+			continue
+		}
+		var t string
+		if json.Unmarshal(raw, &t) == nil && strings.EqualFold(strings.TrimSpace(t), announcementCaseType) {
+			return true
+		}
+	}
+	return false
+}
+
+// caseSearchTargetsSecurityReports reports whether body's type filter --
+// either the top-level filters.filters array or any filters.anyOf branch --
+// includes securityReportCaseType. Best-effort JSON inspection, not a full
+// parse of the generic filter grammar (entity-service's own CaseFieldFilter):
+// a body this can't make sense of is treated as not targeting it, since a
+// genuinely malformed request is rejected by entity-service's own validation
+// regardless of what this check decides. This only catches requests that
+// explicitly ask for this type, the same way Security Center's own
+// caseTypes-locked search does (CsmIssuesView, webapp) -- a hypothetical
+// unfiltered "every case type" search that happens to also return
+// security-report rows is a known, narrower gap, not handled here.
+func caseSearchTargetsSecurityReports(body []byte) bool {
+	var req struct {
+		Filters struct {
+			Filters []caseFieldFilterFragment `json:"filters"`
+			AnyOf   []struct {
+				Filters []caseFieldFilterFragment `json:"filters"`
+			} `json:"anyOf"`
+		} `json:"filters"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false
+	}
+	if filtersNameSecurityReportType(req.Filters.Filters) {
+		return true
+	}
+	for _, branch := range req.Filters.AnyOf {
+		if filtersNameSecurityReportType(branch.Filters) {
+			return true
+		}
+	}
+	return false
+}
+
+func filtersNameSecurityReportType(filters []caseFieldFilterFragment) bool {
+	for _, f := range filters {
+		if f.Field != "type" {
+			continue
+		}
+		for _, v := range f.Values {
+			if v == securityReportCaseType {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // SearchCases handles POST /cases/search.
@@ -637,11 +846,19 @@ func (h *CaseHandler) SearchCases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if caseSearchTargetsSecurityReports(body) && !(h.access != nil && h.access.Permits(PermViewSecurityCenter, user.Roles)) {
+		writeError(w, http.StatusForbidden, ErrMsgForbidden)
+		return
+	}
+
 	result, err := h.entity.SearchCases(r.Context(), body)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity SearchCases failed", "userID", user.UserID, "err", err)
 		mapUpstreamErrorGeneric(w, err, "Failed to search cases.")
 		return
+	}
+	if shouldRedactInlineImages(h.access, user.Roles) {
+		result = redactRawBase64Images(result)
 	}
 
 	writeJSON(w, http.StatusOK, result)
@@ -1259,7 +1476,10 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var currentCase struct {
-			State string `json:"state"`
+			State            string `json:"state"`
+			AssignedEngineer *struct {
+				ID *string `json:"id"`
+			} `json:"assignedEngineer"`
 		}
 		if err := json.Unmarshal(current, &currentCase); err != nil {
 			slog.ErrorContext(r.Context(), "failed to parse current case state", "userID", user.UserID, "caseID", caseID, "err", err)
@@ -1273,6 +1493,23 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 		if patch.WorkState != nil && currentCase.State != caseStateWorkInProgress {
 			writeError(w, http.StatusBadRequest, ErrMsgWorkStateNotAllowed)
 			return
+		}
+		// Ownership check: closing a case is restricted to its own assigned
+		// engineer, unless the caller is admin (an operational override).
+		// Scoped to only the transition that sets state to closed — not every
+		// PATCH — since the issue this guards against is specifically about
+		// closing a ticket that isn't yours. Mirrors CreateCaseComment's own
+		// ownership guard above.
+		if patch.State != nil && *patch.State == caseStateClosed && !(h.access != nil && h.access.Permits(PermAdmin, user.Roles)) {
+			currentUserID := resolveCurrentUserID(r.Context(), h.entity, user)
+			if currentUserID == "" {
+				writeError(w, http.StatusInternalServerError, ErrMsgInternal)
+				return
+			}
+			if currentCase.AssignedEngineer == nil || currentCase.AssignedEngineer.ID == nil || *currentCase.AssignedEngineer.ID != currentUserID {
+				writeError(w, http.StatusForbidden, ErrMsgCaseCloseNotOwnCase)
+				return
+			}
 		}
 	}
 
@@ -1467,6 +1704,9 @@ func (h *CaseHandler) GetCase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Failed to process case details.")
 		return
 	}
+	if shouldRedactInlineImages(h.access, user.Roles) {
+		result = redactRawBase64Images(result)
+	}
 
 	writeJSON(w, http.StatusOK, result)
 }
@@ -1526,10 +1766,16 @@ func (h *CaseHandler) CreateCaseEscalation(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if action == "DEESCALATE" && !h.callerIsNotifiedOnCurrentEscalation(r, caseID, user) {
+	if action == "DEESCALATE" && !h.callerIsCaseTeamLead(r, caseID, user) {
 		writeError(w, http.StatusForbidden, ErrMsgForbidden)
 		return
 	}
+
+	// This route's permission (PermEscalate) is also held by roles that
+	// never write anything else here (escalator), so a caller reaching this
+	// point may have no "user" row yet. See ensureUserProvisioned's own doc
+	// comment.
+	ensureUserProvisioned(r.Context(), h.entity, user)
 
 	result, err := h.entity.CreateCaseEscalation(r.Context(), caseID, body)
 	if err != nil {
@@ -1701,7 +1947,7 @@ func (h *CaseHandler) SearchAllCallRequests(w http.ResponseWriter, r *http.Reque
 // Forwards the body unchanged to the entity service's PATCH /call-requests/{callRequestId}.
 //
 // This is the single mutation surface for call requests, including the agent-only
-// (WSO2 engineer) state transitions (schedule/reschedule, reject, conclude+notes)
+// (WSO2 engineer) state transitions (schedule/reschedule, reject, conclude with or without notes)
 // selected by the target `state` in the body. The backend has no role-based access
 // control layer yet, so any authenticated user may invoke them today; engineer-only
 // gating is a follow-up and MUST NOT be invented here.
@@ -1788,6 +2034,11 @@ func (h *CaseHandler) CreateCaseGithubIssue(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if h.engineering != nil {
+		h.createGitHubIssueViaEngineering(w, r, user, caseID, body)
+		return
+	}
+
 	result, err := h.entity.CreateCaseGithubIssue(r.Context(), caseID, body)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity CreateCaseGithubIssue failed", "userID", user.UserID, "caseID", caseID, "err", err)
@@ -1796,4 +2047,66 @@ func (h *CaseHandler) CreateCaseGithubIssue(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusCreated, result)
+}
+
+// viewerCaseClient abstracts the ServiceNow operations used by ViewerCaseHandler.
+// GetCases/GetCaseByNumber/GetCommentsAndWorknotes used to live here too,
+// backed first by ServiceNow and later by a Postgres translation layer --
+// both removed in favor of calling CS Portal's own POST /cases/search,
+// GET /cases/{id}, and POST /cases/{id}/comments/search directly (worknote
+// creation similarly merged onto POST /cases/{id}/comments, using the same
+// entity-service CommentType distinction CS Portal's own comment handler
+// already exposes -- see splWorknotesHandler's removal). Attachments have no
+// entity-service equivalent at all yet (no Postgres storage/backfill path),
+// so that one stays here, ServiceNow-backed, unmerged.
+type viewerCaseClient interface {
+	GetAttachmentsInfo(ctx context.Context, caseNumber string, offset, limit int) ([]servicenow.AttachmentInfo, error)
+}
+
+// ViewerCaseHandler handles HTTP requests for SupportPortalLite's case-
+// attachments endpoint -- the one piece of the case domain with no
+// Postgres/entity-service equivalent to merge onto (see viewerCaseClient's own
+// doc comment). Reading, searching, and commenting on cases now goes
+// through CS Portal's own /cases routes directly.
+type ViewerCaseHandler struct {
+	sn          viewerCaseClient
+	accessGuard *AccessGuard
+}
+
+// NewViewerCaseHandler creates a ViewerCaseHandler.
+func NewViewerCaseHandler(sn viewerCaseClient, accessGuard *AccessGuard) *ViewerCaseHandler {
+	return &ViewerCaseHandler{sn: sn, accessGuard: accessGuard}
+}
+
+// GetAttachmentsInfo handles GET /cases/{caseId}/attachments-info.
+func (h *ViewerCaseHandler) GetAttachmentsInfo(w http.ResponseWriter, r *http.Request) {
+	user, ok := requireViewerAccess(w, r, h.accessGuard)
+	if !ok {
+		return
+	}
+	caseID := r.PathValue("caseId")
+	if caseID == "" {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+	offset, limit, ok := parsePaginationParams(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := h.sn.GetAttachmentsInfo(r.Context(), caseID, offset, limit)
+	if err != nil {
+		if errors.Is(err, servicenow.ErrCaseNotFound) {
+			writeError(w, http.StatusNotFound, ErrMsgNotFound)
+			return
+		}
+		if isUnsafeQueryValue(err) {
+			writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+			return
+		}
+		slog.ErrorContext(r.Context(), "servicenow GetAttachmentsInfo failed", "userID", user.UserID, "caseID", caseID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to retrieve case attachments.")
+		return
+	}
+	writeJSONValue(w, http.StatusOK, result)
 }

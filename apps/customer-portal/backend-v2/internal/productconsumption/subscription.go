@@ -17,6 +17,7 @@
 package productconsumption
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -179,9 +180,28 @@ func (c *Client) generateSecretKeys(ctx context.Context) (SecretKeysResponse, er
 }
 
 // getDeploymentLicense calls POST /projects/{projectId}/deployments/{deploymentId}/license.
+//
+// A refusal arrives as a 200 carrying success:false, and a malformed
+// subscriptionData or a missing signature are both possible even on
+// success:true — any of these would otherwise reach ProcessLicenseDownload's
+// caller as a 200 with an empty or unusable license and no error. A license
+// with no signature is unverifiable by the customer's product, the same
+// failure shape as no subscriptionData at all.
 func (c *Client) getDeploymentLicense(ctx context.Context, projectID, deploymentID string, req DeploymentLicenseRequest) (LicenseResponse, error) {
 	var out LicenseResponse
 	path := fmt.Sprintf("/projects/%s/deployments/%s/license", pathEscape(uuidToSysID(projectID)), pathEscape(uuidToSysID(deploymentID)))
-	err := c.postJSON(ctx, path, req, &out)
-	return out, err
+	if err := c.postJSON(ctx, path, req, &out); err != nil {
+		return LicenseResponse{}, err
+	}
+	if !out.Result.Success {
+		return LicenseResponse{}, apierror.NewDataError("licensing service did not issue a license for project %s", projectID)
+	}
+	data := bytes.TrimSpace(out.Result.License.SubscriptionData)
+	if len(data) == 0 || data[0] != '{' {
+		return LicenseResponse{}, apierror.NewDataError("licensing service returned no subscription data for project %s", projectID)
+	}
+	if out.Result.License.Signature == "" {
+		return LicenseResponse{}, apierror.NewDataError("licensing service returned no signature for project %s", projectID)
+	}
+	return out, nil
 }

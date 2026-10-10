@@ -111,6 +111,44 @@ func TestFilterProductsByClass_NoClassRequested(t *testing.T) {
 	}
 }
 
+// TestFilterProductsByClass_PostgresClassMatchesProductModel is the
+// regression test for GET /products?class=product_model always returning
+// zero products on the Postgres data source: entity-service's Postgres
+// Class values ("software"/"service") never literally equal "product_model"
+// (that's ServiceNow's row-granularity marker, not a Postgres category — see
+// postgresProductClasses' own doc comment), so plain normalized equality
+// could never match a Postgres-sourced product.
+func TestFilterProductsByClass_PostgresClassMatchesProductModel(t *testing.T) {
+	page := SearchProductsResponse{
+		Products: []ProductSummary{
+			{ID: "1", Name: "WSO2 API Manager", Class: strPtr("software")},
+			{ID: "2", Name: "WSO2 Managed Cloud", Class: strPtr("service")},
+		},
+		TotalRecords: 2,
+	}
+
+	got := FilterProductsByClass(page, portalClassValue)
+
+	if len(got.Products) != 2 {
+		t.Fatalf("products = %d, want 2 — a Postgres product's software/service class must satisfy a %q request",
+			len(got.Products), portalClassValue)
+	}
+}
+
+// TestFilterProductsByClass_PostgresClassOnlyMatchesProductModel confirms the
+// postgresProductClasses fallback is scoped to a "product_model" request —
+// it must not turn into a generic "software"/"service" always-match for any
+// other class value.
+func TestFilterProductsByClass_PostgresClassOnlyMatchesProductModel(t *testing.T) {
+	page := SearchProductsResponse{Products: []ProductSummary{{ID: "1", Class: strPtr("software")}}}
+
+	got := FilterProductsByClass(page, "service")
+
+	if len(got.Products) != 0 {
+		t.Fatalf("products = %d, want 0 — a software-class product must not match an unrelated \"service\" request", len(got.Products))
+	}
+}
+
 func derefOrNil(s *string) any {
 	if s == nil {
 		return nil

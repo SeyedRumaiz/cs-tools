@@ -675,6 +675,7 @@ export default function CsmUpdatesPage(): JSX.Element {
             <QueryErrorState
               message={productLevels.error instanceof Error && productLevels.error.message.trim() ? productLevels.error.message : "Could not load product catalog."}
               error={productLevels.error}
+              onRetry={() => void productLevels.refetch()}
             />
           ) : productLevels.isLoading ? (
             <UpdatesFilterSkeleton />

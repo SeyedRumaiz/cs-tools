@@ -19,6 +19,7 @@ import {
   Button,
   Card,
   Chip,
+  IconButton,
   Skeleton,
   Table,
   TableBody,
@@ -28,11 +29,15 @@ import {
   TableRow,
   Typography,
 } from "@wso2/oxygen-ui";
-import { ArrowLeft } from "@wso2/oxygen-ui-icons-react";
-import { type JSX, type ReactNode } from "react";
+import { ArrowLeft, Pencil } from "@wso2/oxygen-ui-icons-react";
+import { type JSX, type ReactNode, useState } from "react";
 import { Link as RouterLink, useLocation, useParams } from "react-router";
+import { BackendApiError } from "@api/backend/client";
 import { useAccountProjects } from "@features/csm-accounts/api/useAccountProjects";
 import { useGetAccount } from "@features/csm-accounts/api/useGetAccount";
+import { usePatchAccountTeams } from "@features/csm-accounts/api/usePatchAccountTeams";
+import EditAccountTeamsDialog from "@features/csm-accounts/components/EditAccountTeamsDialog";
+import { useGetUsersMe } from "@features/settings/api/useGetUsersMe";
 import {
   getDeactivationState,
   resolveAccountTier,
@@ -40,9 +45,13 @@ import {
 import DirectoryEntityChip from "@features/csm-admin/components/DirectoryEntityChip";
 import QueryErrorState from "@components/QueryErrorState";
 import { useNavTransition } from "@hooks/useNavTransition";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
+import { useGetAccountEscalations } from "@features/csm-accounts/api/useGetAccountEscalations";
+import { GoogleDrive } from "@features/csm-accounts/components/GoogleDrive";
 
+/** "managed_cloud_subscription" -> "Managed Cloud Subscription". */
 function formatSubscriptionType(value: string): string {
-  return value.replace(/_/g, " ");
+  return value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function formatDate(value?: string | null): string {
@@ -55,6 +64,17 @@ function formatDate(value?: string | null): string {
         month: "short",
         day: "numeric",
       });
+}
+
+/**
+ * A raw upstream message is only safe to show for a client error (<500) —
+ * a 5xx body can leak internal detail and isn't actionable by the user, so
+ * it falls back to a generic message instead.
+ */
+function accountTeamsSaveErrorMessage(err: unknown): string {
+  return err instanceof BackendApiError && err.status < 500 && err.message
+    ? err.message
+    : "Could not update the account's teams. Please try again.";
 }
 
 function MetaCell({
@@ -189,6 +209,126 @@ function ProjectsSection({ accountId }: { accountId: string }): JSX.Element {
   );
 }
 
+function formatDateTime(value?: string | null): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
+}
+
+/**
+ * Account escalations — a former Support Portal Lite-only section, kept
+ * viewer-only (gated by isSplAudience at the call site) since it has no
+ * modern/entity-service-backed equivalent. Read-only: the original "raise a
+ * new escalation" dialog isn't carried over here, since the account
+ * identifier it needs (the ServiceNow account *number*, not this page's own
+ * `id`) couldn't be confirmed against this modern page's data without a live
+ * check — a correctness risk not worth taking for a write action nobody
+ * reported missing. Revisit if a viewer specifically needs to raise one from
+ * here.
+ */
+function EscalationsSection({ accountId }: { accountId: string }): JSX.Element {
+  const [page, setPage] = useState(0);
+  const rowsPerPage = 10;
+  const { data, isLoading, isError, error } = useGetAccountEscalations(
+    accountId,
+    page * rowsPerPage,
+    rowsPerPage,
+  );
+  const escalations = data ?? [];
+
+  return (
+    <Card sx={{ p: 2.5, display: "flex", flexDirection: "column", gap: 2 }}>
+      <Typography variant="subtitle2">Escalations</Typography>
+      <TableContainer sx={{ border: 1, borderColor: "divider", borderRadius: 1 }}>
+        <Table size="small" sx={{ "& .MuiTableCell-root": { borderColor: "divider" } }}>
+          <TableHead>
+            <TableRow sx={{ bgcolor: "action.hover" }}>
+              <TableCell>ID</TableCell>
+              <TableCell>Severity</TableCell>
+              <TableCell>State</TableCell>
+              <TableCell>Escalated Date</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {isLoading ? (
+              Array.from({ length: 3 }).map((_, i) => (
+                <TableRow key={i}>
+                  <TableCell><Skeleton variant="rounded" width="60%" height={18} /></TableCell>
+                  <TableCell><Skeleton variant="rounded" width={90} height={22} /></TableCell>
+                  <TableCell><Skeleton variant="rounded" width={80} height={22} /></TableCell>
+                  <TableCell><Skeleton variant="rounded" width="50%" height={18} /></TableCell>
+                </TableRow>
+              ))
+            ) : isError ? (
+              <TableRow>
+                <TableCell colSpan={4} align="center">
+                  <QueryErrorState
+                    message={error instanceof Error && error.message.trim() ? error.message : "Failed to load escalations."}
+                    error={error}
+                  />
+                </TableCell>
+              </TableRow>
+            ) : escalations.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={4} align="center" sx={{ py: 4 }}>
+                  <Typography variant="body2" color="text.secondary">
+                    No escalations found for this account.
+                  </Typography>
+                </TableCell>
+              </TableRow>
+            ) : (
+              escalations.map((e) => (
+                <TableRow key={e.id} hover>
+                  <TableCell>{e.id}</TableCell>
+                  <TableCell>
+                    <Chip size="small" label={e.severity} variant="outlined" />
+                  </TableCell>
+                  <TableCell>{e.state}</TableCell>
+                  <TableCell>{formatDateTime(e.escalatedOn)}</TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </TableContainer>
+      <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 1 }}>
+        <Button
+          size="small"
+          variant="outlined"
+          disabled={page === 0}
+          onClick={() => setPage((p) => Math.max(0, p - 1))}
+        >
+          Previous
+        </Button>
+        <Button
+          size="small"
+          variant="outlined"
+          disabled={escalations.length < rowsPerPage}
+          onClick={() => setPage((p) => p + 1)}
+        >
+          Next
+        </Button>
+      </Box>
+    </Card>
+  );
+}
+
+/**
+ * Artifacts Repository — the account's linked Google Drive folder, another
+ * former Support Portal Lite-only section with no modern equivalent, kept
+ * viewer-only. Hidden entirely when the account has no drive location set,
+ * rather than showing an empty/error state for a feature that was never
+ * configured for this account.
+ */
+function ArtifactsSection({ driveLocation }: { driveLocation: string }): JSX.Element {
+  return (
+    <Card sx={{ p: 2.5, display: "flex", flexDirection: "column", gap: 2 }}>
+      <Typography variant="subtitle2">Artifacts Repository</Typography>
+      <GoogleDrive driveLocation={driveLocation} />
+    </Card>
+  );
+}
+
 export default function CsmAccountDetailPage(): JSX.Element {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavTransition();
@@ -199,6 +339,14 @@ export default function CsmAccountDetailPage(): JSX.Element {
   const fromListState = location.state as { from?: string } | undefined;
   const resolvedBackPath = fromListState?.from ?? "/customers/accounts";
   const { data, isLoading, isError } = useGetAccount(id);
+  const patchAccountTeams = usePatchAccountTeams(id);
+  const [editTeamsOpen, setEditTeamsOpen] = useState(false);
+  // Client-side affordance only — the backend enforces the actual admin gate
+  // on PATCH /accounts/{id}; hiding the control here just avoids offering an
+  // action that would 403 for everyone else.
+  const { data: me } = useGetUsersMe();
+  const isAdmin = (me?.roles ?? []).some((r) => r.toLowerCase() === "admin");
+  const { isSplAudience } = usePortalAccess();
 
   if (isLoading) {
     return (
@@ -288,26 +436,45 @@ export default function CsmAccountDetailPage(): JSX.Element {
           <MetaCell label="Technical Owner">
             <Typography variant="body2">{a.technicalOwner?.name ?? "—"}</Typography>
           </MetaCell>
-          {(a.creTeam || a.sreTeam) && (
-            <MetaCell label="CRE / SRE team">
-              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-                {a.creTeam && (
-                  <DirectoryEntityChip
-                    id={a.creTeam.id}
-                    name={a.creTeam.name}
-                    routeBase="/admin/teams"
-                  />
-                )}
-                {a.sreTeam && (
-                  <DirectoryEntityChip
-                    id={a.sreTeam.id}
-                    name={a.sreTeam.name}
-                    routeBase="/admin/teams"
-                  />
-                )}
-              </Box>
-            </MetaCell>
-          )}
+          <MetaCell label="CRE / SRE team">
+            <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 0.5 }}>
+              {a.creTeam && (
+                <DirectoryEntityChip
+                  id={a.creTeam.id}
+                  name={a.creTeam.name}
+                  routeBase="/admin/teams"
+                />
+              )}
+              {a.sreTeam && (
+                <DirectoryEntityChip
+                  id={a.sreTeam.id}
+                  name={a.sreTeam.name}
+                  routeBase="/admin/teams"
+                />
+              )}
+              {!a.creTeam && !a.sreTeam && (
+                <Typography variant="body2" color="text.secondary">
+                  —
+                </Typography>
+              )}
+              {isAdmin && (
+                <IconButton
+                  size="small"
+                  aria-label="Edit CRE / SRE team"
+                  className="csm-print-hide"
+                  onClick={() => {
+                    // A failed save from a previous session with this dialog
+                    // would otherwise still be `isError` here, showing a
+                    // stale error the moment the dialog reopens.
+                    patchAccountTeams.reset();
+                    setEditTeamsOpen(true);
+                  }}
+                >
+                  <Pencil size={14} />
+                </IconButton>
+              )}
+            </Box>
+          </MetaCell>
           <MetaCell label="Activated on">
             <Typography variant="body2">{formatDate(a.activationDate)}</Typography>
           </MetaCell>
@@ -342,6 +509,36 @@ export default function CsmAccountDetailPage(): JSX.Element {
       </Card>
 
       <ProjectsSection accountId={a.id} />
+
+      {isSplAudience && <EscalationsSection accountId={a.id} />}
+      {isSplAudience && a.driveLocation && (
+        <ArtifactsSection driveLocation={a.driveLocation} />
+      )}
+
+      {editTeamsOpen && (
+        <EditAccountTeamsDialog
+          currentCreTeam={a.creTeam}
+          currentSreTeam={a.sreTeam}
+          isSaving={patchAccountTeams.isPending}
+          saveError={
+            patchAccountTeams.isError
+              ? accountTeamsSaveErrorMessage(patchAccountTeams.error)
+              : null
+          }
+          onClose={() => {
+            if (!patchAccountTeams.isPending) setEditTeamsOpen(false);
+          }}
+          onSave={(patch) =>
+            // No onError handler: the dialog's own inline alert (saveError
+            // above, driven by patchAccountTeams.isError/.error) already
+            // surfaces the failure — a second, separately-computed global
+            // banner would just show different text for the same error.
+            patchAccountTeams.mutate(patch, {
+              onSuccess: () => setEditTeamsOpen(false),
+            })
+          }
+        />
+      )}
     </Box>
   );
 }

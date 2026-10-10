@@ -65,6 +65,13 @@ interface CsmCaseCommentInputProps {
   ) => Promise<unknown> | void;
   disabled?: boolean;
   /**
+   * Hides the attach button and ignores dropped files. Attachments are uploaded
+   * by a separate request the backend only allows with write access, after the
+   * comment itself has been posted, so a caller without it would otherwise end
+   * up with a comment and a rejected upload.
+   */
+  attachmentsDisabled?: boolean;
+  /**
    * When set, a **customer-visible** reply cannot be sent right now (e.g. the
    * case isn't in-progress/ongoing) and this string explains why. Only the
    * public-reply path is blocked: internal work notes and attachment-only sends
@@ -188,6 +195,7 @@ function useDraftState<T>(
 export default function CsmCaseCommentInput({
   onSubmit,
   disabled = false,
+  attachmentsDisabled = false,
   publicCommentDisabledReason = null,
   canResumeToUnlockPublicReply = false,
   onResumeWork,
@@ -271,11 +279,11 @@ export default function CsmCaseCommentInput({
       // whatever was on the page.
       if (!isFileDrag(e)) return;
       e.preventDefault();
-      if (disabled || submitting) return;
+      if (disabled || submitting || attachmentsDisabled) return;
       dragCounter.current += 1;
       setDragOver(true);
     },
-    [disabled, submitting, isFileDrag],
+    [disabled, submitting, attachmentsDisabled, isFileDrag],
   );
   const onDragOver = useCallback(
     (e: DragEvent) => {
@@ -332,10 +340,10 @@ export default function CsmCaseCommentInput({
       e.preventDefault();
       dragCounter.current = 0;
       setDragOver(false);
-      if (disabled || submitting) return;
+      if (disabled || submitting || attachmentsDisabled) return;
       addDroppedFiles(e.dataTransfer.files);
     },
-    [disabled, submitting, isFileDrag, addDroppedFiles],
+    [disabled, submitting, attachmentsDisabled, isFileDrag, addDroppedFiles],
   );
 
   // Incrementing this trigger clears the editor (see Editor's ResetPlugin).
@@ -629,7 +637,7 @@ export default function CsmCaseCommentInput({
           showKeyboardHint
           autoFocus={autoFocus}
           enterToSubmit={false}
-          onAttachmentClick={onAttachmentClick}
+          onAttachmentClick={attachmentsDisabled ? undefined : onAttachmentClick}
           attachments={attachments.map((a) => a.file)}
           onAttachmentRemove={onAttachmentRemove}
           onSubmitKeyDown={() => {

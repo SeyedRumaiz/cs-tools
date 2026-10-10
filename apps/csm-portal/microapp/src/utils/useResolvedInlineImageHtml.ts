@@ -49,7 +49,7 @@ function blobToDataUrl(blob: Blob): Promise<string | null> {
  * the webapp's identical hook (features/csm-cases/api/useResolvedInlineImageHtml.ts) — both apps
  * read the same csm-portal backend and the same `.iix` inline-image convention.
  *
- * @param html - Sanitized HTML that may contain `.iix` `<img>` src references.
+ * @param html - Sanitized HTML that may contain `.iix` or bare attachment-id (migrated content) `<img>` src references.
  */
 export function useResolvedInlineImageHtml(html: string): { resolvedHtml: string; isLoading: boolean } {
   const attachmentIds = useMemo(() => extractIixAttachmentIds(html), [html]);

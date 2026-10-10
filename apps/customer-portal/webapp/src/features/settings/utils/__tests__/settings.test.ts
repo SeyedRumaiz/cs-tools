@@ -16,10 +16,12 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  hasCustomerAdminRole,
   getAvatarColor,
   getInitials,
   getRoleBadges,
   getRoleChipSx,
+  getRoleLabel,
 } from "@features/settings/utils/settings";
 
 describe("settings utils", () => {
@@ -58,3 +60,39 @@ describe("settings utils", () => {
   });
 });
 
+
+describe("hasCustomerAdminRole", () => {
+  it("accepts the ServiceNow and the CSM database spellings", () => {
+    expect(hasCustomerAdminRole(["external", "sn_customerservice.customer_admin"])).toBe(true);
+    expect(hasCustomerAdminRole(["external", "customer", "customer_admin"])).toBe(true);
+    expect(hasCustomerAdminRole([" Customer_Admin "])).toBe(true);
+  });
+
+  it("refuses everything else", () => {
+    expect(hasCustomerAdminRole(undefined)).toBe(false);
+    expect(hasCustomerAdminRole([])).toBe(false);
+    expect(hasCustomerAdminRole(["customer", "partner_admin", "sn_customerservice.customer"])).toBe(false);
+  });
+});
+
+describe("getRoleLabel", () => {
+  it("maps roles correctly across dev and staging variants", () => {
+    expect(getRoleLabel(undefined)).toBe("Not Available");
+    expect(getRoleLabel([])).toBe("Not Available");
+    expect(getRoleLabel(["customer_admin"])).toBe("Admin");
+    expect(getRoleLabel(["admin"])).toBe("Admin");
+    expect(getRoleLabel(["sn_customerservice.customer_admin"])).toBe("Admin");
+    expect(getRoleLabel(["sn_customerservice.admin"])).toBe("Admin");
+    expect(getRoleLabel(["partner_admin"])).toBe("Partner Admin");
+    expect(getRoleLabel(["sn_customerservice.partner_admin"])).toBe("Partner Admin");
+    expect(getRoleLabel(["lead"])).toBe("Lead");
+    expect(getRoleLabel(["security_user"])).toBe("Security User");
+    expect(getRoleLabel(["partner"])).toBe("Partner");
+    expect(getRoleLabel(["agent"])).toBe("Internal User");
+    expect(getRoleLabel(["internal"])).toBe("Internal User");
+    expect(getRoleLabel(["system_user"])).toBe("System User");
+    expect(getRoleLabel(["customer"])).toBe("Portal User");
+    expect(getRoleLabel(["customer_user"])).toBe("Portal User");
+    expect(getRoleLabel(["unknown_role"])).toBe("Portal User");
+  });
+});

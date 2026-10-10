@@ -29,6 +29,7 @@ import {
   visibleNavChildren,
   visibleNavSections,
 } from "@config/featureFlags";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
 import { useNavTransition } from "@hooks/useNavTransition";
 
 /** Tooltip for a disabled WIP item. Includes the label so the collapsed rail
@@ -111,6 +112,7 @@ export default function CsmSideBar({
   onSelect,
   onToggleExpand,
 }: CsmSideBarProps): JSX.Element {
+  const access = usePortalAccess();
   const location = useLocation();
   const navigate = useNavTransition();
   const activeItem = pickActiveId(location.pathname);
@@ -183,96 +185,99 @@ export default function CsmSideBar({
     >
       <Sidebar.Nav>
         <Sidebar.Category>
-          {/* `hidden` sections are filtered out entirely; `wip` ones stay
-              rendered but disabled below. */}
-          {visibleNavSections().map((item) => {
-            const itemContent = (
-              <Sidebar.Item id={item.id}>
-                <Sidebar.ItemIcon>
-                  <item.icon size={20} />
-                </Sidebar.ItemIcon>
-                {/* Plain string: Oxygen derives the collapsed-rail tooltip via
-                    String(ItemLabel.children), so a wrapper element would render
-                    as "[object Object]". */}
-                <Sidebar.ItemLabel>{item.label}</Sidebar.ItemLabel>
-              </Sidebar.Item>
-            );
+          {
+            /* `hidden` sections are filtered out entirely; `wip` ones stay
+               rendered but disabled below. */
+            visibleNavSections(access)
+              .map((item) => {
+                const itemContent = (
+                  <Sidebar.Item id={item.id}>
+                    <Sidebar.ItemIcon>
+                      <item.icon size={20} />
+                    </Sidebar.ItemIcon>
+                    {/* Plain string: Oxygen derives the collapsed-rail tooltip via
+                        String(ItemLabel.children), so a wrapper element would render
+                        as "[object Object]". */}
+                    <Sidebar.ItemLabel>{item.label}</Sidebar.ItemLabel>
+                  </Sidebar.Item>
+                );
 
-            // WIP sections stay visible but disabled: no navigating Link, dimmed
-            // and non-clickable (pointer events blocked on the inner box so no
-            // click reaches Oxygen's select handler). The outer element is a
-            // focusable div (tabIndex 0, aria-disabled) so keyboard users can
-            // reach it and reveal the "work in progress" tooltip, which fires on
-            // both hover and focus. Their routes render the coming-soon page
-            // (see App.tsx's WipRouteGuard).
-            if (featureState(item.id) === "wip") {
-              return (
-                <Tooltip
-                  key={item.id}
-                  title={wipTooltip(item.label)}
-                  placement="right"
-                >
-                  <Box
-                    aria-disabled
-                    tabIndex={0}
-                    sx={{ display: "block", cursor: "not-allowed" }}
+                // WIP sections stay visible but disabled: no navigating Link, dimmed
+                // and non-clickable (pointer events blocked on the inner box so no
+                // click reaches Oxygen's select handler). The outer element is a
+                // focusable div (tabIndex 0, aria-disabled) so keyboard users can
+                // reach it and reveal the "work in progress" tooltip, which fires on
+                // both hover and focus. Their routes render the coming-soon page
+                // (see App.tsx's WipRouteGuard).
+                if (featureState(item.id) === "wip") {
+                  return (
+                    <Tooltip
+                      key={item.id}
+                      title={wipTooltip(item.label)}
+                      placement="right"
+                    >
+                      <Box
+                        aria-disabled
+                        tabIndex={0}
+                        sx={{ display: "block", cursor: "not-allowed" }}
+                      >
+                        <Box sx={{ opacity: 0.45, pointerEvents: "none" }}>
+                          {itemContent}
+                        </Box>
+                      </Box>
+                    </Tooltip>
+                  );
+                }
+
+                // A submenu section (Operations, Security Center) renders its
+                // children as nested `Sidebar.Item`s instead of navigating
+                // directly: Oxygen shows a chevron and calls `onToggleExpand`
+                // for any item with nested items rather than `onSelect`, so this
+                // parent is deliberately NOT wrapped in a `Link` — only its
+                // children (below) navigate. A section whose config has hidden
+                // every one of its children falls through to the plain flat item
+                // instead of rendering an entry with nothing to expand.
+                const children = isSubmenuSection(item) ? visibleNavChildren(item, access) : [];
+                if (children.length > 0) {
+                  return (
+                    <Sidebar.Item id={item.id} key={item.id}>
+                      <Sidebar.ItemIcon>
+                        <item.icon size={20} />
+                      </Sidebar.ItemIcon>
+                      <Sidebar.ItemLabel>{item.label}</Sidebar.ItemLabel>
+                      {children.map((child) => {
+                        const childWip = featureState(child.id) === "wip";
+                        return (
+                          <Sidebar.Item id={child.id} key={child.id}>
+                            {child.icon && (
+                              <Sidebar.ItemIcon>
+                                <child.icon size={18} />
+                              </Sidebar.ItemIcon>
+                            )}
+                            <Sidebar.ItemLabel>{child.label}</Sidebar.ItemLabel>
+                            {childWip && (
+                              <Sidebar.ItemBadge color="warning">WIP</Sidebar.ItemBadge>
+                            )}
+                          </Sidebar.Item>
+                        );
+                      })}
+                    </Sidebar.Item>
+                  );
+                }
+
+                return (
+                  <Link
+                    key={item.id}
+                    component={NavigateLink}
+                    to={item.href}
+                    color="inherit"
+                    underline="none"
                   >
-                    <Box sx={{ opacity: 0.45, pointerEvents: "none" }}>
-                      {itemContent}
-                    </Box>
-                  </Box>
-                </Tooltip>
-              );
-            }
-
-            // A submenu section (Operations, Security Center) renders its
-            // children as nested `Sidebar.Item`s instead of navigating
-            // directly: Oxygen shows a chevron and calls `onToggleExpand`
-            // for any item with nested items rather than `onSelect`, so this
-            // parent is deliberately NOT wrapped in a `Link` — only its
-            // children (below) navigate. A section whose config has hidden
-            // every one of its children falls through to the plain flat item
-            // instead of rendering an entry with nothing to expand.
-            const children = isSubmenuSection(item) ? visibleNavChildren(item) : [];
-            if (children.length > 0) {
-              return (
-                <Sidebar.Item id={item.id} key={item.id}>
-                  <Sidebar.ItemIcon>
-                    <item.icon size={20} />
-                  </Sidebar.ItemIcon>
-                  <Sidebar.ItemLabel>{item.label}</Sidebar.ItemLabel>
-                  {children.map((child) => {
-                    const childWip = featureState(child.id) === "wip";
-                    return (
-                      <Sidebar.Item id={child.id} key={child.id}>
-                        {child.icon && (
-                          <Sidebar.ItemIcon>
-                            <child.icon size={18} />
-                          </Sidebar.ItemIcon>
-                        )}
-                        <Sidebar.ItemLabel>{child.label}</Sidebar.ItemLabel>
-                        {childWip && (
-                          <Sidebar.ItemBadge color="warning">WIP</Sidebar.ItemBadge>
-                        )}
-                      </Sidebar.Item>
-                    );
-                  })}
-                </Sidebar.Item>
-              );
-            }
-
-            return (
-              <Link
-                key={item.id}
-                component={NavigateLink}
-                to={item.href}
-                color="inherit"
-                underline="none"
-              >
-                {itemContent}
-              </Link>
-            );
-          })}
+                    {itemContent}
+                  </Link>
+                );
+              })
+          }
         </Sidebar.Category>
       </Sidebar.Nav>
 

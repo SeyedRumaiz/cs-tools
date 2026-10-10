@@ -44,6 +44,9 @@ import { useCurrentUser } from "@context/current-user/CurrentUserContext";
 import DashboardWidgetGrid from "@features/csm-dashboard/components/DashboardWidgetGrid";
 import SectionCard from "@features/csm-dashboard/components/SectionCard";
 import { WIDGET_GRID_SX } from "@features/csm-dashboard/utils/dashboardWidgetGridLayout";
+import DiscardDraftDialog, {
+  type DeployedLookup,
+} from "@features/csm-admin/dashboards/components/DiscardDraftDialog";
 import WidgetEditorDialog from "@features/csm-admin/dashboards/components/WidgetEditorDialog";
 import {
   useDashboardFilterPresets,
@@ -52,6 +55,7 @@ import {
 import { deployableDashboardFromDraft } from "@features/csm-admin/dashboards/utils/sharedConfigDraftsStorage";
 import { isDraftDrifted } from "@features/csm-admin/dashboards/utils/dashboardDrift";
 import {
+  deleteDashboardDraft,
   newDraftId,
   saveDashboardDraft,
   useDashboardDraft,
@@ -180,6 +184,9 @@ export default function CsmDashboardBuilderEditorPage(): JSX.Element {
     workingRef.current = working;
   }, [working]);
   const pendingSaveRef = useRef(false);
+  // Set once the admin discards the draft: from then on neither the debounced
+  // save nor the unmount flush below may write `working` back to storage.
+  const discardedRef = useRef(false);
   useEffect(() => {
     if (!working) return;
     if (skipNextAutosaveRef.current) {
@@ -189,6 +196,7 @@ export default function CsmDashboardBuilderEditorPage(): JSX.Element {
     pendingSaveRef.current = true;
     const timer = setTimeout(() => {
       pendingSaveRef.current = false;
+      if (discardedRef.current) return;
       const saved = saveDashboardDraft(working);
       setSavedAt(saved.updatedAt);
     }, 300);
@@ -210,7 +218,7 @@ export default function CsmDashboardBuilderEditorPage(): JSX.Element {
   // later".
   useEffect(() => {
     return () => {
-      if (pendingSaveRef.current && workingRef.current) {
+      if (pendingSaveRef.current && !discardedRef.current && workingRef.current) {
         saveDashboardDraft(workingRef.current);
       }
     };
@@ -246,6 +254,7 @@ export default function CsmDashboardBuilderEditorPage(): JSX.Element {
   const [editingWidget, setEditingWidget] = useState<
     { widget: BeDashboardWidget | undefined; defaultSection?: string } | undefined
   >(undefined);
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [pendingRemoval, setPendingRemoval] = useState<
     { kind: "widget"; widgetId: string; label: string } | { kind: "section"; section: string } | undefined
   >(undefined);
@@ -386,6 +395,24 @@ export default function CsmDashboardBuilderEditorPage(): JSX.Element {
     }
   };
 
+  // Same `live` query the drift check uses. `sourceDashboardId` only records
+  // where the draft came from; the dashboard may since have been removed, or
+  // the lookup may not have settled, so only a resolved hit promises a reset.
+  const deployedLookup: DeployedLookup = live.isLoading
+    ? "pending"
+    : live.isError
+      ? "failed"
+      : live.data
+        ? "exists"
+        : "missing";
+
+  const handleDiscardDraft = () => {
+    discardedRef.current = true;
+    pendingSaveRef.current = false;
+    deleteDashboardDraft(draftId);
+    navigate("/admin/dashboards");
+  };
+
   const emptySectionsToRender = working.emptySections.filter(
     (s) => !working.widgets.some((w) => w.section === s),
   );
@@ -422,6 +449,20 @@ export default function CsmDashboardBuilderEditorPage(): JSX.Element {
               {copyFeedback ? "Copied!" : "Copy as JSON"}
             </Button>
           </Tooltip>
+          {/* Hidden until a draft is actually in storage (the seed effect above
+              writes it right after load), so there is never a discard offered
+              for something that does not exist yet. */}
+          {localDraft && (
+            <Button
+              size="small"
+              variant="outlined"
+              color="error"
+              startIcon={<Trash2 size={14} />}
+              onClick={() => setConfirmingDiscard(true)}
+            >
+              Discard local draft
+            </Button>
+          )}
         </Box>
       </Box>
 
@@ -865,6 +906,14 @@ export default function CsmDashboardBuilderEditorPage(): JSX.Element {
           }
         />
       )}
+
+      <DiscardDraftDialog
+        open={confirmingDiscard}
+        dashboardName={working.displayName || working.id}
+        deployedLookup={deployedLookup}
+        onCancel={() => setConfirmingDiscard(false)}
+        onConfirm={handleDiscardDraft}
+      />
 
       <Dialog open={!!pendingRemoval} onClose={() => setPendingRemoval(undefined)} maxWidth="xs" fullWidth>
         <DialogTitle>

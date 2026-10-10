@@ -1,432 +1,337 @@
-openapi: 3.0.1
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+openapi: 3.0.3
 info:
-  title: SRE Alert Ingestion Service API
+  title: SRE Alert API
   version: 1.0.0
-  description: >
-    Ingests normalized alerts from external monitoring/alerting tools and
-    turns each into a platform incident. Every accepted alert is durably
-    buffered before any delivery attempt is made, retried with backoff on
-    failure, and escalated via an independent voice-call channel if delivery
-    keeps failing — so this service is never a single point of failure on
-    the platform's own availability. Deployed with no gateway/ingress auth
-    layer in front of it, so it authenticates every inbound request itself
-    via HTTP Basic Auth, one username/password pair per alert source.
-security:
-  - basicAuth: []
+  description: >-
+    Receives alert webhooks from monitoring sources, normalizes them into the
+    canonical alert and stores them for sre-alert-core-service. One POST route per source.
 servers:
-  - url: "{server}:{port}/"
-    variables:
-      server:
-        default: http://localhost
-      port:
-        default: "8080"
+  - url: /api/wso2/v1/sre_alert_api
+tags:
+  - name: alerts
 paths:
-  /health:
-    get:
-      summary: Liveness/readiness check — reports whether the buffer database is reachable.
-      operationId: getHealth
-      security: []
-      responses:
-        "200":
-          description: Ok
-        "503":
-          description: Buffer database unreachable.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /alerts:
+  /aws:
     post:
-      summary: Submit a normalized alert for incident creation.
-      description: >
-        Validates and durably persists the alert before responding — no
-        delivery attempt is made inline. A background worker retries
-        delivery with exponential backoff and escalates via an independent
-        notification channel once the retry budget is exhausted. The
-        returned id identifies the buffered alert, not a platform incident
-        (no incident may exist yet, or ever, depending on how delivery
-        resolves).
-      operationId: createAlert
+      tags: [alerts]
+      operationId: postAwsAlert
+      summary: Receive an AWS alert webhook
+      description: >-
+        An SNS SubscriptionConfirmation is verified and confirmed, and an UnsubscribeConfirmation is
+        logged; both answer 200 and store nothing. Notifications are stored as alerts; any other SNS
+        message type is rejected with 400.
       requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AlertRequest'
+        $ref: '#/components/requestBodies/SourcePayload'
       responses:
-        "202":
-          description: Alert accepted and durably buffered.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AlertAcceptedResponse'
-        "400":
-          description: BadRequest — missing a required field, or malformed JSON.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "413":
-          description: RequestEntityTooLarge
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: InternalServerError
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+        '200':
+          description: SNS subscribe or unsubscribe confirmation handled; nothing stored.
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
-  /alerts/adapters/azure:
+  /azure:
     post:
-      summary: Submit an Azure Monitor common-alert-schema webhook payload.
-      description: >
-        Translates Azure Monitor's own native webhook body into this
-        service's generic AlertRequest, then reuses the exact same
-        validation/buffering/worker/grouping/dedup/escalation path as
-        POST /alerts. Additive to that generic endpoint, not a replacement
-        for it.
-      operationId: createAlertFromAzure
+      tags: [alerts]
+      operationId: postAzureAlert
+      summary: Receive an Azure Monitor alert webhook
       requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AzureAlertPayload'
+        $ref: '#/components/requestBodies/SourcePayload'
       responses:
-        "202":
-          description: Alert accepted and durably buffered.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AlertAcceptedResponse'
-        "400":
-          description: BadRequest — missing a required field, or malformed JSON.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "413":
-          description: RequestEntityTooLarge
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: InternalServerError
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
-  /alerts/adapters/site24x7:
+  /datadog:
     post:
-      summary: Submit a Site24x7 native alert-webhook payload.
-      description: >
-        Translates Site24x7's own native webhook body into this service's
-        generic AlertRequest. Only STATUS values TROUBLE/DOWN/CRITICAL
-        create a buffered alert; any other STATUS returns 200 with a small
-        acknowledgment body (the payload is valid, it is simply not a
-        status this integration acts on).
-      operationId: createAlertFromSite24x7
+      tags: [alerts]
+      operationId: postDatadogAlert
+      summary: Receive a Datadog alert webhook
       requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/Site24x7AlertPayload'
+        $ref: '#/components/requestBodies/SourcePayload'
       responses:
-        "202":
-          description: Alert accepted and durably buffered.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AlertAcceptedResponse'
-        "200":
-          description: Recognized but ignored — STATUS is not TROUBLE/DOWN/CRITICAL.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/IgnoredResponse'
-        "400":
-          description: BadRequest — malformed JSON.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "413":
-          description: RequestEntityTooLarge
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: InternalServerError
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
-  /alerts/adapters/opensearch:
+  /elasticsearch:
     post:
-      summary: Submit an OpenSearch (Choreo path) native alert payload.
-      description: >
-        Translates this source's own native alert body into this service's
-        generic AlertRequest, then reuses the exact same
-        validation/buffering/worker/grouping/dedup/escalation path as
-        POST /alerts.
-      operationId: createAlertFromOpenSearch
+      tags: [alerts]
+      operationId: postElasticsearchAlert
+      summary: Receive an Elasticsearch alert webhook
       requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/OpenSearchAlertPayload'
+        $ref: '#/components/requestBodies/SourcePayload'
       responses:
-        "202":
-          description: Alert accepted and durably buffered.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AlertAcceptedResponse'
-        "400":
-          description: BadRequest — malformed JSON.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "413":
-          description: RequestEntityTooLarge
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: InternalServerError
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
-  /alerts/adapters/grafana:
+  /gcp:
     post:
-      summary: Submit a Grafana native alert-webhook payload.
-      description: >
-        Translates Grafana's own native webhook body into this service's
-        generic AlertRequest. Only state == "alerting" creates a buffered
-        alert; any other state returns 200 with a small acknowledgment body
-        (a non-alerting webhook is not an incident-creation trigger).
-      operationId: createAlertFromGrafana
+      tags: [alerts]
+      operationId: postGcpAlert
+      summary: Receive a GCP alert webhook
       requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GrafanaAlertPayload'
+        $ref: '#/components/requestBodies/SourcePayload'
       responses:
-        "202":
-          description: Alert accepted and durably buffered.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AlertAcceptedResponse'
-        "200":
-          description: Recognized but ignored — state is not "alerting".
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/IgnoredResponse'
-        "400":
-          description: BadRequest — malformed JSON.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "413":
-          description: RequestEntityTooLarge
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: InternalServerError
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /icinga:
+    post:
+      tags: [alerts]
+      operationId: postIcingaAlert
+      summary: Receive an Icinga alert webhook
+      requestBody:
+        $ref: '#/components/requestBodies/SourcePayload'
+      responses:
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /openobserve:
+    post:
+      tags: [alerts]
+      operationId: postOpenobserveAlert
+      summary: Receive an OpenObserve alert webhook
+      requestBody:
+        $ref: '#/components/requestBodies/SourcePayload'
+      responses:
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /opensearch:
+    post:
+      tags: [alerts]
+      operationId: postOpensearchAlert
+      summary: Receive an OpenSearch alert webhook
+      requestBody:
+        $ref: '#/components/requestBodies/SourcePayload'
+      responses:
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /prometheus:
+    post:
+      tags: [alerts]
+      operationId: postPrometheusAlert
+      summary: Receive a Prometheus Alertmanager alert webhook
+      requestBody:
+        $ref: '#/components/requestBodies/SourcePayload'
+      responses:
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /servicenow:
+    post:
+      tags: [alerts]
+      operationId: postServicenowAlert
+      summary: Receive an alert ServiceNow has already transformed (temporary)
+      description: >-
+        Temporary route for the parallel run. The body is one canonical alert object, or an
+        array of them, with the eight fields ServiceNow's AlertCoreUtils.init receives.
+      requestBody:
+        $ref: '#/components/requestBodies/CanonicalAlertPayload'
+      responses:
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /site24x7:
+    post:
+      tags: [alerts]
+      operationId: postSite24x7Alert
+      summary: Receive a Site24x7 alert webhook
+      requestBody:
+        $ref: '#/components/requestBodies/SourcePayload'
+      responses:
+        '201':
+          $ref: '#/components/responses/Stored'
+        '400':
+          $ref: '#/components/responses/Rejected'
+        '401':
+          $ref: '#/components/responses/Rejected'
+        '413':
+          $ref: '#/components/responses/Rejected'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
 components:
-  securitySchemes:
-    basicAuth:
-      type: http
-      scheme: basic
-      description: >
-        One username/password pair per alert source, configured via the
-        SRE_ALERT_AUTH_USERS environment variable (bcrypt-hashed at rest).
-        See README.md's Authentication section.
-
+  requestBodies:
+    SourcePayload:
+      required: true
+      description: The source's native webhook payload, sent as-is (up to 1 MiB).
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+    CanonicalAlertPayload:
+      required: true
+      description: One canonical alert, or a non-empty array of them (up to 1 MiB).
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/CanonicalAlert'
+              - type: array
+                minItems: 1
+                items:
+                  $ref: '#/components/schemas/CanonicalAlert'
+  responses:
+    Stored:
+      description: Every alert in the request was stored.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Stored'
+    Rejected:
+      description: The request was rejected (bad payload, unauthorized, or too large). No alert id was used.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unavailable:
+      description: The alert could not be stored now (queue full, storage failure or timeout).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
   schemas:
-    ErrorResponse:
+    CanonicalAlert:
       type: object
+      description: >-
+        Stored as sent, with no defaults. Needs at least one of these fields; other keys are ignored.
+      minProperties: 1
+      additionalProperties: true
       properties:
-        message:
-          type: string
-
-    AlertRequest:
-      type: object
-      required:
-        - source
-        - severity
-        - service
-        - metricName
-        - description
-      properties:
-        source:
-          type: string
-          description: >
-            The originating monitoring/alerting tool (e.g. "azure",
-            "site24x7", "grafana", "datadog", "prometheus"). Recognized
-            values map to an existing incident contact-type; unrecognized
-            values are accepted and simply omit that mapping.
-        severity:
-          type: string
-          description: >
-            One of "critical", "major", "minor", "warning", "ok" (case
-            insensitive). An unrecognized value maps to the same
-            classification as "ok" — see README.md's severity mapping table.
         service:
           type: string
-          description: The affected service, mapped to the created incident's serviceId.
-        metricName:
+        metric_name:
           type: string
+        severity:
+          type: string
+          example: Critical
         category:
           type: string
-          description: >
-            One of "INQUIRY", "SERVICE_INTERRUPTION", "SECURITY" (case
-            insensitive, optional). Defaults to "SERVICE_INTERRUPTION" when
-            omitted or unrecognized.
         environment:
           type: string
-        uniqueIdentifier:
+        source:
           type: string
-          description: The source tool's own identifier for this alert, if any.
+          example: AWS
+        unique_identifier:
+          type: string
         description:
           type: string
-
-    AlertAcceptedResponse:
+    Stored:
       type: object
-      properties:
-        id:
-          type: string
-          format: uuid
-          description: The buffered alert's internal id (not a platform incident id).
-        alertNumber:
-          type: string
-          description: >
-            This service's own human-readable alert number (e.g. "ALT0000123"),
-            distinct from id — see internal/store.Store.Enqueue's doc comment.
-
-    IgnoredResponse:
-      type: object
-      description: >
-        Returned when a vendor-adapter route recognized the payload as
-        well-formed but not one this integration acts on (e.g. a Site24x7
-        STATUS other than TROUBLE/DOWN/CRITICAL, or a Grafana state other
-        than "alerting") — the alert is neither buffered nor an error.
-      required: [status, reason]
       properties:
         status:
           type: string
-          enum: [ignored]
-        reason:
+          example: OK
+        alt_id:
           type: string
-
-    AzureAlertPayload:
+          description: The stored alert's id. Present when the request stored exactly one alert.
+          example: ALT000000123
+        alt_ids:
+          type: array
+          description: Every stored alert's id, in request order. Present only for a multi-alert request that stored several alerts.
+          items:
+            type: string
+            example: ALT000000123
+    Error:
       type: object
-      description: >
-        Azure Monitor's own common-alert-schema webhook body, modeled to
-        only the fields this adapter reads — not an exhaustive schema of
-        everything Azure Monitor can send.
       properties:
-        data:
-          type: object
-          properties:
-            essentials:
-              type: object
-              properties:
-                alertId:
-                  type: string
-                alertRule:
-                  type: string
-                severity:
-                  type: string
-                  description: One of "Sev0".."Sev4".
-                monitorCondition:
-                  type: string
-                  description: '"Fired" or "Resolved".'
-                monitoringService:
-                  type: string
-            alertContext:
-              type: object
-              description: Vendor-specific nested object, rendered into Description as-is.
-
-    Site24x7AlertPayload:
-      type: object
-      description: Site24x7's own native alert-webhook body.
-      properties:
-        STATUS:
+        status:
           type: string
-          description: >
-            One of "TROUBLE", "DOWN", "CRITICAL" (actionable, case
-            sensitive) or any other value (recognized but ignored).
-        MONITORNAME:
+          example: rejected
+        error:
           type: string
-        MONITOR_ID:
-          type: string
-        INCIDENT_REASON:
-          type: string
-        INCIDENT_DETAILS:
-          type: string
-
-    OpenSearchAlertPayload:
-      type: object
-      description: >
-        This source's own native alert body. Note: its "source" field is a
-        human-readable title, not the originating system's identity — it is
-        mapped to AlertRequest.metricName, not AlertRequest.source (which is
-        always the fixed literal "opensearch").
-      properties:
-        source:
-          type: string
-          description: Human-readable title of what fired.
-        description:
-          type: string
-        timestamp:
-          type: string
-        severity:
-          type: string
-          description: >
-            One of "critical", "urgent", "warning", "low", "informational",
-            or any other/missing value (maps to this service's "ok").
-
-    GrafanaAlertPayload:
-      type: object
-      description: Grafana's own native alert-webhook body.
-      properties:
-        state:
-          type: string
-          description: Only "alerting" is actionable; any other value is ignored.
-        title:
-          type: string
-        tags:
-          type: object
-          properties:
-            service:
-              type: string
-              description: Free text, passed through as-is to AlertRequest.service.
-            severity:
-              type: string
-              description: One of "1".."4", or any other/missing value (maps to "ok").

@@ -185,16 +185,22 @@ function renderOptionalCell(id: CaseOptionalColumnId, c: CsmCaseRow): JSX.Elemen
   }
 }
 
-// Subject gets the lion's share of the row; the ids sit in their own narrow
-// column so a long subject no longer has to share one cell with them.
+// Subject gets the widest fixed track; the ids sit in their own narrow
+// column so a long subject no longer has to share one cell with them. Every
+// track except the last is capped at a fixed width (see caseListColumns.ts for
+// why `fr` tracks are avoided under the grid's max-content sizing).
 // The work-state chip (only present for WIP cases) stacks under the State chip
 // in the State column, so it doesn't need a column of its own. The leading
 // `auto` track (unlabeled in the header) holds the per-row quick-preview
 // action — kept at the left edge so it's reachable without hunting across
 // the row, with the preview drawer itself opening on the right.
-const CASE_ID_TRACK = "minmax(120px, 0.9fr)";
-const SUBJECT_TRACK = "minmax(280px, 3fr)";
-const STATE_TRACK = "minmax(110px, 1fr)";
+const CASE_ID_TRACK = "minmax(120px, 160px)";
+const SUBJECT_TRACK = "minmax(280px, 320px)";
+const STATE_TRACK = "minmax(110px, 150px)";
+/** The one flexible track: absorbs spare width when the container is wider than
+ * the columns need, so the table still fills its card. Its own cell is a short
+ * relative time, so it cannot inflate the grid under max-content sizing. */
+const UPDATED_TRACK = "minmax(90px, 1fr)";
 
 export default function CasesList({
   cases,
@@ -286,7 +292,7 @@ export default function CasesList({
     SUBJECT_TRACK,
     ...effectiveOptionalColumns.map((id) => CASE_OPTIONAL_COLUMNS[id].track),
     STATE_TRACK,
-    "auto",
+    UPDATED_TRACK,
   ].join(" ");
 
   return (
@@ -502,7 +508,7 @@ export default function CasesList({
                         normal viewport width, forcing horizontal scroll on
                         the *default* view even with everyday-length values,
                         not just pathologically long ones. */}
-                    <Box sx={{ minWidth: 0, maxWidth: 360 }}>
+                    <Box sx={{ minWidth: 0, maxWidth: 320 }}>
                       <Typography variant="body2" noWrap title={c.subject}>
                         {c.subject}
                       </Typography>
@@ -517,16 +523,16 @@ export default function CasesList({
                       </Typography>
                     </Box>
                     {/* Same fix as Subject above, for the same reason: every
-                        optional column's own track is `minmax(140px, 1fr)`
+                        optional column's own track is `minmax(140px, 220px)`
                         (see caseListColumns.ts) — mechanically identical to
-                        Subject's `minmax(280px, 3fr)` — so without a real
+                        Subject's `minmax(280px, 320px)` — so without a real
                         max-width here too, one long product/customer/person
                         name in an optional column can blow up the grid's
                         width exactly like an unbounded Subject used to
                         (reported live for Security Reports' Product column,
                         but the bug is shared by every CasesList caller). */}
                     {effectiveOptionalColumns.map((id) => (
-                      <Box key={id} sx={{ minWidth: 0, maxWidth: 260 }}>
+                      <Box key={id} sx={{ minWidth: 0, maxWidth: 220 }}>
                         {renderOptionalCell(id, c)}
                       </Box>
                     ))}

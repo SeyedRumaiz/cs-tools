@@ -54,8 +54,14 @@ export interface User {
   phone?: string | null;
   timezone?: string | null;
   userType: UserType;
-  createdAt: string;
-  updatedAt: string;
+  /** Names of the roles assigned to the user, from the user search. */
+  roles?: string[];
+  /** The timestamps entity-service actually sends. */
+  createdOn?: string;
+  updatedOn?: string;
+  /** Older spelling of {@link createdOn}/{@link updatedOn}; kept as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 /**
@@ -151,6 +157,18 @@ export interface SnUserDetail extends SnUser {
   projectAccess?: UserProjectAccess[];
   /** Present for external contacts only; absent when the SCIM lookup itself failed. */
   externalAccount?: ExternalAccountStatus;
+  /**
+   * The CSM portal's own Asgardeo-backed role assignment (`viewer`,
+   * `escalator`, `cs_engineer`, `admin`, ...) — the same vocabulary
+   * `GET /users/me` reports for the caller, resolved for the user being
+   * VIEWED via SCIM. A separate field from this object's own `roles`
+   * (entity-service's role vocabulary, what the Customer Portal's access is
+   * modeled on) — the two describe different things for the same person.
+   * Present only for a wso2.com-email target, regardless of its recorded
+   * `userType`; absent when the target's email isn't wso2.com or when the
+   * SCIM lookup itself failed.
+   */
+  csmPlatformRoles?: string[];
 }
 
 export interface UserSearchFilters {
@@ -227,7 +245,7 @@ export interface NormalizedUser {
   active?: boolean;
   /** Present only from the ServiceNow source; see {@link SnUser.lockedOut}. */
   lockedOut?: boolean;
-  /** Present only from the ServiceNow source. */
+  /** Role names assigned to the user (both sources). */
   roles?: string[];
   /** Present from either source, when the caller requested the full profile. */
   phone?: string | null;
@@ -243,8 +261,13 @@ export interface NormalizedUserSearchResult {
   hasMore: boolean;
 }
 
+/**
+ * `roles` is deliberately NOT part of this test: the postgres source returns it
+ * too now, so it no longer tells the two shapes apart. A postgres user has
+ * `firstName`/`lastName`; only a ServiceNow user has `name` and `active`.
+ */
 function isSnUser(u: User | SnUser): u is SnUser {
-  return "name" in u || "active" in u || "roles" in u;
+  return "name" in u || "active" in u;
 }
 
 /** Maps either source's user shape into {@link NormalizedUser}. */
@@ -272,9 +295,10 @@ export function normalizeUser(u: User | SnUser): NormalizedUser {
     email: u.email,
     timezone: u.timezone ?? null,
     userType: u.userType,
+    roles: u.roles,
     phone: u.phone ?? null,
-    createdOn: u.createdAt,
-    updatedOn: u.updatedAt,
+    createdOn: u.createdOn ?? u.createdAt,
+    updatedOn: u.updatedOn ?? u.updatedAt,
   };
 }
 
@@ -289,6 +313,8 @@ export interface NormalizedUserDetail extends NormalizedUser {
   projectAccess?: UserProjectAccess[];
   /** Present for external contacts only; absent when the SCIM lookup itself failed. */
   externalAccount?: ExternalAccountStatus;
+  /** See {@link SnUserDetail.csmPlatformRoles}. */
+  csmPlatformRoles?: string[];
 }
 
 /** Maps `GET /users/{id}`'s response into {@link NormalizedUserDetail}. */
@@ -299,6 +325,7 @@ export function normalizeUserDetail(u: SnUserDetail): NormalizedUserDetail {
     teams: u.teams,
     projectAccess: u.projectAccess,
     externalAccount: u.externalAccount,
+    csmPlatformRoles: u.csmPlatformRoles,
   };
 }
 

@@ -54,3 +54,20 @@ export function deploymentTypeLabel(type?: BeDeploymentType | string): string {
     DEPLOYMENT_TYPE_LABEL[type as BeDeploymentType] ?? type.replace(/_/g, " ")
   );
 }
+
+/**
+ * Valid deployed-product category codes (`BeDeployedProduct.category`,
+ * `BeDeployedProductCreatePayload`/`BeDeployedProductDetailUpdatePayload`'s
+ * own `category` field) -- Postgres-only, same opaque vocabulary as
+ * entity-service's `ProductCategories` search filter and the BE's
+ * `deployed_product_category_enum`. No confirmed full-name expansion exists
+ * for any of these codes anywhere in this codebase, so
+ * {@link deployedProductCategoryLabel} below only upper-cases the raw code
+ * rather than inventing one.
+ */
+export const DEPLOYED_PRODUCT_CATEGORY_OPTIONS = ["pdp", "ms", "ps", "cl", "pc"] as const;
+
+/** Display label for a deployed-product category code. "—" when unset. */
+export function deployedProductCategoryLabel(category?: string | null): string {
+  return category ? category.toUpperCase() : "—";
+}

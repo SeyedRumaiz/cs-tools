@@ -22,6 +22,7 @@ import { useLogger } from "@hooks/useLogger";
 import { AUTH_NOT_READY_ERROR_MESSAGE } from "@constants/apiConstants";
 import { setUserPreferredTimeZone } from "@utils/dateTime";
 import { ApiError } from "@utils/ApiError";
+import { CORRELATION_ID_HEADER, newCorrelationId } from "@utils/correlationId";
 
 /**
  * Hook to get user details.
@@ -48,9 +49,11 @@ const useGetUserDetails = (): UseQueryResult<UserDetails, Error> => {
 
         logger.debug(`[useGetUserDetails] URL: ${requestUrl}`);
 
+        const correlationId = newCorrelationId();
         const response = await authFetch(requestUrl, {
           method: "GET",
           cache: "no-store",
+          headers: { [CORRELATION_ID_HEADER]: correlationId },
         });
 
         logger.debug(`[useGetUserDetails] Response status: ${response.status}`);
@@ -70,6 +73,7 @@ const useGetUserDetails = (): UseQueryResult<UserDetails, Error> => {
             response.statusText,
             apiMessage ??
               `Error fetching user details: ${response.status} ${response.statusText}`,
+            response.headers.get(CORRELATION_ID_HEADER) ?? correlationId,
           );
         }
 

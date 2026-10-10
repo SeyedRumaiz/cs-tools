@@ -76,9 +76,54 @@ describe("useWidgetData", () => {
       {
         filters: { states: ["open"] },
         pagination: { offset: 0, limit: 1 },
+        countOnly: true,
       },
       { signal: expect.any(AbortSignal) },
     );
+  });
+
+  it("posts a flat body with no `filters` key to /projects/search (count and sorted list)", async () => {
+    postMock.mockResolvedValue({ total: 2, projects: [] });
+
+    renderHook(
+      () =>
+        useWidgetData({
+          widgetId: "p1",
+          resourceType: "project",
+          filters: { onboardingStatus: ["In-Progress"] },
+          shape: "count",
+        }),
+      { wrapper },
+    );
+    await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
+    expect(postMock).toHaveBeenCalledWith(
+      "/projects/search",
+      { onboardingStatus: ["In-Progress"], pagination: { offset: 0, limit: 1 } },
+      { signal: expect.any(AbortSignal) },
+    );
+
+    postMock.mockClear();
+    renderHook(
+      () =>
+        useWidgetData({
+          widgetId: "p2",
+          resourceType: "project",
+          filters: { onboardingStatus: ["In-Progress"] },
+          shape: "list",
+          listLimit: 5,
+          sortBy: { field: "endDate", order: "asc" },
+        }),
+      { wrapper },
+    );
+    await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
+    const [, body] = postMock.mock.calls[0];
+    expect(body).toEqual({
+      onboardingStatus: ["In-Progress"],
+      sortBy: "endDate",
+      sortOrder: "asc",
+      pagination: { offset: 0, limit: 5 },
+    });
+    expect(body).not.toHaveProperty("filters");
   });
 
   it("caps concurrent in-flight /cases/search calls at WIDGET_FETCH_CONCURRENCY_LIMIT when a dashboard's worth of widgets all mount at once", async () => {
@@ -322,6 +367,45 @@ describe("useWidgetData", () => {
       expect(events).toEqual(["attempt-1", "attempt-2"]);
       expect(result.current.isError).toBe(true);
     });
+  });
+
+  it("uses a separate cache entry for shape count vs. shape list at the same listLimit, so switching shape re-fetches instead of reusing an empty cached item list", async () => {
+    // Both shapes resolve limit to 1 here (count always does; list via
+    // listLimit: 1), so without `shape` in the queryKey the two would
+    // collide on an identical key. Mirrors the real entity service: a
+    // countOnly request gets back `cases: []`, a plain one gets real rows.
+    postMock.mockImplementation((_path: string, body: { countOnly?: boolean }) =>
+      Promise.resolve(
+        body.countOnly
+          ? { total: 3, cases: [] }
+          : { total: 3, cases: [{ id: "c1" }, { id: "c2" }, { id: "c3" }] },
+      ),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const sharedWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+
+    const { result, rerender } = renderHook(
+      (props: { shape: "count" | "list" }) =>
+        useWidgetData({
+          widgetId: "w1",
+          resourceType: "case",
+          filters: {},
+          shape: props.shape,
+          listLimit: 1,
+        }),
+      { wrapper: sharedWrapper, initialProps: { shape: "count" } },
+    );
+
+    await waitFor(() => expect(result.current.data?.total).toBe(3));
+    expect(result.current.data?.items).toEqual([]);
+    expect(postMock).toHaveBeenCalledTimes(1);
+
+    rerender({ shape: "list" });
+
+    await waitFor(() => expect(postMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(3));
   });
 });
 

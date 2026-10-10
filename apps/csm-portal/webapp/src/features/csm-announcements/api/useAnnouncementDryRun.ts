@@ -21,6 +21,7 @@ import { DRY_RUN_TEST_PROJECT_KEY } from "@config/announcementDryRunConfig";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import { useAddTagToCase } from "@features/csm-cases/api/useCaseTags";
 import { usePostCsmCase } from "@features/csm-cases/api/usePostCsmCase";
+import { SECURITY_ANNOUNCEMENT_TAG_LABEL } from "@features/csm-announcements/components/CreateCustomerAnnouncementForm";
 
 /**
  * Fixed tag attached to every dry-run case, regardless of which flow ran it,
@@ -57,7 +58,8 @@ export interface UseAnnouncementDryRun {
   runningDryRun: boolean;
   dryRunResult: DryRunResult | null;
   canRunDryRun: boolean;
-  handleRunDryRun: () => Promise<void>;
+  /** Resolves with the created result directly (not just via `dryRunResult` state) — lets a caller chain further work off it without waiting on a re-render, e.g. the create forms' "Submit for approval" orchestration. `null` on any failure or when the guard blocks it. */
+  handleRunDryRun: () => Promise<DryRunResult | null>;
 }
 
 /**
@@ -114,8 +116,8 @@ export function useAnnouncementDryRun({
     [subject, description, extraCanRun, runningDryRun],
   );
 
-  const handleRunDryRun = async (): Promise<void> => {
-    if (!canRunDryRun) return;
+  const handleRunDryRun = async (): Promise<DryRunResult | null> => {
+    if (!canRunDryRun) return null;
     setRunningDryRun(true);
     setDryRunResult(null);
 
@@ -131,7 +133,7 @@ export function useAnnouncementDryRun({
         showError(
           `Could not find the test project "${DRY_RUN_TEST_PROJECT_KEY}". Check the CSM_PORTAL_ANNOUNCEMENT_TEST_PROJECT_KEY configuration.`,
         );
-        return;
+        return null;
       }
 
       const created = await postCase.mutateAsync({
@@ -139,6 +141,12 @@ export function useAnnouncementDryRun({
         projectId: testProject.id,
         subject: subject.trim(),
         description,
+        // Derived from tagLabels rather than a dedicated prop: the caller
+        // already encodes "is this a security announcement" as whether
+        // SECURITY_ANNOUNCEMENT_TAG_LABEL is in its tag set (see
+        // CreateCustomerAnnouncementForm's dryRunTagLabels), so this stays in
+        // sync with the same toggle without widening this hook's own props.
+        isSecurityAnnouncement: tagLabels.includes(SECURITY_ANNOUNCEMENT_TAG_LABEL),
       });
       // Best-effort: the dry-run case already exists even if a tag fails to
       // attach, so a tag failure here doesn't block reporting success — same
@@ -166,12 +174,15 @@ export function useAnnouncementDryRun({
         );
       }
 
-      setDryRunResult({
+      const result: DryRunResult = {
         caseId: created.id,
         displayId: created.internalId || created.number || created.id,
-      });
+      };
+      setDryRunResult(result);
+      return result;
     } catch {
       showError("Could not run the dry run. Please try again.");
+      return null;
     } finally {
       setRunningDryRun(false);
     }

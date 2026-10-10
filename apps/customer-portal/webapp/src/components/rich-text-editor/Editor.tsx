@@ -456,6 +456,16 @@ const Editor = ({
             "& .editor-text-strikethrough": {
               textDecoration: "line-through",
             },
+            // Mirrors the read-view "& code" rule (ChatMessageCard.tsx) so
+            // inline code looks the same while composing as it will once
+            // posted.
+            "& .editor-text-code": {
+              fontFamily: "monospace",
+              fontSize: "inherit",
+              backgroundColor: "action.hover",
+              px: 1,
+              py: 0.25,
+            },
             "& .editor-list-ul": { ml: 3, listStyleType: "disc" },
             "& .editor-list-ol": { ml: 3, listStyleType: "decimal" },
             "& .editor-link": {

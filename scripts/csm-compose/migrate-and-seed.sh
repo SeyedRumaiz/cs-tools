@@ -1,0 +1,190 @@
+#!/bin/sh
+# Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# One-shot init: applies entity-service's raw SQL migrations (it doesn't wire
+# up a migration tool -- see apps/csm-portal/README.md), then loads the fixed,
+# minimal dummy seed data in seed-entity-service.sql into entity-service's
+# database. Runs as the "migrate" compose service, which every dependent
+# service waits on via `depends_on: condition: service_completed_successfully`.
+#
+# A broader, randomized set of dummy data is generated separately by the
+# "seed-generator" compose service (scripts/csm-compose/seed-generator),
+# chained to run after this script completes -- it isn't an extra step in
+# this script because this container's image (postgres:16-alpine) has no Go
+# toolchain to build or run that program.
+set -eu
+
+export PGPASSWORD="${POSTGRES_PASSWORD}"
+PSQL="psql -h ${POSTGRES_HOST} -p ${POSTGRES_PORT} -U ${POSTGRES_USER} -v ON_ERROR_STOP=1"
+
+echo "[migrate] waiting for postgres..."
+until $PSQL -d postgres -c 'select 1' > /dev/null 2>&1; do
+  sleep 1
+done
+
+echo "[migrate] ensuring database exists"
+$PSQL -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = '${ENTITY_DB_NAME}'" | grep -q 1 || \
+  $PSQL -d postgres -c "CREATE DATABASE \"${ENTITY_DB_NAME}\""
+
+# entity-service's own migrations/*.sql files (4-digit, single-file, no
+# .up/.down split -- matching operations/csm-sync-service's own convention,
+# see entity-service/CLAUDE.md's "Database migrations" section) are its
+# source of truth, but ship with no migration tool of their own: `make
+# migrate` there tracks against csm_migration_applied_migration on a real
+# shared database, which this local compose stack has no equivalent
+# connection to. So this script tracks which migrations have actually been
+# applied in a per-database schema_migrations table of its own, applying
+# only the ones missing from it on every `docker compose up`, rather than
+# gating on a single application table's presence (e.g. entity-service's
+# "work_item", created partway through the set by an early migration -- a
+# later migration failing after that point would leave the schema
+# incomplete but still look "migrated" forever after, since work_item
+# already exists).
+#
+# Each migration file is applied and recorded in one transaction (`psql -1`):
+# if the file's SQL fails partway through, nothing from it is recorded, so
+# the same migration is retried -- from scratch -- on the next run instead
+# of being silently skipped with a half-applied schema.
+ensure_migrations_table() {
+  db="$1"
+  $PSQL -d "$db" -c \
+    "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+}
+
+apply_pending_migrations() {
+  db="$1"; dir="$2"
+  ensure_migrations_table "$db"
+  # Ordering: the 4-digit NNNN_*.sql files (the convention, see above) in
+  # numeric order, THEN any legacy 6-digit 000NNN_*.up.sql stragglers. Those
+  # predate the renumbering but depend on tables the 4-digit files create (e.g.
+  # 000087 triggers on `outage`, from 0083), yet `sort -V` would run them
+  # first: leading zeros make 000086 sort below 0001. *.down.sql files are
+  # rollbacks and must never be applied on the way up.
+  files="$( { ls "${dir}"/[0-9][0-9][0-9][0-9]_*.sql 2>/dev/null | sort -t_ -k1 -V;
+              ls "${dir}"/[0-9][0-9][0-9][0-9][0-9][0-9]_*.up.sql 2>/dev/null | sort -t_ -k1 -V; } )"
+  for f in $files; do
+    version="$(basename "$f" .sql)"
+    already="$($PSQL -d "$db" -tAc "SELECT 1 FROM schema_migrations WHERE version = '${version}'")"
+    if [ "$already" != "1" ]; then
+      echo "[migrate]   applying $f"
+      if grep -qiE '(CREATE|DROP) INDEX CONCURRENTLY' "$f"; then
+        # CONCURRENTLY cannot run inside a transaction block, so a migration
+        # using it (e.g. 0152_work_item_type_updated_on_index.sql) is applied
+        # without -1, then recorded separately. Such files are written
+        # idempotent (IF NOT EXISTS), so a failure between the two steps just
+        # retries harmlessly.
+        $PSQL -d "$db" -f "$f"
+        $PSQL -d "$db" -c "INSERT INTO schema_migrations (version) VALUES ('${version}')"
+      else
+        tmp="$(mktemp)"
+        cat "$f" > "$tmp"
+        printf "\nINSERT INTO schema_migrations (version) VALUES ('%s');\n" "$version" >> "$tmp"
+        $PSQL -d "$db" -1 -f "$tmp"
+        rm -f "$tmp"
+      fi
+    fi
+
+    # A fixture named for this migration runs straight after it, in the same
+    # pass. Some migrations backfill rows that only ServiceNow supplies and
+    # RAISE EXCEPTION when they are absent -- fatal on a fresh local database,
+    # and fatal for every migration queued behind them. A fixture supplies
+    # those rows at the moment they first become insertable, so the real
+    # migration runs unmodified. A fixture may also converge a table an OLDER
+    # local volume built in a different shape than the migration's own
+    # `CREATE TABLE IF NOT EXISTS` (a no-op there) -- see
+    # fixtures/0136_change_request_deployment_table.sql. It brings such a table
+    # to the sync's shape and never adds to it: the sync owns the schema. Local
+    # dev only; nothing reads /migrations/fixtures outside this compose stack.
+    #
+    # A fixture is recorded as its own row, `fixture:<version>`, and checked
+    # independently of its migration. Otherwise a fixture that failed after
+    # its migration was recorded would never be retried, and a volume whose
+    # migration ran before the fixture existed would never get it -- leaving
+    # the later migration that needs its rows failing on every run. Still run
+    # here, inside the loop, so it lands before any later migration does.
+    # Fixtures must therefore be safe to re-run (ON CONFLICT DO NOTHING).
+    fixture="/migrations/fixtures/${version}.sql"
+    if [ -f "$fixture" ]; then
+      loaded="$($PSQL -d "$db" -tAc "SELECT 1 FROM schema_migrations WHERE version = 'fixture:${version}'")"
+      if [ "$loaded" != "1" ]; then
+        echo "[migrate]     + fixture ${version}.sql"
+        tmp="$(mktemp)"
+        cat "$fixture" > "$tmp"
+        printf "\nINSERT INTO schema_migrations (version) VALUES ('fixture:%s');\n" "$version" >> "$tmp"
+        $PSQL -d "$db" -1 -f "$tmp"
+        rm -f "$tmp"
+      fi
+    fi
+  done
+}
+
+echo "[migrate] applying entity-service migrations (if any are pending)"
+apply_pending_migrations "${ENTITY_DB_NAME}" /migrations/entity-service
+
+echo "[migrate] loading entity-service seed data"
+$PSQL -d "${ENTITY_DB_NAME}" -f /migrations/seed-entity-service.sql
+
+# The Team Schedule roster: teams, engineers and a rota either side of today.
+# Separate from the base seed because it is the only seed that depends on the
+# schedule_* tables, and because it is the one a developer is likely to want to
+# re-run on its own while working on the rota.
+echo "[migrate] loading Team Schedule roster"
+$PSQL -d "${ENTITY_DB_NAME}" -f /migrations/seed-team-schedule.sql
+
+# The role entity-service connects as. NOT the superuser: a Postgres superuser
+# (and any role with BYPASSRLS) skips EVERY row-level-security policy, even on a
+# FORCE ROW LEVEL SECURITY table, so with entity-service connected as `postgres`
+# the project-membership policies on work_item (migrations 0145-0154, 0176) never
+# apply -- any signed-in customer could read any project's change request or
+# case by id, which production (a non-superuser role) refuses with a 404. A
+# plain role makes this stack enforce what production enforces. Migrations and
+# seeds above still run as the superuser: only the application is restricted.
+#
+# Re-run on every pass, not only on the first: GRANT ... ON ALL TABLES covers
+# only the tables that exist now, and the migrations above may have just added
+# some. ALTER DEFAULT PRIVILEGES covers any table a later pass creates as the
+# superuser. Idempotent.
+APP_DB_USER="${APP_DB_USER:-csm_app}"
+APP_DB_PASSWORD="${APP_DB_PASSWORD:-devpassword}"
+echo "[migrate] ensuring the application role ${APP_DB_USER} (no superuser, no BYPASSRLS)"
+$PSQL -d "${ENTITY_DB_NAME}" \
+  -v app_user="${APP_DB_USER}" -v app_password="${APP_DB_PASSWORD}" -v db_name="${ENTITY_DB_NAME}" <<'SQL'
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE',
+              :'app_user', :'app_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_user')
+\gexec
+SELECT format('ALTER ROLE %I NOSUPERUSER NOBYPASSRLS PASSWORD %L', :'app_user', :'app_password')
+\gexec
+SELECT format('GRANT CONNECT ON DATABASE %I TO %I', :'db_name', :'app_user')
+\gexec
+SELECT format('GRANT USAGE ON SCHEMA public TO %I', :'app_user')
+\gexec
+SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', :'app_user')
+\gexec
+SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'app_user')
+\gexec
+SELECT format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO %I', :'app_user')
+\gexec
+SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', :'app_user')
+\gexec
+SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %I', :'app_user')
+\gexec
+SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO %I', :'app_user')
+\gexec
+SQL
+
+echo "[migrate] done"

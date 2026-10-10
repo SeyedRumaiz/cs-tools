@@ -19,6 +19,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -45,6 +46,7 @@ type entityCaseClient interface {
 	SearchEscalations(ctx context.Context, req entity.SearchEscalationsRequest) (entity.SearchEscalationsResponse, error)
 	SearchAttachments(ctx context.Context, req entity.SearchAttachmentsRequest) (entity.SearchAttachmentsResponse, error)
 	CreateAttachment(ctx context.Context, req entity.CreateAttachmentRequest) (entity.CreateAttachmentResponse, error)
+	SearchUsers(ctx context.Context, req entity.SearchUsersRequest) (entity.SearchUsersResponse, error)
 }
 
 // CaseHandler handles HTTP requests for case operations.
@@ -55,6 +57,59 @@ type CaseHandler struct {
 // NewCaseHandler creates a CaseHandler backed by the given entity client.
 func NewCaseHandler(entity entityCaseClient) *CaseHandler {
 	return &CaseHandler{entity: entity}
+}
+
+// resolveWatchListUserIDs translates a caller-supplied watch list — email
+// addresses, picked from the project-contact onboarding service (a Salesforce-backed
+// identity space, not entity-service's own) — into entity-service's own "user"
+// table ids, which is what UpdateCase's WatchList field requires (validated
+// there as UUIDs). Used by PatchCase only: CreateCase forwards the emails
+// as-is because entity-service resolves them itself on create.
+//
+// A contact whose email doesn't resolve to any entity-service user (not yet a
+// registered platform user — a real, valid state for a project contact) is
+// dropped from the result rather than failing the whole request on its own —
+// what an all-unresolved result should mean is a call-site decision (see
+// CreateCase/PatchCase). A SearchUsers failure is different in kind: this
+// backend couldn't answer the question at all, which must never be
+// indistinguishable from "nobody matched" — so that case returns an error
+// instead of a possibly-empty result, and the caller must stop the write
+// rather than silently proceeding as if no watchers had been requested.
+func (h *CaseHandler) resolveWatchListUserIDs(ctx context.Context, emails []string) ([]string, error) {
+	if len(emails) == 0 {
+		return nil, nil
+	}
+
+	resp, err := h.entity.SearchUsers(ctx, entity.SearchUsersRequest{
+		Pagination: entity.Pagination{Limit: len(emails), Offset: 0},
+		Filters:    entity.SearchUsersFilters{Emails: emails},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve watch-list emails: %w", err)
+	}
+
+	byEmail := make(map[string]string, len(resp.Users))
+	for _, u := range resp.Users {
+		byEmail[strings.ToLower(u.Email)] = u.ID
+	}
+
+	ids := make([]string, 0, len(emails))
+	unresolved := 0
+	for _, email := range emails {
+		id, ok := byEmail[strings.ToLower(email)]
+		if !ok {
+			unresolved++
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if unresolved > 0 {
+		// Never log the email itself here -- it's PII (CWE-532); a count is
+		// enough to notice the gap without exposing whose address it was.
+		slog.WarnContext(ctx, "some watch-list emails did not resolve to a platform user, dropped from watch list",
+			"requested", len(emails), "unresolved", unresolved)
+	}
+	return ids, nil
 }
 
 // SearchCases handles POST /projects/{id}/cases/search.
@@ -221,7 +276,8 @@ func (h *CaseHandler) GetCase(w http.ResponseWriter, r *http.Request) {
 	writeJSONValue(w, http.StatusOK, dto.MapCaseDetails(result))
 }
 
-// CreateCase handles POST /cases.
+// CreateCase handles POST /cases. The body may carry inline base64 attachments,
+// so it is read with maxAttachmentBodyBytes rather than the blanket 1 MiB cap.
 func (h *CaseHandler) CreateCase(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -229,7 +285,7 @@ func (h *CaseHandler) CreateCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, ok := readJSONBody(w, r)
+	body, ok := readJSONBodyWithLimit(w, r, maxAttachmentBodyBytes)
 	if !ok {
 		return
 	}
@@ -263,6 +319,10 @@ func (h *CaseHandler) CreateCase(w http.ResponseWriter, r *http.Request) {
 	// request body (the struct's json:"-" tag means a client-supplied value
 	// would be silently dropped anyway, but set it explicitly for clarity).
 	entityReq.CreatedBy = user.Email
+	// entityReq.WatchList (copied from req.WatchList above) is forwarded as the
+	// project-contact emails the caller submitted. entity-service resolves them
+	// itself for each data source on create, so no id round trip is needed here
+	// (that lookup is also gated to internal roles for the caller's own token).
 
 	result, err := h.entity.CreateCase(r.Context(), entityReq)
 	if err != nil {
@@ -322,6 +382,32 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 	if primaryFieldsSet != 1 {
 		writeError(w, http.StatusBadRequest, "Exactly one of stateKey or watchList must be provided.")
 		return
+	}
+
+	// req.WatchList carries project-contact emails, not entity-service user
+	// ids — resolve before forwarding (see resolveWatchListUserIDs). Only
+	// meaningful when WatchList is actually the field being set (StateKey is
+	// the other, mutually exclusive branch validated above).
+	if len(req.WatchList) > 0 {
+		resolvedIDs, err := h.resolveWatchListUserIDs(r.Context(), req.WatchList)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "resolving watch-list emails failed", "userID", user.UserID, "caseID", id, "err", summarizeErr(err))
+			mapUpstreamError(w, err, "Failed to resolve watch list.")
+			return
+		}
+		if len(resolvedIDs) == 0 {
+			// Every submitted email failed to resolve. Forwarding an empty
+			// list here would satisfy neither this endpoint's own "exactly
+			// one of stateKey/watchList" check (already passed, above) nor
+			// entity-service's identical one -- UpdateCase would either 400
+			// with a confusing message or (per entity-service's own
+			// len(WatchList)>0 gate) silently do nothing while still
+			// returning 200. Reject explicitly instead, before ever calling
+			// UpdateCase.
+			writeError(w, http.StatusBadRequest, "None of the provided watch list users could be found.")
+			return
+		}
+		req.WatchList = resolvedIDs
 	}
 
 	result, err := h.entity.UpdateCase(r.Context(), id, dto.BuildEntityUpdateCaseRequest(id, req))
@@ -397,6 +483,14 @@ func (h *CaseHandler) SearchCaseActivities(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
 		return
 	}
+	// Always forced server-side, never left to the request body: a customer
+	// must never see a WORK_NOTE-type comment, in the page OR in totalRecords
+	// -- same "restrict, don't mirror" rule as BuildEntityCreateCaseCommentRequest
+	// forcing type: comment. dto.MapSearchCaseActivities still filters the
+	// array client-side too (defense in depth), but entity-service excluding
+	// them here is what makes totalRecords agree with what's actually shown.
+	excludeWorkNotes := true
+	req.ExcludeWorkNotes = &excludeWorkNotes
 
 	result, err := h.entity.SearchCaseActivities(r.Context(), id, req)
 	if err != nil {
@@ -610,4 +704,3 @@ func isProjectSuspended(project entity.ProjectDetailsView) bool {
 	return project.ClosureState != nil &&
 		strings.EqualFold(strings.TrimSpace(*project.ClosureState), "suspended")
 }
-

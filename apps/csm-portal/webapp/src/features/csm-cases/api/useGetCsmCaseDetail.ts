@@ -68,6 +68,7 @@ function detailFromBeCase(
   // deployed product instance is linked. `||` so an empty displayName also
   // falls through.
   const product = c.deployedProduct?.displayName || c.deployedProduct?.product?.name || "—";
+  const productCatalogueName = c.deployedProduct?.product?.name?.trim() || undefined;
   return {
     id: c.id,
     caseNumber: c.number,
@@ -80,6 +81,7 @@ function detailFromBeCase(
     projectId: c.project?.id ?? "",
     projectName: c.project?.name ?? "—",
     product,
+    productCatalogueName,
     severity: severityFromBe(c.severity),
     state: uiStateFromBe(c.state),
     workState: c.workState ?? null,

@@ -38,7 +38,7 @@ import { useSyncRecentViewsIdentity } from "@features/csm-recent/hooks/useRecent
 import GlobalNotificationBanner from "@components/notification-banner/GlobalNotificationBanner";
 import HtmlAnnouncementBanner from "@components/announcement-banner/HtmlAnnouncementBanner";
 import MobileAppBanner from "@components/mobile-app-banner/MobileAppBanner";
-import TopBanner from "@components/top-banner/TopBanner";
+import TopBanners from "@components/top-banner/TopBanners";
 import Header from "@components/header/Header";
 import CsmSideBar from "@components/side-nav-bar/CsmSideBar";
 import RouteSuspenseFallback from "@components/route-fallback/RouteSuspenseFallback";
@@ -166,7 +166,7 @@ export default function AppLayout({
           }}
         >
           <Box className="csm-print-hide">
-            <TopBanner />
+            <TopBanners />
             <MobileAppBanner />
             <GlobalNotificationBanner visible={notificationBannerConfig.visible} />
             <HtmlAnnouncementBanner />

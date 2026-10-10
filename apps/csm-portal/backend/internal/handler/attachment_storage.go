@@ -66,6 +66,18 @@ type sftpgoClient interface {
 	BaseURL() string
 }
 
+// attachmentStorageEntityClient is the entity-service surface
+// AttachmentStorageHandler needs: everything the case attachment flows use,
+// plus the change-request and incident detail lookups that back this
+// handler's per-reference-type access checks (an attachment can reference a
+// case, a change request, or an incident — see referenceType on the entity
+// service's attachment schema).
+type attachmentStorageEntityClient interface {
+	entityCaseClient
+	GetChangeRequest(ctx context.Context, id string) ([]byte, error)
+	GetIncident(ctx context.Context, id string) ([]byte, error)
+}
+
 // AttachmentStorageHandler implements the SFTPGo-backed attachment-storage
 // endpoints: minting a write-scoped SFTPGo share before an upload, and
 // creating a short-lived read-scoped public download share for an
@@ -79,13 +91,13 @@ type sftpgoClient interface {
 // cmd/server/main.go. The existing streaming attachment endpoints on
 // CaseHandler are completely unaffected by this handler and by the flag.
 type AttachmentStorageHandler struct {
-	entity entityCaseClient
+	entity attachmentStorageEntityClient
 	sftpgo sftpgoClient
 }
 
 // NewAttachmentStorageHandler creates an AttachmentStorageHandler backed by
 // the given entity and SFTPGo clients.
-func NewAttachmentStorageHandler(entity entityCaseClient, sftpgo sftpgoClient) *AttachmentStorageHandler {
+func NewAttachmentStorageHandler(entity attachmentStorageEntityClient, sftpgo sftpgoClient) *AttachmentStorageHandler {
 	return &AttachmentStorageHandler{entity: entity, sftpgo: sftpgo}
 }
 
@@ -112,7 +124,23 @@ type mintUploadTokenRequest struct {
 	// Mirrors AttachmentCreatePayload.description on the existing
 	// (non-SFTPGo) attachment-creation path.
 	Description *string `json:"description,omitempty"`
+	// ReferenceType identifies what kind of entity the path's {id} refers to:
+	// "case" (the default when omitted, preserving the pre-existing contract
+	// for every caller that never sends this field), "change_request", or
+	// "incident" — the same reference types the existing (non-SFTPGo)
+	// POST /attachments path accepts. Additive: the field is optional, and an
+	// unrecognised value is rejected with 400 rather than guessed at.
+	ReferenceType string `json:"referenceType,omitempty"`
 }
+
+// Attachment reference types accepted by MintUploadToken and understood by
+// CreateAttachmentShare. Mirrors the entity service's ReferenceType enum for
+// the subset of entities this handler can authorize against.
+const (
+	refTypeCase          = "case"
+	refTypeChangeRequest = "change_request"
+	refTypeIncident      = "incident"
+)
 
 // uploadTokenResponse is the response body of
 // POST /cases/{id}/attachments/upload-token.
@@ -183,6 +211,19 @@ type uploadTokenResponse struct {
 // CaseHandler.CreateCaseAttachment already applies (case exists and is not
 // closed): a row is never created, and a share never minted, for a case the
 // caller could not otherwise attach a file to.
+//
+// Reference types other than "case": the request body's optional
+// referenceType field declares what the path's {id} refers to (the route is
+// kept unchanged for compatibility; {id} is really the reference entity's
+// id). "change_request" and "incident" are recognised and authorized (the
+// caller must be able to read the referenced entity, mirroring how the CR and
+// incident detail endpoints gate reads today), but then rejected with 422:
+// the entity service's direct-upload persistence is case-scoped today — it
+// has no storage-key-backed attachment records for change requests or
+// incidents — so those uploads must go through the standard attachment path
+// instead. This gives a clear, honest error rather than the confusing
+// not-found a change-request id used to produce when it was assumed to be a
+// case id. Anything else is rejected with 400.
 func (h *AttachmentStorageHandler) MintUploadToken(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -190,8 +231,8 @@ func (h *AttachmentStorageHandler) MintUploadToken(w http.ResponseWriter, r *htt
 		return
 	}
 
-	caseID := r.PathValue("id")
-	if caseID == "" || !uuidRe.MatchString(caseID) {
+	referenceID := r.PathValue("id")
+	if referenceID == "" || !uuidRe.MatchString(referenceID) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
 		return
 	}
@@ -234,6 +275,37 @@ func (h *AttachmentStorageHandler) MintUploadToken(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// Empty defaults to "case": every existing caller (which never sends the
+	// field) keeps exactly the pre-existing behavior.
+	referenceType := req.ReferenceType
+	if referenceType == "" {
+		referenceType = refTypeCase
+	}
+	switch referenceType {
+	case refTypeCase:
+		// Falls through to the full flow below.
+	case refTypeChangeRequest, refTypeIncident:
+		// Authorize FIRST — the caller must be able to read the referenced
+		// entity (the same gate its detail endpoint applies: the entity
+		// service's own 403/404 decides) — and only then report the
+		// capability gap. A caller with no access to the entity learns
+		// nothing about which storage modes it supports.
+		if !h.canReadReference(w, r, referenceType, referenceID) {
+			return
+		}
+		// The entity service's direct-upload persistence is case-scoped
+		// today: it has no storage-key-backed attachment records for change
+		// requests or incidents, so there is nothing this flow could durably
+		// record. Fail with a clear 422 instead of pretending — the standard
+		// attachment upload path still works for these types.
+		writeError(w, http.StatusUnprocessableEntity, ErrMsgAttachmentStorageUnsupportedRef)
+		return
+	default:
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	caseID := referenceID
 	projectID, ok := h.canWriteCase(w, r, caseID)
 	if !ok {
 		return
@@ -280,8 +352,8 @@ func (h *AttachmentStorageHandler) MintUploadToken(w http.ResponseWriter, r *htt
 		Status        string  `json:"status"`
 		Description   *string `json:"description,omitempty"`
 	}{
-		ReferenceID:   caseID,
-		ReferenceType: "case",
+		ReferenceID:   referenceID,
+		ReferenceType: referenceType,
 		Name:          req.Filename,
 		Type:          req.MimeType,
 		StorageKey:    storageKey,
@@ -445,15 +517,20 @@ func (h *AttachmentStorageHandler) CreateAttachmentShare(w http.ResponseWriter, 
 		return
 	}
 
-	// Read-access check: mirrors the (lack of) additional case-state gating
-	// on GetCaseAttachmentContent and SearchCaseAttachments today — those
-	// endpoints impose no restriction beyond the entity service's own
-	// GetCase access control (a 403/404 from upstream decides who can see
-	// what). Reused here, unchanged, for the read path.
-	if meta.ReferenceType == "case" && meta.ReferenceID != "" {
-		if !h.canReadCase(w, r, meta.ReferenceID) {
-			return
-		}
+	// Read-access check, fail closed: the caller must be shown to have read
+	// access to the entity this attachment references before a public
+	// (passwordless) share URL is ever minted for it. The check is keyed on
+	// the attachment's own referenceType/referenceId as reported by the
+	// entity service; a missing, empty, or unrecognised reference means
+	// access CANNOT be established — deny with 404, never assume a type. (In
+	// particular, the backing data source that predates referenceType on
+	// attachment details reports it empty; its attachments carry no
+	// storageKey and were never shareable through this endpoint anyway.)
+	// Per-type, the check mirrors the gate each entity's own detail/content
+	// endpoints apply today: the entity service's own 403/404 on the detail
+	// lookup decides who can see what.
+	if !h.canReadReference(w, r, meta.ReferenceType, meta.ReferenceID) {
+		return
 	}
 
 	if meta.StorageKey == nil || *meta.StorageKey == "" {
@@ -637,6 +714,44 @@ func sanitizeFilenameForStorageKey(filename string) string {
 	}
 
 	return cleaned
+}
+
+// canReadReference confirms the caller can view the entity an attachment
+// references, dispatching on the attachment's own referenceType. FAIL
+// CLOSED: an empty or unrecognised reference type, or a missing reference
+// id, denies with 404 — it is never assumed to mean "case". An empty
+// referenceType is a real occurrence, not just a defensive case: the backing
+// data source that predates referenceType on attachment details reports it
+// empty. On failure the response has already been written; the caller must
+// only return.
+func (h *AttachmentStorageHandler) canReadReference(w http.ResponseWriter, r *http.Request, referenceType, referenceID string) bool {
+	if referenceID == "" {
+		slog.WarnContext(r.Context(), "attachment access denied: attachment carries no reference id", "referenceType", referenceType)
+		writeError(w, http.StatusNotFound, ErrMsgNotFound)
+		return false
+	}
+	switch referenceType {
+	case refTypeCase:
+		return h.canReadCase(w, r, referenceID)
+	case refTypeChangeRequest:
+		if _, err := h.entity.GetChangeRequest(r.Context(), referenceID); err != nil {
+			slog.ErrorContext(r.Context(), "entity GetChangeRequest failed during attachment-storage read guard", "changeRequestID", referenceID, "err", summarizeErr(err))
+			mapUpstreamErrorGeneric(w, err, "Failed to validate change request access.")
+			return false
+		}
+		return true
+	case refTypeIncident:
+		if _, err := h.entity.GetIncident(r.Context(), referenceID); err != nil {
+			slog.ErrorContext(r.Context(), "entity GetIncident failed during attachment-storage read guard", "incidentID", referenceID, "err", summarizeErr(err))
+			mapUpstreamErrorGeneric(w, err, "Failed to validate incident access.")
+			return false
+		}
+		return true
+	default:
+		slog.WarnContext(r.Context(), "attachment access denied: unrecognised reference type", "referenceType", referenceType)
+		writeError(w, http.StatusNotFound, ErrMsgNotFound)
+		return false
+	}
 }
 
 // canReadCase confirms the caller can view the target case at all — mirrors

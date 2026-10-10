@@ -19,6 +19,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/middleware"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
 	integrationservice "github.com/wso2-open-operations/cs-tools/entity-service/internal/servicenow-integration-service"
 )
 
@@ -308,6 +310,23 @@ func (s *snChangeRequestService) SearchChangeRequests(ctx context.Context, req d
 
 	token := middleware.UserIDTokenFromContext(ctx)
 
+	// A customer is only ever sent the states a customer may see, whatever they
+	// asked for (see sn_change_request_customer_view.go); staff are sent what they
+	// asked for.
+	states := req.Filters.States
+	customerView := customerViewApplies(ctx)
+	if customerView {
+		var none bool
+		if states, none = customerChangeRequestStates(states); none {
+			return domain.SearchChangeRequestsResponse{
+				ChangeRequests: []domain.SearchChangeRequestView{},
+				Total:          0,
+				Limit:          req.Pagination.Limit,
+				Offset:         req.Pagination.Offset,
+			}, nil
+		}
+	}
+
 	var snSortBy *snCRSort
 	if req.SortBy.Field != "" {
 		snField := snCRSortFieldMap[req.SortBy.Field]
@@ -322,7 +341,7 @@ func (s *snChangeRequestService) SearchChangeRequests(ctx context.Context, req d
 		Filters: snChangeRequestFilters{
 			ProjectIDs:         uuidsToSysids(req.Filters.ProjectIDs),
 			SearchQuery:        req.Filters.SearchQuery,
-			StateKeys:          domainCRStatesToSNIDs(req.Filters.States),
+			StateKeys:          domainCRStatesToSNIDs(states),
 			ImpactKeys:         domainCRImpactsToSNIDs(req.Filters.Impacts),
 			ClosedStartDate:    formatSNDateTimeUTC(req.Filters.ClosedStartDate),
 			ClosedEndDate:      formatSNDateTimeUTC(req.Filters.ClosedEndDate),
@@ -393,9 +412,19 @@ func (s *snChangeRequestService) SearchChangeRequests(ctx context.Context, req d
 		views = append(views, view)
 	}
 
+	total := snResp.TotalRecords
+	if customerView {
+		// ServiceNow was asked for the visible states only, so nothing should be
+		// dropped; a change request it returned anyway is not shown (and not counted).
+		var dropped int
+		if views, dropped = dropHiddenChangeRequests(ctx, views); dropped > 0 {
+			total = max(total-dropped, len(views))
+		}
+	}
+
 	return domain.SearchChangeRequestsResponse{
 		ChangeRequests: views,
-		Total:          snResp.TotalRecords,
+		Total:          total,
 		Limit:          req.Pagination.Limit,
 		Offset:         req.Pagination.Offset,
 	}, nil
@@ -464,11 +493,21 @@ func (s *snChangeRequestService) AggregateChangeRequests(ctx context.Context, re
 
 	token := middleware.UserIDTokenFromContext(ctx)
 
+	// The same customer view as SearchChangeRequests.
+	states := req.Filters.States
+	customerView := customerViewApplies(ctx)
+	if customerView {
+		var none bool
+		if states, none = customerChangeRequestStates(states); none {
+			return domain.AggregateResponse{Groups: []domain.AggregateBucket{}}, nil
+		}
+	}
+
 	payload := snChangeRequestAggregatePayload{
 		Filters: snChangeRequestFilters{
 			ProjectIDs:         uuidsToSysids(req.Filters.ProjectIDs),
 			SearchQuery:        req.Filters.SearchQuery,
-			StateKeys:          domainCRStatesToSNIDs(req.Filters.States),
+			StateKeys:          domainCRStatesToSNIDs(states),
 			ImpactKeys:         domainCRImpactsToSNIDs(req.Filters.Impacts),
 			ClosedStartDate:    formatSNDateTimeUTC(req.Filters.ClosedStartDate),
 			ClosedEndDate:      formatSNDateTimeUTC(req.Filters.ClosedEndDate),
@@ -514,11 +553,23 @@ func (s *snChangeRequestService) AggregateChangeRequests(ctx context.Context, re
 			// else: leave the key as-is, mirroring snCRStateLabelToString's
 			// own defensive fallback for an unrecognized label.
 		}
+		if customerView {
+			resp = dropHiddenStateBuckets(ctx, resp)
+		}
 	}
 	return resp, nil
 }
 
-// snCreateChangeRequestPayload is the Choreo POST /change-requests request body.
+// snCreateChangeRequestPayload is the Choreo POST /change-requests request
+// body. Deliberately has no stateKey field: the org's own Change Management
+// process flow confirms every change request begins at New unconditionally
+// (no branch at creation decides otherwise), and ServiceNow already defaults
+// a fresh record to New on its own. An earlier revision of this payload
+// accepted and forwarded a caller-chosen create-time state (New/Assess/
+// Authorize) -- a real reported bug: the CSM Portal's own create form let a
+// user pick Assess or Authorize directly, skipping the workflow's own
+// assess/authorize gates entirely. CreateChangeRequest below now rejects any
+// req.State other than New before this payload is even built.
 type snCreateChangeRequestPayload struct {
 	Subject             string  `json:"subject"`
 	CategoryKey         *string `json:"categoryKey,omitempty"`
@@ -528,7 +579,6 @@ type snCreateChangeRequestPayload struct {
 	PriorityKey         *string `json:"priorityKey,omitempty"`
 	ImpactKey           *string `json:"impactKey,omitempty"`
 	TypeKey             *string `json:"typeKey,omitempty"`
-	StateKey            *string `json:"stateKey,omitempty"`
 	GroupID             *string `json:"groupId,omitempty"`
 	AssignedEngineerID  *string `json:"assignedEngineerId,omitempty"`
 	RiskKey             *string `json:"riskKey,omitempty"`
@@ -547,8 +597,6 @@ type snCreateChangeRequestPayload struct {
 	AffectedServicesText         *string  `json:"affectedServicesText,omitempty"`
 	AffectedComponentsText       *string  `json:"affectedComponentsText,omitempty"`
 	RollbackDurationText         *string  `json:"rollbackDurationText,omitempty"`
-	CustomerGroupID              *string  `json:"customerGroupId,omitempty"`
-	EnvironmentIDs               []string `json:"environmentIds,omitempty"`
 	DeploymentProductIDs         []string `json:"deploymentProductIds,omitempty"`
 	DurationInput                *int     `json:"durationInput,omitempty"`
 	IsPlanningVisibleToCustomers *bool    `json:"isPlanningVisibleToCustomers,omitempty"`
@@ -563,21 +611,6 @@ type snCreateChangeRequestResponse struct {
 		CreatedOn string `json:"createdOn"`
 		CreatedBy string `json:"createdBy"`
 	} `json:"changeRequest"`
-}
-
-// snCRCreateStateIDMap maps domain ChangeRequestState enums to SN string state IDs for create.
-var snCRCreateStateIDMap = map[domain.ChangeRequestState]string{
-	domain.ChangeRequestStateNew:              "-5",
-	domain.ChangeRequestStateAssess:           "-4",
-	domain.ChangeRequestStateAuthorize:        "-3",
-	domain.ChangeRequestStateCustomerApproval: "5",
-	domain.ChangeRequestStateScheduled:        "-2",
-	domain.ChangeRequestStateImplement:        "-1",
-	domain.ChangeRequestStateReview:           "0",
-	domain.ChangeRequestStateCustomerReview:   "1",
-	domain.ChangeRequestStateRollback:         "2",
-	domain.ChangeRequestStateClosed:           "3",
-	domain.ChangeRequestStateCanceled:         "4",
 }
 
 // snCRCreateTypeIDMap maps domain ChangeRequestType enums to SN string type IDs for create.
@@ -704,13 +737,50 @@ type snCRStrChoice struct {
 // the adapter converts here rather than leaking the inconsistency upwards.
 const snUTCDateTimeLayout = "2006-01-02T15:04:05Z"
 
-// toDownstreamUTCDateTime parses a platform-format datetime ("YYYY-MM-DD HH:mm:ss",
-// interpreted as UTC) and re-emits it in the layout the downstream create endpoint
-// requires. It returns a ValidationError naming the field when the input does not
-// parse, so bad input is rejected with a specific message instead of an opaque
-// downstream pattern-validation failure.
+// snPlannedTimestamp returns a planned start / end in the one layout ServiceNow's
+// change request API takes, "YYYY-MM-DD HH:mm:ss" in UTC (snCreatedOnLayout).
+//
+// The API this service fronts documents two layouts for the planned window: that
+// one, and RFC 3339 with a zone designator ("2030-03-01T09:00:00Z",
+// "...+05:30"), which the PostgreSQL data source reads as an instant. An RFC 3339
+// value is therefore converted to the zoneless UTC layout here, the same
+// conversion the dual-write mirror makes (repository.StrictMirrorPlannedTimestamp,
+// which reads an instant as PlannedTimestampForServiceNow does); a value already
+// in the zoneless layout is forwarded as it was sent (one spelled a little
+// differently, "2030-03-01 9:00:00", is written back in the layout). Anything
+// else is a ValidationError naming the field, never an opaque downstream pattern
+// failure: "infinity", "now", "tomorrow", a date alone, a zone name; a year
+// outside 2000 to 2100 in either layout (the range the PostgreSQL data source
+// holds every planned window to); a zoneless value with a fractional second,
+// which Go's parser takes but ServiceNow's layout has none (an RFC 3339 value
+// with one is an instant and is converted to whole seconds).
+func snPlannedTimestamp(field, value string) (string, error) {
+	converted, err := repository.StrictMirrorPlannedTimestamp(value)
+	switch {
+	case err == nil:
+		return converted, nil
+	case errors.Is(err, repository.ErrPlannedTimestampFraction), errors.Is(err, repository.ErrPlannedTimestampYear):
+		return "", &apierror.ValidationError{
+			Msg: fmt.Sprintf("%s must follow the format: YYYY-MM-DD HH:mm:ss (%s)", field, err.Error()),
+		}
+	}
+	return "", &apierror.ValidationError{
+		Msg: fmt.Sprintf("%s must follow the format: YYYY-MM-DD HH:mm:ss", field),
+	}
+}
+
+// toDownstreamUTCDateTime parses a planned date-time (see snPlannedTimestamp:
+// "YYYY-MM-DD HH:mm:ss" interpreted as UTC, or RFC 3339 with a zone) and re-emits
+// it in the layout the downstream create endpoint requires. It returns a
+// ValidationError naming the field when the input does not parse, so bad input is
+// rejected with a specific message instead of an opaque downstream
+// pattern-validation failure.
 func toDownstreamUTCDateTime(field, value string) (string, error) {
-	t, err := time.Parse(snCreatedOnLayout, value)
+	converted, err := snPlannedTimestamp(field, value)
+	if err != nil {
+		return "", err
+	}
+	t, err := time.Parse(snCreatedOnLayout, converted)
 	if err != nil {
 		return "", &apierror.ValidationError{
 			Msg: fmt.Sprintf("%s must follow the format: YYYY-MM-DD HH:mm:ss", field),
@@ -721,23 +791,48 @@ func toDownstreamUTCDateTime(field, value string) (string, error) {
 
 // CreateChangeRequest implements ChangeRequestService for the ServiceNow data source.
 func (s *snChangeRequestService) CreateChangeRequest(ctx context.Context, req domain.CreateChangeRequestRequest) (domain.CreateChangeRequestResponse, error) {
+	if err := repository.RejectRemovedCreateFields(req); err != nil {
+		return domain.CreateChangeRequestResponse{}, err
+	}
 	if req.Subject == "" {
 		return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: "subject is required"}
+	}
+	// ServiceNow's create payload has no project or deployment field; refuse
+	// rather than drop them silently. (The PostgreSQL-first dual-write service
+	// strips them before it mirrors, so this only fires when ServiceNow is the
+	// sole data source.)
+	if req.ProjectID != nil || len(req.DeploymentIDs) > 0 {
+		return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: "projectId and deploymentIds are not supported on the ServiceNow data source"}
 	}
 	if req.Category != nil {
 		if _, ok := snCRCategoryIDMap[*req.Category]; !ok {
 			return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("invalid category %q", *req.Category)}
 		}
 	}
-	if req.Type != nil {
-		if _, ok := snCRCreateTypeIDMap[*req.Type]; !ok {
-			return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("invalid type %q", *req.Type)}
-		}
+	// The type is mandatory and must be standard/normal/emergency -- it decides
+	// the approval flow ServiceNow runs (Standard: none; Normal: approvals;
+	// Emergency: expedited).
+	if err := repository.ValidateCreateChangeRequestType(req.Type); err != nil {
+		return domain.CreateChangeRequestResponse{}, err
 	}
-	if req.State != nil {
-		if _, ok := snCRCreateStateIDMap[*req.State]; !ok {
-			return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("invalid state %q", *req.State)}
-		}
+	if _, ok := snCRCreateTypeIDMap[*req.Type]; !ok {
+		return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("invalid type %q", *req.Type)}
+	}
+	// An Emergency change takes no customer step. The two customer boxes are not part of
+	// ServiceNow's create payload (this data source would drop them), but the refusal is
+	// the same on every create path rather than a request that is accepted and ignored.
+	if err := repository.ValidateCreateChangeRequestCustomerGates(req.Type, req.CustomerApprovalRequired, req.CustomerReviewRequired); err != nil {
+		return domain.CreateChangeRequestResponse{}, err
+	}
+	// A change request can only ever be created at New -- see
+	// snCreateChangeRequestPayload's own doc comment for why. req.State is
+	// still accepted (rather than removed from CreateChangeRequestRequest
+	// entirely) so a caller that explicitly asks for New gets the same 200 it
+	// always has; anything else is rejected outright rather than silently
+	// downgraded to New, since silently ignoring a caller's explicit request
+	// would look like success while doing something else.
+	if req.State != nil && *req.State != domain.ChangeRequestStateNew {
+		return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("a change request can only be created in the New state, not %q", *req.State)}
 	}
 	if req.Risk != nil {
 		if _, ok := snCRRiskIDMap[*req.Risk]; !ok {
@@ -762,18 +857,12 @@ func (s *snChangeRequestService) CreateChangeRequest(ctx context.Context, req do
 		"groupId":             req.GroupID,
 		"assignedEngineerId":  req.AssignedEngineerID,
 		"requestedById":       req.RequestedByID,
-		"customerGroupId":     req.CustomerGroupID,
 	}
 	for field, val := range uuidFields {
 		if val != nil {
 			if err := validateUUIDs(field, []string{*val}); err != nil {
 				return domain.CreateChangeRequestResponse{}, err
 			}
-		}
-	}
-	if req.EnvironmentIDs != nil {
-		if err := validateUUIDs("environmentIds", req.EnvironmentIDs); err != nil {
-			return domain.CreateChangeRequestResponse{}, err
 		}
 	}
 	if req.DeploymentProductIDs != nil {
@@ -788,14 +877,17 @@ func (s *snChangeRequestService) CreateChangeRequest(ctx context.Context, req do
 		if req.PlannedStartDate == nil || req.PlannedEndDate == nil {
 			return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: "durationInput requires both plannedStartDate and plannedEndDate"}
 		}
-		start, err := time.Parse(snCreatedOnLayout, *req.PlannedStartDate)
+		startText, err := snPlannedTimestamp("plannedStartDate", *req.PlannedStartDate)
 		if err != nil {
-			return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: "plannedStartDate must follow the format: YYYY-MM-DD HH:mm:ss"}
+			return domain.CreateChangeRequestResponse{}, err
 		}
-		end, err := time.Parse(snCreatedOnLayout, *req.PlannedEndDate)
+		endText, err := snPlannedTimestamp("plannedEndDate", *req.PlannedEndDate)
 		if err != nil {
-			return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{Msg: "plannedEndDate must follow the format: YYYY-MM-DD HH:mm:ss"}
+			return domain.CreateChangeRequestResponse{}, err
 		}
+		// Both were just validated against this layout.
+		start, _ := time.Parse(snCreatedOnLayout, startText)
+		end, _ := time.Parse(snCreatedOnLayout, endText)
 		if want := int(end.Sub(start).Seconds()); *req.DurationInput != want {
 			return domain.CreateChangeRequestResponse{}, &apierror.ValidationError{
 				Msg: fmt.Sprintf("durationInput (%d) must match plannedEndDate - plannedStartDate (%d)", *req.DurationInput, want),
@@ -818,13 +910,9 @@ func (s *snChangeRequestService) CreateChangeRequest(ctx context.Context, req do
 		AffectedServicesText:         req.AffectedServicesText,
 		AffectedComponentsText:       req.AffectedComponentsText,
 		RollbackDurationText:         req.RollbackDurationText,
-		EnvironmentIDs:               uuidsToSysids(req.EnvironmentIDs),
 		DeploymentProductIDs:         uuidsToSysids(req.DeploymentProductIDs),
 		DurationInput:                req.DurationInput,
 		IsPlanningVisibleToCustomers: req.IsPlanningVisibleToCustomers,
-	}
-	if req.CustomerGroupID != nil {
-		payload.CustomerGroupID = strPtr(uuidToSysid(*req.CustomerGroupID))
 	}
 	if req.PlannedStartDate != nil {
 		v, err := toDownstreamUTCDateTime("plannedStartDate", *req.PlannedStartDate)
@@ -848,10 +936,8 @@ func (s *snChangeRequestService) CreateChangeRequest(ctx context.Context, req do
 		v := snCRCreateTypeIDMap[*req.Type]
 		payload.TypeKey = &v
 	}
-	if req.State != nil {
-		v := snCRCreateStateIDMap[*req.State]
-		payload.StateKey = &v
-	}
+	// req.State is validated above but never forwarded -- payload has no
+	// stateKey field at all, see snCreateChangeRequestPayload's own comment.
 	if req.Risk != nil {
 		v := snCRRiskIDMap[*req.Risk]
 		payload.RiskKey = &v
@@ -960,8 +1046,6 @@ type snPatchChangeRequestPayload struct {
 	AffectedServicesText   json.RawMessage `json:"affectedServicesText,omitempty"`
 	AffectedComponentsText json.RawMessage `json:"affectedComponentsText,omitempty"`
 	RollbackDurationText   json.RawMessage `json:"rollbackDurationText,omitempty"`
-	CustomerGroupID        json.RawMessage `json:"customerGroupId,omitempty"`
-	EnvironmentIDs         json.RawMessage `json:"environmentIds,omitempty"`
 	DeploymentProductIDs   json.RawMessage `json:"deploymentProductIds,omitempty"`
 	DurationInput          json.RawMessage `json:"durationInput,omitempty"`
 	// Comment and WorkNote append a journal entry; they are never null (the
@@ -992,10 +1076,22 @@ type snPatchChangeRequestResponse struct {
 }
 
 func (s *snChangeRequestService) PatchChangeRequest(ctx context.Context, id string, req domain.PatchChangeRequestRequest) (domain.PatchChangeRequestResponse, error) {
+	if err := repository.RejectRemovedPatchFields(req); err != nil {
+		return domain.PatchChangeRequestResponse{}, err
+	}
 	token := middleware.UserIDTokenFromContext(ctx)
 
 	if err := validateUUIDs("id", []string{id}); err != nil {
 		return domain.PatchChangeRequestResponse{}, err
+	}
+	if req.DeploymentIDs != nil {
+		return domain.PatchChangeRequestResponse{}, &apierror.ValidationError{Msg: "deploymentIds is not supported on the ServiceNow data source"}
+	}
+	// WSO2's answer to a time the customer proposed lives in PostgreSQL (customer_updated_on /
+	// customer_updated_date_confirmation): ServiceNow is the authority on this data source, and
+	// its own flow answers it there.
+	if req.ConfirmCustomerUpdatedDate != nil || req.ExpectedCustomerUpdatedOn != nil {
+		return domain.PatchChangeRequestResponse{}, &apierror.ValidationError{Msg: "confirmCustomerUpdatedDate is not supported on the ServiceNow data source: answer the customer's proposed date in ServiceNow"}
 	}
 
 	if req.Title == nil && req.Description == nil && req.ProjectID == nil && req.CaseID == nil &&
@@ -1007,7 +1103,7 @@ func (s *snChangeRequestService) PatchChangeRequest(ctx context.Context, id stri
 		req.IsCustomerReviewed == nil && req.RequestApproval == nil &&
 		req.ImplementationPlan == nil && req.Priority == nil && req.Category == nil &&
 		req.RequestedByID == nil && req.AffectedServicesText == nil && req.AffectedComponentsText == nil &&
-		req.RollbackDurationText == nil && req.CustomerGroupID == nil && req.EnvironmentIDs == nil &&
+		req.RollbackDurationText == nil &&
 		req.DeploymentProductIDs == nil && req.Comment == nil && req.WorkNote == nil &&
 		req.DurationInput == nil && req.IsPlanningVisibleToCustomers == nil {
 		return domain.PatchChangeRequestResponse{}, &apierror.ValidationError{Msg: "at least one field must be provided"}
@@ -1045,15 +1141,23 @@ func (s *snChangeRequestService) PatchChangeRequest(ctx context.Context, id stri
 			return domain.PatchChangeRequestResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("invalid type %q", *req.Type)}
 		}
 	}
+	// The planned window goes downstream in the one layout ServiceNow takes: an RFC
+	// 3339 value is converted to it (snPlannedTimestamp), a zoneless one is
+	// forwarded as sent. req is this call's own copy, so re-pointing its fields
+	// does not touch the caller's.
 	if req.PlannedStartOn != nil {
-		if _, err := time.Parse(snCreatedOnLayout, *req.PlannedStartOn); err != nil {
-			return domain.PatchChangeRequestResponse{}, &apierror.ValidationError{Msg: "plannedStartOn must follow the format: YYYY-MM-DD HH:mm:ss"}
+		v, err := snPlannedTimestamp("plannedStartOn", *req.PlannedStartOn)
+		if err != nil {
+			return domain.PatchChangeRequestResponse{}, err
 		}
+		req.PlannedStartOn = &v
 	}
 	if req.PlannedEndOn != nil {
-		if _, err := time.Parse(snCreatedOnLayout, *req.PlannedEndOn); err != nil {
-			return domain.PatchChangeRequestResponse{}, &apierror.ValidationError{Msg: "plannedEndOn must follow the format: YYYY-MM-DD HH:mm:ss"}
+		v, err := snPlannedTimestamp("plannedEndOn", *req.PlannedEndOn)
+		if err != nil {
+			return domain.PatchChangeRequestResponse{}, err
 		}
+		req.PlannedEndOn = &v
 	}
 	if req.Priority != nil && *req.Priority != nil && !validChangeRequestPriority[**req.Priority] {
 		return domain.PatchChangeRequestResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("invalid priority %q", **req.Priority)}
@@ -1095,19 +1199,13 @@ func (s *snChangeRequestService) PatchChangeRequest(ctx context.Context, id stri
 	// Tri-state UUID fields: only validate when a non-null value is being set;
 	// an explicit null (clear) or an omitted field needs no UUID validation.
 	triStateUUIDFields := map[string]**string{
-		"requestedById":   req.RequestedByID,
-		"customerGroupId": req.CustomerGroupID,
+		"requestedById": req.RequestedByID,
 	}
 	for field, val := range triStateUUIDFields {
 		if val != nil && *val != nil {
 			if err := validateUUIDs(field, []string{**val}); err != nil {
 				return domain.PatchChangeRequestResponse{}, err
 			}
-		}
-	}
-	if req.EnvironmentIDs != nil {
-		if err := validateUUIDs("environmentIds", *req.EnvironmentIDs); err != nil {
-			return domain.PatchChangeRequestResponse{}, err
 		}
 	}
 	if req.DeploymentProductIDs != nil {
@@ -1194,24 +1292,6 @@ func (s *snChangeRequestService) PatchChangeRequest(ctx context.Context, id stri
 			return domain.PatchChangeRequestResponse{}, fmt.Errorf("sn patch change request: marshal rollbackDurationText: %w", err)
 		}
 		payload.RollbackDurationText = v
-	}
-	if req.CustomerGroupID != nil {
-		var v any
-		if *req.CustomerGroupID != nil {
-			v = uuidToSysid(**req.CustomerGroupID)
-		}
-		raw, err := rawJSONOrNull(v)
-		if err != nil {
-			return domain.PatchChangeRequestResponse{}, fmt.Errorf("sn patch change request: marshal customerGroupId: %w", err)
-		}
-		payload.CustomerGroupID = raw
-	}
-	if req.EnvironmentIDs != nil {
-		b, err := json.Marshal(uuidsToSysids(*req.EnvironmentIDs))
-		if err != nil {
-			return domain.PatchChangeRequestResponse{}, fmt.Errorf("sn patch change request: marshal environmentIds: %w", err)
-		}
-		payload.EnvironmentIDs = b
 	}
 	if req.DeploymentProductIDs != nil {
 		b, err := json.Marshal(uuidsToSysids(*req.DeploymentProductIDs))
@@ -1521,7 +1601,7 @@ func mapSNChangeRequestDetailToView(cr snChangeRequestDetail) domain.ChangeReque
 		HasCustomerApproved:     cr.HasCustomerApproved,
 		HasCustomerReviewed:     cr.HasCustomerReviewed,
 		ApprovedOn:              cr.ApprovedOn,
-		LegalNextStates:         cr.LegalNextStates,
+		LegalNextStates:         withoutCustomerOutcomeStates(cr.LegalNextStates, view.State),
 
 		// Field-parity additions.
 		ImplementationPlan:           cr.ImplementationPlan,
@@ -1556,21 +1636,11 @@ func mapSNChangeRequestDetailToView(cr snChangeRequestDetail) domain.ChangeReque
 	if cr.RequestedBy != nil {
 		result.RequestedBy = &domain.EntityRef{ID: sysidToUUID(cr.RequestedBy.ID), Name: cr.RequestedBy.Name}
 	}
-	if cr.CustomerGroup != nil {
-		result.CustomerGroup = &domain.EntityRef{ID: sysidToUUID(cr.CustomerGroup.ID), Name: cr.CustomerGroup.Name}
-	}
 	if cr.ChangeRequestType != nil {
 		result.ChangeRequestType = &cr.ChangeRequestType.Label
 	}
 	if cr.Likelihood != nil {
 		result.Likelihood = &cr.Likelihood.Label
-	}
-	if len(cr.Environments) > 0 {
-		envs := make([]domain.EntityRef, 0, len(cr.Environments))
-		for _, e := range cr.Environments {
-			envs = append(envs, domain.EntityRef{ID: sysidToUUID(e.ID), Name: e.Name})
-		}
-		result.Environments = envs
 	}
 	if len(cr.DeploymentProducts) > 0 {
 		products := make([]domain.EntityRef, 0, len(cr.DeploymentProducts))
@@ -1588,4 +1658,43 @@ func mapSNChangeRequestDetailToView(cr snChangeRequestDetail) domain.ChangeReque
 	}
 
 	return result
+}
+
+// withoutCustomerOutcomeStates drops the two next states that only the CUSTOMER
+// can reach from the next states ServiceNow offers, so that this data source's
+// legalNextStates answer is the one the PostgreSQL data source gives
+// (repository.changeRequestForwardNextStates): "scheduled" is never offered,
+// from any state -- there is no Schedule action, a change becomes Scheduled when
+// its CAB approval is granted or, out of Customer
+// Approval, when the customer approves -- and "closed" is never offered from
+// Customer Review, which only the customer's own review closes. No staff action
+// records the customer's approval or review on their behalf (a compliance rule:
+// ServiceNow's record of it is audited), so the portal must never be handed
+// either as something to click. Rollback (the failed-review off-ramp
+// ServiceNow offers from Review and Customer Review) and Cancel are never
+// stripped; "closed" from Review stays. This filters OUR response only: what
+// ServiceNow itself returns is unchanged.
+func withoutCustomerOutcomeStates(states []string, state *string) []string {
+	if states == nil {
+		return nil
+	}
+	fromCustomerReview := state != nil && strings.EqualFold(*state, string(domain.ChangeRequestStateCustomerReview))
+	out := make([]string, 0, len(states))
+	for _, st := range states {
+		if strings.EqualFold(st, string(domain.ChangeRequestStateScheduled)) {
+			continue
+		}
+		if fromCustomerReview && strings.EqualFold(st, string(domain.ChangeRequestStateClosed)) {
+			continue
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// GetChangeRequestLinkOptions implements ChangeRequestService. The
+// project/deployment/environment cascade is derived from PostgreSQL tables, so
+// it is not available when ServiceNow is the data source.
+func (s *snChangeRequestService) GetChangeRequestLinkOptions(_ context.Context, _ domain.ChangeRequestLinkOptionsRequest) (domain.ChangeRequestLinkOptionsResponse, error) {
+	return domain.ChangeRequestLinkOptionsResponse{}, &apierror.ValidationError{Msg: "change request link options are not supported on the ServiceNow data source"}
 }

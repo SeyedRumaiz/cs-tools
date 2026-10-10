@@ -16,15 +16,23 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  collapseCodeBlockWhitespace,
+  collapseCommentSourceWhitespace,
+  collapseHtmlSourceWhitespace,
   compareByCreatedOnThenId,
   convertCodeTagsToHtml,
+  deriveFilterLabels,
   extractInlineImageRefId,
+  isInlineImageRefSrc,
+  isNoveraOrBotSender,
   hasSingleCodeWrapper,
   hasSubmittableEditorContent,
   linkifyBareUrls,
   normalizeCaseTypeOptions,
   replaceInlineImageSources,
   stripCodeWrapper,
+  toUtcEndOfDay,
+  toUtcStartOfDay,
 } from "@features/support/utils/support";
 
 describe("extractInlineImageRefId", () => {
@@ -93,6 +101,30 @@ describe("normalizeCaseTypeOptions", () => {
   });
 });
 
+describe("isNoveraOrBotSender", () => {
+  it("still recognizes the literal name 'Novera'", () => {
+    expect(isNoveraOrBotSender("Novera", "comment")).toBe(true);
+  });
+
+  it("still recognizes an explicit bot type", () => {
+    expect(isNoveraOrBotSender("", "bot")).toBe(true);
+  });
+
+  // Regression: the real GET /conversations/{id}/messages response sends
+  // createdBy: "" for a Novera reply, not the literal name "Novera" -- every
+  // real human message in this feed has a non-empty createdBy, so an empty
+  // one is itself the bot signal.
+  it("treats an empty createdBy as Novera, even with an ordinary 'comment' type", () => {
+    expect(isNoveraOrBotSender("", "comment")).toBe(true);
+    expect(isNoveraOrBotSender(null, "comment")).toBe(true);
+    expect(isNoveraOrBotSender(undefined, undefined)).toBe(true);
+  });
+
+  it("does not flag a real person's message", () => {
+    expect(isNoveraOrBotSender("Alice", "comment")).toBe(false);
+  });
+});
+
 describe("compareByCreatedOnThenId", () => {
   it("orders human comment before bot when timestamps tie", () => {
     const rows = [
@@ -102,6 +134,27 @@ describe("compareByCreatedOnThenId", () => {
     rows.sort(compareByCreatedOnThenId);
 
     expect(rows.map((r) => r.id)).toEqual(["1", "2"]);
+  });
+
+  // Regression: the real conversation transcript stores a Novera reply with
+  // createdBy: "" (not the name "Novera") and only whole-second timestamp
+  // precision, so a user's question and Novera's answer often share an
+  // identical createdOn -- without isNoveraOrBotSender recognizing the empty
+  // createdBy, this tie fell through to an effectively arbitrary id compare,
+  // and the bot's reply could render above the question that caused it.
+  it("orders the user's question before Novera's empty-createdBy reply when timestamps tie", () => {
+    const rows = [
+      { id: "reply-1", createdOn: "2026-06-24T16:19:34Z", createdBy: "", type: "comment" },
+      {
+        id: "question-1",
+        createdOn: "2026-06-24T16:19:34Z",
+        createdBy: "Jane Doe",
+        type: "comment",
+      },
+    ];
+    rows.sort(compareByCreatedOnThenId);
+
+    expect(rows.map((r) => r.id)).toEqual(["question-1", "reply-1"]);
   });
 });
 
@@ -114,5 +167,246 @@ describe("linkifyBareUrls", () => {
     expect(output).toContain(
       '<a href="https://wso2.com/docs" target="_blank" rel="noopener noreferrer"',
     );
+  });
+});
+
+// Regression tests: a Date with fewer than 4 digits in its year (reachable
+// live from a partially-typed MUI DatePicker year section) used to
+// serialize into a malformed, non-zero-padded RFC3339 string (e.g.
+// "2-01-10T00:00:00Z") that entity-service's filter parser rejected with a
+// 400. Month/day were already zero-padded; only the year was missed.
+describe("toUtcStartOfDay", () => {
+  it("zero-pads a short year to 4 digits", () => {
+    // new Date(2, 0, 10) would NOT give year 2 -- the Date constructor
+    // special-cases a 0-99 year argument as 1900+year. setFullYear has no
+    // such special-casing, so it's the only way to construct a genuinely
+    // short year for this test.
+    const date = new Date(2026, 0, 10);
+    date.setFullYear(2);
+    expect(toUtcStartOfDay(date)).toBe("0002-01-10T00:00:00Z");
+  });
+
+  it("formats a normal 4-digit year unchanged", () => {
+    const date = new Date(2026, 0, 10);
+    expect(toUtcStartOfDay(date)).toBe("2026-01-10T00:00:00Z");
+  });
+});
+
+describe("toUtcEndOfDay", () => {
+  it("zero-pads a short year to 4 digits", () => {
+    const date = new Date(2026, 0, 10);
+    date.setFullYear(2);
+    expect(toUtcEndOfDay(date)).toBe("0002-01-11T00:00:00Z");
+  });
+
+  it("formats a normal 4-digit year unchanged", () => {
+    const date = new Date(2026, 0, 10);
+    expect(toUtcEndOfDay(date)).toBe("2026-01-11T00:00:00Z");
+  });
+});
+
+// Content migrated from the legacy data source carries inline images as a bare
+// attachment id (`<img src="/<uuid>">`) with no `.iix` suffix.
+describe("bare attachment-id srcs (migrated content)", () => {
+  const UUID = "0f15cbcc-c36b-8310-af2f-404599013196";
+  const HEX = UUID.replace(/-/g, "");
+
+  it.each([
+    ["hyphenated uuid with leading slash", `/${UUID}`, HEX],
+    ["hyphenated uuid without leading slash", UUID, HEX],
+    ["uppercase hyphenated uuid", `/${UUID.toUpperCase()}`, HEX],
+    ["hyphenated uuid with .iix", `/${UUID}.iix`, HEX],
+    ["32-hex id with leading slash", `/${HEX}`, HEX],
+    ["32-hex id without leading slash", HEX, HEX],
+    ["surrounding whitespace", `  /${UUID} `, HEX],
+  ])("treats %s as an attachment reference", (_name, src, id) => {
+    expect(isInlineImageRefSrc(src)).toBe(true);
+    expect(extractInlineImageRefId(src)).toBe(id);
+  });
+
+  it("keeps existing .iix behaviour unchanged", () => {
+    expect(isInlineImageRefSrc(`/${HEX}.iix`)).toBe(true);
+    expect(extractInlineImageRefId(`/${HEX}.iix`)).toBe(HEX);
+    expect(extractInlineImageRefId(`https://host/${HEX}.iix`)).toBe(HEX);
+    expect(isInlineImageRefSrc("/no-match.iix")).toBe(true);
+  });
+
+  it.each([
+    ["query string", `/${UUID}?x=1`],
+    ["extra path segment", `/images/${UUID}`],
+    ["absolute url", `https://host/${UUID}`],
+    ["protocol-relative", `//${UUID}`],
+    ["double leading slash", `//${HEX}`],
+    ["other extension", `/${UUID}.png`],
+    ["data uri", "data:image/png;base64,AAAA"],
+    ["short hex", "/abc123"],
+    ["malformed uuid", "/0f15cbcc-c36b-8310-af2f-40459901319"],
+  ])("does not treat %s as an attachment reference", (_name, src) => {
+    expect(isInlineImageRefSrc(src)).toBe(false);
+  });
+
+  it("replaces a bare-uuid src when the attachment id is the 32-hex form", () => {
+    const out = replaceInlineImageSources(`<p><img src="/${UUID}"><br></p>`, [
+      { id: HEX, previewUrl: "data:image/png;base64,AAA" },
+    ]);
+    expect(out).toContain('src="data:image/png;base64,AAA"');
+  });
+
+  it("leaves a bare-uuid src untouched when no attachment matches", () => {
+    const out = replaceInlineImageSources(`<img src="/${UUID}">`, [
+      { id: "ffffffffffffffffffffffffffffffff", previewUrl: "data:x" },
+    ]);
+    expect(out).toContain(`src="/${UUID}"`);
+  });
+});
+
+describe("deriveFilterLabels", () => {
+  it("words the state filter as Status, like every other list page", () => {
+    expect(deriveFilterLabels("state")).toEqual({
+      label: "Status",
+      allLabel: "All Statuses",
+    });
+  });
+
+  it("matches the label and all-option of the status filter", () => {
+    expect(deriveFilterLabels("state")).toEqual(deriveFilterLabels("status"));
+  });
+
+  it("keeps capitalising and pluralising other ids", () => {
+    expect(deriveFilterLabels("severity")).toEqual({
+      label: "Severity",
+      allLabel: "All Severities",
+    });
+    expect(deriveFilterLabels("impact")).toEqual({
+      label: "Impact",
+      allLabel: "All Impacts",
+    });
+    expect(deriveFilterLabels("caseType")).toEqual({
+      label: "Case Type",
+      allLabel: "All Case Types",
+    });
+    expect(deriveFilterLabels("createdBy")).toEqual({
+      label: "Created By",
+      allLabel: "All Users",
+    });
+    expect(deriveFilterLabels("status")).toEqual({
+      label: "Status",
+      allLabel: "All Statuses",
+    });
+  });
+});
+
+describe("collapseHtmlSourceWhitespace", () => {
+  it("drops the newlines between laid-out block elements, \\r\\n included", () => {
+    expect(collapseHtmlSourceWhitespace("<p>One</p>\r\n<p>Two</p>\r\n<p>Three</p>")).toBe(
+      "<p>One</p><p>Two</p><p>Three</p>",
+    );
+  });
+
+  it("joins a hand-wrapped paragraph and drops the indentation", () => {
+    expect(
+      collapseHtmlSourceWhitespace("<p>Wrapped by hand\r\n   at a fixed width.</p>\r\n<p>Next.</p>"),
+    ).toBe("<p>Wrapped by hand at a fixed width.</p><p>Next.</p>");
+  });
+
+  it("joins hard-wrapped list items and drops the indentation", () => {
+    const source =
+      "<ul>\n  <li>First point\n    continues here.<br>\n    Second line.\n  </li>\n</ul>";
+    expect(collapseHtmlSourceWhitespace(source)).toBe(
+      "<ul><li>First point continues here.<br>Second line.</li></ul>",
+    );
+  });
+
+  it("keeps a single space between inline elements that were on separate lines", () => {
+    expect(collapseHtmlSourceWhitespace("<p>\n  Use <b>one</b>\n  <i>two</i> now\n</p>")).toBe(
+      "<p>Use <b>one</b> <i>two</i> now</p>",
+    );
+  });
+
+  it("leaves a <pre> block and a <code> snippet exactly as written", () => {
+    const source =
+      "<p>Run:</p>\n<pre>line one\n  line two</pre>\n<p>Then <code>a\nb</code> done</p>";
+    expect(collapseHtmlSourceWhitespace(source)).toBe(
+      "<p>Run:</p><pre>line one\n  line two</pre><p>Then <code>a\nb</code> done</p>",
+    );
+  });
+
+  it("keeps a space either side of inline code that sat on its own lines", () => {
+    expect(collapseHtmlSourceWhitespace("<p>\n  Set <code>x=1</code>\n  then restart\n</p>")).toBe(
+      "<p>Set <code>x=1</code> then restart</p>",
+    );
+  });
+
+  it("leaves plain text and editor output alone", () => {
+    const text = "Line one\nLine two\n\nLine four";
+    expect(collapseHtmlSourceWhitespace(text)).toBe(text);
+    const editor = "<p>Two  spaces</p><p>Next<br>line</p>";
+    expect(collapseHtmlSourceWhitespace(editor)).toBe(editor);
+  });
+
+  it("keeps the line breaks of a note that only mixes in a stray <br>", () => {
+    const note = "Line one\nLine two<br>Line three";
+    expect(collapseHtmlSourceWhitespace(note)).toBe(note);
+  });
+
+  it("trims a newline at the very start and end of the body", () => {
+    expect(collapseHtmlSourceWhitespace("\r\n<p>One</p>\r\n")).toBe("<p>One</p>");
+  });
+});
+
+describe("collapseCodeBlockWhitespace / collapseCommentSourceWhitespace", () => {
+  it("collapses only inside the [code] block and leaves the text around it alone", () => {
+    const source =
+      "Intro line\nnext line\n[code]<ul>\n  <li>One</li>\n</ul>[/code]\nTail text\nmore";
+    expect(collapseCodeBlockWhitespace(source)).toBe(
+      "Intro line\nnext line\n[code]<ul><li>One</li></ul>[/code]\nTail text\nmore",
+    );
+  });
+
+  it("keeps the legacy escaped markers as written", () => {
+    expect(collapseCodeBlockWhitespace("[\\code]<p>a</p>\n<p>b</p>[\\/code]")).toBe(
+      "[\\code]<p>a</p><p>b</p>[\\/code]",
+    );
+  });
+
+  it("leaves an inline [code] snippet with no markup, and its newlines, alone", () => {
+    const source = "Run [code]line one\nline two[/code] now";
+    expect(collapseCodeBlockWhitespace(source)).toBe(source);
+  });
+
+  it("also cleans laid-out HTML written outside the [code] blocks", () => {
+    const source =
+      "<div>\r\n  <p>Intro</p>\r\n</div>\r\n[code]<ul>\r\n  <li>One</li>\r\n</ul>[/code]\r\n<div>\r\n  <p>Outro</p>\r\n</div>";
+    expect(collapseCodeBlockWhitespace(source)).toBe(
+      "<div><p>Intro</p></div>[code]<ul><li>One</li></ul>[/code]<div><p>Outro</p></div>",
+    );
+  });
+
+  it("judges a newline beside a block against its neighbours, so inline spacing survives", () => {
+    const source =
+      "<p>\r\n  See <b>this</b>\r\n[code]<b>that</b>[/code]\r\n  then stop\r\n</p>";
+    expect(collapseCodeBlockWhitespace(source)).toBe(
+      "<p>See <b>this</b> [code]<b>that</b>[/code] then stop</p>",
+    );
+  });
+
+  it("does not let markup inside a block turn the plain text around it into laid-out HTML", () => {
+    const source = "Line one\nLine two\n[code]<p>a</p>\n<p>b</p>[/code]\nLine three\nLine four";
+    expect(collapseCodeBlockWhitespace(source)).toBe(
+      "Line one\nLine two\n[code]<p>a</p><p>b</p>[/code]\nLine three\nLine four",
+    );
+  });
+
+  it("still cleans each block when the text already holds the placeholder characters", () => {
+    const source = "\uE000 note\n[code]<p>a</p>\n<p>b</p>[/code]";
+    expect(collapseCodeBlockWhitespace(source)).toBe("\uE000 note\n[code]<p>a</p><p>b</p>[/code]");
+  });
+
+  it("picks the per-block or whole-body form by whether the body has [code] markers", () => {
+    expect(collapseCommentSourceWhitespace("[code]<p>a</p>\n<p>b</p>[/code]\nplain\ntext")).toBe(
+      "[code]<p>a</p><p>b</p>[/code]\nplain\ntext",
+    );
+    expect(collapseCommentSourceWhitespace("<p>a</p>\n<p>b</p>")).toBe("<p>a</p><p>b</p>");
+    expect(collapseCommentSourceWhitespace("")).toBe("");
   });
 });

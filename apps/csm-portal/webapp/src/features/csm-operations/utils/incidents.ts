@@ -266,3 +266,20 @@ export function buildIncidentSearchFilters(
     ...(fieldFilters.length > 0 && { filters: fieldFilters }),
   };
 }
+
+/** Path of an incident's Related tab, where its tasks are listed. */
+export function incidentRelatedTabPath(incidentId: string): string {
+  return `/operations/incidents/${encodeURIComponent(incidentId)}?tab=related`;
+}
+
+/** Closed incident-task states (ServiceNow's 3, 4, 7). Any other state, or
+ * none, is still open. */
+export const CLOSED_INCIDENT_TASK_STATES: readonly string[] = [
+  "CLOSED_COMPLETE",
+  "CLOSED_INCOMPLETE",
+  "CLOSED_SKIPPED",
+];
+
+export function isIncidentTaskOpen(state?: string | null): boolean {
+  return !state || !CLOSED_INCIDENT_TASK_STATES.includes(state.toUpperCase());
+}

@@ -31,11 +31,12 @@ csm-scheduled-tasks/
 │   ├── registry/registry.go # Task{Name, Schedule, Handler, RetryBackoff, To, Cc}
 │   ├── engine/engine.go     # Tick: claim → run → report back, once per task per invocation
 │   ├── ledger/client.go     # entity-service client for this component's own durable state (Attempt/Complete/Fail/DeleteResolvedBefore)
-│   ├── entitycases/client.go # Separate, read-only entity-service client for case search — used by report-style sub-crons (see CLAUDE.md, "Stale cases report")
-│   ├── notify/              # Email sending — same internal email service csm-notification-service uses; alert.html (failure alerts) and stale_cases_report.html (see CLAUDE.md, "Per-task report emails")
+│   ├── entitycases/client.go # Separate, read-only entity-service client for case search — used by report-style sub-crons (see CLAUDE.md, "Per-task report emails")
+│   ├── notify/              # Email sending — same internal email service csm-notification-service uses; alert.html (failure alerts) plus one template per report-style sub-cron (see CLAUDE.md, "Per-task report emails")
 │   ├── httpsec/httpsec.go   # Shared HTTPS/redirect guards for ledger, entitycases, and notify's OAuth2 clients
 │   ├── housekeeping/        # Sub-cron: deletes old resolved scheduled_task_run rows (see CLAUDE.md, "Housekeeping")
 │   ├── stalecases/          # Sub-cron: reports cases open too long (see CLAUDE.md, "Stale cases report")
+│   ├── opencases/           # Sub-cron: reports cases still in Open state (see CLAUDE.md, "Open cases report")
 │   └── apierror/errors.go   # Typed upstream-error wrapper, shared by ledger, entitycases, and notify
 ```
 
@@ -52,9 +53,10 @@ go run ./cmd/server
 ```
 
 Each run is one tick against whichever entity-service `.env` points at, then the process exits.
-Two sub-crons are registered today: `housekeeping_cleanup` (see `CLAUDE.md`, "Housekeeping") and
-`stale_cases_report` (see `CLAUDE.md`, "Stale cases report"); see `CLAUDE.md` ("Adding a sub-cron")
-for how to register another.
+Three sub-crons are registered today: `housekeeping_cleanup` (see `CLAUDE.md`, "Housekeeping"),
+`stale_cases_report` (see `CLAUDE.md`, "Stale cases report"), and `open_cases_report` (see
+`CLAUDE.md`, "Open cases report"); see `CLAUDE.md` ("Adding a sub-cron") for how to register
+another.
 
 ## Environment variables
 

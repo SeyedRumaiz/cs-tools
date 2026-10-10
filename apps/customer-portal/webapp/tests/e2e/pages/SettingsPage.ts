@@ -123,7 +123,35 @@ export class SettingsPage {
     return this.main().getByRole("row").filter({ hasText: email });
   }
 
-  /** Every user row currently listed, identified by their edit control. */
+  /**
+   * Every user row currently listed, regardless of who is looking.
+   *
+   * Matched on the email each row carries, NOT on the row's edit control.
+   * {@link userRows} uses the latter, which is admin-only — the Actions column
+   * and its buttons render inside `canAddOrRemoveUsers`, so for a Portal, Lead
+   * or Security user it matches nothing. Using it as a readiness signal is
+   * therefore circular: a non-admin waits forever for a control they are not
+   * permitted to see.
+   */
+  anyUserRows(): Locator {
+    return this.main().getByRole("row").filter({ hasText: /@/ });
+  }
+
+  /**
+   * The user list's column headers, present for every role.
+   *
+   * The Actions column is admin-only, so only the first three are guaranteed —
+   * which is why this takes the header to wait for rather than assuming one.
+   *
+   * @param label - Header text, e.g. "User".
+   */
+  userTableHeader(label: string): Locator {
+    return this.main().getByRole("columnheader", { name: label, exact: true });
+  }
+
+  /** Every user row currently listed, identified by their edit control.
+   *
+   * ⚠️ Admin-only by construction — see {@link anyUserRows}. */
   userRows(): Locator {
     return this.main().getByRole("row").filter({
       has: this.page.getByRole("button", {
@@ -225,6 +253,19 @@ export class SettingsPage {
   //
   // AI Assistant tab.
   //
+
+  /**
+   * Text within the settings page, for asserting a notice or label is shown.
+   *
+   * Returns every match rather than narrowing: some strings legitimately appear
+   * more than once, and callers assert on visibility or count rather than
+   * pretending there is exactly one.
+   *
+   * @param text - Exact text to find.
+   */
+  settingsText(text: string): Locator {
+    return this.main().getByText(text, { exact: true });
+  }
 
   /** The Support Capabilities section heading. */
   capabilitiesSection(): Locator {

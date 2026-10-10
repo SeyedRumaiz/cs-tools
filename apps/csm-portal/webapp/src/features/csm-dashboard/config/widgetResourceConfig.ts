@@ -125,7 +125,9 @@ export interface WidgetResourceConfig {
    * offset, limit }, sortBy? }`) — every resourceType's own search contract
    * uses that shape EXCEPT `case_feedback`'s `POST /cases/feedback/search`,
    * which takes flat `page`/`pageSize` instead of `pagination.offset/limit`
-   * (see that entry's own comment for why). Omitted (every other
+   * (see that entry's own comment for why), and `project`'s `POST
+   * /projects/search`, which takes its filters flat with no `filters` key.
+   * Omitted (every other
    * resourceType) keeps `useWidgetData`'s existing request shape untouched. */
   buildSearchRequestBody?: (args: {
     filters: Record<string, unknown>;
@@ -887,6 +889,38 @@ export const WIDGET_RESOURCE_CONFIG: Record<
     itemsKey: "projects",
     primaryLabel: (item) => asString(item.name) ?? asString(item.projectKey) ?? "—",
     secondaryLabel: (item) => asString(item.subscriptionType),
+    // `POST /projects/search` takes its filters flat at the top level
+    // (`onboardingStatus`, `accountId`, ...) next to `pagination`, and
+    // rejects any unknown top-level field — including a `filters` wrapper,
+    // even an empty one — so the default `{filters, pagination}` body 400s.
+    buildSearchRequestBody: ({ filters, offset, limit, sortBy }) => {
+      // The preview page's URL round-trip decodes every filter value as a
+      // comma-split array; the endpoint's single-valued string fields reject
+      // that shape, so unwrap them back to scalars (a no-op for a tile-level
+      // fetch, whose filters never went through that round-trip).
+      const body: Record<string, unknown> = { ...filters };
+      for (const key of [
+        "searchQuery",
+        "closureStatus",
+        "endDateFrom",
+        "endDateTo",
+        "accountId",
+        "arrTodayGte",
+        "subRegion",
+      ] as const) {
+        const v = body[key];
+        if (Array.isArray(v)) body[key] = v[0];
+      }
+      // The endpoint takes `sortBy`/`sortOrder` as plain strings and only
+      // accepts `sortBy: "endDate"`; a widget's `{field, order}` sort is
+      // flattened to that, and anything else is dropped rather than sent
+      // to be rejected.
+      if (sortBy?.field === "endDate") {
+        body.sortBy = "endDate";
+        if (sortBy.order === "asc" || sortBy.order === "desc") body.sortOrder = sortBy.order;
+      }
+      return { ...body, pagination: { offset, limit } };
+    },
     buildHref: () => "/customers/projects",
     icon: FolderKanban,
     iconColor: "secondary",

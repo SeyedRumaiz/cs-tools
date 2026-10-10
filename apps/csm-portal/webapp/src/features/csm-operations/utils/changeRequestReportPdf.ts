@@ -32,10 +32,12 @@ import {
 import { isBlankHtml } from "@utils/sanitizeHtml";
 import { formatBackendTimestampForDisplay } from "@utils/dateTime";
 import {
+  changeRequestCategoryLabel,
   changeRequestImpactColor,
   changeRequestImpactLabel,
   changeRequestStateColor,
   changeRequestStateLabel,
+  customerApprovedDisplay,
 } from "@features/csm-operations/utils/changeRequests";
 import {
   hasDisplayableContent,
@@ -86,12 +88,21 @@ export function generateChangeRequestReportPdf(
     { label: "Impact", value: changeRequestImpactLabel(cr.impact), colorRole: changeRequestImpactColor(cr.impact) },
     { label: "Type", value: cr.type ?? "—" },
   ];
-  if (cr.category?.label) rows.push({ label: "Category", value: cr.category.label });
+  if (cr.category) rows.push({ label: "Category", value: changeRequestCategoryLabel(cr.category) });
   if (cr.priority?.label) rows.push({ label: "Priority", value: cr.priority.label });
   rows.push({ label: "Project", value: cr.project?.name || "—" });
   rows.push({ label: "Linked case", value: cr.case?.name || "—" });
   if (cr.deployment?.name) rows.push({ label: "Deployment", value: cr.deployment.name });
   if (cr.deployedProduct?.name) rows.push({ label: "Deployed product", value: cr.deployedProduct.name });
+  if (cr.deployments?.length) {
+    rows.push({ label: "Deployments", value: cr.deployments.map((d) => d.name).join(", ") });
+  }
+  if (cr.deploymentProducts?.length) {
+    rows.push({ label: "Deployment products", value: cr.deploymentProducts.map((p) => p.name).join(", ") });
+  }
+  if (cr.customerContacts?.length) {
+    rows.push({ label: "Customer group", value: cr.customerContacts.map((c) => c.name).join(", ") });
+  }
   rows.push({ label: "Assigned engineer", value: cr.assignedEngineer?.name || "Unassigned" });
   rows.push({ label: "Assigned team", value: cr.assignedTeam?.name || "—" });
   if (cr.requestedBy?.name) rows.push({ label: "Requested by", value: cr.requestedBy.name });
@@ -103,7 +114,9 @@ export function generateChangeRequestReportPdf(
     rows.push({ label: "Affected components", value: cr.affectedComponentsText });
   }
   if (cr.hasCustomerApproved !== undefined) {
-    rows.push({ label: "Customer approved", value: cr.hasCustomerApproved ? "Yes" : "No" });
+    // "Proposed time accepted" for a change WSO2 scheduled by accepting the time the customer proposed
+    // (nothing is stamped as the customer's approval then, so a plain "No" would mislead).
+    rows.push({ label: "Customer approved", value: customerApprovedDisplay(cr) });
   }
   if (cr.approvedBy?.name) {
     rows.push({

@@ -59,7 +59,7 @@ func main() {
 	isEmailSendEnabled := envBool("IS_EMAIL_SEND_ENABLED", false)
 	testProjectID := os.Getenv("TEST_PROJECT_ID")
 	excludedProjectIDs := parseExcludedProjectIDs(os.Getenv("EXCLUDED_PROJECT_IDS"))
-	standingCC := parseCommaSeparatedList(os.Getenv("STANDING_CC_RECIPIENTS"))
+	standingRecipients := parseCommaSeparatedList(os.Getenv("STANDING_CC_RECIPIENTS"))
 	runID := newRunID()
 
 	slog.Info("acp-closure-service starting",
@@ -68,7 +68,7 @@ func main() {
 		"isEmailSendEnabled", isEmailSendEnabled,
 		"testProjectID", testProjectID,
 		"excludedProjectIDs", sortedKeys(excludedProjectIDs),
-		"standingCC", standingCC,
+		"standingRecipientsCount", len(standingRecipients),
 	)
 
 	if isWeekend(time.Now()) {
@@ -110,7 +110,7 @@ func main() {
 			Sender:                 emailClient,
 			Logger:                 slog.Default(),
 			AllowNonWSO2Recipients: envBool("EMAIL_SERVICE_ALLOW_NON_WSO2_RECIPIENTS", false),
-			StandingCC:             standingCC,
+			StandingRecipients:     standingRecipients,
 		}
 	}
 
@@ -220,10 +220,10 @@ func parseExcludedProjectIDs(v string) map[string]bool {
 }
 
 // parseCommaSeparatedList parses STANDING_CC_RECIPIENTS: a comma-separated
-// list of email addresses always cc'd on every notice (see
-// notify.EmailNotifier.StandingCC's own doc comment for why this is
-// deliberately env-configurable rather than a hardcoded constant — staging
-// must not cc real production distribution lists). Same
+// list of email addresses added to every notice (see
+// notify.EmailNotifier.StandingRecipients's own doc comment for where they
+// go and why this is deliberately env-configurable rather than a hardcoded
+// constant — staging must not email real production distribution lists). Same
 // trim-and-drop-empty convention as parseExcludedProjectIDs, but returns an
 // ordered slice rather than a set, since order and duplicates are
 // meaningful for a recipient list.

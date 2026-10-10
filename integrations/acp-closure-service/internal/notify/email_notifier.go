@@ -203,21 +203,24 @@ type EmailNotifier struct {
 	// production environment, once that's a deliberate decision — not
 	// something to flip casually to "make a test work".
 	AllowNonWSO2Recipients bool
-	// StandingCC is a fixed list of addresses cc'd on every notice this
-	// component sends — internal, customer-facing, and the
-	// no-business-contact nudge alike, subscription and invoice cascades
-	// alike, since none of this varies by notice shape. Confirmed against
-	// every real reference email this project has (both internal and
-	// customer-facing): each one cc's customer-lifecycle-notification@wso2.com
-	// and billing@wso2.com, which this port never sent until this field was
-	// added — a real gap, not a documented simplification. Configurable
-	// (STANDING_CC_RECIPIENTS in main.go) rather than a hardcoded constant
-	// specifically so staging can leave it empty — these are real
-	// production distribution lists that must not receive test traffic,
-	// the same reasoning behind AllowNonWSO2Recipients defaulting false.
-	// Entries still pass through filterRecipients like any other recipient;
-	// this is additive cc, not a bypass of the WSO2-only staging safeguard.
-	StandingCC []string
+	// StandingRecipients is a fixed list of addresses added to every notice
+	// this component sends, subscription and invoice cascades alike: the
+	// legacy distribution lists customer-lifecycle-notification@wso2.com and
+	// billing@wso2.com, which this port never sent to until this field was
+	// added — a real gap, not a documented simplification. Where they go
+	// matches the ServiceNow system (confirmed by the user from real legacy
+	// emails, 2026-09-29): on internal notices and the no-business-contact
+	// nudge they're in "to" with the internal people; on customer-facing
+	// notices they're in both "to" (with the customers) and "cc" (with the
+	// internal people). Configurable (STANDING_CC_RECIPIENTS in main.go; the
+	// env var keeps its original name, from when these were cc-only) rather
+	// than a hardcoded constant specifically so staging can leave it empty —
+	// these are real production distribution lists that must not receive
+	// test traffic, the same reasoning behind AllowNonWSO2Recipients
+	// defaulting false. Entries still pass through filterRecipients like any
+	// other recipient; this is not a bypass of the WSO2-only staging
+	// safeguard.
+	StandingRecipients []string
 }
 
 // Send builds the to/cc recipient lists, converts Body to simple HTML, and
@@ -236,7 +239,10 @@ type EmailNotifier struct {
 // kind.
 func (n *EmailNotifier) Send(ctx context.Context, notice Notice) (bool, error) {
 	to, cc := recipientsToToCC(notice.Recipients)
-	cc = append(cc, n.StandingCC...)
+	to = append(to, n.StandingRecipients...)
+	if notice.Recipients.IsCustomerFacing() {
+		cc = append(cc, n.StandingRecipients...)
+	}
 	to = n.filterRecipients(to)
 	cc = n.filterRecipients(cc)
 
@@ -260,7 +266,7 @@ func (n *EmailNotifier) Send(ctx context.Context, notice Notice) (bool, error) {
 	// cause of a real symptom seen in a live test: the trailing "WSO2
 	// Team" signature line visually missing in the received email.
 	htmlBody := renderInternalEmailHTML(notice.Body, notice.ProjectSfID, notice.InvoiceSfIDs)
-	if notice.Recipients.Customer != nil {
+	if notice.Recipients.IsCustomerFacing() {
 		htmlBody = renderEmailHTML(notice.Body)
 	}
 
@@ -279,8 +285,10 @@ func (n *EmailNotifier) Send(ctx context.Context, notice Notice) (bool, error) {
 // state per recipients.AccountManagerEmail's existing contract) are
 // dropped rather than sent through as blank strings.
 func recipientsToToCC(r Recipients) (to, cc []string) {
-	if r.Customer != nil {
-		to = appendIfNonEmpty(to, r.Customer.Email)
+	if r.IsCustomerFacing() {
+		for _, c := range r.Customers {
+			to = appendIfNonEmpty(to, c.Email)
+		}
 		cc = appendIfNonEmpty(cc, r.AccountOwner.Email, r.RenewalManager.Email, r.TechnicalOwner.Email)
 		return to, cc
 	}
@@ -316,7 +324,7 @@ func (n *EmailNotifier) filterRecipients(emails []string) []string {
 // renderEmailHTML wraps a notice's plain-text Body in the customer-facing
 // branded WSO2 email shell (emailHTMLTemplate) — logo, orange accent
 // border, footer disclaimer — matching real customer-facing notice
-// examples. Used by Send only when notice.Recipients.Customer is non-nil.
+// examples. Used by Send only when notice.Recipients.Customers is non-empty.
 func renderEmailHTML(body string) string {
 	return fmt.Sprintf(emailHTMLTemplate, wso2LogoURL, plainTextToHTML(body))
 }

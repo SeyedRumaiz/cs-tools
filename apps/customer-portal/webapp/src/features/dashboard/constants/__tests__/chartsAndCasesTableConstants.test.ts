@@ -25,7 +25,10 @@ import {
   CASES_TABLE_CLEAR_FILTERS_LABEL,
   DASHBOARD_CASES_VIEW_TABS,
 } from "@features/dashboard/constants/casesTable";
-import { DASHBOARD_STATS } from "@features/dashboard/constants/dashboard";
+import {
+  DASHBOARD_STATS,
+  OUTSTANDING_ENGAGEMENTS_CATEGORY_CHART_DATA,
+} from "@features/dashboard/constants/dashboard";
 import { DashboardCasesViewMode } from "@features/dashboard/types/casesTable";
 
 describe("charts constants", () => {
@@ -33,6 +36,24 @@ describe("charts constants", () => {
     expect(DASHBOARD_CHART_TITLE_OUTSTANDING_CASES).toBe("Outstanding Support Cases");
     expect(DASHBOARD_CHART_TITLE_OUTSTANDING_OPERATIONS).toBe("Outstanding Operations");
     expect(DASHBOARD_CHART_CAPTION_TOTAL).toBe("Total");
+  });
+
+  it("covers all 5 engagement types the backend can return, or outstanding counts silently drop", () => {
+    // DashboardPage's outstandingEngagements memo only sums a backend entry
+    // whose label matches one of these names (case-insensitively) -- a
+    // category missing here isn't unlabeled, it vanishes from the chart AND
+    // its total. Names must match backend-v2's own
+    // caseEngagementTypeDisplayLabels exactly.
+    const names = OUTSTANDING_ENGAGEMENTS_CATEGORY_CHART_DATA.map((c) => c.name);
+    expect(names.sort()).toEqual(
+      [
+        "Consultancy",
+        "Onboarding",
+        "Migration",
+        "Follow Up",
+        "New Feature Improvement",
+      ].sort(),
+    );
   });
 });
 

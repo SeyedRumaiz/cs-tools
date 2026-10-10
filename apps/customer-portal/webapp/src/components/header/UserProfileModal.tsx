@@ -42,6 +42,7 @@ import {
   validatePhoneE164,
   type PhoneCountryOption,
 } from "@features/settings/utils/phone";
+import { getRoleLabel } from "@features/settings/utils/settings";
 import { resolveDisplayTimeZone } from "@utils/dateTime";
 
 const PASSWORD_RESET_URL = "https://wso2.com/user/password";
@@ -75,18 +76,6 @@ const formatLastPasswordUpdate = (
   } catch {
     return "Not Available";
   }
-};
-
-/**
- * Maps role strings to user-friendly labels. Returns highest role when multiple roles present.
- *
- * @param {string[]} roles - Array of role strings from users/me endpoint.
- * @returns {string} The user-friendly role label.
- */
-const getRoleLabel = (roles: string[] | undefined): string => {
-  if (!roles || roles.length === 0) return "Not Available";
-  if (roles.includes("sn_customerservice.customer_admin")) return "Admin";
-  return "System User";
 };
 
 export interface UserProfileModalProps {

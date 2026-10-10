@@ -1,0 +1,16 @@
+# Secrets / local config
+.env
+config.toml
+
+# Build output (cmd/server -> bin/alert-core-service)
+/bin/
+
+# Go tooling
+*.test
+*.out
+coverage.txt
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

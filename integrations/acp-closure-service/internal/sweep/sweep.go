@@ -417,7 +417,7 @@ func accountName(proj project) string {
 // their recipient list.
 //
 // For a customer-audience window, contact resolution (fetchContacts +
-// ResolveCustomerContact) happens BEFORE the internal notice sends, not
+// ResolveCustomerContacts) happens BEFORE the internal notice sends, not
 // after — deliberately. A transient fetchContacts failure must leave zero
 // notices sent, not an internal notice sent with no corresponding
 // suspensionProcessState record: the caller (processProject) skips
@@ -484,7 +484,7 @@ func notifyForWindow(
 	if err != nil {
 		return false, err
 	}
-	resolution := recipients.ResolveCustomerContact(projectContacts, accountContactsList)
+	resolution := recipients.ResolveCustomerContacts(projectContacts, accountContactsList)
 
 	internalDelivered, err := ntf.Send(ctx, internalNotice)
 	if err != nil {
@@ -496,7 +496,7 @@ func notifyForWindow(
 		customerNotice.Subject = buildCustomerSubject(window, proj.Name)
 		customerNotice.Body = buildCustomerBody(window, proj)
 		customerNotice.Recipients = internalRecipients
-		customerNotice.Recipients.Customer = resolution.CustomerContact
+		customerNotice.Recipients.Customers = resolution.CustomerContacts
 		customerNotice.ResolvedVia = resolution.ResolvedVia
 		customerDelivered, err := ntf.Send(ctx, customerNotice)
 		if err != nil {
@@ -580,39 +580,79 @@ func contactFromPersonRef(p *personRefDTO) recipients.Contact {
 	return recipients.Contact{Name: p.Name, Email: recipients.AccountManagerEmail(&ref)}
 }
 
+// fetchContacts reads every page of the project's contacts and, unless the
+// project already has business contacts (account contacts only feed the
+// Primary Contact fallback), every page of the account's contacts. Both
+// searches return one page at a time (20 rows
+// unless a limit is sent, 50 at most, confirmed against staging) and report
+// total but no hasMore, so each is paged until a page comes back empty or
+// offset reaches total. Without this, a contact past the first page would
+// never get the customer notice.
 func fetchContacts(ctx context.Context, reader entityReader, proj project) ([]recipients.ProjectContact, []recipients.AccountContact, error) {
-	pcRaw, err := reader.SearchProjectContacts(ctx, proj.ID, []byte(`{}`))
+	var projectContacts []recipients.ProjectContact
+	err := pageContacts(func(body []byte) (int, int, error) {
+		raw, err := reader.SearchProjectContacts(ctx, proj.ID, body)
+		if err != nil {
+			return 0, 0, fmt.Errorf("search project contacts: %w", err)
+		}
+		var page projectContactSearchResponse
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return 0, 0, fmt.Errorf("parse project contacts: %w", err)
+		}
+		for _, c := range page.Contacts {
+			projectContacts = append(projectContacts, recipients.ProjectContact{Name: c.Name, Email: c.Email, Roles: c.Roles})
+		}
+		return len(page.Contacts), page.Total, nil
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("search project contacts: %w", err)
-	}
-	var pcResp projectContactSearchResponse
-	if err := json.Unmarshal(pcRaw, &pcResp); err != nil {
-		return nil, nil, fmt.Errorf("parse project contacts: %w", err)
+		return nil, nil, err
 	}
 
-	projectContacts := make([]recipients.ProjectContact, len(pcResp.Contacts))
-	for i, c := range pcResp.Contacts {
-		projectContacts[i] = recipients.ProjectContact{Name: c.Name, Email: c.Email, Roles: c.Roles}
-	}
-
-	if proj.accountID() == "" {
+	// Account contacts only feed the Primary Contact fallback, so skip them
+	// when the project already has business contacts (CodeRabbit, PR #2134).
+	if proj.accountID() == "" || recipients.HasBusinessContacts(projectContacts) {
 		return projectContacts, nil, nil
 	}
 
-	acRaw, err := reader.SearchAccountContacts(ctx, proj.accountID(), []byte(`{}`))
+	var accountContacts []recipients.AccountContact
+	err = pageContacts(func(body []byte) (int, int, error) {
+		raw, err := reader.SearchAccountContacts(ctx, proj.accountID(), body)
+		if err != nil {
+			return 0, 0, fmt.Errorf("search account contacts: %w", err)
+		}
+		var page accountContactSearchResponse
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return 0, 0, fmt.Errorf("parse account contacts: %w", err)
+		}
+		for _, c := range page.Contacts {
+			accountContacts = append(accountContacts, recipients.AccountContact{Name: c.Name, Email: c.Email, IsPrimary: c.IsPrimary})
+		}
+		return len(page.Contacts), page.Total, nil
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("search account contacts: %w", err)
-	}
-	var acResp accountContactSearchResponse
-	if err := json.Unmarshal(acRaw, &acResp); err != nil {
-		return nil, nil, fmt.Errorf("parse account contacts: %w", err)
-	}
-
-	accountContacts := make([]recipients.AccountContact, len(acResp.Contacts))
-	for i, c := range acResp.Contacts {
-		accountContacts[i] = recipients.AccountContact{Name: c.Name, Email: c.Email, IsPrimary: c.IsPrimary}
+		return nil, nil, err
 	}
 	return projectContacts, accountContacts, nil
+}
+
+// pageContacts calls fetch once per page, passing the request body for that
+// page. fetch returns how many rows the page held and the reported total.
+func pageContacts(fetch func(body []byte) (rows, total int, err error)) error {
+	offset := 0
+	for {
+		body, err := json.Marshal(searchContactsRequest{Pagination: pagination{Limit: pageSize, Offset: offset}})
+		if err != nil {
+			return fmt.Errorf("build contacts search request: %w", err)
+		}
+		rows, total, err := fetch(body)
+		if err != nil {
+			return err
+		}
+		offset += rows
+		if rows == 0 || offset >= total {
+			return nil
+		}
+	}
 }
 
 // recordNoticeSent writes the new window into suspensionProcessState's

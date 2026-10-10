@@ -89,6 +89,78 @@ const varsFor = (identity: IdentityName) => ({
 });
 
 /**
+ * The project types accounts are provisioned per, as env-var prefixes.
+ *
+ * Mirrors ProjectType in config/testData.ts — kept as short keys because they
+ * form variable names: E2E_<PROJECT>_<ROLE>_USERNAME.
+ */
+export type ProjectKey = "SUB" | "MS_SUB" | "CLOUD";
+
+/**
+ * The four user types each project has.
+ *
+ * ADMIN is the only one carrying the ServiceNow `customer_admin` role; the
+ * other three differ by PROJECT MEMBERSHIP, not by user role — the two
+ * independent sources CLAUDE.md warns are the usual confusion in this area.
+ */
+export type RoleKey = "ADMIN" | "PORTAL" | "SECURITY" | "LEAD";
+
+const roleVars = (project: ProjectKey, role: RoleKey) => ({
+  USERNAME_VAR: `E2E_${project}_${role}_USERNAME`,
+  PASSWORD_VAR: `E2E_${project}_${role}_PASSWORD`,
+  TOTP_VAR: `E2E_${project}_${role}_TOTP_SECRET`,
+});
+
+/**
+ * Credentials for one project/role pair.
+ *
+ * Separate from {@link readCredentials}, which addresses the two legacy
+ * identities by name. This one addresses the full 3x4 matrix, for specs that
+ * compare what different user types can see.
+ *
+ * @param project - Project type key.
+ * @param role - User type key.
+ * @returns The credential set.
+ */
+export function readRoleCredentials(
+  project: ProjectKey,
+  role: RoleKey,
+): Credentials {
+  const { USERNAME_VAR, PASSWORD_VAR, TOTP_VAR } = roleVars(project, role);
+  const username = process.env[USERNAME_VAR];
+  const password = process.env[PASSWORD_VAR];
+  const totpSecret = process.env[TOTP_VAR];
+
+  if (!username || !password || !totpSecret) {
+    throw new Error(
+      `Missing credentials for ${project}/${role}. Set ${USERNAME_VAR}, ` +
+        `${PASSWORD_VAR} and ${TOTP_VAR} in webapp/.env.e2e.local (git-ignored) ` +
+        "or as environment variables.",
+    );
+  }
+
+  return { username, password, totpSecret };
+}
+
+/** Whether a full credential set exists for a project/role pair. */
+export function hasRoleCredentials(
+  project: ProjectKey,
+  role: RoleKey,
+): boolean {
+  const { USERNAME_VAR, PASSWORD_VAR, TOTP_VAR } = roleVars(project, role);
+  return Boolean(
+    process.env[USERNAME_VAR] &&
+      process.env[PASSWORD_VAR] &&
+      process.env[TOTP_VAR],
+  );
+}
+
+/** The username for a project/role pair, for logs. Never the password. */
+export function roleUsername(project: ProjectKey, role: RoleKey): string {
+  return process.env[roleVars(project, role).USERNAME_VAR] ?? "(unset)";
+}
+
+/**
  * Reads the credentials, failing with an actionable message when incomplete.
  *
  * Names the missing variables and where to set them — a bare "undefined" here

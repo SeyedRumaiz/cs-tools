@@ -63,6 +63,31 @@ export function caseTypeHasSeverity(caseType: BeCaseType | undefined): boolean {
   return caseType === undefined || caseType === "case";
 }
 
+/**
+ * {@link ALL_CASE_TYPES}, narrowed to the types a caller may actually see.
+ * The backend's `POST /cases/search` denies the WHOLE request with a 403
+ * when the type filter names `security_report_analysis` and the caller
+ * lacks `PermViewSecurityCenter` (`access.go`) — it does not silently drop
+ * just that type and return the rest. Every unlocked, multi-type search
+ * (the project Work items tab, the quick-nav case search) must build its
+ * "every type" request from this instead of {@link ALL_CASE_TYPES}
+ * directly, or a caller who can't see security reports gets a 403 on a
+ * search that also asks for ordinary cases, service requests, etc. —
+ * reported live.
+ *
+ * `canSeeSecurityReports` must mirror `PermViewSecurityCenter` exactly
+ * (`cs_engineer || admin || comment_updater` — see that permission's own
+ * doc comment in `access.go`), not just `canUseSecurityCenter`
+ * (`cs_engineer || admin`): a `comment_updater`-only caller holds the
+ * backend permission too, and passing the narrower flag here would 403 them
+ * on exactly the search this function exists to prevent a 403 on.
+ */
+export function visibleCaseTypes(canSeeSecurityReports: boolean): BeCaseType[] {
+  return canSeeSecurityReports
+    ? ALL_CASE_TYPES
+    : ALL_CASE_TYPES.filter((t) => t !== "security_report_analysis");
+}
+
 /** Where a case's own detail page lives, keyed by its type — each
  * non-`case` type has its own dedicated route/detail page (different
  * fields/actions), not just a filtered view of `/cases`. */

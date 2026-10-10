@@ -27,6 +27,7 @@ const patchMutateMock = vi.fn();
 const showErrorMock = vi.fn();
 const editProblemDialogMock = vi.fn();
 const problemFixNotesDialogMock = vi.fn();
+const requirementDialogMock = vi.fn();
 let patchIsPending = false;
 
 // The backend client reads runtime config at module load, which isn't
@@ -79,6 +80,13 @@ vi.mock("@features/csm-operations/components/ProblemFixNotesDialog", () => ({
   },
 }));
 
+vi.mock("@features/csm-operations/components/ProblemTransitionRequirementDialog", () => ({
+  default: (props: unknown) => {
+    requirementDialogMock(props);
+    return null;
+  },
+}));
+
 // Imported after the mocks above so the module picks them up.
 import ProblemDetailPage from "@features/csm-operations/pages/ProblemDetailPage";
 
@@ -86,6 +94,7 @@ const BASE_PROBLEM: BeProblemDetail = {
   id: "prb-1",
   number: "PRB0040157",
   subject: "Intermittent 502s on the gateway",
+  description: "Gateway pods intermittently return 502s under load.",
   state: "CLOSED",
   priority: "High",
   category: "",
@@ -126,6 +135,7 @@ describe("ProblemDetailPage", () => {
     showErrorMock.mockReset();
     editProblemDialogMock.mockReset();
     problemFixNotesDialogMock.mockReset();
+    requirementDialogMock.mockReset();
     patchIsPending = false;
   });
 
@@ -192,6 +202,14 @@ describe("ProblemDetailPage", () => {
     // should trigger navigation when clicked directly as text.
     const plainTextOccurrence = originLabels.find((el) => el.closest('[role="button"]') === null);
     expect(plainTextOccurrence).toBeDefined();
+  });
+
+  it("renders the description when present", () => {
+    mockQueryResult({ data: BASE_PROBLEM });
+    render(<ProblemDetailPage />);
+    expect(
+      screen.getByText("Gateway pods intermittently return 502s under load."),
+    ).toBeInTheDocument();
   });
 
   it("renders resolution notes when present", () => {
@@ -272,4 +290,69 @@ describe("ProblemDetailPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /Move to Assess/i }));
     expect(showErrorMock).toHaveBeenCalled();
   });
+
+  // ServiceNow refuses Assess without an assignee and Resolved without fix
+  // notes, so the page asks for whichever is missing instead of PATCHing.
+  it("asks for an assignee instead of PATCHing when an unassigned problem is assessed", () => {
+    mockQueryResult({ data: { ...BASE_PROBLEM, state: "NEW", assignedTo: null } });
+    render(<ProblemDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: /Move to Assess/i }));
+    expect(patchMutateMock).not.toHaveBeenCalled();
+    expect(requirementDialogMock).toHaveBeenCalledWith(expect.objectContaining({ transition: "assess" }));
+  });
+
+  it("asks for fix notes instead of PATCHing when a problem without them is resolved", () => {
+    mockQueryResult({ data: { ...BASE_PROBLEM, state: "FIX_IN_PROGRESS", fixNotes: "  " } });
+    render(<ProblemDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: /Move to Resolved/i }));
+    expect(patchMutateMock).not.toHaveBeenCalled();
+    expect(requirementDialogMock).toHaveBeenCalledWith(expect.objectContaining({ transition: "resolve" }));
+  });
+
+  it("resolves directly when the problem already has fix notes", () => {
+    mockQueryResult({ data: { ...BASE_PROBLEM, state: "FIX_IN_PROGRESS" } });
+    render(<ProblemDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: /Move to Resolved/i }));
+    expect(requirementDialogMock).not.toHaveBeenCalled();
+    expect(patchMutateMock).toHaveBeenCalledWith(
+      { id: "prb-1", patch: { transition: "resolve" } },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
+  });
+
+  it("sends the dialog's field with the move, in one PATCH", () => {
+    mockQueryResult({ data: { ...BASE_PROBLEM, state: "NEW", assignedTo: null } });
+    render(<ProblemDetailPage />);
+    fireEvent.click(screen.getByRole("button", { name: /Move to Assess/i }));
+    const props = requirementDialogMock.mock.calls.at(-1)?.[0] as {
+      onConfirm: (patch: { transition: string; assignedToId: string }) => void;
+    };
+    props.onConfirm({ transition: "assess", assignedToId: "user-9" });
+    expect(patchMutateMock).toHaveBeenCalledWith(
+      { id: "prb-1", patch: { transition: "assess", assignedToId: "user-9" } },
+      expect.objectContaining({ onSuccess: expect.any(Function), onError: expect.any(Function) }),
+    );
+  });
+
+  it("renders an HTML description as formatted text, not tags", () => {
+    mockQueryResult({ data: { ...BASE_PROBLEM, description: "<p>test</p><script>alert(1)</script>" } });
+    const { container } = render(<ProblemDetailPage />);
+    expect(screen.getByText("test")).toBeInTheDocument();
+    expect(screen.queryByText("<p>test</p>", { exact: false })).not.toBeInTheDocument();
+    expect(container.querySelector("script")).toBeNull();
+  });
+
+  it("keeps a plain-text description's line breaks", () => {
+    mockQueryResult({ data: { ...BASE_PROBLEM, description: "line one\nline two" } });
+    render(<ProblemDetailPage />);
+    expect(screen.getByText(/line one\s+line two/)).toBeInTheDocument();
+  });
+
+  it("shows the problem's assignment group", () => {
+    mockQueryResult({ data: { ...BASE_PROBLEM, assignmentGroup: { id: "grp-1", name: "Choreo Special Ops" } } });
+    render(<ProblemDetailPage />);
+    expect(screen.getByText("Assignment group")).toBeInTheDocument();
+    expect(screen.getByText("Choreo Special Ops")).toBeInTheDocument();
+  });
 });
+

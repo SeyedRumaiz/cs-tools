@@ -38,11 +38,28 @@ type entityTimeCardClient interface {
 // TimeCardHandler handles HTTP requests for time-card operations.
 type TimeCardHandler struct {
 	entity entityTimeCardClient
+	// access backs the approve/reject check in UpdateTimeCard -- see
+	// WithAccessGuard. nil fails that check closed (denied), never open,
+	// mirroring CaseHandler's own field of the same name/reasoning.
+	access *AccessGuard
 }
 
 // NewTimeCardHandler creates a TimeCardHandler backed by the given entity client.
 func NewTimeCardHandler(entity entityTimeCardClient) *TimeCardHandler {
 	return &TimeCardHandler{entity: entity}
+}
+
+// WithAccessGuard wires the same guard that authorises every route into this
+// handler, so UpdateTimeCard can additionally require PermApproveTimeCard for
+// a state-transition (approve/reject) request -- a restriction PermView*/
+// PermTimeCardsAndUpdates alone (the route-level permission this route already
+// carries, shared with ordinary field edits) cannot express, the same
+// shared-route problem CaseHandler.WithAccessGuard solves for Security Center
+// -- see that method's own doc comment. Returns h for chaining at the
+// construction site.
+func (h *TimeCardHandler) WithAccessGuard(g *AccessGuard) *TimeCardHandler {
+	h.access = g
+	return h
 }
 
 // SearchTimeCards handles POST /time-cards/search.
@@ -124,6 +141,26 @@ func (h *TimeCardHandler) CreateTimeCard(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusCreated, result)
 }
 
+// timeCardUpdateTargetsStateTransition reports whether body is an
+// approve/reject request rather than a plain field edit -- entity-service's
+// UpdateTimeCardRequest (openapi.yaml) carries EITHER editable fields OR a
+// state transition (`state: "approved"`/`"rejected"`) on this same PATCH
+// route, so the two can only be told apart by inspecting the body itself,
+// the same best-effort JSON-inspection approach
+// caseSearchTargetsSecurityReports uses for its own shared-route problem. A
+// body this can't make sense of is treated as not a transition, since a
+// genuinely malformed request is rejected by entity-service's own validation
+// regardless of what this check decides.
+func timeCardUpdateTargetsStateTransition(body []byte) bool {
+	var req struct {
+		State *string `json:"state"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false
+	}
+	return req.State != nil
+}
+
 // UpdateTimeCard handles PATCH /time-cards/{id}.
 func (h *TimeCardHandler) UpdateTimeCard(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
@@ -140,6 +177,11 @@ func (h *TimeCardHandler) UpdateTimeCard(w http.ResponseWriter, r *http.Request)
 
 	body, ok := readTimeCardBody(w, r)
 	if !ok {
+		return
+	}
+
+	if timeCardUpdateTargetsStateTransition(body) && !(h.access != nil && h.access.Permits(PermApproveTimeCard, user.Roles)) {
+		writeError(w, http.StatusForbidden, ErrMsgForbidden)
 		return
 	}
 

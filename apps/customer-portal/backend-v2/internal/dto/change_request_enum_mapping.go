@@ -25,7 +25,17 @@ import "strconv"
 // normalizes State/Impact to these exact domain enum strings (see
 // snCRStateLabelToString/snCRImpactLabelToString), so no label-word-parsing
 // is needed here — just a direct enum lookup, both directions.
+//
+// Authorize ("-3") is in the vocabulary on purpose: a change request a customer
+// was asked about can be back in Authorize -- a time proposed or a Re-schedule made
+// before a proposal started waiting for WSO2 in Customer Approval (change requests
+// of that older flow finish through the CAB and ask the customer again) -- and it
+// stays visible to that customer while it is there. New and
+// Assess are not: no change request that is visible to a customer is ever in
+// either (it left New when approval was requested and a designated one never
+// returns to Assess), so they have no id or label to show.
 var crStateIDs = map[string]string{
+	"authorize":         "-3",
 	"customer_approval": "5",
 	"scheduled":         "-2",
 	"implement":         "-1",
@@ -43,10 +53,28 @@ var crImpactIDs = map[string]string{
 	"low":    "3",
 }
 
+// crStateFilterOnlyIDs are ServiceNow ids a search may NAME although no response
+// ever carries them (see crStateIDs). A search for state New or Assess is a
+// well-formed question whose answer is "none": entity-service decides what the
+// caller may see, so it is asked, rather than the id being dropped here (a
+// dropped id would turn "only New" into "no state filter", every visible change
+// request).
+var crStateFilterOnlyIDs = map[string]string{
+	"-5": "new",
+	"-4": "assess",
+}
+
 var (
-	crStateIDToEnum  = reverseStringMap(crStateIDs)
+	crStateIDToEnum  = withEntries(reverseStringMap(crStateIDs), crStateFilterOnlyIDs)
 	crImpactIDToEnum = reverseStringMap(crImpactIDs)
 )
+
+func withEntries(base, extra map[string]string) map[string]string {
+	for k, v := range extra {
+		base[k] = v
+	}
+	return base
+}
 
 // crStateLabels/crImpactLabels supply portal-facing display text for these
 // enum values — entity-service's change-request search response carries the
@@ -54,6 +82,7 @@ var (
 // search's SN-backed path), so this is this backend's own presentation
 // text, not a mirror of anything entity-service or ServiceNow provides.
 var crStateLabels = map[string]string{
+	"authorize":         "Authorize",
 	"customer_approval": "Customer Approval",
 	"scheduled":         "Scheduled",
 	"implement":         "Implement",
@@ -106,6 +135,30 @@ func crImpactRef(impact *string) *IDLabelRef {
 		label = *impact
 	}
 	return &IDLabelRef{ID: crImpactIDs[*impact], Label: label}
+}
+
+// normalizeChangeRequestStateChoices is normalizeCaseSeverityChoices for
+// change-request states (see that function's own doc comment for the shape).
+//
+// GET /projects/{id}/filters' changeRequestStates never went through this at
+// all -- unlike CaseStates/Severities/IssueTypes/EngagementTypes on the same
+// response, which are all normalized a few lines above. On the Postgres data
+// source, ReferenceDataRepository.EnumLabels (entity-service) returns the
+// raw enum label as both id and label (e.g. {"id":"ROLLBACK","label":"ROLLBACK"}),
+// since Postgres enums have no separate numeric id -- so
+// filters.stateIds?.map(Number) on the frontend converted every selection to
+// NaN, which Array.prototype.includes still matched via SameValueZero
+// against crStateIDs's own reverse-mapped set of also-NaN entries, so the
+// value silently reached the request as null instead of a real state key.
+// Every state selection was equally broken, not just Rollback.
+func normalizeChangeRequestStateChoices(items []ReferenceItem) []ReferenceItem {
+	return normalizeChoices(items, nil, crStateIDs, crStateLabels)
+}
+
+// normalizeChangeRequestImpactChoices is normalizeChangeRequestStateChoices
+// for change-request impact.
+func normalizeChangeRequestImpactChoices(items []ReferenceItem) []ReferenceItem {
+	return normalizeChoices(items, nil, crImpactIDs, crImpactLabels)
 }
 
 // crTypeRef builds a label-only {label} ref (no id) for entity-service's

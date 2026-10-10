@@ -108,7 +108,7 @@ func TestSNCaseService_CreateCase_WatchListResolvedToEmails(t *testing.T) {
 		}`))
 	})
 
-	svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil)
+	svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil, nil, nil, "", nil)
 
 	req := domain.CreateCaseRequest{
 		Type:                  "engagement",
@@ -167,15 +167,21 @@ func TestWatchListEmails_ForwardsMoreThan50Emails(t *testing.T) {
 }
 
 // TestWatchListEmails_RejectsNeitherEmailNorUUID covers the 400 the portal
-// used to hit with emails, now reserved for values that are neither.
+// used to hit with emails, now reserved for values that are neither. The
+// invalid value itself is deliberately not echoed in the message -- a watch
+// list entry can be a third party's email address, and this message is both
+// logged and returned to the caller (writeServiceError).
 func TestWatchListEmails_RejectsNeitherEmailNorUUID(t *testing.T) {
 	_, err := watchListEmails(context.Background(), nil, "token", "watchList", []string{"not-an-email"})
 	verr, ok := err.(*apierror.ValidationError)
 	if !ok {
 		t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
 	}
-	if !strings.Contains(verr.Msg, "invalid email") {
-		t.Fatalf("error %q does not name an invalid email", verr.Msg)
+	if !strings.Contains(verr.Msg, "watchList") {
+		t.Fatalf("error %q does not name the offending field", verr.Msg)
+	}
+	if strings.Contains(verr.Msg, "not-an-email") {
+		t.Fatalf("error %q must not echo the invalid entry itself", verr.Msg)
 	}
 }
 
@@ -211,7 +217,7 @@ func TestSNCaseService_CreateCase_WatchListEmailsForwarded(t *testing.T) {
 		}`))
 	})
 
-	svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil)
+	svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil, nil, nil, "", nil)
 
 	req := domain.CreateCaseRequest{
 		Type:                  "engagement",
@@ -252,7 +258,7 @@ func TestSNCaseService_UpdateCase_WatchListResolvedToEmails(t *testing.T) {
 		}`))
 	})
 
-	svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil)
+	svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil, nil, nil, "", nil)
 
 	watchList := []string{testIncidentWatcherUUID1, testIncidentWatcherUUID2}
 	_, err := svc.UpdateCase(contextWithUserIDToken("token"), domain.UpdateCaseRequest{
@@ -289,7 +295,7 @@ func TestSNCaseService_UpdateCase_WatchListEmailsForwarded(t *testing.T) {
 		}`))
 	})
 
-	svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil)
+	svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil, nil, nil, "", nil)
 
 	watchList := []string{testWatcherEmail1, testWatcherEmail2}
 	_, err := svc.UpdateCase(contextWithUserIDToken("token"), domain.UpdateCaseRequest{
@@ -414,7 +420,7 @@ func TestSNCaseService_UpdateCase_WatchListAbsentVsEmpty(t *testing.T) {
 				}`))
 			})
 
-			svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil)
+			svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil, nil, nil, "", nil)
 			if _, err := svc.UpdateCase(contextWithUserIDToken("token"), tt.req); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -513,7 +519,7 @@ func TestSNCaseService_UpdateCase_EmptyWatchListFieldAccounting(t *testing.T) {
 				}`))
 			})
 
-			svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil)
+			svc := NewServiceNowCaseService(newTestSNClient(t, mux), nil, nil, nil, nil, "", nil)
 			_, err := svc.UpdateCase(contextWithUserIDToken("token"), tt.req)
 			if tt.wantErr {
 				if _, ok := err.(*apierror.ValidationError); !ok {
@@ -539,7 +545,7 @@ func TestWatchListResolution_UnknownUserID(t *testing.T) {
 	})
 	client := newTestSNClient(t, mux)
 
-	caseSvc := NewServiceNowCaseService(client, nil, nil)
+	caseSvc := NewServiceNowCaseService(client, nil, nil, nil, nil, "", nil)
 	incidentSvc := NewServiceNowIncidentService(client, nil)
 	unknown := []string{testIncidentWatcherUUID1, testUnknownWatcherUUID}
 

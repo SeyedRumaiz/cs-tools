@@ -80,13 +80,16 @@ export const STATE_COLOR: Record<
 
 /**
  * Title-case an unknown backend state key for display, e.g.
- * `pending_review` -> "Pending review". This is the fallback that lets a state
- * the frontend has not been taught about still render with a readable label,
- * so introducing a new case state on the backend needs no frontend change.
+ * `pending_review` -> "Pending review", `PENDING_REVIEW` -> "Pending review".
+ * This is the fallback that lets a state the frontend has not been taught
+ * about still render with a readable label, so introducing a new case state
+ * on the backend needs no frontend change. Lower-cases before splitting so
+ * an all-caps raw value (e.g. a sync-written audit entry) still comes out
+ * sentence-cased rather than staying shouty.
  */
 export function humanizeState(state: string): string {
   if (!state) return "Unknown";
-  const words = state.split("_").filter(Boolean);
+  const words = state.toLowerCase().split("_").filter(Boolean);
   return words
     .map((w, i) => (i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w))
     .join(" ");
@@ -96,9 +99,17 @@ export function humanizeState(state: string): string {
  * Display label for a case state. Uses the curated label for known states and
  * gracefully degrades to a humanized key for any state the frontend does not
  * recognize (backend/frontend rollout skew, or a newly added state).
+ *
+ * Normalizes casing/spacing before the lookup (trim, lower-case, spaces to
+ * underscores) so this matches regardless of which of the state's several
+ * real-world spellings reaches it — e.g. a case's own "solution_proposed",
+ * an already-humanized "Solution proposed", or a raw sync-written
+ * "SOLUTION_PROPOSED" — all resolve to the same curated label instead of
+ * only the first.
  */
 export function stateLabel(state: string): string {
-  return STATE_LABEL[state as CaseState] ?? humanizeState(state);
+  const key = state.trim().toLowerCase().replace(/\s+/g, "_") as CaseState;
+  return STATE_LABEL[key] ?? humanizeState(state);
 }
 
 /**

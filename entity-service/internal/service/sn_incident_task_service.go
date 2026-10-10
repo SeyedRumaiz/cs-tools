@@ -309,3 +309,9 @@ func mapSNIncidentTaskDetailToView(it snIncidentTaskDetailResponse) domain.Incid
 	}
 	return view
 }
+
+// UpdateIncidentTask is not available on the ServiceNow data source:
+// ServiceNow's IncidentTaskUtils exposes search, aggregate and get only.
+func (s *snIncidentTaskService) UpdateIncidentTask(context.Context, domain.UpdateIncidentTaskRequest) (domain.IncidentTaskDetail, error) {
+	return domain.IncidentTaskDetail{}, &apierror.ServiceUnavailableError{Msg: "updating an incident task is not available on this data source"}
+}

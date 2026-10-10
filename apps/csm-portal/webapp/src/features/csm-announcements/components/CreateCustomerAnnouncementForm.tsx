@@ -28,20 +28,18 @@ import { useMemo, useState, type JSX } from "react";
 import type { BeSubscriptionType } from "@api/backend/types";
 import EditorWithSourceToggle from "@components/rich-text-editor/EditorWithSourceToggle";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
-import { useAddTagToCase } from "@features/csm-cases/api/useCaseTags";
-import { usePostCsmCase } from "@features/csm-cases/api/usePostCsmCase";
 import { DRY_RUN_TAG_LABEL, useAnnouncementDryRun } from "@features/csm-announcements/api/useAnnouncementDryRun";
 import { useAnnouncementExcludedProjectKeys } from "@features/csm-announcements/api/useAnnouncementExcludedProjectKeys";
 import { useResolveAnnouncementAudience } from "@features/csm-announcements/api/useResolveAnnouncementAudience";
-import AnnouncementDryRunCard from "@features/csm-announcements/components/AnnouncementDryRunCard";
+import { useCreateAnnouncementRequest } from "@features/csm-announcements/api/useCreateAnnouncementRequest";
+import { useUpdateAnnouncementRequest } from "@features/csm-announcements/api/useUpdateAnnouncementRequest";
+import { useRecordAnnouncementRequestDryRun } from "@features/csm-announcements/api/useRecordAnnouncementRequestDryRun";
+import { useSubmitAnnouncementRequest } from "@features/csm-announcements/api/useSubmitAnnouncementRequest";
 import AudienceScopeControls, {
   type AnnouncementAudienceScope,
 } from "@features/csm-announcements/components/AudienceScopeControls";
 import ResolvedAudienceList from "@features/csm-announcements/components/ResolvedAudienceList";
-import {
-  ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
-  settleWithConcurrencyLimit,
-} from "@features/csm-announcements/utils/settleWithConcurrencyLimit";
+import type { CustomerAudienceDefinition } from "@features/csm-announcements/types/announcementRequests";
 import { useNavTransition } from "@hooks/useNavTransition";
 
 /**
@@ -63,48 +61,44 @@ const CLOSED_STATES: string[] = ["Restricted", "Suspended"];
  * is what makes it findable/filterable later despite tags having no closed
  * vocabulary on the backend.
  */
-const SECURITY_ANNOUNCEMENT_TAG_LABEL = "Security Announcement";
+export const SECURITY_ANNOUNCEMENT_TAG_LABEL = "Security Announcement";
 
 /** The rich-text editor emits `<p></p>` when empty; check the stripped text. */
 function isEmptyHtml(html: string): boolean {
   return html.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim().length === 0;
 }
 
-const BACK_TARGET = "/announcements";
+const PENDING_TARGET = "/announcements?tab=pending";
 
 /**
  * The "Create announcement for customers" flow (Option 1 of the two-option
- * announcement create page — see AnnouncementKindSelector). Creates an
- * announcement (`type: "announcement"`) against one or more projects. Unlike
- * a standard case, this is a broadcast — no severity/issueType/deployment/
- * deployedProduct/attachments, just a subject and description.
+ * announcement create page — see AnnouncementKindSelector). Builds a
+ * `kind: "customer"` announcement request (Phase 2's draft/approval
+ * workflow) rather than sending immediately: this page only ever produces a
+ * brand-new `draft` and, optionally, submits it for approval — every other
+ * lifecycle step (further edits, re-approval, publish) happens through
+ * {@link AnnouncementRequestDialog} from the registry's "Pending" tab, not
+ * here. That's a deliberate boundary (see the Phase 2 plan): this component
+ * doesn't need any "resume an existing draft" state machine of its own.
  *
  * Two audience scopes (see AudienceScopeControls): a hand-picked project
- * list, same as before, or "all customer projects" resolved from the entity
- * service under a pair of default exclusions. Either way, a single
- * announcement "record" per project: the backend's `POST /cases` create call
- * takes exactly one `projectId`, so the resolved/picked list fans out into
- * one independent create call per project (same subject/description on
- * each), not one record with a target list — there is still no batch entity
- * (see the announcement-enhancement brief's Phase 3). Submitting is
- * therefore a batch: if some calls fail while others succeed, the succeeded
- * ones stand (no auto-retry) and the failures are reported by project so the
- * engineer can retry just those.
+ * list, or "all customer projects" resolved from the entity service under a
+ * pair of default exclusions. `ResolvedAudienceList` here is purely a
+ * pre-submit review aid (matching Phase 1's "resolved recipient list before
+ * send" intent) — the actual audience that gets messaged is resolved fresh,
+ * server-side, at Submit time from the request's stored `audienceDefinition`
+ * (with the mandatory excluded-project-key denylist applied), not from
+ * whatever this list happened to show a moment earlier.
  *
- * "This is a security announcement" tags every created case with a fixed
- * label (see SECURITY_ANNOUNCEMENT_TAG_LABEL) via a second call per case,
- * `POST /cases/{id}/tags` — there's no dedicated announcement-type field to
- * set this on instead. A tag-attach failure never invalidates its case
- * (the case already exists by then) — it's tracked and reported separately
- * from a create failure, since the fix is "add the label by hand," not
- * "retry the create."
- *
- * "Dry run" is the shared useAnnouncementDryRun/AnnouncementDryRunCard pair
- * (also used by the EOL/product-version flow) — creates exactly one real
- * case in a single fixed test project, tagged with DRY_RUN_TAG_LABEL plus
- * SECURITY_ANNOUNCEMENT_TAG_LABEL when this checkbox is on. It's independent
- * of audience/scope entirely: no project needs to be picked or resolved to
- * dry-run, since the test project is fixed regardless.
+ * "Submit for approval" runs the dry run (the shared useAnnouncementDryRun
+ * mechanism, also used by the EOL flow — creates one real case in a fixed
+ * test project), then creates/updates the draft, records the dry run onto
+ * it, and submits — all in one click, not a separate "run a dry run first"
+ * step. The real announcement process this replaces shares that exact
+ * dry-run case's link with the approver for review, so there's nothing to
+ * gain from a distinct preview step before submitting; if the sender wants
+ * to change anything afterward, editing a `pending_approval` request (via
+ * the dialog) already reverts it to draft for a fresh attempt.
  */
 export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const navigate = useNavTransition();
@@ -117,20 +111,25 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
   const [subject, setSubject] = useState("");
   const [description, setDescription] = useState("");
   const [isSecurityAnnouncement, setIsSecurityAnnouncement] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [submittingForApproval, setSubmittingForApproval] = useState(false);
+  const [draftId, setDraftId] = useState<string | null>(null);
 
-  const postCase = usePostCsmCase();
-  const addTag = useAddTagToCase();
+  const createDraft = useCreateAnnouncementRequest();
+  const updateDraft = useUpdateAnnouncementRequest();
+  const recordDryRun = useRecordAnnouncementRequestDryRun();
+  const submitRequest = useSubmitAnnouncementRequest();
 
   const dryRunTagLabels = useMemo(
     () => [DRY_RUN_TAG_LABEL, ...(isSecurityAnnouncement ? [SECURITY_ANNOUNCEMENT_TAG_LABEL] : [])],
     [isSecurityAnnouncement],
   );
-  const { runningDryRun, dryRunResult, canRunDryRun, handleRunDryRun } = useAnnouncementDryRun({
+  const busy = savingDraft || submittingForApproval;
+  const { runningDryRun, canRunDryRun, handleRunDryRun } = useAnnouncementDryRun({
     subject,
     description,
     tagLabels: dryRunTagLabels,
-    extraCanRun: !submitting,
+    extraCanRun: !busy,
   });
 
   const audienceFilters = useMemo(
@@ -145,114 +144,108 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
 
   // The scope actually being sent: today's hand-picked list, or every id
   // resolved for "all customer projects" (see AudienceScopeControls' own doc
-  // comment on what that scope does and doesn't filter).
+  // comment on what that scope does and doesn't filter). Just a pre-submit
+  // sanity check here — the real audience is resolved again server-side.
   const targetProjectIds = useMemo(
     () => (scope === "all" ? resolvedAudience.projects.map((p) => p.id) : projectIds),
     [scope, resolvedAudience.projects, projectIds],
   );
 
-  const canSubmit = useMemo(
+  const audienceDefinition: CustomerAudienceDefinition = useMemo(
     () =>
-      targetProjectIds.length > 0 &&
-      !(scope === "all" && resolvedAudience.isLoading) &&
-      // TanStack Query can retain a previous successful fetch's `data` after
-      // a later refetch fails (isLoading goes back to false, but the stale
-      // list is still sitting there) — without this check, targetProjectIds
-      // would still look populated and a resolution failure could let the
-      // sender submit against an audience that's actually out of date.
-      !(scope === "all" && resolvedAudience.isError) &&
-      subject.trim().length > 0 &&
-      !isEmptyHtml(description) &&
-      !submitting,
-    [
-      targetProjectIds,
-      scope,
-      resolvedAudience.isLoading,
-      resolvedAudience.isError,
-      subject,
-      description,
-      submitting,
-    ],
+      scope === "specific"
+        ? { scope: "specific", projectIds }
+        : {
+            scope: "all",
+            excludeClosureStates: excludeClosedStates ? CLOSED_STATES : [],
+            excludeSubscriptionTypes: excludeCloudTypes ? CLOUD_SUBSCRIPTION_TYPES : [],
+          },
+    [scope, projectIds, excludeClosedStates, excludeCloudTypes],
   );
 
-  const handleSubmit = async (): Promise<void> => {
-    if (!canSubmit) return;
-    setSubmitting(true);
+  const canSaveDraft = subject.trim().length > 0 && !isEmptyHtml(description) && !busy;
 
-    const trimmedSubject = subject.trim();
-    // Tag failures are tracked separately from create failures: the case
-    // already exists by the time a tag-attach could fail, so it must not be
-    // reported (or retried) as a failed create — just as a narrower, secondary
-    // problem to fix on an otherwise-successful case.
-    const failedTagProjectIds: string[] = [];
-    const results = await settleWithConcurrencyLimit(
-      targetProjectIds,
-      ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT,
-      async (projectId) => {
-        const created = await postCase.mutateAsync({
-          type: "announcement",
-          projectId,
-          subject: trimmedSubject,
+  const canSubmitForApproval =
+    canRunDryRun &&
+    targetProjectIds.length > 0 &&
+    !(scope === "all" && resolvedAudience.isLoading) &&
+    // TanStack Query can retain a previous successful fetch's `data` after a
+    // later refetch fails (isLoading goes back to false, but the stale list
+    // is still sitting there) — without this check, targetProjectIds would
+    // still look populated and a resolution failure could let the sender
+    // submit against an audience that's actually out of date.
+    !(scope === "all" && resolvedAudience.isError) &&
+    !busy;
+
+  const handleSaveDraft = async (): Promise<void> => {
+    if (!canSaveDraft) return;
+    setSavingDraft(true);
+    try {
+      if (draftId) {
+        await updateDraft.mutateAsync({
+          id: draftId,
+          subject: subject.trim(),
           description,
+          isSecurityAnnouncement,
+          audienceDefinition,
         });
-        if (isSecurityAnnouncement) {
-          try {
-            await addTag.mutateAsync({
-              caseId: created.id,
-              label: SECURITY_ANNOUNCEMENT_TAG_LABEL,
-            });
-          } catch {
-            failedTagProjectIds.push(projectId);
-          }
-        }
-        return created;
-      },
-    );
-    setSubmitting(false);
-
-    // Neither audience source exposes picked project names for a failure
-    // report beyond what's already resolved, so a failure is reported by id
-    // — still enough for the engineer to identify which project(s) to retry.
-    const failedProjectIds = targetProjectIds.filter(
-      (_, i) => results[i].status === "rejected",
-    );
-
-    if (failedProjectIds.length === 0 && failedTagProjectIds.length === 0) {
-      navigate(BACK_TARGET);
-      return;
-    }
-
-    const succeededCount = targetProjectIds.length - failedProjectIds.length;
-    if (succeededCount > 0) {
-      // Partial failure: the succeeded creates already landed and aren't
-      // retried automatically, so navigate away and surface exactly which
-      // project(s) still need attention — a failed create needs retrying,
-      // a failed tag attach just needs the label added by hand.
-      const messages: string[] = [];
-      if (failedProjectIds.length > 0) {
-        messages.push(
-          `created for ${succeededCount} of ${targetProjectIds.length} project${
-            targetProjectIds.length === 1 ? "" : "s"
-          }, but failed for project${failedProjectIds.length === 1 ? "" : "s"} ${failedProjectIds.join(
-            ", ",
-          )} — create it again for the failed project${failedProjectIds.length === 1 ? "" : "s"} only`,
-        );
       } else {
-        messages.push(`created for all ${targetProjectIds.length} project${targetProjectIds.length === 1 ? "" : "s"}`);
+        const created = await createDraft.mutateAsync({
+          kind: "customer",
+          subject: subject.trim(),
+          description,
+          isSecurityAnnouncement,
+          audienceDefinition,
+        });
+        setDraftId(created.id);
       }
-      if (failedTagProjectIds.length > 0) {
-        messages.push(
-          `the security label couldn't be attached for project${
-            failedTagProjectIds.length === 1 ? "" : "s"
-          } ${failedTagProjectIds.join(", ")} — add it manually on ${
-            failedTagProjectIds.length === 1 ? "that case" : "those cases"
-          }`,
-        );
+      navigate(PENDING_TARGET);
+    } catch {
+      showError("Could not save this draft. Please try again.");
+    } finally {
+      setSavingDraft(false);
+    }
+  };
+
+  const handleSubmitForApproval = async (): Promise<void> => {
+    if (!canSubmitForApproval) return;
+    setSubmittingForApproval(true);
+    try {
+      const result = await handleRunDryRun();
+      if (!result) return; // useAnnouncementDryRun already surfaced the error
+
+      let id = draftId;
+      if (id) {
+        await updateDraft.mutateAsync({
+          id,
+          subject: subject.trim(),
+          description,
+          isSecurityAnnouncement,
+          audienceDefinition,
+        });
+      } else {
+        const created = await createDraft.mutateAsync({
+          kind: "customer",
+          subject: subject.trim(),
+          description,
+          isSecurityAnnouncement,
+          audienceDefinition,
+        });
+        id = created.id;
+        setDraftId(id);
       }
-      showError(`The announcement was ${messages.join("; ")}.`);
-      navigate(BACK_TARGET);
-    } else {
-      showError("Could not create the announcement. Please try again.");
+
+      await recordDryRun.mutateAsync({ id, caseId: result.caseId });
+      await submitRequest.mutateAsync({ id });
+      navigate(PENDING_TARGET);
+    } catch (error) {
+      showError(
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "Could not submit this request for approval. Please try again.",
+      );
+    } finally {
+      setSubmittingForApproval(false);
     }
   };
 
@@ -270,7 +263,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
             excludeClosedStates={excludeClosedStates}
             onExcludeClosedStatesChange={setExcludeClosedStates}
             excludedProjectKeys={excludedProjectKeysQuery.data ?? []}
-            disabled={submitting}
+            disabled={busy}
           />
         </Grid>
 
@@ -304,7 +297,7 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
               <Checkbox
                 size="small"
                 checked={isSecurityAnnouncement}
-                disabled={submitting}
+                disabled={busy}
                 onChange={(e) => setIsSecurityAnnouncement(e.target.checked)}
               />
             }
@@ -335,23 +328,17 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
               minHeight={180}
               maxHeight={420}
               toolbarVariant="full"
-              disabled={submitting}
+              disabled={busy}
             />
           </Box>
         </Grid>
       </Grid>
 
-      <AnnouncementDryRunCard
-        runningDryRun={runningDryRun}
-        dryRunResult={dryRunResult}
-        canRunDryRun={canRunDryRun}
-        onRunDryRun={() => void handleRunDryRun()}
-      />
-
       <Box
         sx={{
           display: "flex",
           justifyContent: "flex-end",
+          alignItems: "center",
           gap: 1.5,
           mt: 2.5,
           pt: 2,
@@ -359,17 +346,23 @@ export default function CreateCustomerAnnouncementForm(): JSX.Element {
           borderColor: "divider",
         }}
       >
-        <Button variant="outlined" onClick={() => navigate(BACK_TARGET)}>
+        <Button variant="outlined" onClick={() => navigate("/announcements")}>
           Cancel
+        </Button>
+        <Button variant="outlined" onClick={() => void handleSaveDraft()} disabled={!canSaveDraft}>
+          {savingDraft ? "Saving…" : "Save as draft"}
         </Button>
         <Button
           variant="contained"
-          onClick={() => void handleSubmit()}
-          disabled={!canSubmit}
+          onClick={() => void handleSubmitForApproval()}
+          disabled={!canSubmitForApproval}
         >
-          {submitting ? "Creating…" : "Create announcement"}
+          {runningDryRun ? "Running dry run…" : submittingForApproval ? "Submitting…" : "Submit for approval"}
         </Button>
       </Box>
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block", textAlign: "right", mt: 0.5 }}>
+        Submitting creates a real case in the DCPSUB test project to share with your approver.
+      </Typography>
     </Card>
   );
 }

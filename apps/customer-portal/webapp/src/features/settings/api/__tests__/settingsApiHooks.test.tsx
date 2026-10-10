@@ -28,6 +28,11 @@ import { usePatchProject } from "@features/settings/api/usePatchProject";
 import { usePatchProjectContact } from "@features/settings/api/usePatchProjectContact";
 import { usePatchUserMe } from "@features/settings/api/usePatchUserMe";
 import { usePostProjectContact } from "@features/settings/api/usePostProjectContact";
+import { useResendProjectContactInvitation } from "@features/settings/api/useResendProjectContactInvitation";
+import {
+  SETTINGS_USER_RESEND_ALREADY_ACCEPTED,
+  SETTINGS_USER_RESEND_COOLDOWN,
+} from "@features/settings/constants/settingsConstants";
 import { useRegenerateRegistryToken } from "@features/settings/api/useRegenerateRegistryToken";
 import { useSearchRegistryTokens } from "@features/settings/api/useSearchRegistryTokens";
 import { useValidateProjectContact } from "@features/settings/api/useValidateProjectContact";
@@ -123,11 +128,23 @@ describe("settings API hooks", () => {
     const { result } = renderHook(() => usePostProjectContact("p-1"), {
       wrapper: createWrapper(),
     });
-    await result.current.mutateAsync({ contactEmail: "new@test.dev" } as never);
+    await expect(
+      result.current.mutateAsync({ contactEmail: "new@test.dev" } as never),
+    ).resolves.toBe("created");
     expect(authFetchMock).toHaveBeenCalledWith(
       "https://api.test/projects/p-1/contacts",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("reports a 202 invitation as still processing", async () => {
+    authFetchMock.mockResolvedValueOnce({ ok: true, status: 202 });
+    const { result } = renderHook(() => usePostProjectContact("p-1"), {
+      wrapper: createWrapper(),
+    });
+    await expect(
+      result.current.mutateAsync({ contactEmail: "new@test.dev" } as never),
+    ).resolves.toBe("processing");
   });
 
   it("patches an existing project contact", async () => {
@@ -158,6 +175,28 @@ describe("settings API hooks", () => {
       "https://api.test/projects/p-1/contacts/delete%40test.dev",
       expect.objectContaining({ method: "DELETE" }),
     );
+  });
+
+  it("resends an invitation", async () => {
+    authFetchMock.mockResolvedValueOnce({ ok: true, status: 200 });
+    const { result } = renderHook(() => useResendProjectContactInvitation("p-1"), {
+      wrapper: createWrapper(),
+    });
+    await result.current.mutateAsync("invite@test.dev");
+    expect(authFetchMock).toHaveBeenCalledWith(
+      "https://api.test/projects/p-1/contacts/invite%40test.dev/resend-invitation",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("explains a resend inside the cooldown and one for a contact no longer invited", async () => {
+    const { result } = renderHook(() => useResendProjectContactInvitation("p-1"), {
+      wrapper: createWrapper(),
+    });
+    authFetchMock.mockResolvedValueOnce({ ok: false, status: 429, text: async () => "" });
+    await expect(result.current.mutateAsync("a@test.dev")).rejects.toThrow(SETTINGS_USER_RESEND_COOLDOWN);
+    authFetchMock.mockResolvedValueOnce({ ok: false, status: 409, text: async () => "" });
+    await expect(result.current.mutateAsync("a@test.dev")).rejects.toThrow(SETTINGS_USER_RESEND_ALREADY_ACCEPTED);
   });
 
   it("patches current user profile", async () => {

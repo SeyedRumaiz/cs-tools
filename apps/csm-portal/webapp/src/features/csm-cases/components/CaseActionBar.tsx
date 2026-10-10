@@ -520,9 +520,12 @@ const ACKNOWLEDGEABLE_SEVERITIES = new Set<SeverityOrUnset>(["S0", "S1", "S2", "
  */
 // eslint-disable-next-line react-refresh/only-export-components -- exported so CsmCaseDetailPage's startWork can reuse the same acknowledgeability check rather than duplicating it (fast-refresh DX only)
 export function canAcknowledge(caseDetail: CsmCaseDetail): boolean {
-  return (
-    !caseDetail.acknowledgedBy && ACKNOWLEDGEABLE_SEVERITIES.has(caseDetail.severity)
-  );
+  if (caseDetail.acknowledgedBy) return false;
+  // Security report analyses carry no triage severity (the detail page hides
+  // the severity chip for them), so the severity gate would hide the button
+  // on every one of them. They are acknowledgeable regardless of severity.
+  if (caseDetail.caseType === "security_report_analysis") return true;
+  return ACKNOWLEDGEABLE_SEVERITIES.has(caseDetail.severity);
 }
 
 /**
@@ -583,7 +586,9 @@ export default function CaseActionBar({
         justifyContent: { xs: "flex-start", md: "flex-end" },
       }}
     >
-      {!!caseDetail.acknowledgedBy && ACKNOWLEDGEABLE_SEVERITIES.has(caseDetail.severity) && (
+      {!!caseDetail.acknowledgedBy &&
+        (caseDetail.caseType === "security_report_analysis" ||
+          ACKNOWLEDGEABLE_SEVERITIES.has(caseDetail.severity)) && (
         // Leads the bar as context, read before the action buttons. Mutually
         // exclusive with the Acknowledge button below (only one of the two
         // ever renders, since one implies the case is already claimed and

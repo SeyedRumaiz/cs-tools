@@ -37,7 +37,7 @@ import {
   useDeleteTimeCard,
 } from "@features/csm-timecards/api/useTimeCards";
 import { useCurrentEngineer } from "@features/csm-timecards/api/useTimeSheets";
-import { useIsTeamLead } from "@features/csm-timecards/hooks/useIsTeamLead";
+import { useTimecardRole } from "@features/csm-timecards/hooks/useTimecardRole";
 import { billableLabel } from "@features/csm-timecards/constants/timeCardConstants";
 import { decisionSummary } from "@features/csm-timecards/utils/timeCardDecision";
 import { BackendApiError } from "@api/backend/client";
@@ -51,12 +51,14 @@ import RefreshButton from "@components/RefreshButton";
 
 interface CaseTimeCardsPanelProps {
   caseId: string;
-  /** Opens the log-time dialog (owned by the page so the action bar can trigger it). */
-  onLogTime: () => void;
+  /** Opens the log-time dialog (owned by the page so the action bar can trigger it).
+   * Omitted for a caller without write access, which hides the "Log time" button. */
+  onLogTime?: () => void;
   /** Opens the edit dialog for one of this panel's own cards (owned by the
    * page, same as `onLogTime` — both open the same `LogTimeCardDialog`
-   * instance, just in different modes). */
-  onEditTimeCard: (card: CsmTimeCard) => void;
+   * instance, just in different modes). Omitted for a caller without write
+   * access, which hides the per-card edit and delete actions. */
+  onEditTimeCard?: (card: CsmTimeCard) => void;
 }
 
 // Every column is left-aligned for a consistent scan line down the table,
@@ -78,9 +80,11 @@ const GRID =
 
 /**
  * The body of a case's "Time tracking" tab: the time cards logged on this
- * case, with a running total and per-entry status. A team lead can review
- * (accept or reject) any submitted entry inline. Available even after the
- * case is closed — time is often logged after the fact.
+ * case, with a running total and per-entry status. An approver can review
+ * (accept or reject) any submitted entry they're listed as an approver for;
+ * an admin can review any submitted entry at all (approve-by-exception —
+ * see {@link useTimecardRole}'s own `isAdmin` doc comment). Available even
+ * after the case is closed — time is often logged after the fact.
  */
 export default function CaseTimeCardsPanel({
   caseId,
@@ -89,7 +93,7 @@ export default function CaseTimeCardsPanel({
 }: CaseTimeCardsPanelProps): JSX.Element {
   const { data, isLoading, isError, refetch, isFetching, dataUpdatedAt } =
     useCaseTimeCards(caseId);
-  const isTeamLead = useIsTeamLead();
+  const { isApprover, isAdmin } = useTimecardRole();
   const me = useCurrentEngineer();
   const decide = useDecideTimeCard();
   const deleteTimeCard = useDeleteTimeCard();
@@ -134,15 +138,17 @@ export default function CaseTimeCardsPanel({
             updatedAt={dataUpdatedAt}
             label="Refresh time cards"
           />
-          <Button
-            size="small"
-            variant="contained"
-            startIcon={<Plus size={14} />}
-            onClick={onLogTime}
-            sx={{ textTransform: "none" }}
-          >
-            Log time
-          </Button>
+          {onLogTime && (
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={<Plus size={14} />}
+              onClick={onLogTime}
+              sx={{ textTransform: "none" }}
+            >
+              Log time
+            </Button>
+          )}
         </Box>
       </Box>
 
@@ -218,18 +224,23 @@ export default function CaseTimeCardsPanel({
             const decision = decisionSummary(c);
             const canEdit = c.state === "submitted" && !!me.id && c.userId === me.id;
             // Never shown on your own card: the backend 403s a self-decide
-            // regardless of approver status, so a card you submitted
-            // yourself can never actually be reviewed by you. Also gated on
-            // being in the card's own approver list -- this panel shows
-            // every submitted card on the case, not just ones assigned to
-            // the signed-in lead, and the backend 403s a decision from
-            // anyone not in that list (confirmed live).
+            // regardless of approver status (admin included), so a card you
+            // submitted yourself can never actually be reviewed by you. A
+            // plain approver is additionally gated on being in the card's
+            // own approver list -- this panel shows every submitted card on
+            // the case, not just ones assigned to the signed-in lead, and
+            // the backend 403s a decision from an approver not in that list
+            // (confirmed live). An admin skips that list check entirely --
+            // entity-service's TransitionTimeCardState lets an admin decide
+            // ANY submitted card (approve-by-exception, see
+            // useTimecardRole's own isAdmin doc comment), not just ones
+            // they're specifically listed as an approver for.
             const canReview =
-              isTeamLead &&
+              (isApprover || isAdmin) &&
               c.state === "submitted" &&
               !!me.id &&
               c.userId !== me.id &&
-              !!c.approvers?.some((a) => a.id === me.id);
+              (isAdmin || !!c.approvers?.some((a) => a.id === me.id));
 
             return (
               <Box
@@ -308,7 +319,7 @@ export default function CaseTimeCardsPanel({
                       flexWrap: "wrap",
                     }}
                   >
-                    {canEdit && (
+                    {canEdit && onEditTimeCard && (
                       <>
                         <Tooltip title="Edit">
                           <IconButton

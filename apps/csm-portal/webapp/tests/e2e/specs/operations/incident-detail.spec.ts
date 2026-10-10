@@ -49,7 +49,7 @@ async function provisionIncident(
     shortDescription: subject,
     category: "Inquiry / Help",
     subcategory: "Information Request",
-    contactType: "Email",
+    channel: "Email",
     impact: "Low",
     urgency: "Low",
     serviceQuery: "e",

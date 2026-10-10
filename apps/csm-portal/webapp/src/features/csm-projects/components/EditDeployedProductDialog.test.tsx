@@ -78,6 +78,18 @@ describe("EditDeployedProductDialog — Details tab", () => {
     expect(onSaveDetails).toHaveBeenCalledWith({ cores: null });
   });
 
+  it("disables the 'Not set' category option once a category is already set", () => {
+    renderDialog({ category: "ms" });
+    fireEvent.mouseDown(screen.getByLabelText(/^category$/i));
+    expect(screen.getByRole("option", { name: /not set/i })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("keeps the 'Not set' category option selectable when no category is set yet", () => {
+    renderDialog();
+    fireEvent.mouseDown(screen.getByLabelText(/^category$/i));
+    expect(screen.getByRole("option", { name: /not set/i })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
   it("calling onSaveDetails is the only way the dialog would close (parent decides, not asserted here)", () => {
     // The dialog itself never calls onClose from a save — DeployedProductsPanel
     // decides to close on the Details-save success callback. Confirm no

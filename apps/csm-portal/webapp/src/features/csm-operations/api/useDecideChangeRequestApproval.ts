@@ -20,7 +20,7 @@ import {
   type UseMutationResult,
 } from "@tanstack/react-query";
 import { ApiQueryKeys } from "@constants/apiConstants";
-import { useBackendApi } from "@api/backend/client";
+import { BackendApiError, useBackendApi } from "@api/backend/client";
 import type {
   BeChangeRequestApprovalDecision,
   BeChangeRequestApprovalDecisionPayload,
@@ -40,7 +40,10 @@ export interface DecideChangeRequestApprovalInput {
  * be decided. ServiceNow's existing business rule cascades the change
  * request's own state automatically, so on success both the approvals and
  * the change request detail are invalidated so the page reflects the new
- * state/stage immediately.
+ * state/stage immediately. A 409 ("this approval is no longer pending: the
+ * change request is in Closed, but the Review stage can only be decided while
+ * it is in Review") means the change moved on while the page was open, so the
+ * same queries are refreshed then too and the stale row disappears.
  */
 export function useDecideChangeRequestApproval(): UseMutationResult<
   BeChangeRequestApprovalDecisionResponse,
@@ -49,6 +52,18 @@ export function useDecideChangeRequestApproval(): UseMutationResult<
 > {
   const api = useBackendApi();
   const queryClient = useQueryClient();
+
+  const invalidateChangeRequest = (id: string): void => {
+    void queryClient.invalidateQueries({
+      queryKey: [ApiQueryKeys.CHANGE_REQUEST_APPROVALS, id],
+    });
+    void queryClient.invalidateQueries({
+      queryKey: [ApiQueryKeys.CHANGE_REQUEST_DETAILS, id],
+    });
+    void queryClient.invalidateQueries({
+      queryKey: [ApiQueryKeys.CHANGE_REQUESTS],
+    });
+  };
 
   return useMutation<
     BeChangeRequestApprovalDecisionResponse,
@@ -62,16 +77,11 @@ export function useDecideChangeRequestApproval(): UseMutationResult<
       >(`/change-requests/${encodeURIComponent(input.id)}/approvals/decision`, {
         decision: input.decision,
       }),
-    onSuccess: (_data, variables) => {
-      void queryClient.invalidateQueries({
-        queryKey: [ApiQueryKeys.CHANGE_REQUEST_APPROVALS, variables.id],
-      });
-      void queryClient.invalidateQueries({
-        queryKey: [ApiQueryKeys.CHANGE_REQUEST_DETAILS, variables.id],
-      });
-      void queryClient.invalidateQueries({
-        queryKey: [ApiQueryKeys.CHANGE_REQUESTS],
-      });
+    onSuccess: (_data, variables) => invalidateChangeRequest(variables.id),
+    onError: (err, variables) => {
+      if (err instanceof BackendApiError && err.status === 409) {
+        invalidateChangeRequest(variables.id);
+      }
     },
   });
 }

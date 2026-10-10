@@ -34,11 +34,7 @@ export default function ListPagination({
   onPageChange,
   onRowsPerPageChange,
   rowsPerPageOptions = [5, 10, 25, 50],
-}: ListPaginationProps): JSX.Element | null {
-  if (totalRecords <= rowsPerPage) {
-    return null;
-  }
-
+}: ListPaginationProps): JSX.Element {
   return (
     <TablePagination
       component="div"

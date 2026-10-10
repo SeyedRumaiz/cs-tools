@@ -20,11 +20,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/directory"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/scim"
@@ -36,6 +39,11 @@ type scimClient interface {
 	SearchUser(ctx context.Context, email string) (*scim.UserInfo, error)
 	SearchExternalUser(ctx context.Context, email string) (*scim.ExternalUserInfo, error)
 	UpdateUserPhone(ctx context.Context, userID, mobile string) (*string, error)
+	GetRole(ctx context.Context, roleID string) ([]scim.RoleMember, error)
+	// AddRoleMembers grants a role to one or more users by email -- used by
+	// CreateUser to grant each of the caller's requested grantRoles once the
+	// new platform user exists.
+	AddRoleMembers(ctx context.Context, roleID string, emails []string) error
 }
 
 // entityUserClient abstracts the entity service user operations used by UsersHandler.
@@ -44,6 +52,12 @@ type entityUserClient interface {
 	PatchUserMe(ctx context.Context, body []byte) ([]byte, error)
 	SearchUsers(ctx context.Context, body []byte) ([]byte, error)
 	GetUser(ctx context.Context, id string) ([]byte, error)
+	GetUsersByIDs(ctx context.Context, body []byte) ([]byte, error)
+	CreateUser(ctx context.Context, body []byte) ([]byte, error)
+	ListSavedFilterViews(ctx context.Context, listKey string) ([]byte, error)
+	SaveSavedFilterView(ctx context.Context, body []byte) ([]byte, error)
+	DeleteSavedFilterView(ctx context.Context, listKey, name string) ([]byte, error)
+	ReorderSavedFilterView(ctx context.Context, body []byte) ([]byte, error)
 }
 
 // UsersHandler handles HTTP requests for user-related operations.
@@ -61,15 +75,42 @@ type UsersHandler struct {
 	// tell whether AttachmentStorageHandler's routes are reachable without
 	// probing them.
 	sftpgoAttachmentStorageEnabled bool
-	// dashboardDesignerEmails is the startup-resolved DASHBOARD_DESIGNER_EMAILS
-	// allow-list (see loadDashboardDesignerEmails in cmd/server/main.go), keyed
-	// by lower-cased email. GET /users/me grants a caller whose email is in
-	// this set a synthetic "dashboard_designer" role on top of whatever the
-	// entity service reports -- the dashboard builder's admin gate is
-	// FE-only and role-based, and this is how a caller gets that access
-	// without being handed the full "admin" role. Nil (the zero value, and
-	// the common case when the env var is unset) means nobody gets it.
-	dashboardDesignerEmails map[string]struct{}
+	// timecardApproverRoleIDs are every real role ID (see
+	// handler.RoleIDsForKey) GET /users/time-card-approvers fetches via SCIM
+	// and merges. Configured once, out of band -- see that handler's own doc
+	// comment for why this is the real, authoritative list of approvers, not
+	// entity-service's own Postgres role table. More than one ID is possible:
+	// AUTH_TIMECARD_APPROVER_ROLES can name several real role names, each
+	// resolved to its own ID, and an approver holding only one of them must
+	// still be listed.
+	timecardApproverRoleIDs []string
+	// access resolves the caller's token roles into the portal roles GET
+	// /users/me reports. nil (every existing call site and test) reports none;
+	// cmd/server/main.go sets it with WithAccessGuard.
+	access *AccessGuard
+	// grantableRoles is which portal roles CreateUser may grant via SCIM (see
+	// ResolveGrantableRoles), each already resolved to its real role ID.
+	// nil/empty (every existing call site and test) means no grantRoles value
+	// is ever valid -- cmd/server/main.go sets it with WithGrantableRoles.
+	grantableRoles []GrantableRole
+}
+
+// WithGrantableRoles makes CreateUser able to grant the given portal roles
+// via SCIM when a caller's grantRoles field names one, and makes
+// GetGrantableRoles (a separate handler, same resolved list) report them to
+// the webapp. Returns h for chaining at the construction site.
+func (h *UsersHandler) WithGrantableRoles(roles []GrantableRole) *UsersHandler {
+	h.grantableRoles = roles
+	return h
+}
+
+// WithAccessGuard makes GET /users/me report the portal roles the caller's
+// token roles grant, using the same guard that authorises every route, so
+// what the frontend is told and what the backend enforces cannot disagree.
+// Returns h for chaining at the construction site.
+func (h *UsersHandler) WithAccessGuard(g *AccessGuard) *UsersHandler {
+	h.access = g
+	return h
 }
 
 // NewUsersHandler creates a UsersHandler backed by the given SCIM and entity
@@ -77,26 +118,31 @@ type UsersHandler struct {
 // mirrors the same runtime flag value main.go uses to decide whether to
 // register AttachmentStorageHandler's routes (SFTPGO_ATTACHMENT_STORAGE_ENABLED),
 // so GET /users/me can tell the frontend whether those routes are reachable.
-// dashboardDesignerEmails is the startup-resolved DASHBOARD_DESIGNER_EMAILS
-// allow-list; see the field doc comment on UsersHandler.
-func NewUsersHandler(scim scimClient, entity entityUserClient, dir *directory.Directory, sftpgoAttachmentStorageEnabled bool, dashboardDesignerEmails map[string]struct{}) *UsersHandler {
+// timecardApproverRoleIDs is GetTimeCardApprovers' own config -- see that
+// handler's doc comment; pass nil/empty when GET /users/time-card-approvers
+// is not registered (main.go only registers it once this is non-empty).
+func NewUsersHandler(scim scimClient, entity entityUserClient, dir *directory.Directory, sftpgoAttachmentStorageEnabled bool, timecardApproverRoleIDs []string) *UsersHandler {
 	return &UsersHandler{
 		scim:                           scim,
 		entity:                         entity,
 		dir:                            dir,
 		sftpgoAttachmentStorageEnabled: sftpgoAttachmentStorageEnabled,
-		dashboardDesignerEmails:        dashboardDesignerEmails,
+		timecardApproverRoleIDs:        timecardApproverRoleIDs,
 	}
 }
 
 // userMeResponse is the GET /users/me response shape.
 type userMeResponse struct {
-	ID          *string           `json:"id,omitempty"`
-	Email       string            `json:"email"`
-	FirstName   *string           `json:"firstName,omitempty"`
-	LastName    *string           `json:"lastName,omitempty"`
-	TimeZone    *string           `json:"timeZone,omitempty"`
-	Roles       []string          `json:"roles,omitempty"`
+	ID        *string `json:"id,omitempty"`
+	Email     string  `json:"email"`
+	FirstName *string `json:"firstName,omitempty"`
+	LastName  *string `json:"lastName,omitempty"`
+	TimeZone  *string `json:"timeZone,omitempty"`
+	// Roles is which portal roles (viewer, cs_engineer, admin, ...) the
+	// caller's token roles grant: several are possible. It is not the entity
+	// service's role data, which this response no longer carries. Always
+	// present, [] when they hold none.
+	Roles       []string          `json:"roles"`
 	PhoneNumber *string           `json:"phoneNumber,omitempty"`
 	Team        *userTeamResponse `json:"team,omitempty"`
 	// SftpgoAttachmentStorageEnabled mirrors the backend's
@@ -130,12 +176,11 @@ type entityGroupRef struct {
 
 // entityUserMeResponse is the subset of the entity GET /users/me response we care about.
 type entityUserMeResponse struct {
-	ID        string   `json:"id"`
-	Email     string   `json:"email"`
-	FirstName *string  `json:"firstName"`
-	LastName  string   `json:"lastName"`
-	TimeZone  *string  `json:"timeZone"`
-	Roles     []string `json:"roles"`
+	ID        string  `json:"id"`
+	Email     string  `json:"email"`
+	FirstName *string `json:"firstName"`
+	LastName  string  `json:"lastName"`
+	TimeZone  *string `json:"timeZone"`
 	// Groups is every group the caller belongs to, or absent when the upstream
 	// membership lookup failed. The team is derived from it here rather than
 	// upstream, since the registry lives in this service.
@@ -154,21 +199,6 @@ type userUpdateResponse struct {
 	TimeZone    *string `json:"timeZone,omitempty"`
 }
 
-// appendRoleIfMissing returns roles with role appended, unless it is already
-// present (case-sensitive: role names are lower_snake_case platform
-// vocabulary, and an exact duplicate is what this guards against, not a
-// differently-cased variant). Works correctly starting from a nil roles
-// slice, which is the common case for a caller with no entity-reported
-// roles at all.
-func appendRoleIfMissing(roles []string, role string) []string {
-	for _, r := range roles {
-		if r == role {
-			return roles
-		}
-	}
-	return append(roles, role)
-}
-
 // GetMe handles GET /users/me.
 // id, firstName, lastName, timeZone, and roles are sourced from the entity service.
 // phoneNumber is sourced from SCIM.
@@ -182,10 +212,31 @@ func (h *UsersHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 	resp := userMeResponse{
 		Email:                          user.Email,
 		SftpgoAttachmentStorageEnabled: h.sftpgoAttachmentStorageEnabled,
+		Roles:                          []string{},
+	}
+	if h.access != nil {
+		resp.Roles = h.access.RolesFor(user.Roles)
 	}
 
 	entityRaw, err := h.entity.GetUserMe(r.Context())
 	if err != nil {
+		// entity-service 404s GetUserMe when the caller's email has no "user"
+		// row at all -- a real, reported case (an authenticated JWT whose
+		// identity was never provisioned downstream). A bare 404 reaching the
+		// webapp here isn't "page not found" the way it is for a resource id
+		// in a URL; the frontend's data-fetching hook had nothing to render
+		// and nothing resembling the 403 state it already knows how to show,
+		// so it spun forever instead. Map it to 403 (the already-handled
+		// "you don't have permission" case) rather than passing a 404
+		// through that the caller can't act on and the UI doesn't expect
+		// for this endpoint. The real reason is still logged, at ERROR
+		// specifically so it's not lost alongside routine 403s.
+		var apiErr *apierror.Error
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			slog.ErrorContext(r.Context(), "entity GetUserMe: user not found", "userID", user.UserID)
+			writeError(w, http.StatusForbidden, ErrMsgForbidden)
+			return
+		}
 		slog.ErrorContext(r.Context(), "entity GetUserMe failed", "userID", user.UserID, "err", err)
 		// A caller cannot distinguish "no roles/team" from "upstream identity
 		// resolution failed" if this falls through to a 200 with zeroed
@@ -202,20 +253,7 @@ func (h *UsersHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 		resp.FirstName = entityResp.FirstName
 		resp.LastName = &entityResp.LastName
 		resp.TimeZone = entityResp.TimeZone
-		if entityResp.Roles != nil {
-			resp.Roles = entityResp.Roles
-		}
 		resp.Team = h.teamForGroups(entityResp.Groups)
-	}
-
-	// The dashboard_designer grant is BFF-local truth, independent of the
-	// entity service: it must still apply even when the entity response
-	// above failed to parse (the else branch never ran, so resp.Roles is
-	// still nil here), because "the entity response happened to be
-	// malformed" is not a defensible reason to withhold access this layer
-	// grants entirely on its own.
-	if _, ok := h.dashboardDesignerEmails[strings.ToLower(user.Email)]; ok {
-		resp.Roles = appendRoleIfMissing(resp.Roles, "dashboard_designer")
 	}
 
 	scimInfo, err := h.scim.SearchUser(r.Context(), user.Email)
@@ -231,7 +269,8 @@ func (h *UsersHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // PatchMe handles PATCH /users/me.
-// phoneNumber update is handled via SCIM; timeZone update is handled via the entity service.
+// phoneNumber is updated via SCIM and then mirrored to the entity service; timeZone is updated
+// via the entity service. A request carrying both makes one entity call.
 func (h *UsersHandler) PatchMe(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -266,6 +305,13 @@ func (h *UsersHandler) PatchMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Entity treats an empty timeZone as absent, so reject it up front rather than
+	// report a value that was never stored. Must precede the identity provider call.
+	if payload.TimeZone != nil && strings.TrimSpace(*payload.TimeZone) == "" {
+		writeError(w, http.StatusBadRequest, "timeZone must not be empty.")
+		return
+	}
+
 	resp := userUpdateResponse{}
 
 	if payload.PhoneNumber != nil {
@@ -278,15 +324,38 @@ func (h *UsersHandler) PatchMe(w http.ResponseWriter, r *http.Request) {
 		resp.PhoneNumber = updatedPhone
 	}
 
+	// Mirror into the platform database with one entity PATCH carrying only the
+	// fields this request changed. SCIM has already succeeded; it is idempotent,
+	// so a client retry after an entity failure is safe.
+	entityFields := map[string]string{}
+	if payload.PhoneNumber != nil {
+		// Store what the identity provider actually kept, falling back to the request.
+		stored := *payload.PhoneNumber
+		if resp.PhoneNumber != nil {
+			stored = *resp.PhoneNumber
+		}
+		entityFields["phone"] = stored
+	}
 	if payload.TimeZone != nil {
-		patchBody, marshalErr := json.Marshal(map[string]string{"timeZone": *payload.TimeZone})
+		entityFields["timeZone"] = *payload.TimeZone
+	}
+	if len(entityFields) > 0 {
+		errMsg := "Failed to update time zone."
+		if payload.PhoneNumber != nil {
+			errMsg = "Failed to update phone number."
+			if payload.TimeZone != nil {
+				errMsg = "Failed to update profile."
+			}
+		}
+		patchBody, marshalErr := json.Marshal(entityFields)
 		if marshalErr != nil {
-			writeError(w, http.StatusInternalServerError, "Failed to update time zone.")
+			writeError(w, http.StatusInternalServerError, errMsg)
 			return
 		}
 		if _, entityErr := h.entity.PatchUserMe(r.Context(), patchBody); entityErr != nil {
+			// Never log the body: it may carry the phone number.
 			slog.ErrorContext(r.Context(), "entity PatchUserMe failed", "userID", user.UserID, "err", entityErr)
-			mapUpstreamError(w, entityErr, "Failed to update time zone.")
+			mapUpstreamError(w, entityErr, errMsg)
 			return
 		}
 		resp.TimeZone = payload.TimeZone
@@ -377,5 +446,342 @@ func (h *UsersHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	// enrichment above, so a failure in either never blocks the other.
 	enriched = h.withExternalAccountStatus(r.Context(), enriched, user.UserID)
 
+	// Independent of both enrichments above: replaces entity-service's own
+	// role vocabulary with the portal-role one, for an internal target only.
+	enriched = h.withPortalRoles(r.Context(), enriched, user.UserID)
+
 	writeJSON(w, http.StatusOK, enriched)
+}
+
+// getUsersByIDsRequest is the request body for POST /users/by-ids.
+type getUsersByIDsRequest struct {
+	IDs []string `json:"ids"`
+}
+
+// GetUsersByIDs handles POST /users/by-ids -- resolves a batch of user ids
+// to their profiles in one call (e.g. for showing names on a list of
+// records that each reference a user by id, rather than looking each one
+// up individually).
+func (h *UsersHandler) GetUsersByIDs(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		if _, ok := err.(*http.MaxBytesError); ok {
+			writeError(w, http.StatusRequestEntityTooLarge, ErrMsgTooLarge)
+			return
+		}
+		writeError(w, http.StatusBadRequest, errMsgReadBody)
+		return
+	}
+	if !json.Valid(body) {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	var req getUsersByIDsRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	forwardBody, err := json.Marshal(req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrMsgInternal)
+		return
+	}
+
+	result, err := h.entity.GetUsersByIDs(r.Context(), forwardBody)
+	if err != nil {
+		mapUpstreamErrorGeneric(w, err, "Failed to look up users.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// createUserRequest is the POST /users request shape. Roles is validated
+// against the directory's assignable-role allow-list -- entity-service
+// deliberately does not validate role names itself (see domain.UserRole's
+// own doc comment there), so this is the one place that does -- and is
+// otherwise forwarded to the entity service unchanged. GrantRoles is
+// portal-only and never reaches entity-service at all (see
+// buildEntityCreateUserBody): it names zero or more GrantableRole.Key
+// values, each granted via SCIM once the entity service user exists.
+type createUserRequest struct {
+	FirstName  string   `json:"firstName"`
+	LastName   string   `json:"lastName"`
+	Email      string   `json:"email"`
+	Roles      []string `json:"roles"`
+	GrantRoles []string `json:"grantRoles"`
+}
+
+// buildEntityCreateUserBody re-encodes req into exactly the fields
+// entity-service's own CreateUserRequest expects. entity-service's decoder
+// rejects unknown fields, so GrantRoles (meaningless there) cannot be
+// forwarded as part of the raw request body the way most of this handler's
+// other POST/PATCH bodies are -- same "rebuild from what was actually
+// validated" precedent CreateCaseComment's own work_note rebuild follows in
+// cases.go.
+func buildEntityCreateUserBody(req createUserRequest) ([]byte, error) {
+	return json.Marshal(struct {
+		FirstName string   `json:"firstName"`
+		LastName  string   `json:"lastName"`
+		Email     string   `json:"email"`
+		Roles     []string `json:"roles"`
+	}{
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		Email:     req.Email,
+		Roles:     req.Roles,
+	})
+}
+
+// CreateUser handles POST /users. Restricted to admin via the route's
+// PermAdmin permission (cmd/server/main.go) — this handler itself only
+// validates the request shape, it does not re-check the caller's role.
+func (h *UsersHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	body, ok := readJSONBody(w, r)
+	if !ok {
+		return
+	}
+
+	var req createUserRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+	for _, role := range req.Roles {
+		if !h.dir.IsValidRole(role) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("roles contains invalid value: %s", role))
+			return
+		}
+	}
+	if requestsInternalUserType(req.Roles) && !isWso2Email(req.Email) {
+		writeError(w, http.StatusBadRequest, "an internal-type user must have a "+wso2EmailDomain+" email address")
+		return
+	}
+	if requestsExternalUserType(req.Roles) {
+		writeError(w, http.StatusBadRequest, "creating an external-type user is not available at this time")
+		return
+	}
+
+	// Resolved up front, before anything is created, so an unknown grantRoles
+	// key fails fast with a 400 rather than after the entity service user
+	// already exists.
+	roleIDsToGrant := make([]string, 0, len(req.GrantRoles))
+	for _, key := range req.GrantRoles {
+		id, ok := RoleIDForKey(h.grantableRoles, key)
+		if !ok {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("grantRoles contains invalid value: %s", key))
+			return
+		}
+		roleIDsToGrant = append(roleIDsToGrant, id)
+	}
+
+	entityBody, err := buildEntityCreateUserBody(req)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "failed to build entity CreateUser body", "userID", user.UserID, "err", err)
+		writeError(w, http.StatusInternalServerError, ErrMsgInternal)
+		return
+	}
+
+	result, err := h.entity.CreateUser(r.Context(), entityBody)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity CreateUser failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to create the user.")
+		return
+	}
+
+	// Best-effort: the platform user already exists by this point, so a SCIM
+	// failure must not be reported as a failed create -- it's logged instead,
+	// the same posture ensureUserProvisioned (cases.go) takes for the
+	// opposite direction of this same mechanism.
+	for _, roleID := range roleIDsToGrant {
+		if err := h.scim.AddRoleMembers(r.Context(), roleID, []string{req.Email}); err != nil {
+			slog.ErrorContext(r.Context(), "scim AddRoleMembers failed", "userID", user.UserID, "roleID", roleID, "err", err)
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, result)
+}
+
+// timeCardApproversResponse is the GET /users/time-card-approvers response shape.
+type timeCardApproversResponse struct {
+	Approvers []timeCardApproverRef `json:"approvers"`
+}
+
+type timeCardApproverRef struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+}
+
+// GetTimeCardApprovers handles GET /users/time-card-approvers. Lists the real
+// membership of every configured time-card-approver role via the SCIM
+// operations service, rather than entity-service's own Postgres `role`/
+// `user_role` tables (what POST /users/search's roleIds filter reads) --
+// approval is actually granted by real role membership (see
+// AUTH_TIMECARD_APPROVER_ROLES in "Access control"), and the Postgres table
+// is a separate, syncable mirror that can drift from it. AUTH_TIMECARD_APPROVER_ROLES
+// can name several real role names, each resolved to its own ID (see
+// handler.RoleIDsForKey) -- an approver is anyone holding ANY of them, so
+// every configured ID is queried and the results merged, deduplicated by
+// member ID in case the same person holds more than one. Only registered
+// (see cmd/server/main.go) once at least one ID is configured.
+func (h *UsersHandler) GetTimeCardApprovers(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	// Registered unconditionally (see cmd/server/main.go) so a disabled
+	// deployment 404s cleanly here rather than falling through to the
+	// wildcard GET /users/{id} route, which would reject the literal segment
+	// "time-card-approvers" as an invalid UUID with 400 instead.
+	if len(h.timecardApproverRoleIDs) == 0 {
+		writeError(w, http.StatusNotFound, ErrMsgNotFound)
+		return
+	}
+
+	seen := make(map[string]struct{})
+	approvers := make([]timeCardApproverRef, 0, len(h.timecardApproverRoleIDs))
+	for _, roleID := range h.timecardApproverRoleIDs {
+		members, err := h.scim.GetRole(r.Context(), roleID)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "scim GetRole (time card approvers) failed", "userID", user.UserID, "roleID", roleID, "err", err)
+			// A 401/403 here means this backend's own SCIM client credentials
+			// lack the scope to read roles (see ASGARDEO_ROLE_IDS's own doc
+			// comment) -- a deployment/configuration problem, not anything
+			// about the calling portal user's own permissions.
+			// mapUpstreamErrorGeneric's usual 401/403 pass-through would tell
+			// an ordinary viewer "you don't have permission" for what is
+			// actually a backend misconfiguration an admin needs to fix, so
+			// those two codes are reported as a sanitized 502 instead; every
+			// other status still goes through the usual mapping.
+			var apiErr *apierror.Error
+			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+				writeError(w, http.StatusBadGateway, "Failed to list time card approvers.")
+				return
+			}
+			mapUpstreamErrorGeneric(w, err, "Failed to list time card approvers.")
+			return
+		}
+
+		for _, m := range members {
+			if _, dup := seen[m.ID]; dup {
+				continue
+			}
+			seen[m.ID] = struct{}{}
+			approvers = append(approvers, timeCardApproverRef{ID: m.ID, Email: m.Email})
+		}
+	}
+	writeJSONValue(w, http.StatusOK, timeCardApproversResponse{Approvers: approvers})
+}
+
+// ListSavedFilterViews handles GET /users/me/saved-filter-views.
+func (h *UsersHandler) ListSavedFilterViews(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	listKey := r.URL.Query().Get("listKey")
+	if listKey == "" {
+		writeError(w, http.StatusBadRequest, "listKey is required.")
+		return
+	}
+
+	result, err := h.entity.ListSavedFilterViews(r.Context(), listKey)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity ListSavedFilterViews failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to list saved filter views.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// SaveSavedFilterView handles PATCH /users/me/saved-filter-views.
+func (h *UsersHandler) SaveSavedFilterView(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	body, ok := readJSONBody(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := h.entity.SaveSavedFilterView(r.Context(), body)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity SaveSavedFilterView failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to save the filter view.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// DeleteSavedFilterView handles DELETE /users/me/saved-filter-views.
+func (h *UsersHandler) DeleteSavedFilterView(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	q := r.URL.Query()
+	listKey := q.Get("listKey")
+	name := q.Get("name")
+	if listKey == "" || name == "" {
+		writeError(w, http.StatusBadRequest, "listKey and name are required.")
+		return
+	}
+
+	result, err := h.entity.DeleteSavedFilterView(r.Context(), listKey, name)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity DeleteSavedFilterView failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to delete the filter view.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ReorderSavedFilterView handles POST /users/me/saved-filter-views/reorder.
+func (h *UsersHandler) ReorderSavedFilterView(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	body, ok := readJSONBody(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := h.entity.ReorderSavedFilterView(r.Context(), body)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity ReorderSavedFilterView failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to reorder saved filter views.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }

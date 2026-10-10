@@ -31,7 +31,7 @@ import { buildRecommendationRequestFromCase } from "@features/support/utils/reco
 import { usePostCaseEscalationsSearch } from "@features/support/api/usePostCaseEscalationsSearch";
 import useGetProjectContacts from "@features/settings/api/useGetProjectContacts";
 import useGetUserDetails from "@features/settings/api/useGetUserDetails";
-import { SETTINGS_CUSTOMER_ADMIN_ROLE } from "@features/settings/constants/settingsConstants";
+import { hasCustomerAdminRole } from "@features/settings/utils/settings";
 import {
   getStatusColor,
   resolveColorFromTheme,
@@ -218,7 +218,7 @@ export default function CaseDetailsContent({
   // escalation on this case are also eligible, in addition to admins/leads.
   const isCurrentUserCsAdmin: boolean | undefined = isUserDetailsLoading
     ? undefined
-    : (userDetails?.roles ?? []).includes(SETTINGS_CUSTOMER_ADMIN_ROLE);
+    : hasCustomerAdminRole(userDetails?.roles);
   const hasCreatedEscalation =
     !!userDetails?.email &&
     !!escalationData?.escalations?.some(

@@ -14,13 +14,20 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  backendUtcToZonedInput,
+  clearUserPreferredTimeZone,
+  setUserPreferredTimeZone,
+  zonedInputToBackendUtc,
   formatDateOnlyForDisplay,
   formatRelativeDateOnly,
   isPastDateOnly,
   isPastDateTime,
+  isPastZonedInput,
   parseDateOnly,
+  formatUtcDateForDisplay,
+  utcDateOnlyValue,
 } from "./dateTime";
 
 describe("isPastDateTime", () => {
@@ -169,5 +176,146 @@ describe("parseDateOnly's invalid-date rejection, through its public callers", (
 
   it("formatRelativeDateOnly falls back to '—' instead of a relative label for the wrong day", () => {
     expect(formatRelativeDateOnly("2026-02-31")).toBe("—");
+  });
+});
+
+describe("zonedInputToBackendUtc / backendUtcToZonedInput", () => {
+  afterEach(() => {
+    clearUserPreferredTimeZone();
+  });
+
+  it("converts a wall-clock value east of UTC to the earlier UTC instant", () => {
+    // Asia/Colombo is UTC+05:30 all year.
+    expect(zonedInputToBackendUtc("2026-03-01T15:30", "Asia/Colombo")).toBe("2026-03-01 10:00:00");
+  });
+
+  it("converts a wall-clock value west of UTC to the later UTC instant, across midnight", () => {
+    // America/New_York is UTC-05:00 in early March (before DST starts on the 8th).
+    expect(zonedInputToBackendUtc("2026-03-01T22:00", "America/New_York")).toBe("2026-03-02 03:00:00");
+  });
+
+  it("applies the offset in force on that date (daylight saving)", () => {
+    // Same zone in July is UTC-04:00.
+    expect(zonedInputToBackendUtc("2026-07-01T10:00", "America/New_York")).toBe("2026-07-01 14:00:00");
+  });
+
+  it("is the identity in UTC", () => {
+    expect(zonedInputToBackendUtc("2026-03-01T10:00", "UTC")).toBe("2026-03-01 10:00:00");
+  });
+
+  it("uses the user's preferred time zone when none is passed", () => {
+    setUserPreferredTimeZone("Asia/Colombo");
+    expect(zonedInputToBackendUtc("2026-03-01T15:30")).toBe("2026-03-01 10:00:00");
+  });
+
+  it("returns null for an unparseable value", () => {
+    expect(zonedInputToBackendUtc("not a date", "UTC")).toBeNull();
+    expect(zonedInputToBackendUtc("", "UTC")).toBeNull();
+  });
+
+  it("reads a backend UTC timestamp back as the wall-clock value in the user's zone", () => {
+    expect(backendUtcToZonedInput("2026-03-01 10:00:00", "Asia/Colombo")).toBe("2026-03-01T15:30");
+    expect(backendUtcToZonedInput("2026-03-01T10:00:00Z", "Asia/Colombo")).toBe("2026-03-01T15:30");
+  });
+
+  it("returns an empty string for an empty or unparseable backend value", () => {
+    expect(backendUtcToZonedInput(null, "UTC")).toBe("");
+    expect(backendUtcToZonedInput(undefined, "UTC")).toBe("");
+    expect(backendUtcToZonedInput("garbage", "UTC")).toBe("");
+  });
+
+  it.each(["Asia/Colombo", "America/New_York", "Pacific/Auckland", "UTC"])(
+    "round-trips a backend value through the picker and back in %s",
+    (zone) => {
+      const stored = "2026-10-25 01:30:00";
+      const wallClock = backendUtcToZonedInput(stored, zone);
+      expect(zonedInputToBackendUtc(wallClock, zone)).toBe(stored);
+    },
+  );
+});
+
+describe("isPastZonedInput", () => {
+  // The whole point of this helper is that it must NOT read the picker digits
+  // in the browser zone, so pin the browser zone to UTC (independent of the
+  // machine running the tests) and vary the profile zone against it.
+
+  beforeAll(() => {
+    vi.stubEnv("TZ", "UTC");
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    clearUserPreferredTimeZone();
+  });
+
+  function freezeNow(): void {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2030-03-01T12:00:00Z"));
+  }
+
+  it("runs with the browser zone pinned to UTC", () => {
+    expect(new Date(2030, 2, 1, 12, 0).toISOString()).toBe("2030-03-01T12:00:00.000Z");
+  });
+
+  it("is past in the profile zone even though the same digits are in the future in the browser zone", () => {
+    freezeNow();
+    setUserPreferredTimeZone("Asia/Colombo");
+    // 15:30 Colombo (UTC+05:30) is 10:00Z, before now (12:00Z). Read as browser
+    // (UTC) digits it would be 15:30Z, i.e. still in the future.
+    expect(isPastZonedInput("2030-03-01T15:30")).toBe(true);
+    expect(isPastDateTime(new Date(2030, 2, 1, 15, 30))).toBe(false);
+  });
+
+  it("is future in the profile zone even though the same digits are in the past in the browser zone", () => {
+    freezeNow();
+    setUserPreferredTimeZone("America/Los_Angeles");
+    // 08:00 Los Angeles (UTC-08:00 on this date) is 16:00Z, after now. Read as
+    // browser (UTC) digits it would be 08:00Z, i.e. already past.
+    expect(isPastZonedInput("2030-03-01T08:00")).toBe(false);
+    expect(isPastDateTime(new Date(2030, 2, 1, 8, 0))).toBe(true);
+  });
+
+  it("honours an explicit time zone over the profile zone", () => {
+    freezeNow();
+    setUserPreferredTimeZone("America/Los_Angeles");
+    expect(isPastZonedInput("2030-03-01T15:30", "Asia/Colombo")).toBe(true);
+  });
+
+  it("never flags an empty or unparseable value", () => {
+    freezeNow();
+    expect(isPastZonedInput("")).toBe(false);
+    expect(isPastZonedInput("not a date")).toBe(false);
+  });
+});
+
+describe("utcDateOnlyValue / formatUtcDateForDisplay", () => {
+  // A calendar-date field is stored as <day> 00:00 UTC. These must name that
+  // day in any viewer timezone: local getters give the previous day west of
+  // UTC, which is the off-by-one the auto-closure hold hit.
+  it("names the UTC calendar day of a midnight-UTC value", () => {
+    expect(utcDateOnlyValue("2026-10-22T00:00:00.000Z")).toBe("2026-10-22");
+    expect(utcDateOnlyValue("2026-01-01T00:00:00Z")).toBe("2026-01-01");
+    expect(formatUtcDateForDisplay("2026-10-22T00:00:00.000Z")).toBe("Oct 22, 2026");
+  });
+
+  it("reads an unzoned backend value as UTC, like every other backend timestamp", () => {
+    expect(utcDateOnlyValue("2026-10-22 00:00:00")).toBe("2026-10-22");
+  });
+
+  it("keeps the UTC day for an instant late in that day", () => {
+    expect(utcDateOnlyValue("2026-10-22T23:59:59.000Z")).toBe("2026-10-22");
+    expect(formatUtcDateForDisplay("2026-10-22T23:59:59.000Z")).toBe("Oct 22, 2026");
+  });
+
+  it("returns null for empty or unparseable input", () => {
+    expect(utcDateOnlyValue(undefined)).toBeNull();
+    expect(utcDateOnlyValue("")).toBeNull();
+    expect(utcDateOnlyValue("not a date")).toBeNull();
+    expect(formatUtcDateForDisplay(null)).toBeNull();
+    expect(formatUtcDateForDisplay("not a date")).toBeNull();
   });
 });

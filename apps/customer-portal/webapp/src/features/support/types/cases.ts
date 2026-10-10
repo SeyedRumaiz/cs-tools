@@ -298,9 +298,23 @@ export type CaseDetails = AuditMetadata & {
   engineerEmail: string | null;
   findingsResolved: number | null;
   findingsTotal: number | null;
-  watchList?: Array<{ id?: string; userName?: string; name?: string; email?: string }> | null;
+  watchList?: Array<{
+    id?: string;
+    userName?: string;
+    name?: string;
+    email?: string;
+    /** True for the case's account's 4 named stakeholders (CSM, technical owner,
+     * secondary technical owner, account manager) — the backend always re-adds
+     * these on the next watch-list write, so they can't actually be removed.
+     * Disable the remove control for these specifically. */
+    locked?: boolean;
+  }> | null;
   escalationLevel?: EscalationLevel | null;
   isEscalated?: boolean | null;
+  /** Free-text labels attached to the case, e.g. "Security Announcement". */
+  tags?: Array<{ id: string; label: string; color?: string | null }>;
+  /** Only meaningful when type.id is "announcement" -- "GENERAL" or "SECURITY". Absent for every other case-like type. */
+  announcementType?: string | null;
 };
 
 // Item type for a single case comment.
@@ -361,6 +375,10 @@ export type CaseMetadataResponse = {
   conversationStates?: MetadataItem[];
   timeCardStates?: MetadataItem[];
   severityBasedAllocationTime?: Record<string, number>;
+  // Options for the resolutionCode/cause fields PATCH /cases/:id requires
+  // when closing a case (see PatchCaseRequest).
+  resolutionCodes?: MetadataItem[];
+  causes?: MetadataItem[];
 };
 
 // Model type for all cases filter values state.
@@ -462,6 +480,11 @@ export type CaseClassificationRequest = SharedEnvContext & {
 export type PatchCaseRequest = {
   stateKey?: number;
   watchList?: string[];
+  // Required alongside stateKey when closing (or proposing a solution for)
+  // a case — see CaseStateConfirmDialog.
+  resolutionCode?: string;
+  cause?: string;
+  closeNotes?: string;
 };
 
 // Request type for creating a support case.

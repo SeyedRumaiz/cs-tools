@@ -34,6 +34,7 @@ import type {
   CsmCommentAuthorRole,
 } from "@features/csm-cases/types/csmCases";
 import type { UserReference } from "@/types/userReference";
+import { stripThinkingBlocks } from "@utils/stripThinkingBlocks";
 import type {
   CaseState,
   Severity,
@@ -155,11 +156,25 @@ function commentAuthorEmail(comment: BeComment): string | undefined {
  * normalizes `type` to `comment`/`work_note`/`activity` (a `bot` type never
  * survives), so the bot is identified by the author's `name` equalling
  * `"Novera"`. The `type === "bot"` check is a defensive fallback.
+ *
+ * The REAL `GET /conversations/{id}/messages` response (confirmed live via a
+ * HAR capture against the staging backend, not just a synthetic fixture)
+ * sends Novera as `createdBy: { name: "", email: "Novera" }` -- the literal
+ * sentinel lands in `email`, with `name` empty, not the other way around.
+ * `name === "novera"` alone never matched this, so Novera's `authorRole`
+ * silently stayed the default ("customer" in a conversation) instead of
+ * "chatbot" -- which broke the chatbot-sorts-after-human timestamp tie-break
+ * (`compareFeedEntries` / `compareCommentsChronologically`, both keyed on
+ * `authorRole === "chatbot"`) and left a bot reply's `<thinking>` reasoning
+ * unstripped. `email === "novera"` is an exact match, not a substring/domain
+ * match, so a real person's `x@wso2.com`-shaped address is never caught by
+ * it -- only the bare sentinel with no `@` is.
  */
 function isBotSender(comment: BeComment): boolean {
   const name = (comment.createdBy?.name ?? "").trim().toLowerCase();
+  const email = (comment.createdBy?.email ?? "").trim().toLowerCase();
   const ty = (comment.type ?? "").trim().toLowerCase();
-  return ty === "bot" || name === "novera";
+  return ty === "bot" || name === "novera" || email === "novera";
 }
 
 // The backend normalizes `type` to the singular enum (`work_note`/`comment`/
@@ -197,11 +212,19 @@ export function uiCommentFromBe(
     authorEmail: commentAuthorEmail(comment),
     authorUser: userReferenceFromBe(comment.createdBy),
     // For a chatbot the body is Markdown; the bubble renders it as Markdown.
-    // Otherwise it is rich-text HTML, sanitised on render.
-    bodyHtml: comment.content ?? "",
+    // Otherwise it is rich-text HTML, sanitised on render. Novera's stored
+    // answer can still carry its own <thinking> reasoning — drop that here so
+    // every consumer of a chatbot body gets the answer alone.
+    bodyHtml:
+      role === "chatbot"
+        ? stripThinkingBlocks(comment.content ?? "")
+        : (comment.content ?? ""),
     authorRole: role,
     createdAt: comment.createdOn,
     internal: WORK_NOTE_TYPES.has(ty),
+    isEdited: !!comment.lastEditedOn,
+    lastEditedOn: comment.lastEditedOn,
+    isDeleted: !!comment.isDeleted,
   };
 }
 

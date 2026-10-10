@@ -181,6 +181,55 @@ export class DashboardPage {
    * too, and taking `nth(1)` to skip it would silently start clicking the wrong
    * thing if a column were ever added above.
    */
+  /**
+   * Waits for the Outstanding Support Cases table to fill.
+   *
+   * The table is populated by its own request and routinely takes longer than
+   * the 5s default assertion timeout — measured at roughly twelve seconds
+   * against staging. Asserting a row without an explicit timeout fails with
+   * "element(s) not found", which reads like a wrong selector and sends people
+   * looking in the wrong place; the rows are there, just not yet.
+   *
+   * Encapsulated here rather than left to each call site, which is where the
+   * timeout kept being forgotten.
+   *
+   * @returns The first row, for a caller that wants to read or click it.
+   */
+  async waitForCasesTable(): Promise<Locator> {
+    const firstRow = this.casesTableRows().first();
+    await expect(
+      firstRow,
+      "the Outstanding Support Cases table should list at least one case",
+    ).toBeVisible({ timeout: LOAD_TIMEOUT_MS });
+    return firstRow;
+  }
+
+  /**
+   * Waits for the cases table to reach a resting state and reports its size.
+   *
+   * Unlike {@link waitForCasesTable}, this tolerates an empty table: switching
+   * to My Cases as an account that raised nothing on the project shows "No
+   * outstanding cases.", which is a correct result rather than a failure.
+   * Waiting only for rows would hang there for the full timeout and then blame
+   * the selector.
+   *
+   * @returns The number of rows, 0 when the empty state is showing.
+   */
+  async waitForCasesTableSettled(): Promise<number> {
+    await expect(async () => {
+      const rows = await this.casesTableRows().count();
+      const empty = await this.main()
+        .getByText(DASHBOARD.casesTable.emptyMessage)
+        .count();
+      expect(
+        rows + empty,
+        "the cases table should show rows or say it has none",
+      ).toBeGreaterThan(0);
+    }).toPass({ timeout: LOAD_TIMEOUT_MS });
+
+    return this.casesTableRows().count();
+  }
+
   casesTableRows(): Locator {
     return this.main()
       .getByRole("row")

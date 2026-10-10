@@ -157,15 +157,21 @@ export type PostCsmCaseAttachmentResult = UseMutationResult<
  * Upload a file attachment to a reference entity.
  *
  * Two mutually exclusive paths, gated on the signed-in user's
- * `sftpgoAttachmentStorageEnabled` flag (`GET /users/me`):
- *  - Off (default, unchanged): the file is sent as a base64 data URI in a
- *    single `POST /attachments`.
- *  - On: `POST /cases/{id}/attachments/upload-token` registers the
- *    attachment's metadata (in "pending" status) and mints a write-scoped
- *    SFTPGo share; the file's bytes then go straight from the browser to
- *    SFTPGo via that share (mirroring `uploadProgress`); finally
- *    `POST /cases/{id}/attachments/{attachmentId}/confirm` transitions the
- *    row to "complete".
+ * `sftpgoAttachmentStorageEnabled` flag (`GET /users/me`) AND on
+ * `referenceType`:
+ *  - Off, or `referenceType` is `"change_request"`/`"incident"`: the file is
+ *    sent as a base64 data URI in a single `POST /attachments`. Direct-upload
+ *    storage only supports `"case"` today — the BE authorizes but then
+ *    rejects change-request/incident mint requests with a deterministic 422,
+ *    so those two reference types always take this path regardless of the
+ *    flag.
+ *  - On, and `referenceType` is `"case"` (or absent): `POST
+ *    /cases/{id}/attachments/upload-token` registers the attachment's
+ *    metadata (in "pending" status) and mints a write-scoped SFTPGo share;
+ *    the file's bytes then go straight from the browser to SFTPGo via that
+ *    share (mirroring `uploadProgress`); finally `POST
+ *    /cases/{id}/attachments/{attachmentId}/confirm` transitions the row to
+ *    "complete".
  *
  * The confirm/create response is a thin ack either way, so the list is
  * refetched on success to hydrate the new entry from search.
@@ -195,7 +201,10 @@ export function usePostCsmCaseAttachment(): PostCsmCaseAttachmentResult {
       const name = input.name?.trim() || input.file.name;
       const type = input.file.type || "application/octet-stream";
 
-      if (sftpgoEnabled) {
+      // Direct-upload storage only supports "case" today; change-request and
+      // incident uploads always fall through to the legacy base64 path below,
+      // regardless of the flag.
+      if (sftpgoEnabled && referenceType === "case") {
         setUploadProgress(0);
         try {
           const tokenRequest: BeAttachmentUploadTokenRequest = {
@@ -203,6 +212,7 @@ export function usePostCsmCaseAttachment(): PostCsmCaseAttachmentResult {
             mimeType: type,
             sizeBytes: input.file.size,
             description: input.description?.trim() || null,
+            referenceType,
           };
           const tokenResponse = await api.post<
             BeAttachmentUploadTokenRequest,

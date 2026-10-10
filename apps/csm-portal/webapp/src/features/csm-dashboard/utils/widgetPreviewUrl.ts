@@ -170,6 +170,25 @@ export function isCaseFieldFilterArray(value: unknown): value is WidgetCaseField
   );
 }
 
+/** True when `entry` alone is a field/op predicate (the per-entry form of
+ * {@link isCaseFieldFilterArray}). */
+export function isFieldFilterEntry(entry: unknown): entry is WidgetCaseFieldFilterLike {
+  return isCaseFieldFilterArray([entry]);
+}
+
+/**
+ * Looser than {@link isCaseFieldFilterArray}, which needs EVERY entry to be a
+ * field/op predicate: true when at least one is. A case query can hold an
+ * entry of another shape alongside real predicates (e.g. an unexpanded
+ * `{ preset }` reference), and the strict guard would then send the whole
+ * array down the flat-record path, skipping placeholder substitution and
+ * making the matching `has*Placeholder` check report false. Placeholder
+ * helpers use this and pass entries that are not predicates through untouched.
+ */
+export function hasFieldFilterEntries(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.some(isFieldFilterEntry);
+}
+
 /** One `anyOf` branch: its own predicate array, ANDed within the branch, OR'd
  * against every other branch — matches the backend's `CaseFilterBranch` and
  * `widgetFilterMerge.ts`'s own (independently duplicated, not imported here

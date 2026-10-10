@@ -23,12 +23,58 @@ if (!BACKEND_BASE_URL) {
   );
 }
 
+/**
+ * Rejects a stream URL that isn't safe to send credentials to.
+ * useCaseActivityStream puts the caller's ID token in three request headers,
+ * so a `http://` URL would carry it across the network in cleartext — and
+ * this value is deployment config rather than something the app controls, so
+ * a typo is the realistic way that happens.
+ *
+ * An unusable value is treated as unset (the feature is simply off) rather
+ * than thrown, unlike BACKEND_BASE_URL below: the stream is optional to begin
+ * with, so a bad value here must not take the whole portal down with it.
+ * Loopback over http is allowed so the stream service can be run locally.
+ */
+function secureStreamUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol === "https:") return url;
+  const isLoopback = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(
+    parsed.hostname,
+  );
+  return parsed.protocol === "http:" && isLoopback ? url : undefined;
+}
+
+// Base URL for the case-activity SSE stream (customer-portal-activity-stream-service,
+// its own Choreo component — not a path under backendUrl). Optional: that
+// service only stands the stream listener up when Event Hub is configured,
+// so useCaseActivityStream checks for this and no-ops rather than throwing,
+// unlike BACKEND_BASE_URL above.
+const STREAM_BASE_URL = secureStreamUrl(
+  window.config?.CUSTOMER_PORTAL_STREAM_BASE_URL,
+);
+
+// Master on/off switch for the case-activity SSE stream, independent of
+// whether STREAM_BASE_URL is set. Strict `=== true` (rather than the usual
+// `?? false`) so only the literal boolean turns it on — any config predating
+// this key evaluates to false, which is what makes it safe by default.
+const STREAM_ENABLED = window.config?.CUSTOMER_PORTAL_STREAM_ENABLED === true;
+
 // Interface for the API configuration.
 interface ApiConfig {
   backendUrl: string;
+  streamUrl?: string;
+  streamEnabled: boolean;
 }
 
 // Configuration for the API service.
 export const apiConfig: ApiConfig = {
   backendUrl: BACKEND_BASE_URL,
+  streamUrl: STREAM_BASE_URL,
+  streamEnabled: STREAM_ENABLED,
 };

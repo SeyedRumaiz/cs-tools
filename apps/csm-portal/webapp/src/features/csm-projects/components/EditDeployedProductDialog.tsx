@@ -21,9 +21,14 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
   Tab,
   Tabs,
   TextField,
+  Typography,
 } from "@wso2/oxygen-ui";
 import { useState, type JSX } from "react";
 import type {
@@ -34,6 +39,10 @@ import type {
 import UpdateHistoryPanel, {
   type UpdateHistoryFormState,
 } from "@features/csm-projects/components/UpdateHistoryPanel";
+import {
+  DEPLOYED_PRODUCT_CATEGORY_OPTIONS,
+  deployedProductCategoryLabel,
+} from "@features/csm-projects/utils/deployments";
 
 interface EditDeployedProductDialogProps {
   deployedProduct: BeDeployedProduct;
@@ -65,15 +74,15 @@ function updateHistoryFooterLabel(action: UpdateHistoryFormState["saveAction"]):
 }
 
 /**
- * Edit a deployed product: its cores/tps/description (Details tab) and its
- * update-level history (Update History tab), via
+ * Edit a deployed product: its cores/tps/category/description (Details tab)
+ * and its update-level history (Update History tab), via
  * `PATCH /deployments/{deploymentId}/products/{productId}` (detail variant).
  *
  * The two tabs are independent saves, matching customer-portal's
  * `ManageProductModal`/`UpdateHistoryTab` interaction:
  *  - Details tab: only changed fields are sent (BE requires minProperties 1);
  *    Save is disabled until at least one field differs. On success the
- *    dialog closes.
+ *    dialog closes. Category is set-only — see `categoryChanged` below.
  *  - Update History tab: add/edit/delete each PATCH the whole resulting
  *    array immediately (there is no per-entry endpoint) via
  *    {@link UpdateHistoryPanel}; the dialog stays open either way, showing
@@ -105,10 +114,12 @@ export default function EditDeployedProductDialog({
   const originalCores = deployedProduct.cores ?? null;
   const originalTps = deployedProduct.tps ?? null;
   const originalDescription = "";
+  const originalCategory = deployedProduct.category ?? "";
 
   const [cores, setCores] = useState(originalCores === null ? "" : String(originalCores));
   const [tps, setTps] = useState(originalTps === null ? "" : String(originalTps));
   const [description, setDescription] = useState(originalDescription);
+  const [category, setCategory] = useState(originalCategory);
 
   const coresNum = cores.trim() === "" ? null : Number(cores);
   const tpsNum = tps.trim() === "" ? null : Number(tps);
@@ -122,6 +133,10 @@ export default function EditDeployedProductDialog({
   const coresChanged = coresNum !== originalCores;
   const tpsChanged = tpsNum !== originalTps;
   const descriptionChanged = description.trim() !== originalDescription;
+  // Category can only ever be set, never cleared back to unset (see
+  // BeDeployedProductDetailUpdatePayload.category's own doc comment) — a
+  // selection back to "Not set" is therefore not a real change to send.
+  const categoryChanged = category !== originalCategory && category !== "";
 
   const detailsPayload: BeDeployedProductDetailUpdatePayload = {};
   if (coresChanged) detailsPayload.cores = coresNum;
@@ -129,12 +144,13 @@ export default function EditDeployedProductDialog({
   if (descriptionChanged) {
     detailsPayload.description = description.trim().length > 0 ? description.trim() : null;
   }
+  if (categoryChanged) detailsPayload.category = category;
 
   const canSaveDetails =
     !isSaving &&
     !coresError &&
     !tpsError &&
-    (coresChanged || tpsChanged || descriptionChanged);
+    (coresChanged || tpsChanged || descriptionChanged || categoryChanged);
 
   // --- Update History tab state -----------------------------------------
   const updates = deployedProduct.updates ?? [];
@@ -178,6 +194,41 @@ export default function EditDeployedProductDialog({
               helperText={tpsError ? "Must be a non-negative number." : " "}
               disabled={isSaving}
             />
+
+            {/* Category — set-only (see categoryChanged above); only
+                MS/PC-categorized deployed products support service request
+                creation, so this is what lets staff make an existing
+                deployed product SR-eligible. */}
+            <FormControl size="small" fullWidth disabled={isSaving}>
+              <InputLabel id="edit-dp-category-label" shrink={category !== ""}>
+                Category
+              </InputLabel>
+              <Select
+                labelId="edit-dp-category-label"
+                label="Category"
+                value={category}
+                onChange={(e) => setCategory(e.target.value as string)}
+                notched={category !== ""}
+                displayEmpty
+              >
+                {/* Disabled once a category already exists: selecting this
+                    would look like clearing it, but the BE has no way to
+                    clear a category back to unset (see categoryChanged
+                    above) -- categoryChanged already treats a "" selection
+                    as a no-op, so leaving this enabled let a user think
+                    they'd cleared the category when nothing was sent. */}
+                <MenuItem value="" disabled={originalCategory !== ""}>
+                  <Typography variant="inherit" component="span" color="text.secondary">
+                    Not set
+                  </Typography>
+                </MenuItem>
+                {DEPLOYED_PRODUCT_CATEGORY_OPTIONS.map((c) => (
+                  <MenuItem key={c} value={c}>
+                    {deployedProductCategoryLabel(c)}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
 
             <TextField
               label="Description"

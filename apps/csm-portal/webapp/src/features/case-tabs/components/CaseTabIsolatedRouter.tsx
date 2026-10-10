@@ -26,6 +26,7 @@ import type { NavigateOptions, To } from "react-router";
 import { matchCaseLocation } from "@context/case-tabs/caseRoutePatterns";
 import { useCaseTabsControllerRef } from "@context/case-tabs/CaseTabsContext";
 import { CaseRouteOverrideProvider } from "@context/case-tabs/CaseRouteOverrideContext";
+import { CaseTabVisibilityProvider } from "@context/case-tabs/CaseTabVisibilityContext";
 import type { CaseRouteKind, CaseTabState } from "@context/case-tabs/caseTabsTypes";
 import { tabElementId, tabPanelElementId } from "@features/case-tabs/utils/tabElementIds";
 import { useNavTransition } from "@hooks/useNavTransition";
@@ -301,7 +302,9 @@ export default function CaseTabIsolatedRouter({
         overflowY: "auto",
       }}
     >
-      <CaseRouteOverrideProvider value={overrideValue}>{children}</CaseRouteOverrideProvider>
+      <CaseRouteOverrideProvider value={overrideValue}>
+        <CaseTabVisibilityProvider isVisible={isVisible}>{children}</CaseTabVisibilityProvider>
+      </CaseRouteOverrideProvider>
     </div>
   );
 }

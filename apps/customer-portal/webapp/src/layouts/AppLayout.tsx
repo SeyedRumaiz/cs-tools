@@ -38,7 +38,7 @@ import Header from "@components/header/Header";
 import SideBar from "@components/side-nav-bar/SideBar";
 import useGetUserDetails from "@features/settings/api/useGetUserDetails";
 import PortalAccessRequiredPage from "@/components/access-control/PortalAccessRequiredPage";
-import { isUnauthorizedError } from "@utils/ApiError";
+import { isForbiddenError, isUnauthorizedError } from "@utils/ApiError";
 import {
   getSidebarCollapsed,
   setSidebarCollapsed,
@@ -220,7 +220,16 @@ export default function AppLayout({ children }: AppLayoutProps): JSX.Element {
     isVulnerabilityDetailsPage ||
     isPendingUpdatesPage ||
     isUpdateLevelDetailsPage;
-  const hasPortalAccessError = isUnauthorizedError(userDetailsError);
+  // A caller whose /users/me call comes back 401 (session invalid) or 403
+  // (authenticated, but no backing account/no portal entitlement — the
+  // backend maps "user not found" to 403 specifically so this falls into the
+  // same bucket) is "not entitled to this portal", not a transient error.
+  // Checking 401 only used to leave a 403 falling through to the routed
+  // <Outlet> below: its child pages each call this same hook, get the same
+  // errored, non-retrying query back, and most only branch on isLoading, so
+  // the page spun forever instead of ever reaching an error state.
+  const hasPortalAccessError =
+    isUnauthorizedError(userDetailsError) || isForbiddenError(userDetailsError);
 
   return (
     <IdleTimeoutProvider>
@@ -334,7 +343,7 @@ export default function AppLayout({ children }: AppLayoutProps): JSX.Element {
                   </Typography>
                 </Box>
               ) : hasPortalAccessError ? (
-                <PortalAccessRequiredPage />
+                <PortalAccessRequiredPage error={userDetailsError} />
               ) : (
                 <Box
                   sx={{

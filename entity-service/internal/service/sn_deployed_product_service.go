@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -167,7 +168,10 @@ type snCreateDeployedProductPayload struct {
 type snCreateDeployedProductResponse struct {
 	Message         string `json:"message"`
 	DeployedProduct struct {
-		ID        string `json:"id"`
+		ID string `json:"id"`
+		// Number is the record's own number (e.g. IBITM...), carried in the
+		// upstream create reply. It is not exposed on the public response.
+		Number    string `json:"number"`
 		CreatedOn string `json:"createdOn"`
 		CreatedBy string `json:"createdBy"`
 	} `json:"deployedProduct"`
@@ -198,19 +202,24 @@ type snUpdateDeployedProductResponse struct {
 	} `json:"deployedProduct"`
 }
 
-// CreateDeployedProduct implements DeployedProductService for the ServiceNow data source.
-func (s *snDeployedProductService) CreateDeployedProduct(ctx context.Context, req domain.CreateDeployedProductRequest) (domain.CreateDeployedProductResponse, error) {
+// createDeployedProductSN validates req and performs the actual ServiceNow
+// POST /deployed-products call, parsing its response. Shared by
+// CreateDeployedProduct (below, the public ServiceNow-data-source path) and
+// deployedProductService.createDeployedProductSNFirst (dual-write's Postgres
+// insert, which needs Number too -- see snCreateDeployedProductResponse's own
+// doc comment).
+func (s *snDeployedProductService) createDeployedProductSN(ctx context.Context, req domain.CreateDeployedProductRequest) (snCreateDeployedProductResponse, error) {
 	if err := validateUUIDs("projectId", []string{req.ProjectID}); err != nil {
-		return domain.CreateDeployedProductResponse{}, err
+		return snCreateDeployedProductResponse{}, err
 	}
 	if err := validateUUIDs("deploymentId", []string{req.DeploymentID}); err != nil {
-		return domain.CreateDeployedProductResponse{}, err
+		return snCreateDeployedProductResponse{}, err
 	}
 	if err := validateUUIDs("productId", []string{req.ProductID}); err != nil {
-		return domain.CreateDeployedProductResponse{}, err
+		return snCreateDeployedProductResponse{}, err
 	}
 	if err := validateUUIDs("versionId", []string{req.VersionID}); err != nil {
-		return domain.CreateDeployedProductResponse{}, err
+		return snCreateDeployedProductResponse{}, err
 	}
 
 	token := middleware.UserIDTokenFromContext(ctx)
@@ -227,12 +236,21 @@ func (s *snDeployedProductService) CreateDeployedProduct(ctx context.Context, re
 
 	raw, err := s.client.Post(ctx, "/deployed-products", token, payload)
 	if err != nil {
-		return domain.CreateDeployedProductResponse{}, err
+		return snCreateDeployedProductResponse{}, err
 	}
 
 	var snResp snCreateDeployedProductResponse
 	if err := json.Unmarshal(raw, &snResp); err != nil {
-		return domain.CreateDeployedProductResponse{}, fmt.Errorf("sn create deployed product: parse response: %w", err)
+		return snCreateDeployedProductResponse{}, fmt.Errorf("sn create deployed product: parse response: %w", err)
+	}
+	return snResp, nil
+}
+
+// CreateDeployedProduct implements DeployedProductService for the ServiceNow data source.
+func (s *snDeployedProductService) CreateDeployedProduct(ctx context.Context, req domain.CreateDeployedProductRequest) (domain.CreateDeployedProductResponse, error) {
+	snResp, err := s.createDeployedProductSN(ctx, req)
+	if err != nil {
+		return domain.CreateDeployedProductResponse{}, err
 	}
 
 	createdOn, err := time.Parse(snCreatedOnLayout, snResp.DeployedProduct.CreatedOn)
@@ -250,28 +268,41 @@ func (s *snDeployedProductService) CreateDeployedProduct(ctx context.Context, re
 	}, nil
 }
 
+// createDeployedProductSNFirstDetails implements deployedProductSNCreator
+// (see deployed_product_service.go) -- the dual-write CREATE path's entry
+// point into this service, returning the fields Postgres's own insert needs
+// (including Number, which the public CreateDeployedProduct above does not
+// expose) rather than the wire-shaped domain.CreateDeployedProductResponse.
+func (s *snDeployedProductService) createDeployedProductSNFirstDetails(ctx context.Context, req domain.CreateDeployedProductRequest) (id, number, createdBy string, createdOn time.Time, err error) {
+	snResp, err := s.createDeployedProductSN(ctx, req)
+	if err != nil {
+		return "", "", "", time.Time{}, err
+	}
+	// The reply's createdOn is deliberately ignored: it is a wall-clock time in
+	// a non-UTC zone, and parsing it as UTC would store created_on hours in the
+	// future. The current time is used instead.
+	// deployed_product.number is NOT NULL UNIQUE on the Postgres side (see
+	// createDeployedProductSNFirst's own doc comment), so a reply without an
+	// id/number cannot be stored. The create has already happened upstream by
+	// now, so this is a partial creation needing reconciliation, not a
+	// rejected client request: reported as a downstream error and logged,
+	// never as a validation error. Nothing reaches the repository.
+	if snResp.DeployedProduct.ID == "" {
+		slog.ErrorContext(ctx, "sn create deployed product: create reply carried no id; nothing written to Postgres",
+			"deploymentId", req.DeploymentID)
+		return "", "", "", time.Time{}, &apierror.DownstreamError{Msg: "The upstream service returned an invalid response to the deployed product create request."}
+	}
+	if snResp.DeployedProduct.Number == "" {
+		slog.ErrorContext(ctx, "sn create deployed product: ServiceNow deployed product created but the create reply carried no number; nothing written to Postgres, needs reconciliation",
+			"deployedProductId", snResp.DeployedProduct.ID, "deploymentId", req.DeploymentID)
+		return "", "", "", time.Time{}, &apierror.DownstreamError{Msg: "The deployed product was created but its number was not returned by the upstream service, so it could not be stored. It needs to be reconciled."}
+	}
+	return sysidToUUID(snResp.DeployedProduct.ID), snResp.DeployedProduct.Number, snResp.DeployedProduct.CreatedBy, time.Now().UTC(), nil
+}
+
 // UpdateDeployedProduct implements DeployedProductService for the ServiceNow data source.
 func (s *snDeployedProductService) UpdateDeployedProduct(ctx context.Context, req domain.UpdateDeployedProductRequest) (domain.UpdateDeployedProductResponse, error) {
-	if err := validateUUIDs("id", []string{req.ID}); err != nil {
-		return domain.UpdateDeployedProductResponse{}, err
-	}
-	if req.DeploymentID != nil {
-		if err := validateUUIDs("deploymentId", []string{*req.DeploymentID}); err != nil {
-			return domain.UpdateDeployedProductResponse{}, err
-		}
-	}
-
-	hasDetailFields := req.Cores != nil || req.TPS != nil || len(req.Description) > 0 || req.Updates != nil
-	if !hasDetailFields && req.Active == nil {
-		return domain.UpdateDeployedProductResponse{}, &apierror.ValidationError{Msg: "at least one of cores, tps, or description must be provided, or active must be set to false"}
-	}
-	if req.Active != nil && *req.Active {
-		return domain.UpdateDeployedProductResponse{}, &apierror.ValidationError{Msg: "active can only be set to false"}
-	}
-	if req.Active != nil && hasDetailFields {
-		return domain.UpdateDeployedProductResponse{}, &apierror.ValidationError{Msg: "cores, tps, and description must not be provided when deactivating"}
-	}
-	if err := validateProductUpdates(req.Updates); err != nil {
+	if err := validateUpdateDeployedProductRequest(req); err != nil {
 		return domain.UpdateDeployedProductResponse{}, err
 	}
 
@@ -469,6 +500,18 @@ const maxProjectsByProductVersionDeployedProductPages = 200
 // Project Type is not Cloud Support, WSO2 Closure State is not Restricted,
 // WSO2 Closure State is not Suspended. That flow gives whoever triggers it no
 // way to opt out; this endpoint doesn't either.
+//
+// fetchEligibleProjectIDs additionally excludes any project whose contract
+// has ended (EndDate in the past) — a fifth, unconditional exclusion beyond
+// the four the SN flow above checks. WSO2 Closure State is frequently left
+// unset (nil) for a project whose subscription simply expired rather than
+// being explicitly marked "Suspended"/"Restricted", so closure-state alone
+// misses it. The customer portal itself already treats an expired end date
+// as equivalent to "Suspended" for access purposes (isProjectSuspended in
+// apps/customer-portal/webapp/src/utils/permission.ts) and blocks the
+// customer from even viewing the project — an EOL announcement audience
+// must not include a project the customer portal itself considers
+// inaccessible.
 var mandatoryExcludeClosureStates = []string{"Restricted", "Suspended"}
 var mandatoryExcludeSubscriptionTypes = []domain.SubscriptionType{
 	domain.SubscriptionTypeCloudSupport,
@@ -656,6 +699,9 @@ func (s *snDeployedProductService) fetchEligibleProjectIDs(ctx context.Context, 
 			return nil, err
 		}
 		for _, p := range resp.Projects {
+			if isProjectContractEnded(p.EndDate, time.Now()) {
+				continue
+			}
 			result[p.ID] = struct{}{}
 		}
 		offset += len(resp.Projects)

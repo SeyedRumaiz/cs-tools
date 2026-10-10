@@ -201,12 +201,12 @@ func TestMakeCall_ValidatesArgumentsBeforeCallingUpstream(t *testing.T) {
 	c := NewTwilioClient(TwilioConfig{AccountSID: "AC123", AuthToken: "secret", FromNumber: "+15550000000", APIBaseURL: srv.URL})
 
 	t.Run("rejects empty to", func(t *testing.T) {
-		if err := c.MakeCall(context.Background(), "", "hello"); err == nil {
+		if _, err := c.MakeCall(context.Background(), "", "hello"); err == nil {
 			t.Fatal("expected error for empty to, got nil")
 		}
 	})
 	t.Run("rejects empty message", func(t *testing.T) {
-		if err := c.MakeCall(context.Background(), "+15551234567", ""); err == nil {
+		if _, err := c.MakeCall(context.Background(), "+15551234567", ""); err == nil {
 			t.Fatal("expected error for empty message, got nil")
 		}
 	})
@@ -218,7 +218,7 @@ func TestMakeCall_ValidatesArgumentsBeforeCallingUpstream(t *testing.T) {
 
 func TestMakeCall_RejectsWhenUnconfigured(t *testing.T) {
 	c := NewTwilioClient(TwilioConfig{})
-	if err := c.MakeCall(context.Background(), "+15551234567", "hello"); err == nil {
+	if _, err := c.MakeCall(context.Background(), "+15551234567", "hello"); err == nil {
 		t.Fatal("expected error for unconfigured client, got nil")
 	}
 }
@@ -228,7 +228,7 @@ func TestMakeCall_RejectsWhenUnconfigured(t *testing.T) {
 // way it does for SendSMS.
 func TestMakeCall_RejectsMessagingServiceSidOnlyConfig(t *testing.T) {
 	c := NewTwilioClient(TwilioConfig{AccountSID: "AC123", AuthToken: "secret", MessagingServiceSid: "MG123"})
-	if err := c.MakeCall(context.Background(), "+15551234567", "hello"); err == nil {
+	if _, err := c.MakeCall(context.Background(), "+15551234567", "hello"); err == nil {
 		t.Fatal("expected error: MakeCall requires FromNumber even when MessagingServiceSid is set")
 	}
 }
@@ -249,7 +249,7 @@ func TestMakeCall_SendsExpectedRequest(t *testing.T) {
 	})
 
 	c := NewTwilioClient(TwilioConfig{AccountSID: "AC123", AuthToken: "secret-token", FromNumber: "+15550000000", APIBaseURL: srv.URL})
-	if err := c.MakeCall(context.Background(), "+15551234567", "On-call page: P1 incident"); err != nil {
+	if _, err := c.MakeCall(context.Background(), "+15551234567", "On-call page: P1 incident"); err != nil {
 		t.Fatalf("MakeCall returned error: %v", err)
 	}
 
@@ -292,7 +292,7 @@ func TestMakeCall_SendsConfiguredVoiceAndLanguage(t *testing.T) {
 		Language:   "en-IN",
 		APIBaseURL: srv.URL,
 	})
-	if err := c.MakeCall(context.Background(), "+15551234567", "hello"); err != nil {
+	if _, err := c.MakeCall(context.Background(), "+15551234567", "hello"); err != nil {
 		t.Fatalf("MakeCall returned error: %v", err)
 	}
 
@@ -313,7 +313,7 @@ func TestMakeCall_OmitsVoiceAndLanguageAttributesWhenUnset(t *testing.T) {
 	})
 
 	c := NewTwilioClient(TwilioConfig{AccountSID: "AC123", AuthToken: "secret-token", FromNumber: "+15550000000", APIBaseURL: srv.URL})
-	if err := c.MakeCall(context.Background(), "+15551234567", "hello"); err != nil {
+	if _, err := c.MakeCall(context.Background(), "+15551234567", "hello"); err != nil {
 		t.Fatalf("MakeCall returned error: %v", err)
 	}
 
@@ -340,7 +340,7 @@ func TestMakeCall_EscapesMessageInTwiML(t *testing.T) {
 
 	c := NewTwilioClient(TwilioConfig{AccountSID: "AC123", AuthToken: "secret", FromNumber: "+15550000000", APIBaseURL: srv.URL})
 	malicious := `</Say><Redirect>https://evil.example/hijack</Redirect><Say>`
-	if err := c.MakeCall(context.Background(), "+15551234567", malicious); err != nil {
+	if _, err := c.MakeCall(context.Background(), "+15551234567", malicious); err != nil {
 		t.Fatalf("MakeCall returned error: %v", err)
 	}
 
@@ -360,7 +360,7 @@ func TestMakeCall_MapsUpstreamError(t *testing.T) {
 	})
 
 	c := NewTwilioClient(TwilioConfig{AccountSID: "AC123", AuthToken: "secret", FromNumber: "+15550000000", APIBaseURL: srv.URL})
-	err := c.MakeCall(context.Background(), "not-a-number", "hello")
+	_, err := c.MakeCall(context.Background(), "not-a-number", "hello")
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -370,5 +370,42 @@ func TestMakeCall_MapsUpstreamError(t *testing.T) {
 	}
 	if apiErr.StatusCode != http.StatusBadRequest {
 		t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadRequest)
+	}
+}
+
+// GetCall reads one call's status with a GET on the call resource.
+func TestGetCall_ReadsTheStatus(t *testing.T) {
+	var gotMethod, gotPath, gotUser string
+	srv := newTwilioTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotUser, _, _ = r.BasicAuth()
+		_, _ = w.Write([]byte(`{"sid":"CA123","status":"no-answer","to":"+94770000000"}`))
+	})
+	c := NewTwilioClient(TwilioConfig{AccountSID: "AC1", AuthToken: "tok", APIBaseURL: srv.URL})
+	got, err := c.GetCall(context.Background(), "CA123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/Accounts/AC1/Calls/CA123.json" || gotUser != "AC1" {
+		t.Errorf("request = %s %s as %q", gotMethod, gotPath, gotUser)
+	}
+	if got.SID != "CA123" || got.Status != "no-answer" {
+		t.Errorf("call = %+v", got)
+	}
+}
+
+func TestGetCall_MapsUpstreamError(t *testing.T) {
+	srv := newTwilioTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":20404}`))
+	})
+	c := NewTwilioClient(TwilioConfig{AccountSID: "AC1", AuthToken: "tok", APIBaseURL: srv.URL})
+	_, err := c.GetCall(context.Background(), "CA404")
+	var upstream *apierror.Error
+	if !errors.As(err, &upstream) || upstream.StatusCode != http.StatusNotFound {
+		t.Fatalf("err = %v; want a 404 apierror", err)
+	}
+	if _, err := c.GetCall(context.Background(), " "); err == nil {
+		t.Error("an empty sid was sent upstream")
 	}
 }

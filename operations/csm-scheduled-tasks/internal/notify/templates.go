@@ -33,6 +33,9 @@ var alertTemplateRaw string
 //go:embed templates/stale_cases_report.html
 var staleCasesReportTemplateRaw string
 
+//go:embed templates/open_cases_report.html
+var openCasesReportTemplateRaw string
+
 // wso2LogoURL is the white WSO2 logo variant — the alert template's header
 // sits on an orange background, unlike
 // integrations/csm-notification-service's own equivalent constant of the
@@ -52,6 +55,7 @@ func bakeLogo(raw string) string {
 
 var alertTemplate = bakeLogo(alertTemplateRaw)
 var staleCasesReportTemplate = bakeLogo(staleCasesReportTemplateRaw)
+var openCasesReportTemplate = bakeLogo(openCasesReportTemplateRaw)
 
 // escapeHTML mirrors integrations/csm-notification-service's own
 // internal/notifications.escapeHTML exactly: HTML-escapes s and
@@ -129,6 +133,26 @@ func RenderStaleCasesReport(data StaleCasesReportData) string {
 		"<!-- [YEAR] -->", strconv.Itoa(time.Now().Year()),
 	)
 	return replacer.Replace(staleCasesReportTemplate)
+}
+
+// OpenCasesReportData holds every value substituted into the "cases still in
+// Open state" HTML email template.
+type OpenCasesReportData struct {
+	Cases []entitycases.Case
+}
+
+// RenderOpenCasesReport fills in the "cases still in Open state" HTML email
+// template — shares renderCaseRows with RenderStaleCasesReport (the table
+// shape is identical), but its own template file/copy per this component's
+// own CLAUDE.md ("Per-task report emails" — each report-sending sub-cron
+// owns its own template).
+func RenderOpenCasesReport(data OpenCasesReportData) string {
+	replacer := strings.NewReplacer(
+		"<!-- [CASE_COUNT] -->", strconv.Itoa(len(data.Cases)),
+		"<!-- [CASE_ROWS] -->", renderCaseRows(data.Cases),
+		"<!-- [YEAR] -->", strconv.Itoa(time.Now().Year()),
+	)
+	return replacer.Replace(openCasesReportTemplate)
 }
 
 // renderCaseRows builds one <tr> per case for RenderStaleCasesReport. A case

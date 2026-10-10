@@ -103,11 +103,60 @@ describe("WidgetEditorDialog", () => {
     expect(postMock).toHaveBeenCalledWith(
       "/cases/search",
       {
-        filters: {},
+        filters: { filters: [{ field: "type", op: "in", values: ["case"] }] },
         pagination: { offset: 0, limit: 1 },
       },
       { signal: expect.any(AbortSignal) },
     );
+  });
+
+  it("previews with presets expanded, placeholders resolved and the implied type filter added, while Save keeps the references", async () => {
+    postMock.mockResolvedValue({ total: 2, cases: [], limit: 1, offset: 0, hasMore: false });
+    const existing: BeDashboardWidget = {
+      widgetId: "w1",
+      displayName: "My active cases",
+      resourceType: "case",
+      shape: "count",
+      gridWidth: 4,
+      query: {
+        filters: [
+          { field: "assignedUserId", op: "in", values: ["__current_user__"] },
+          { preset: "activeCaseStates" },
+        ],
+      },
+    };
+    const { onSave } = renderDialog({
+      widget: existing,
+      presets: [
+        {
+          name: "activeCaseStates",
+          filter: { field: "state", op: "in", values: ["open", "reopened"] },
+        },
+      ],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^preview$/i }));
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith(
+        "/cases/search",
+        {
+          filters: {
+            filters: [
+              { field: "assignedUserId", op: "in", values: ["user-1"] },
+              { field: "state", op: "in", values: ["open", "reopened"] },
+              { field: "type", op: "in", values: ["case"] },
+            ],
+          },
+          pagination: { offset: 0, limit: 1 },
+        },
+        { signal: expect.any(AbortSignal) },
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Save widget" }));
+    const saved = onSave.mock.calls[0][0] as BeDashboardWidget;
+    expect(saved.query).toEqual(existing.query);
   });
 
   it("shows nothing fetched until Preview is explicitly clicked", () => {
@@ -179,7 +228,9 @@ describe("WidgetEditorDialog", () => {
       expect(postMock).toHaveBeenCalledWith(
         "/cases/search",
         {
-          filters: { filters: [{ field: "creTeam", op: "in", values: ["team-group-1"] }] },
+          filters: {
+            filters: [{ field: "creTeam", op: "in", values: ["team-group-1"] }, { field: "type", op: "in", values: ["case"] }],
+          },
           pagination: { offset: 0, limit: 1 },
         },
         { signal: expect.any(AbortSignal) },
@@ -211,7 +262,9 @@ describe("WidgetEditorDialog", () => {
       expect(postMock).toHaveBeenCalledWith(
         "/cases/search",
         {
-          filters: { filters: [{ field: "sreTeam", op: "in", values: ["sre-team-group-1"] }] },
+          filters: {
+            filters: [{ field: "sreTeam", op: "in", values: ["sre-team-group-1"] }, { field: "type", op: "in", values: ["case"] }],
+          },
           pagination: { offset: 0, limit: 1 },
         },
         { signal: expect.any(AbortSignal) },

@@ -24,16 +24,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/apierror"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/clientcredentials"
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-notification-service/internal/oauthhttp"
 )
-
-// emailTokenFetchTimeout is the HTTP client timeout for token-endpoint requests.
-// Overridden in tests to keep them fast.
-var emailTokenFetchTimeout = 10 * time.Second
 
 // EmailConfig holds the configuration for the email notification channel.
 type EmailConfig struct {
@@ -47,6 +41,9 @@ type EmailConfig struct {
 	// It is a config value rather than a SendEmail argument so that all
 	// portal-originated emails come from a single, pre-approved sender.
 	FromAddress string
+
+	// ReplyTo is EMAIL_REPLY_TO. Only callers that opt in pass it on.
+	ReplyTo []string
 }
 
 // EmailClient is an HTTP client for an internal email notification service,
@@ -62,27 +59,24 @@ type EmailClient struct {
 	http        *http.Client
 	baseURL     string
 	fromAddress string
+	replyTo     []string
 }
 
 // NewEmailClient constructs an EmailClient that authenticates against the
 // email notification service using the OAuth2 client credentials grant type.
 func NewEmailClient(cfg EmailConfig) *EmailClient {
-	cc := clientcredentials.Config{
+	httpClient := oauthhttp.NewClient(oauthhttp.Config{
+		TokenURL:     cfg.TokenURL,
 		ClientID:     cfg.ClientID,
 		ClientSecret: cfg.ClientSecret,
-		TokenURL:     cfg.TokenURL,
 		Scopes:       cfg.Scopes,
-	}
-
-	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient,
-		&http.Client{Timeout: emailTokenFetchTimeout})
-	httpClient := cc.Client(tokenCtx)
-	httpClient.Timeout = 25 * time.Second
+	})
 
 	return &EmailClient{
 		http:        httpClient,
 		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
 		fromAddress: cfg.FromAddress,
+		replyTo:     nonEmpty(cfg.ReplyTo),
 	}
 }
 
@@ -126,7 +120,16 @@ func (c *EmailClient) do(ctx context.Context, method, path string, body []byte) 
 	return respBody, nil
 }
 
-// EmailAttachment is a single file attached to an outgoing email.
+// EmailAttachment is a single file attached to an outgoing email. Inline
+// and ContentID are optional and mirror email-service's own EmailAttachment
+// schema exactly (openapi-send-email.yaml in that repo) — omitting both
+// keeps this attachment a plain Content-Disposition: attachment part,
+// unrelated to the HTML body, same as before this pair existed. Setting
+// Inline: true (with a non-empty ContentID, required by that service) marks
+// the part Content-Disposition: inline instead, so the HTML body can
+// reference this exact file as <img src="cid:<contentId>"> — see
+// notifications.InlineImage, which is what produces these two fields for a
+// comment/description's own embedded images.
 type EmailAttachment struct {
 	// ContentName is the attachment's file name (e.g. "invoice.pdf").
 	ContentName string `json:"contentName"`
@@ -135,6 +138,13 @@ type EmailAttachment struct {
 	// Attachment is the raw file content; encoding/json base64-encodes it
 	// automatically since the field type is []byte.
 	Attachment []byte `json:"attachment"`
+	// Inline marks this attachment Content-Disposition: inline instead of
+	// attachment. Requires ContentID.
+	Inline bool `json:"inline,omitempty"`
+	// ContentID is this part's Content-ID (without angle brackets --
+	// email-service adds those), referenced from the HTML template as
+	// cid:<contentId>. Ignored unless Inline is true.
+	ContentID string `json:"contentId,omitempty"`
 }
 
 // sendEmailRequest is the wire shape expected by POST /send-email.
@@ -152,7 +162,27 @@ type sendEmailRequest struct {
 // SendEmail sends an HTML email via the notification service. The sender
 // address is always the client's configured FromAddress; every other value
 // is supplied by the caller.
+// FromAddress is the address this client sends as. Exposed because a caller
+// that BCCs its whole audience still has to put something in To -- the email
+// service rejects a message without one -- and the sender itself is the only
+// address guaranteed to be valid and to reveal nothing about the recipients.
+func (c *EmailClient) FromAddress() string { return c.fromAddress }
+
+// ReplyTo is the configured Reply-To list, or nil when none is set.
+func (c *EmailClient) ReplyTo() []string { return c.replyTo }
+
 func (c *EmailClient) SendEmail(ctx context.Context, to, cc, bcc, replyTo []string, subject, htmlBody string, attachments []EmailAttachment) error {
+	return c.SendEmailFrom(ctx, c.fromAddress, to, cc, bcc, replyTo, subject, htmlBody, attachments)
+}
+
+// SendEmailFrom is SendEmail with an explicit sender. The From address is
+// not part of the OAuth2 identity, so one client (one token cache) can
+// send on behalf of several addresses; an empty from falls back to the
+// client's configured FromAddress.
+func (c *EmailClient) SendEmailFrom(ctx context.Context, from string, to, cc, bcc, replyTo []string, subject, htmlBody string, attachments []EmailAttachment) error {
+	if from == "" {
+		from = c.fromAddress
+	}
 	if len(to) == 0 {
 		return fmt.Errorf("notifications: at least one recipient (to) is required")
 	}
@@ -165,7 +195,7 @@ func (c *EmailClient) SendEmail(ctx context.Context, to, cc, bcc, replyTo []stri
 		CC:          cc,
 		BCC:         bcc,
 		ReplyTo:     replyTo,
-		From:        c.fromAddress,
+		From:        from,
 		Subject:     subject,
 		Template:    []byte(htmlBody),
 		Attachments: attachments,
@@ -176,4 +206,15 @@ func (c *EmailClient) SendEmail(ctx context.Context, to, cc, bcc, replyTo []stri
 
 	_, err = c.do(ctx, http.MethodPost, "/send-email", reqBody)
 	return err
+}
+
+// nonEmpty trims each address and drops blanks; nil when nothing is left.
+func nonEmpty(addrs []string) []string {
+	var out []string
+	for _, a := range addrs {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
 }

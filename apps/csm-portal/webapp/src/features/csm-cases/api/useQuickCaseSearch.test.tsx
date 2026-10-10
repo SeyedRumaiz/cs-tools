@@ -27,11 +27,27 @@ vi.mock("@api/backend/client", () => ({
   useBackendApi: () => ({ post: postMock }),
 }));
 
+// usePortalAccess transitively reaches CurrentUserContext -> useGetUsersMe,
+// which imports @config/apiConfig directly (also absent under vitest) --
+// mocked directly instead, the same "mock the hook module itself" shape
+// CLAUDE.md's Testing section calls for. Defaults to full Security Center
+// access so the existing ALL_CASE_TYPES-based assertions below are
+// unaffected; the dedicated describe blocks further down override these to
+// exercise visibleCaseTypes's own narrowing.
+let mockCanUseSecurityCenter = true;
+let mockCanUpdateDeleteAnyComment = false;
+vi.mock("@context/current-user/usePortalAccess", () => ({
+  usePortalAccess: () => ({
+    canUseSecurityCenter: mockCanUseSecurityCenter,
+    canUpdateDeleteAnyComment: mockCanUpdateDeleteAnyComment,
+  }),
+}));
+
 import {
   classifyQuickCaseQuery,
   useQuickCaseSearch,
 } from "@features/csm-cases/api/useQuickCaseSearch";
-import { ALL_CASE_TYPES } from "@features/csm-cases/utils/caseType";
+import { ALL_CASE_TYPES, visibleCaseTypes } from "@features/csm-cases/utils/caseType";
 
 function wrapper({ children }: { children: ReactNode }) {
   const queryClient = new QueryClient({
@@ -46,6 +62,20 @@ describe("useQuickCaseSearch", () => {
   beforeEach(() => {
     postMock.mockReset();
     postMock.mockResolvedValue({ cases: [] });
+    mockCanUseSecurityCenter = true;
+    mockCanUpdateDeleteAnyComment = false;
+  });
+
+  it("asks the server not to count every match: the palette never shows a total", async () => {
+    const { result } = renderHook(() => useQuickCaseSearch("printer jam"), { wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(postMock).toHaveBeenCalledTimes(1);
+    expect(postMock).toHaveBeenCalledWith(
+      "/cases/search",
+      expect.objectContaining({ skipTotal: true }),
+    );
   });
 
   it("requests every known case sub-type, not just the default 'case' type", async () => {
@@ -131,6 +161,49 @@ describe("useQuickCaseSearch", () => {
         }),
       }),
     );
+  });
+
+  // Regression: the backend 403s the WHOLE /cases/search when the type
+  // filter names security_report_analysis and the caller lacks
+  // PermViewSecurityCenter -- reported live as the quick-nav palette
+  // returning no results at all (not just missing security-report hits) for
+  // such a caller, since this hook used to send every type unconditionally.
+  describe("without security-report access (no Security Center, no comment_updater)", () => {
+    beforeEach(() => {
+      mockCanUseSecurityCenter = false;
+      mockCanUpdateDeleteAnyComment = false;
+    });
+
+    it("excludes security_report_analysis from the type filter", async () => {
+      const { result } = renderHook(() => useQuickCaseSearch("printer jam"), { wrapper });
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+      const body = postMock.mock.calls[0][1];
+      expect(body.filters.filters[0].values).toEqual(visibleCaseTypes(false));
+      expect(body.filters.filters[0].values).not.toContain("security_report_analysis");
+    });
+  });
+
+  // PermViewSecurityCenter is also held by comment_updater (access.go), so a
+  // caller with no Security Center access but who does hold comment_updater
+  // must still see security_report_analysis -- this hook's gate has to mirror
+  // the backend permission exactly, not just canUseSecurityCenter.
+  describe("comment_updater without Security Center access", () => {
+    beforeEach(() => {
+      mockCanUseSecurityCenter = false;
+      mockCanUpdateDeleteAnyComment = true;
+    });
+
+    it("still includes security_report_analysis in the type filter", async () => {
+      const { result } = renderHook(() => useQuickCaseSearch("printer jam"), { wrapper });
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+      const body = postMock.mock.calls[0][1];
+      expect(body.filters.filters[0].values).toContain("security_report_analysis");
+      expect(body.filters.filters[0].values).toEqual(ALL_CASE_TYPES);
+    });
   });
 
   describe("classifyQuickCaseQuery", () => {

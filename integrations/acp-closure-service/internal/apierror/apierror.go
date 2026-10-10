@@ -23,9 +23,13 @@ import "fmt"
 // Error is returned when csm-integration-service responds with a non-2xx status.
 type Error struct {
 	StatusCode int
-	Body       string
+	// Body is an excerpt of the upstream error response, for code that
+	// needs it. It is deliberately left out of Error(): the error text ends
+	// up in the logs, and an upstream body can echo personal data (e.g. a
+	// rejected recipient address).
+	Body string
 }
 
 func (e *Error) Error() string {
-	return fmt.Sprintf("upstream returned %d: %s", e.StatusCode, e.Body)
+	return fmt.Sprintf("upstream returned %d", e.StatusCode)
 }

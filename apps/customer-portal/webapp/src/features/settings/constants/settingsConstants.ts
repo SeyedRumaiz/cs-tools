@@ -43,6 +43,16 @@ export const SETTINGS_NULL_PLACEHOLDER = NULL_PLACEHOLDER;
 /** Role that can see AI Assistant tab and User Management Add/Delete. */
 export const SETTINGS_CUSTOMER_ADMIN_ROLE = "sn_customerservice.customer_admin";
 
+/**
+ * Every spelling of the customer admin role entity-service reports: the
+ * ServiceNow form while it reads from ServiceNow, and the plain form once it
+ * reads from the CSM database after cutover. Both mean the same person.
+ */
+export const SETTINGS_CUSTOMER_ADMIN_ROLES: readonly string[] = [
+  SETTINGS_CUSTOMER_ADMIN_ROLE,
+  "customer_admin",
+];
+
 /** ServiceNow partner role — triggers list view in ProjectHub when >4 projects. */
 export const SETTINGS_PARTNER_ROLE = "sn_customerservice.partner";
 
@@ -171,6 +181,27 @@ export const SETTINGS_USER_INVITE_SUCCESS = "Invitation sent successfully";
 
 export const SETTINGS_USER_ADD_ERROR = "Failed to add user. Please try again.";
 
+export const SETTINGS_USER_INVITING_NOTICE = "This takes a few seconds.";
+
+/** Contacts shown per page in User Management, as in the portal's other lists. */
+export const SETTINGS_USER_PAGE_SIZE = 10;
+
+export const SETTINGS_USER_INVITE_ALREADY_RUNNING =
+  "An invitation to this address is already being sent.";
+
+export const SETTINGS_USER_PENDING_STATUS = {
+  inviting: "Inviting…",
+  failed: "Failed",
+  processing: "Processing",
+} as const;
+
+export const SETTINGS_USER_PENDING_PROCESSING_TOOLTIP =
+  "Still being processed. If it does not appear in a minute, retry the invitation.";
+
+export const SETTINGS_USER_RETRY_TOOLTIP = "Retry invitation";
+
+export const SETTINGS_USER_DISMISS_TOOLTIP = "Dismiss";
+
 export const SETTINGS_USER_REMOVE_SUCCESS = "User removed successfully";
 
 export const SETTINGS_USER_REMOVE_ERROR =
@@ -187,6 +218,19 @@ export const SETTINGS_USER_UPDATE_ERROR =
 export const SETTINGS_USER_EDIT_TOOLTIP = "Edit user";
 
 export const SETTINGS_USER_REMOVE_TOOLTIP = "Remove user";
+
+export const SETTINGS_USER_RESEND_TOOLTIP = "Resend invitation";
+
+export const SETTINGS_USER_RESEND_SUCCESS = "Invitation resent";
+
+export const SETTINGS_USER_RESEND_ERROR =
+  "Failed to resend the invitation. Please try again.";
+
+export const SETTINGS_USER_RESEND_COOLDOWN =
+  "An invitation was sent a few minutes ago. Please try again later.";
+
+export const SETTINGS_USER_RESEND_ALREADY_ACCEPTED =
+  "This user is no longer waiting on an invitation. Refresh the page to see their current status.";
 
 export const ADD_USER_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

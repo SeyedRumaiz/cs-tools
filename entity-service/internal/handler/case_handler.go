@@ -24,15 +24,18 @@ import (
 	"strings"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/auth"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/service"
 )
 
-// maxAttachmentBodySize caps the CreateCaseAttachment JSON body at 15 MiB,
+// maxAttachmentBodySize caps the CreateCaseAttachment and CreateCase JSON body
+// (CreateCase carries inline base64 attachments) at 15 MiB,
 // matching the csm-portal backend's own maxAttachmentBodyBytes ceiling: a 10
 // MB file becomes ~13.3 MB once base64-encoded, plus JSON envelope overhead.
 // The generic maxRequestBodySize (1 MiB) is far too small for this endpoint
-// and rejects legitimate small attachments (e.g. a 2 MB file).
+// and rejects legitimate small attachments (e.g. a 2 MB file) on both endpoints.
 const maxAttachmentBodySize = int64(15 << 20)
 
 // maxTagSearchLimit caps POST /tags/search results. Tag search backs a
@@ -67,11 +70,24 @@ var safeAttachmentTypes = map[string]bool{
 // CaseHandler handles HTTP requests for the case resource.
 type CaseHandler struct {
 	svc service.CaseService
+	// m2mClientIDs is config.Config.M2MClientIDs -- the same trusted-internal-
+	// client-id set AccessService.ResolveScope already uses to grant
+	// unconditional, unrestricted access. AddCaseTag/CreateCaseComment reuse
+	// it to decide whether a caller may claim an arbitrary ActorEmail: a
+	// caller whose x-jwt-assertion names a client id in this set is already
+	// trusted to bypass RLS entirely, so it needs no second, narrower
+	// allowlist just to claim a comment/tag author.
+	m2mClientIDs map[string]bool
 }
 
-// NewCaseHandler constructs a CaseHandler with the given service.
-func NewCaseHandler(svc service.CaseService) *CaseHandler {
-	return &CaseHandler{svc: svc}
+// NewCaseHandler constructs a CaseHandler with the given service and the
+// trusted M2M client id set permitted to use AddCaseTagRequest.ActorEmail/
+// CreateCaseCommentRequest.ActorEmail (see that field's own doc comment and
+// config.Config.M2MClientIDs'). Passing a nil/empty set is safe -- it simply
+// means no ActorEmail is ever trusted, matching the config's default-closed
+// posture.
+func NewCaseHandler(svc service.CaseService, m2mClientIDs map[string]bool) *CaseHandler {
+	return &CaseHandler{svc: svc, m2mClientIDs: m2mClientIDs}
 }
 
 // GetCase handles GET /cases/{id}.
@@ -89,7 +105,7 @@ func (h *CaseHandler) GetCase(w http.ResponseWriter, r *http.Request) {
 // CreateCase handles POST /cases.
 func (h *CaseHandler) CreateCase(w http.ResponseWriter, r *http.Request) {
 	var req domain.CreateCaseRequest
-	if !decodeRequest(w, r, &req) {
+	if !decodeRequestWithLimit(w, r, &req, maxAttachmentBodySize, attachmentTooLargeMsg) {
 		return
 	}
 	c, err := h.svc.CreateCase(r.Context(), req)
@@ -120,14 +136,62 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// CreateCaseComment handles POST /cases/{id}/comments.
+// CreateCaseComment handles POST /cases/{id}/comments. It has two callers:
+//
+//   - A token-resolved caller (the normal case): no ActorEmail in the body,
+//     the acting user is resolved from x-user-id-token inside
+//     CaseService.CreateCaseComment itself, exactly as before this M2M path
+//     existed.
+//   - An M2M caller with no x-user-id-token to resolve an actor from (e.g.
+//     UMT via csm-integration-service): ActorEmail is set instead, and is
+//     honored only when the caller's own x-jwt-assertion names a client id
+//     in the trusted M2M set (h.m2mClientIDs, config.Config.M2MClientIDs) --
+//     otherwise it is rejected here, before ever reaching the service layer,
+//     since an unchecked caller-supplied actorEmail would let any caller
+//     claim to be any user.
+//
+// The two are mutually exclusive: a request carrying both a real
+// x-user-id-token and an ActorEmail is rejected as a bad request rather than
+// silently preferring one.
 func (h *CaseHandler) CreateCaseComment(w http.ResponseWriter, r *http.Request) {
+	caseID := r.PathValue("id")
+
 	var req domain.CreateCaseCommentRequest
 	if !decodeRequest(w, r, &req) {
 		return
 	}
-	req.CaseID = r.PathValue("id")
-	resp, err := h.svc.CreateCaseComment(r.Context(), req)
+	req.CaseID = caseID
+
+	hasToken := middleware.UserIDTokenFromContext(r.Context()) != ""
+
+	var (
+		resp domain.CreateCaseCommentResponse
+		err  error
+	)
+	switch {
+	case req.ActorEmail != nil && hasToken:
+		// A token-resolved caller should never also be claiming an explicit
+		// actor -- treat as a caller error rather than picking one silently.
+		writeServiceError(w, r, &apierror.ValidationError{
+			Msg: "actorEmail must not be supplied alongside an x-user-id-token",
+		})
+		return
+
+	case req.ActorEmail != nil:
+		if clientID := auth.IdentityFromContext(r.Context()).ClientID; clientID == "" || !h.m2mClientIDs[clientID] {
+			writeServiceError(w, r, &apierror.ForbiddenError{
+				Msg: "caller is not an authorized M2M client",
+			})
+			return
+		}
+		actorEmail := strings.ToLower(strings.TrimSpace(*req.ActorEmail))
+		resp, err = h.svc.CreateCaseCommentAs(r.Context(), req, actorEmail)
+
+	default:
+		// Unchanged from before ActorEmail existed: no token means
+		// CaseService.CreateCaseComment itself returns 401 via resolveActor.
+		resp, err = h.svc.CreateCaseComment(r.Context(), req)
+	}
 	if err != nil {
 		writeServiceError(w, r, err)
 		return
@@ -327,7 +391,23 @@ func (h *CaseHandler) SubmitCaseFeedback(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// AddCaseTag handles POST /cases/{id}/tags.
+// AddCaseTag handles POST /cases/{id}/tags. It has two callers:
+//
+//   - A token-resolved caller (the normal case): no ActorEmail in the body,
+//     the acting user is resolved from x-user-id-token inside
+//     CaseService.AddCaseTag itself, exactly as before this M2M path
+//     existed.
+//   - An M2M caller with no x-user-id-token to resolve an actor from (e.g.
+//     UMT via csm-integration-service): ActorEmail is set instead, and is
+//     honored only when the caller's own x-jwt-assertion names a client id
+//     in the trusted M2M set (h.m2mClientIDs, config.Config.M2MClientIDs) --
+//     otherwise it is rejected here, before ever reaching the service layer,
+//     since an unchecked caller-supplied actorEmail would let any caller
+//     claim to be any user.
+//
+// The two are mutually exclusive: a request carrying both a real
+// x-user-id-token and an ActorEmail is rejected as a bad request rather than
+// silently preferring one.
 func (h *CaseHandler) AddCaseTag(w http.ResponseWriter, r *http.Request) {
 	caseID := r.PathValue("id")
 
@@ -337,7 +417,36 @@ func (h *CaseHandler) AddCaseTag(w http.ResponseWriter, r *http.Request) {
 	}
 	req.CaseID = caseID
 
-	tag, err := h.svc.AddCaseTag(r.Context(), caseID, req.Label)
+	hasToken := middleware.UserIDTokenFromContext(r.Context()) != ""
+
+	var (
+		tag domain.Tag
+		err error
+	)
+	switch {
+	case req.ActorEmail != nil && hasToken:
+		// A token-resolved caller should never also be claiming an explicit
+		// actor -- treat as a caller error rather than picking one silently.
+		writeServiceError(w, r, &apierror.ValidationError{
+			Msg: "actorEmail must not be supplied alongside an x-user-id-token",
+		})
+		return
+
+	case req.ActorEmail != nil:
+		if clientID := auth.IdentityFromContext(r.Context()).ClientID; clientID == "" || !h.m2mClientIDs[clientID] {
+			writeServiceError(w, r, &apierror.ForbiddenError{
+				Msg: "caller is not an authorized M2M client",
+			})
+			return
+		}
+		actorEmail := strings.ToLower(strings.TrimSpace(*req.ActorEmail))
+		tag, err = h.svc.AddCaseTagAs(r.Context(), caseID, req.Label, actorEmail)
+
+	default:
+		// Unchanged from before ActorEmail existed: no token means
+		// CaseService.AddCaseTag itself returns 401 via resolveActor.
+		tag, err = h.svc.AddCaseTag(r.Context(), caseID, req.Label)
+	}
 	if err != nil {
 		writeServiceError(w, r, err)
 		return

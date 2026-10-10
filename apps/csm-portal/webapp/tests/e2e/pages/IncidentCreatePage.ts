@@ -19,10 +19,11 @@ import { INCIDENT_CREATE } from "../utils/selectors";
 
 /**
  * Page object for `/operations/incidents/new`. Unlike change requests
- * (Subject-only), the backend hard-requires Short description, Category,
- * Subcategory, Contact type, Impact, Urgency, Caller, and Service (see
- * `validateCreateIncidentBody` in incidents.go) — Caller auto-fills to the
- * signed-in user, everything else needs an explicit pick.
+ * (Subject-only), the form requires Short description, Category, Channel,
+ * Impact, Urgency, Caller, and Service (the backend's
+ * `validateCreateIncidentBody` in incidents.go hard-requires all but
+ * Channel) — Caller auto-fills to the signed-in user, everything else
+ * needs an explicit pick. Subcategory is optional.
  */
 export class IncidentCreatePage {
   constructor(private readonly page: Page) {}
@@ -43,9 +44,9 @@ export class IncidentCreatePage {
   }
 
   /** Opens a MUI Select by its field label and clicks the named option —
-   * Category, Subcategory, Contact type, Impact, Urgency all use this.
-   * Anchored regex, not `exact: true` — every one of these is a required
-   * field, and MUI's FormControl appends a required-field marker to the
+   * Category, Subcategory, Channel, Impact, Urgency all use this.
+   * Anchored regex, not `exact: true` — all but Subcategory are required
+   * fields, and MUI's FormControl appends a required-field marker to the
    * label. Confirmed live it's not a plain " *": the actual separator is
    * U+2009 (thin space), not U+0020, so `\s*` (which covers U+2009) is used
    * rather than a literal space. A loose (non-exact) match isn't safe
@@ -88,8 +89,8 @@ export class IncidentCreatePage {
     await option.click();
   }
 
-  /** Fills every backend-required field (short description, the five
-   * classification selects, and a Service pick) and submits. Caller is left
+  /** Fills every required field (short description, the classification
+   * selects — Subcategory only when given — and a Service pick) and submits. Caller is left
    * alone — it's already auto-filled to the signed-in user. Returns once
    * the app has navigated to the new incident's detail page
    * (`/operations/incidents/:id`). The id segment must not match the literal
@@ -100,16 +101,17 @@ export class IncidentCreatePage {
   async fillRequiredFieldsAndSubmit(opts: {
     shortDescription: string;
     category: string;
-    subcategory: string;
-    contactType: string;
+    /** Optional — Subcategory isn't required; omitted, it's left unset. */
+    subcategory?: string;
+    channel: string;
     impact: string;
     urgency: string;
     serviceQuery: string;
   }): Promise<void> {
     await this.shortDescriptionField().fill(opts.shortDescription);
     await this.selectOption("Category", opts.category);
-    await this.selectOption("Subcategory", opts.subcategory);
-    await this.selectOption("Contact type", opts.contactType);
+    if (opts.subcategory) await this.selectOption("Subcategory", opts.subcategory);
+    await this.selectOption("Channel", opts.channel);
     await this.selectOption("Impact", opts.impact);
     await this.selectOption("Urgency", opts.urgency);
     await this.pickService(opts.serviceQuery);

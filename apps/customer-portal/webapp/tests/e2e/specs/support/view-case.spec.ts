@@ -57,6 +57,7 @@ import {
   PROJECTS,
 } from "../../config/testData";
 import { CASE_DETAIL, CASE_DETAILS_PANEL } from "../../utils/selectors";
+import { idPattern } from "../../utils/ids";
 
 withSession(test);
 
@@ -78,7 +79,31 @@ test.describe("View Case", () => {
           );
 
           const caseDetail = new CaseDetailPage(page);
+
+          // Capture the case's own data: whether the "Production Version" field
+          // is rendered depends on it, and asserting from the fixture instead
+          // means the test drifts whenever the case data changes.
+          const caseResponse = page.waitForResponse(
+            (r) =>
+              // The page's OWN url also ends with /cases/<id>, so the document
+              // navigation matches a naive path check and hands back HTML.
+              // Excluding it is what makes this the API response.
+              r.request().resourceType() !== "document" &&
+              r.request().method() === "GET" &&
+              new RegExp(`/cases/${idPattern(caseId)}$`).test(
+                new URL(r.url()).pathname,
+              ),
+            { timeout: 60_000 },
+          );
+
           await caseDetail.open(project.id, caseId);
+
+          const caseData = (await (await caseResponse).json()) as {
+            deployedProduct?: { version?: string | null };
+          };
+          const hasProductVersion = Boolean(
+            caseData.deployedProduct?.version,
+          );
 
           // Case number — format only; the value differs per case.
           await expect(caseDetail.caseNumber()).toBeVisible();
@@ -131,14 +156,29 @@ test.describe("View Case", () => {
           // exactly once: several repeat legitimately — the header already shows
           // a status and a severity — so requiring uniqueness would fail for the
           // wrong reason.
-          // "Production Version" is omitted when the project's product has no
-          // version — Cloud Support's does not — so it is only expected where
-          // the fixture says the field exists.
-          const productFields = project.hasProductVersionField
+          // "Production Version" is rendered only when the case carries a
+          // deployed product version (CaseDetailsDetailsPanel guards it on
+          // `deployedProduct.version`). Decided from the CASE's data rather than
+          // a per-project fixture flag: which cases have a version is
+          // environment data that changes, and a stale flag fails as a missing
+          // field — which reads like a UI regression and is not.
+          const productFields = hasProductVersion
             ? fields.productEnvironment
             : fields.productEnvironment.filter(
                 (label) => label !== "Production Version",
               );
+
+          // The inverse also has to hold, or "omit it when absent" would excuse
+          // the field never rendering at all.
+          if (!hasProductVersion) {
+            await expect
+              .soft(
+                caseDetail.detailsText("Production Version"),
+                "Production Version should be hidden when the case has no " +
+                  "deployed product version",
+              )
+              .toHaveCount(0);
+          }
 
           for (const label of [
             ...fields.caseOverview,

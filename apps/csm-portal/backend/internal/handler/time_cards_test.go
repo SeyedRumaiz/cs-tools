@@ -22,6 +22,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
 )
 
 const testTCID = "dddddddd-eeee-ffff-0000-111111111111"
@@ -102,7 +104,7 @@ func TestUpdateTimeCard(t *testing.T) {
 		assertStatus(t, w, http.StatusBadRequest)
 	})
 
-	t.Run("forwards id and body for a state transition and returns 200", func(t *testing.T) {
+	t.Run("forwards id and body for a state transition and returns 200 for an approver", func(t *testing.T) {
 		var capturedID string
 		var capturedBody []byte
 		client := &mockEntityTimeCardClient{
@@ -111,8 +113,9 @@ func TestUpdateTimeCard(t *testing.T) {
 				return []byte(`{"timeCard":{"id":"` + id + `","state":"approved"}}`), nil
 			},
 		}
-		h := NewTimeCardHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodPatch, "/time-cards/"+testTCID, strings.NewReader(`{"state":"approved"}`)))
+		h := NewTimeCardHandler(client).WithAccessGuard(NewAccessGuard(testAccessConfig()))
+		r := httptest.NewRequest(http.MethodPatch, "/time-cards/"+testTCID, strings.NewReader(`{"state":"approved"}`))
+		r = r.WithContext(middleware.WithUserInfo(r.Context(), &middleware.UserInfo{Email: "approver@example.com", UserID: "u1", Roles: []string{"test-timecard-approver"}}))
 		r.SetPathValue("id", testTCID)
 		w := httptest.NewRecorder()
 		h.UpdateTimeCard(w, r)
@@ -123,6 +126,72 @@ func TestUpdateTimeCard(t *testing.T) {
 			t.Errorf("upstream received id %q, want %q", capturedID, testTCID)
 		}
 		if string(capturedBody) != `{"state":"approved"}` {
+			t.Errorf("upstream received body %q", capturedBody)
+		}
+	})
+
+	t.Run("state transition denied without PermApproveTimeCard (no guard wired)", func(t *testing.T) {
+		called := false
+		client := &mockEntityTimeCardClient{
+			updateTimeCardFn: func(context.Context, string, []byte) ([]byte, error) {
+				called = true
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewTimeCardHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/time-cards/"+testTCID, strings.NewReader(`{"state":"approved"}`)))
+		r.SetPathValue("id", testTCID)
+		w := httptest.NewRecorder()
+		h.UpdateTimeCard(w, r)
+		assertStatus(t, w, http.StatusForbidden)
+		if called {
+			t.Fatal("entity service must not be called for a denied state transition")
+		}
+	})
+
+	t.Run("state transition denied for a CS engineer (not a timecard approver)", func(t *testing.T) {
+		h := NewTimeCardHandler(&mockEntityTimeCardClient{
+			updateTimeCardFn: func(context.Context, string, []byte) ([]byte, error) { return []byte(`{}`), nil },
+		}).WithAccessGuard(NewAccessGuard(testAccessConfig()))
+		r := httptest.NewRequest(http.MethodPatch, "/time-cards/"+testTCID, strings.NewReader(`{"state":"rejected","leadComment":"needs more detail"}`))
+		r = r.WithContext(middleware.WithUserInfo(r.Context(), &middleware.UserInfo{Email: "cs@example.com", UserID: "u2", Roles: []string{"test-cs-engineer"}}))
+		r.SetPathValue("id", testTCID)
+		w := httptest.NewRecorder()
+		h.UpdateTimeCard(w, r)
+		assertStatus(t, w, http.StatusForbidden)
+	})
+
+	t.Run("state transition allowed for admin", func(t *testing.T) {
+		h := NewTimeCardHandler(&mockEntityTimeCardClient{
+			updateTimeCardFn: func(_ context.Context, id string, _ []byte) ([]byte, error) {
+				return []byte(`{"timeCard":{"id":"` + id + `","state":"approved"}}`), nil
+			},
+		}).WithAccessGuard(NewAccessGuard(testAccessConfig()))
+		r := httptest.NewRequest(http.MethodPatch, "/time-cards/"+testTCID, strings.NewReader(`{"state":"approved"}`))
+		r = r.WithContext(middleware.WithUserInfo(r.Context(), &middleware.UserInfo{Email: "admin@example.com", UserID: "u3", Roles: []string{"test-admin"}}))
+		r.SetPathValue("id", testTCID)
+		w := httptest.NewRecorder()
+		h.UpdateTimeCard(w, r)
+		assertStatus(t, w, http.StatusOK)
+	})
+
+	t.Run("plain field edit (no state) does not require PermApproveTimeCard", func(t *testing.T) {
+		var capturedBody []byte
+		client := &mockEntityTimeCardClient{
+			updateTimeCardFn: func(_ context.Context, _ string, body []byte) ([]byte, error) {
+				capturedBody = body
+				return []byte(`{"timeCard":{"id":"` + testTCID + `","state":"submitted"}}`), nil
+			},
+		}
+		// No WithAccessGuard at all -- must still succeed, since a nil-body
+		// state field never triggers the check in the first place.
+		h := NewTimeCardHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/time-cards/"+testTCID, strings.NewReader(`{"workLogComment":"updated"}`)))
+		r.SetPathValue("id", testTCID)
+		w := httptest.NewRecorder()
+		h.UpdateTimeCard(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if string(capturedBody) != `{"workLogComment":"updated"}` {
 			t.Errorf("upstream received body %q", capturedBody)
 		}
 	})

@@ -166,7 +166,7 @@ func TestEmailNotifier_Send_CustomerNoticeNeverLinksProjectName(t *testing.T) {
 		Body:        "Some customer-facing body mentioning Acme - Subscription.",
 		ProjectSfID: "a0d4U00000aUJURQA4",
 		Recipients: Recipients{
-			Customer: &recipients.Contact{Email: "customer@example.com"},
+			Customers: []recipients.Contact{{Email: "customer@example.com"}},
 		},
 	})
 	if err != nil {

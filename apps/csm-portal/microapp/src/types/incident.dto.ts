@@ -163,7 +163,7 @@ export interface IncidentCreatePayloadDto {
   contactType?: IncidentContactType;
   impact: IncidentImpact;
   urgency: IncidentUrgency;
-  assignmentGroupId?: string;
+  // No assignmentGroupId: the backend sets the group from serviceId's support group.
   assignedEngineerId?: string;
   subject: string;
   watchList?: string[];

@@ -54,18 +54,26 @@ export type CaseOptionalColumnId =
   | "createdAt"
   | "escalationLevel";
 
+// Tracks are `minmax(<floor>, <fixed cap>)`, never `<n>fr`. The list's grid is
+// sized with `min-width: max-content` (so it scrolls instead of squashing), and
+// under max-content sizing every `fr` track resolves to
+// (widest cell in ANY fr track) / (that track's flex factor). One long product
+// name therefore set the size of a 1fr track, and Subject (3fr) took 3x that:
+// the grid grew far past its container and pushed State/Updated off-screen.
+// A fixed cap keeps each track's max-content contribution bounded by its own
+// column, independent of its neighbours.
 export const CASE_OPTIONAL_COLUMNS: Record<
   CaseOptionalColumnId,
   { label: string; track: string }
 > = {
-  product: { label: "Product", track: "minmax(140px, 1fr)" },
+  product: { label: "Product", track: "minmax(140px, 220px)" },
   type: { label: "Type", track: "auto" },
-  issueType: { label: "Issue type", track: "minmax(140px, 1fr)" },
+  issueType: { label: "Issue type", track: "minmax(140px, 220px)" },
   severity: { label: "Severity", track: "auto" },
-  assignee: { label: "Assignee", track: "minmax(140px, 1fr)" },
-  createdBy: { label: "Reporter", track: "minmax(140px, 1fr)" },
-  customer: { label: "Customer", track: "minmax(140px, 1fr)" },
-  createdAt: { label: "Created", track: "minmax(100px, 0.7fr)" },
+  assignee: { label: "Assignee", track: "minmax(140px, 220px)" },
+  createdBy: { label: "Reporter", track: "minmax(140px, 220px)" },
+  customer: { label: "Customer", track: "minmax(140px, 220px)" },
+  createdAt: { label: "Created", track: "minmax(100px, 140px)" },
   // Blank (not a "not escalated" chip) for cases with no escalation level —
   // see `renderOptionalCell`'s "escalationLevel" case in CasesList.tsx.
   escalationLevel: { label: "Escalation", track: "auto" },

@@ -84,7 +84,7 @@ function IncidentDetailContent({ id }: { id: string }) {
           <DetailRow label="Caller" value={incident.caller?.name} />
           <DetailRow label="Category" value={incident.category} />
           <DetailRow label="Subcategory" value={incident.subcategory} />
-          <DetailRow label="Contact Type" value={incident.contactType} />
+          <DetailRow label="Channel" value={incident.channel} />
           <DetailRow label="Impact" value={incident.impact} />
           <DetailRow label="Urgency" value={incident.urgency} />
           <DetailRow label="Service" value={incident.service?.name} />

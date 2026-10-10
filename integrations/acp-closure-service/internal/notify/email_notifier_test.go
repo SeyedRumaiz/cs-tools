@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,7 +100,7 @@ func TestEmailNotifier_Send_CustomerGoesToToInternalGoesToCC(t *testing.T) {
 			AccountOwner:   recipients.Contact{Email: "am@wso2.com"},
 			RenewalManager: recipients.Contact{Email: "rm@wso2.com"},
 			TechnicalOwner: recipients.Contact{Email: "to@wso2.com"},
-			Customer:       &recipients.Contact{Email: "customer@wso2.com"},
+			Customers:      []recipients.Contact{{Email: "customer@wso2.com"}},
 		},
 	})
 	if err != nil {
@@ -117,20 +118,20 @@ func TestEmailNotifier_Send_CustomerGoesToToInternalGoesToCC(t *testing.T) {
 	}
 }
 
-// TestEmailNotifier_Send_IncludesStandingCCRecipients covers a real gap
-// versus legacy: every real reference email (internal and customer-facing
-// alike) cc's two standing distribution addresses —
-// customer-lifecycle-notification@wso2.com and billing@wso2.com — which
-// this port never sent at all until now. StandingCC applies uniformly
-// regardless of notice shape (internal-only here; customer-facing/nudge
-// covered by the next test) since Send doesn't branch on notice type.
-func TestEmailNotifier_Send_IncludesStandingCCRecipients(t *testing.T) {
+// TestEmailNotifier_Send_StandingRecipientsGoToToOnInternalNotice covers
+// where the two standing distribution lists
+// (customer-lifecycle-notification@wso2.com, billing@wso2.com) sit on an
+// internal notice (and the no-business-contact nudge, which has the same
+// recipient shape): in "to", after the internal people, with no "cc" at
+// all — as the ServiceNow system sends it (confirmed by the user from real
+// legacy emails, 2026-09-29).
+func TestEmailNotifier_Send_StandingRecipientsGoToToOnInternalNotice(t *testing.T) {
 	sender := &mockEmailSender{}
 	n := &EmailNotifier{
 		Sender:                 sender,
 		Logger:                 discardLogger(),
 		AllowNonWSO2Recipients: true,
-		StandingCC:             []string{"customer-lifecycle-notification@wso2.com", "billing@wso2.com"},
+		StandingRecipients:     []string{"customer-lifecycle-notification@wso2.com", "billing@wso2.com"},
 	}
 
 	_, err := n.Send(context.Background(), Notice{
@@ -141,28 +142,27 @@ func TestEmailNotifier_Send_IncludesStandingCCRecipients(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send() error = %v, want nil", err)
 	}
-	got := sender.calls[0].cc
-	want := []string{"customer-lifecycle-notification@wso2.com", "billing@wso2.com"}
-	if len(got) != len(want) {
-		t.Fatalf("cc = %v, want %v", got, want)
+	call := sender.calls[0]
+	wantTo := []string{"am@wso2.com", "customer-lifecycle-notification@wso2.com", "billing@wso2.com"}
+	if !slices.Equal(call.to, wantTo) {
+		t.Errorf("to = %v, want %v", call.to, wantTo)
 	}
-	for i, w := range want {
-		if got[i] != w {
-			t.Errorf("cc[%d] = %q, want %q", i, got[i], w)
-		}
+	if len(call.cc) != 0 {
+		t.Errorf("cc = %v, want none", call.cc)
 	}
 }
 
-// TestEmailNotifier_Send_StandingCCAppliesToCustomerFacingNoticeToo confirms
-// the standing cc list is added on top of the existing internal-people cc
-// for a customer-facing notice, not just internal-only ones.
-func TestEmailNotifier_Send_StandingCCAppliesToCustomerFacingNoticeToo(t *testing.T) {
+// TestEmailNotifier_Send_StandingRecipientsGoToToAndCCOnCustomerNotice: on
+// a customer-facing notice the ServiceNow system lists the two standing
+// lists in both "to" (after the customers) and "cc" (after the internal
+// people), confirmed by the user from real legacy emails.
+func TestEmailNotifier_Send_StandingRecipientsGoToToAndCCOnCustomerNotice(t *testing.T) {
 	sender := &mockEmailSender{}
 	n := &EmailNotifier{
 		Sender:                 sender,
 		Logger:                 discardLogger(),
 		AllowNonWSO2Recipients: true,
-		StandingCC:             []string{"customer-lifecycle-notification@wso2.com", "billing@wso2.com"},
+		StandingRecipients:     []string{"customer-lifecycle-notification@wso2.com", "billing@wso2.com"},
 	}
 
 	_, err := n.Send(context.Background(), Notice{
@@ -170,33 +170,34 @@ func TestEmailNotifier_Send_StandingCCAppliesToCustomerFacingNoticeToo(t *testin
 		Body:    "body",
 		Recipients: Recipients{
 			AccountOwner: recipients.Contact{Email: "am@wso2.com"},
-			Customer:     &recipients.Contact{Email: "customer@wso2.com"},
+			Customers:    []recipients.Contact{{Email: "customer@wso2.com"}},
 		},
 	})
 	if err != nil {
 		t.Fatalf("Send() error = %v, want nil", err)
 	}
-	got := sender.calls[0].cc
-	// 1 internal recipient + 2 standing cc addresses.
-	if len(got) != 3 {
-		t.Fatalf("cc = %v, want 3 entries (1 internal + 2 standing)", got)
+	call := sender.calls[0]
+	wantTo := []string{"customer@wso2.com", "customer-lifecycle-notification@wso2.com", "billing@wso2.com"}
+	if !slices.Equal(call.to, wantTo) {
+		t.Errorf("to = %v, want %v", call.to, wantTo)
 	}
-	if got[len(got)-2] != "customer-lifecycle-notification@wso2.com" || got[len(got)-1] != "billing@wso2.com" {
-		t.Errorf("cc = %v, want the standing addresses appended after the internal ones", got)
+	wantCC := []string{"am@wso2.com", "customer-lifecycle-notification@wso2.com", "billing@wso2.com"}
+	if !slices.Equal(call.cc, wantCC) {
+		t.Errorf("cc = %v, want %v", call.cc, wantCC)
 	}
 }
 
-// TestEmailNotifier_Send_StandingCCGoesThroughWSO2OnlyFilter confirms the
-// standing cc list isn't a bypass of the staging safeguard — a
+// TestEmailNotifier_Send_StandingRecipientsGoThroughWSO2OnlyFilter confirms
+// the standing list isn't a bypass of the staging safeguard — a
 // misconfigured non-wso2.com address there gets filtered out exactly like
 // any other recipient when AllowNonWSO2Recipients is false.
-func TestEmailNotifier_Send_StandingCCGoesThroughWSO2OnlyFilter(t *testing.T) {
+func TestEmailNotifier_Send_StandingRecipientsGoThroughWSO2OnlyFilter(t *testing.T) {
 	sender := &mockEmailSender{}
 	n := &EmailNotifier{
 		Sender:                 sender,
 		Logger:                 discardLogger(),
 		AllowNonWSO2Recipients: false,
-		StandingCC:             []string{"billing@wso2.com", "someone@example.com"},
+		StandingRecipients:     []string{"billing@wso2.com", "someone@example.com"},
 	}
 
 	_, err := n.Send(context.Background(), Notice{
@@ -207,9 +208,9 @@ func TestEmailNotifier_Send_StandingCCGoesThroughWSO2OnlyFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send() error = %v, want nil", err)
 	}
-	got := sender.calls[0].cc
-	if len(got) != 1 || got[0] != "billing@wso2.com" {
-		t.Errorf("cc = %v, want only [billing@wso2.com] — the non-wso2.com standing address must be filtered out", got)
+	want := []string{"am@wso2.com", "billing@wso2.com"}
+	if got := sender.calls[0].to; !slices.Equal(got, want) {
+		t.Errorf("to = %v, want %v — the non-wso2.com standing address must be filtered out", got, want)
 	}
 }
 
@@ -283,7 +284,7 @@ func TestEmailNotifier_Send_AllowsNonWSO2RecipientsWhenExplicitlyEnabled(t *test
 		Subject: "subject",
 		Body:    "body",
 		Recipients: Recipients{
-			Customer: &recipients.Contact{Email: "customer@external.example"},
+			Customers: []recipients.Contact{{Email: "customer@external.example"}},
 		},
 	})
 	if err != nil {
@@ -309,7 +310,7 @@ func TestEmailNotifier_Send_SkipsWhenNoValidRecipientsRemain(t *testing.T) {
 		Subject: "subject",
 		Body:    "body",
 		Recipients: Recipients{
-			Customer: &recipients.Contact{Email: "customer@external.example"},
+			Customers: []recipients.Contact{{Email: "customer@external.example"}},
 		},
 	})
 	if err != nil {
@@ -446,7 +447,7 @@ func TestEmailNotifier_Send_CustomerNoticeGetsBrandedTemplate(t *testing.T) {
 		Body:    "body text",
 		Recipients: Recipients{
 			AccountOwner: recipients.Contact{Email: "am@wso2.com"},
-			Customer:     &recipients.Contact{Email: "customer@wso2.com"},
+			Customers:    []recipients.Contact{{Email: "customer@wso2.com"}},
 		},
 	})
 	if err != nil {
@@ -485,7 +486,7 @@ func TestEmailNotifier_Send_DoesNotLogRawRecipientAddresses(t *testing.T) {
 		Body:    "body",
 		Recipients: Recipients{
 			AccountOwner: recipients.Contact{Email: ccAddr},
-			Customer:     &recipients.Contact{Email: toAddr},
+			Customers:    []recipients.Contact{{Email: toAddr}},
 		},
 	})
 	if err != nil {
@@ -562,7 +563,7 @@ func TestEmailNotifier_Send_ReportsDeliveredFalseWhenSkipped(t *testing.T) {
 	delivered, err := n.Send(context.Background(), Notice{
 		Subject:    "subject",
 		Body:       "body",
-		Recipients: Recipients{Customer: &recipients.Contact{Email: "customer@external.example"}},
+		Recipients: Recipients{Customers: []recipients.Contact{{Email: "customer@external.example"}}},
 	})
 	if err != nil {
 		t.Fatalf("Send() error = %v, want nil", err)
@@ -572,5 +573,38 @@ func TestEmailNotifier_Send_ReportsDeliveredFalseWhenSkipped(t *testing.T) {
 	}
 	if len(sender.calls) != 0 {
 		t.Errorf("SendEmail calls = %d, want 0", len(sender.calls))
+	}
+}
+
+// TestEmailNotifier_Send_EveryCustomerGoesToTo: a customer notice resolved
+// to several customer contacts sends one email with all of them in "to",
+// and the internal people still in "cc".
+func TestEmailNotifier_Send_EveryCustomerGoesToTo(t *testing.T) {
+	sender := &mockEmailSender{}
+	n := &EmailNotifier{Sender: sender, Logger: discardLogger(), AllowNonWSO2Recipients: true}
+
+	_, err := n.Send(context.Background(), Notice{
+		Subject: "subject",
+		Body:    "body",
+		Recipients: Recipients{
+			AccountOwner: recipients.Contact{Email: "am@wso2.com"},
+			Customers: []recipients.Contact{
+				{Email: "bob@customer.example"},
+				{Email: "frank@customer.example"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Send() error = %v, want nil", err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("SendEmail calls = %d, want 1", len(sender.calls))
+	}
+	call := sender.calls[0]
+	if !slices.Equal(call.to, []string{"bob@customer.example", "frank@customer.example"}) {
+		t.Errorf("to = %v, want [bob@customer.example frank@customer.example]", call.to)
+	}
+	if !slices.Equal(call.cc, []string{"am@wso2.com"}) {
+		t.Errorf("cc = %v, want [am@wso2.com]", call.cc)
 	}
 }

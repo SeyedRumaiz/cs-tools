@@ -24,12 +24,20 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  Tooltip,
   Typography,
 } from "@wso2/oxygen-ui";
-import type { JSX } from "react";
+import { useMemo, type JSX } from "react";
 import QueryErrorState from "@components/QueryErrorState";
 import UserRefLink from "@components/UserRefLink";
+import { isOnboardingStatusEnabled } from "@config/onboardingStatusConfig";
+import { useGetProjectOnboardingSteps } from "@features/csm-projects/api/useGetProjectOnboardingSteps";
 import { useSearchProjectContacts } from "@features/csm-projects/api/useSearchProjectContacts";
+import OnboardingStatusChip from "@features/csm-projects/components/OnboardingStatusChip";
+import {
+  findOnboardingMembership,
+  indexOnboardingMembershipsByEmail,
+} from "@features/csm-projects/utils/onboardingStatus";
 import type { BeProjectContact } from "@api/backend/types";
 
 const COLUMN_COUNT = 5;
@@ -105,7 +113,7 @@ interface ProjectContactsTabProps {
  * profile via `UserRefLink` (so nullable-id resolution and the plain-text
  * fallback come for free); a row that would fail the customer portal's own
  * access rule renders unlinked-or-flagged with an inline reason, since
- * that's precisely the case a support engineer needs to notice without
+ * that's precisely the case a CS engineer needs to notice without
  * hovering — a row can fail access two distinct ways (no linked contact
  * record at all, or a linked contact whose email doesn't match what this row
  * was invited under), and the reason line says which.
@@ -116,12 +124,32 @@ interface ProjectContactsTabProps {
  * the explanatory line is always rendered inline, not tucked behind a hover
  * tooltip, so scanning the table surfaces every "can't see their cases" row
  * without hovering each one.
+ *
+ * Behind the `CSM_MIGRATION_ONBOARDING_STATUS_ENABLED` runtime flag, an extra
+ * Onboarding column shows how far each contact's invitation got into the
+ * Customer Portal (`GET /projects/{id}/onboarding-steps`, matched to the row
+ * by lower-cased email): the worst status across the recorded IDENTITY /
+ * DATABASE / EMAIL / REGISTRATION steps as a chip, with every step, its
+ * attempt count and a failed step's last error behind a hover. With the flag
+ * off the column is not rendered and the ledger is never requested; the
+ * contacts query itself is untouched either way, so an onboarding-ledger
+ * failure only ever degrades that one column to "Unavailable".
  */
 export default function ProjectContactsTab({
   projectId,
 }: ProjectContactsTabProps): JSX.Element {
   const { data, isLoading, isError, error } = useSearchProjectContacts(projectId);
   const contacts = data ?? [];
+
+  const onboardingEnabled = isOnboardingStatusEnabled();
+  // The hook disables itself while the flag is off, so this is a no-op then;
+  // it is called unconditionally to keep the hook order stable.
+  const onboarding = useGetProjectOnboardingSteps(projectId);
+  const onboardingIndex = useMemo(
+    () => indexOnboardingMembershipsByEmail(onboarding.data?.memberships ?? []),
+    [onboarding.data],
+  );
+  const columnCount = onboardingEnabled ? COLUMN_COUNT + 1 : COLUMN_COUNT;
 
   return (
     <Paper variant="outlined">
@@ -134,13 +162,30 @@ export default function ProjectContactsTab({
               <TableCell>Roles</TableCell>
               <TableCell>Registration</TableCell>
               <TableCell>Access</TableCell>
+              {onboardingEnabled && (
+                <TableCell>
+                  Onboarding
+                  {onboarding.data?.truncated && (
+                    <Tooltip title="This project's onboarding record is larger than the portal loads at once, so some contacts may show no status or an incomplete one.">
+                      <Typography
+                        component="span"
+                        variant="caption"
+                        color="warning.main"
+                        sx={{ ml: 0.5 }}
+                      >
+                        (partial)
+                      </Typography>
+                    </Tooltip>
+                  )}
+                </TableCell>
+              )}
             </TableRow>
           </TableHead>
           <TableBody>
             {isLoading ? (
               Array.from({ length: 3 }).map((_, i) => (
                 <TableRow key={i}>
-                  {Array.from({ length: COLUMN_COUNT }).map((__, c) => (
+                  {Array.from({ length: columnCount }).map((__, c) => (
                     <TableCell key={c}>
                       <Skeleton variant="rounded" width="70%" height={18} />
                     </TableCell>
@@ -149,7 +194,7 @@ export default function ProjectContactsTab({
               ))
             ) : isError ? (
               <TableRow>
-                <TableCell colSpan={COLUMN_COUNT} align="center">
+                <TableCell colSpan={columnCount} align="center">
                   <QueryErrorState
                     message={error instanceof Error && error.message.trim() ? error.message : "Failed to load project contacts."}
                     error={error}
@@ -158,7 +203,7 @@ export default function ProjectContactsTab({
               </TableRow>
             ) : contacts.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={COLUMN_COUNT} align="center" sx={{ py: 4 }}>
+                <TableCell colSpan={columnCount} align="center" sx={{ py: 4 }}>
                   <Typography variant="body2" color="text.secondary">
                     No contacts found for this project.
                   </Typography>
@@ -219,6 +264,29 @@ export default function ProjectContactsTab({
                         </Typography>
                       )}
                     </TableCell>
+                    {onboardingEnabled && (
+                      <TableCell>
+                        {onboarding.isLoading ? (
+                          <Skeleton variant="rounded" width={96} height={24} />
+                        ) : onboarding.isError ? (
+                          <Tooltip
+                            title={
+                              onboarding.error instanceof Error && onboarding.error.message.trim()
+                                ? onboarding.error.message
+                                : "Failed to load onboarding status."
+                            }
+                          >
+                            <Typography component="span" variant="caption" color="text.secondary">
+                              Unavailable
+                            </Typography>
+                          </Tooltip>
+                        ) : (
+                          <OnboardingStatusChip
+                            membership={findOnboardingMembership(c, onboardingIndex)}
+                          />
+                        )}
+                      </TableCell>
+                    )}
                   </TableRow>
                 );
               })

@@ -34,6 +34,10 @@ import { useState, type JSX } from "react";
 import type { BeDeployedProductCreatePayload } from "@api/backend/types";
 import { useSearchProducts } from "@features/csm-projects/api/useSearchProducts";
 import { useSearchProductVersions } from "@features/csm-projects/api/useSearchProductVersions";
+import {
+  DEPLOYED_PRODUCT_CATEGORY_OPTIONS,
+  deployedProductCategoryLabel,
+} from "@features/csm-projects/utils/deployments";
 
 interface CreateDeployedProductDialogProps {
   /** The project this deployed product belongs to (required by the BE contract). */
@@ -49,7 +53,7 @@ const DESCRIPTION_MAX = 4000;
 
 /**
  * Create a deployed product under the current deployment. Product and version
- * are required; cores, tps, and description are optional sizing fields.
+ * are required; cores, tps, category, and description are optional.
  *
  * Product list comes from `POST /products/search` (full catalogue, bounded).
  * Version list is dependent on the selected product and comes from
@@ -68,6 +72,7 @@ export default function CreateDeployedProductDialog({
   const [cores, setCores] = useState("");
   const [tps, setTps] = useState("");
   const [description, setDescription] = useState("");
+  const [category, setCategory] = useState("");
 
   const { data: products, isLoading: productsLoading } = useSearchProducts();
   const { data: versions, isLoading: versionsLoading } = useSearchProductVersions(
@@ -100,6 +105,7 @@ export default function CreateDeployedProductDialog({
     if (tpsNum !== undefined) payload.tps = tpsNum;
     const trimmedDescription = description.trim();
     if (trimmedDescription) payload.description = trimmedDescription;
+    if (category) payload.category = category;
     onCreate(payload);
   };
 
@@ -214,6 +220,34 @@ export default function CreateDeployedProductDialog({
             error={tpsError}
             helperText={tpsError ? "Must be a non-negative number." : " "}
           />
+
+          {/* Category — optional; only MS/PC-categorized deployed products
+              support service request creation, so this is what lets staff
+              make a deployed product SR-eligible. */}
+          <FormControl size="small" fullWidth>
+            <InputLabel id="create-dp-category-label" shrink={category !== ""}>
+              Category
+            </InputLabel>
+            <Select
+              labelId="create-dp-category-label"
+              label="Category"
+              value={category}
+              onChange={(e) => setCategory(e.target.value as string)}
+              notched={category !== ""}
+              displayEmpty
+            >
+              <MenuItem value="">
+                <Typography variant="inherit" component="span" color="text.secondary">
+                  Not set
+                </Typography>
+              </MenuItem>
+              {DEPLOYED_PRODUCT_CATEGORY_OPTIONS.map((c) => (
+                <MenuItem key={c} value={c}>
+                  {deployedProductCategoryLabel(c)}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
 
           <TextField
             label="Description"

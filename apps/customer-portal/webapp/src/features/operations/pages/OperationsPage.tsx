@@ -224,7 +224,11 @@ export default function OperationsPage(): JSX.Element {
     srStats?.stateCount?.find((s) => s.label === CaseStatus.CLOSED)?.count ?? 0;
   const totalSrCount =
     srStats?.stateCount?.reduce((sum, s) => sum + (s.count ?? 0), 0) ?? 0;
-  const outstandingSrCount = totalSrCount - closedSrCount;
+  // Prefer the API's own outstandingCount: stateCount can omit a case whose
+  // state isn't in the enum list (totalCount 37 vs stateCount sum 36), which
+  // made this card one lower than the real outstanding total.
+  const outstandingSrCount =
+    srStats?.outstandingCount ?? totalSrCount - closedSrCount;
 
   // Action Required CRs = Customer Approval + Customer Review
   const customerApprovalCrCount =

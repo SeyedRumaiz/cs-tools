@@ -58,8 +58,13 @@ describe("resolveOutstandingCrStateIds", () => {
     expect(resolveOutstandingCrStateIds(undefined)).toBeUndefined();
   });
 
-  it("excludes Rollback, Closed, and Canceled by label", () => {
+  it("excludes New, Assess, Closed, and Canceled by label, and keeps Rollback", () => {
+    // Mirrors entity-service's own customer-facing crOutstandingStatesFor:
+    // New/Assess haven't reached the customer yet, Rollback is WSO2
+    // engineering work in progress and IS outstanding.
     const states = [
+      { id: "-5", label: "New" },
+      { id: "-4", label: "Assess" },
       { id: "5", label: "Customer Approval" },
       { id: "-2", label: "Scheduled" },
       { id: "-1", label: "Implement" },
@@ -69,15 +74,17 @@ describe("resolveOutstandingCrStateIds", () => {
       { id: "3", label: "Closed" },
       { id: "4", label: "Canceled" },
     ];
-    expect(resolveOutstandingCrStateIds(states)).toEqual([5, -2, -1, 0, 1]);
+    expect(resolveOutstandingCrStateIds(states)).toEqual([5, -2, -1, 0, 1, 2]);
   });
 
-  it("returns all IDs when no excluded labels are present", () => {
+  it("includes Authorize as outstanding", () => {
+    // A customer sees Authorize only via a re-schedule of their own change
+    // request, so it still counts as outstanding for them.
     const states = [
-      { id: "-5", label: "New" },
-      { id: "-4", label: "Assess" },
+      { id: "-3", label: "Authorize" },
+      { id: "5", label: "Customer Approval" },
     ];
-    expect(resolveOutstandingCrStateIds(states)).toEqual([-5, -4]);
+    expect(resolveOutstandingCrStateIds(states)).toEqual([-3, 5]);
   });
 });
 
@@ -86,16 +93,33 @@ describe("resolveAllowedCrStateIds", () => {
     expect(resolveAllowedCrStateIds(undefined)).toBeUndefined();
   });
 
-  it("excludes New, Assess, and Authorize by label", () => {
+  it("offers every state the server's filters carry, Authorize included, and hides none itself", () => {
+    // What GET /projects/{id}/filters sends: New and Assess are left out by the
+    // server (nothing a customer can see is ever in them), Authorize is in.
     const states = [
-      { id: "-5", label: "New" },
-      { id: "-4", label: "Assess" },
       { id: "-3", label: "Authorize" },
       { id: "5", label: "Customer Approval" },
       { id: "-2", label: "Scheduled" },
       { id: "3", label: "Closed" },
     ];
-    expect(resolveAllowedCrStateIds(states)).toEqual([5, -2, 3]);
+    expect(resolveAllowedCrStateIds(states)).toEqual([-3, 5, -2, 3]);
+  });
+
+  it("does not second-guess the server: a New or Assess entry in the filters is passed on, not dropped", () => {
+    const states = [
+      { id: "-5", label: "New" },
+      { id: "-4", label: "Assess" },
+      { id: "5", label: "Customer Approval" },
+    ];
+    expect(resolveAllowedCrStateIds(states)).toEqual([-5, -4, 5]);
+  });
+
+  it("never sends an id that is not a number (JSON turns NaN into null, which the API reads as state 0)", () => {
+    const states = [
+      { id: "AUTHORIZE", label: "AUTHORIZE" },
+      { id: "5", label: "Customer Approval" },
+    ];
+    expect(resolveAllowedCrStateIds(states)).toEqual([5]);
   });
 });
 
@@ -178,9 +202,14 @@ describe("buildChangeRequestSearchRequest", () => {
     expect(req.filters?.stateKeys).toEqual([]);
   });
 
-  it("resolves outstanding state IDs from metadata when outstandingOnly is true", () => {
+  it("resolves outstanding state IDs from metadata when outstandingOnly is true, Authorize and Rollback among them", () => {
     const req = buildChangeRequestSearchRequest({}, "", true, false, false, allStates);
-    expect(req.filters?.stateKeys).toEqual([-5, -4, -3, 5, -2, -1, 0, 1]);
+    expect(req.filters?.stateKeys).toEqual([-3, 5, -2, -1, 0, 1, 2]);
+    // A change request waiting in Authorize after the customer proposed a new time
+    // is still outstanding for them, and so is one WSO2 is rolling back: neither
+    // is Closed, Canceled, New or Assess.
+    expect(req.filters?.stateKeys).toContain(-3);
+    expect(req.filters?.stateKeys).toContain(2);
   });
 
   it("resolves action-required state IDs from metadata", () => {
@@ -193,11 +222,48 @@ describe("buildChangeRequestSearchRequest", () => {
     expect(req.filters?.stateKeys).toEqual([-2]);
   });
 
-  it("excludes New, Assess, Authorize from default allowed states", () => {
+  it("asks for every state the filters carry by default, hiding none (a designated change request in Authorize must show)", () => {
     const req = buildChangeRequestSearchRequest({}, "", false, false, false, allStates);
-    expect(req.filters?.stateKeys).not.toContain(-5);
-    expect(req.filters?.stateKeys).not.toContain(-4);
-    expect(req.filters?.stateKeys).not.toContain(-3);
+    expect(req.filters?.stateKeys).toEqual([-5, -4, -3, 5, -2, -1, 0, 1, 2, 3, 4]);
+    expect(req.filters?.stateKeys).toContain(-3);
+  });
+
+  it("with the filters the server really sends (no New, no Assess) the default view is every state a customer's change request can be in", () => {
+    const offered = allStates.filter((s) => s.label !== "New" && s.label !== "Assess");
+    const req = buildChangeRequestSearchRequest({}, "", false, false, false, offered);
+    expect(req.filters?.stateKeys).toEqual([-3, 5, -2, -1, 0, 1, 2, 3, 4]);
+  });
+
+  it("lets the customer filter by Authorize and keeps only selections the filters offer", () => {
+    const offered = allStates.filter((s) => s.label !== "New" && s.label !== "Assess");
+    const authorizeOnly = buildChangeRequestSearchRequest({ stateIds: ["-3"] }, "", false, false, false, offered);
+    expect(authorizeOnly.filters?.stateKeys).toEqual([-3]);
+    // A stale selection of a state the filters no longer carry is dropped, not sent.
+    const stale = buildChangeRequestSearchRequest({ stateIds: ["-5", "5"] }, "", false, false, false, offered);
+    expect(stale.filters?.stateKeys).toEqual([5]);
+  });
+
+  it("with the filters the previous system's data source sends (no New, Assess or Authorize) no view ever names one of the three", () => {
+    // The page no longer hides New / Assess / Authorize itself: the API's filter options
+    // leave them out wherever a customer is never shown them (every change request is
+    // visible there except in those three states), so what the page asks for is what the
+    // server may return. The server applies the same line to a request that names or
+    // omits a state differently (entity-service, the section on the previous system's data source).
+    const offered = allStates.filter((s) => !["New", "Assess", "Authorize"].includes(s.label));
+    const hidden = [-5, -4, -3];
+    const views: Array<[string, boolean, boolean, boolean]> = [
+      ["default", false, false, false],
+      ["outstanding", true, false, false],
+      ["action required", false, true, false],
+      ["scheduled", false, false, true],
+    ];
+    for (const [name, outstanding, actionRequired, scheduled] of views) {
+      const req = buildChangeRequestSearchRequest({}, "", outstanding, actionRequired, scheduled, offered);
+      expect(req.filters?.stateKeys?.some((k) => hidden.includes(k)), name).toBe(false);
+    }
+    // A stale selection of Authorize (kept from a deployment that offered it) is dropped, not sent.
+    const stale = buildChangeRequestSearchRequest({ stateIds: ["-3", "5"] }, "", false, false, false, offered);
+    expect(stale.filters?.stateKeys).toEqual([5]);
   });
 
   it("sorts by updatedOn descending by default", () => {

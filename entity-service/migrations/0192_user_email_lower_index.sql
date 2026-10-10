@@ -1,0 +1,43 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- Performance fix for POST /projects/{id}/conversations/search (and every
+-- other LOWER("user".email) lookup in this codebase) timing out on a
+-- project with a real amount of conversation history.
+--
+-- Why: "user" has no index at all on email -- only user_pkey (id) and the
+-- unique user_name index. conversation_repo.go's conversationFromJoins does
+-- `LEFT JOIN "user" u ON LOWER(u.email) = LOWER(wi.created_by)`, and with no
+-- usable index, the planner's only option for that join condition is a
+-- nested loop that re-scans the ENTIRE "user" table once per matching
+-- conversation row. Confirmed empirically against a real project on
+-- staging with 900 conversations: EXPLAIN ANALYZE showed
+-- `Seq Scan on "user" u (loops=900)`, ~2.7 million row comparisons, and the
+-- conversation search's own COUNT query alone took 57s -- the paginated
+-- data query took 65s on top of that -- both far past this service's 10s
+-- per-request Timeout middleware. access_repo.go's UsersByEmail
+-- (`WHERE LOWER(email) = LOWER($1)`, called once per request for every
+-- non-internal caller via AccessService.ResolveScope) hits the identical
+-- missing-index gap; it was cheap to notice here only because "user" is
+-- still a small table (3,042 rows on staging) -- it will not stay cheap as
+-- the user base grows, and this same index fixes it too.
+--
+-- "user" is small enough (thousands, not hundreds of thousands, of rows)
+-- that a plain CREATE INDEX's brief exclusive lock is not a concern the way
+-- idx_work_item_type_updated_on's CONCURRENTLY build was for the much
+-- larger, more actively written work_item table -- no need for the
+-- single-statement-file/no-transaction dance that requires.
+CREATE INDEX IF NOT EXISTS idx_user_email_lower ON "user" (LOWER(email));

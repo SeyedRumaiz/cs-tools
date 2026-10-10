@@ -120,12 +120,59 @@ export async function createCaseViaGetHelp(
 
   await createCase.openViaGetHelp(project.id);
 
+  return fillAndSubmitCase(page, createCase, project, caseInput);
+}
+
+/**
+ * Raises a case without going through Get Help.
+ *
+ * Get Help opens the chat rather than this form when the project's assistant is
+ * enabled, and a non-admin cannot turn that off — so specs that merely need a
+ * case, rather than testing the Get Help route itself, navigate straight to the
+ * form.
+ *
+ * ⚠️ Creates a permanent record — `POST /cases` has no delete counterpart.
+ *
+ * @param page - Test page.
+ * @param project - Project to create the case under.
+ * @param caseInput - Case content to submit.
+ * @returns The created case's id and number.
+ */
+export async function createCaseDirect(
+  page: Page,
+  project: ProjectFixture,
+  caseInput: CaseInput,
+): Promise<CreatedCase> {
+  const createCase = new CaseCreatePage(page);
+
+  await createCase.openDirect(project.id);
+
+  return fillAndSubmitCase(page, createCase, project, caseInput);
+}
+
+/**
+ * Fills the case form and submits it, whichever route opened it.
+ *
+ * @param page - Test page.
+ * @param createCase - The open form.
+ * @param project - Project the case belongs to.
+ * @param caseInput - Case content.
+ * @returns The created case's id and number.
+ */
+async function fillAndSubmitCase(
+  page: Page,
+  createCase: CaseCreatePage,
+  project: ProjectFixture,
+  caseInput: CaseInput,
+): Promise<CreatedCase> {
   if (project.autoSelectsDeployment) {
     // The form must hide Deployment entirely for this project type and lock it
     // to primary production; asserting it stays hidden is the point, since a
     // regression here would silently widen deployment choice.
     await expect(createCase.deploymentSelect()).toBeHidden();
   } else {
+    // Both selects no-op when the form arrives pre-populated, which the
+    // chat-shared route does — see selectDeployment.
     await createCase.selectDeployment(project.deployment);
   }
   await createCase.selectProductVersion(project.productVersion);
@@ -135,6 +182,13 @@ export async function createCaseViaGetHelp(
   await createCase.selectSeverity(caseInput.severity);
 
   await expect(createCase.submitButton()).toBeEnabled();
+
+  // Read the title back from the form rather than assuming it is what was
+  // typed. On the chat-shared route the page generates a title from the case's
+  // content and can overwrite an entered one, so the value here — not
+  // caseInput.title — is what actually gets submitted, and is what the detail
+  // page will show.
+  const submittedTitle = await createCase.titleInput().inputValue();
 
   // Capture the created case's id from the response so the assertions below
   // prove the backend accepted the case, not just that the UI moved on.
@@ -160,8 +214,9 @@ export async function createCaseViaGetHelp(
 
   // The detail page must render the case we just submitted.
   await expect(
-    page.getByText(caseInput.title, { exact: false }).first(),
-  ).toBeVisible();
+    page.getByText(submittedTitle, { exact: false }).first(),
+    `the case detail should show the submitted title "${submittedTitle}"`,
+  ).toBeVisible({ timeout: 60_000 });
 
   return created;
 }

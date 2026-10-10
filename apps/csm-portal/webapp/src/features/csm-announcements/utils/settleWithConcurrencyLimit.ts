@@ -42,14 +42,22 @@ export const ANNOUNCEMENT_CASE_CREATE_CONCURRENCY_LIMIT = 5;
  * `Promise.allSettled` — one entry per item, in the original order — so a
  * caller already written against `Promise.allSettled` only needs to swap
  * the call itself, not its own result-handling logic.
+ *
+ * `onItemSettled`, when given, fires once per item as soon as it settles
+ * (fulfilled or rejected) — a running `completed` count, not tied to
+ * original order, so a caller can drive a live progress indicator instead of
+ * only learning the outcome once every item is done. Optional and additive:
+ * existing callers that don't pass it are unaffected.
  */
 export async function settleWithConcurrencyLimit<T, R>(
   items: T[],
   limit: number,
   fn: (item: T) => Promise<R>,
+  onItemSettled?: (completed: number, total: number) => void,
 ): Promise<PromiseSettledResult<R>[]> {
   const results: PromiseSettledResult<R>[] = new Array(items.length);
   let nextIndex = 0;
+  let completed = 0;
 
   async function worker(): Promise<void> {
     for (;;) {
@@ -60,6 +68,7 @@ export async function settleWithConcurrencyLimit<T, R>(
       } catch (error) {
         results[i] = { status: "rejected", reason: error };
       }
+      onItemSettled?.(++completed, items.length);
     }
   }
 

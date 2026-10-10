@@ -218,14 +218,14 @@ describe("generateCaseReportPdf", () => {
         kind: "field_change",
         actor: "Jane Doe",
         createdAt: "2026-07-01T00:30:00Z",
-        changes: [{ field: "state", fieldLabel: "State", previousValue: "New", newValue: "Work in Progress" }],
+        changes: [{ field: "state", fieldLabel: "State", previousValue: "open", newValue: "work_in_progress" }],
       },
     ];
     generateCaseReportPdf(baseCase(), [comment({ createdAt: "2026-07-01T01:00:00Z" })], audit);
     const joined = state.drawnStrings.join(" ");
     expect(joined).toContain("Activity (2 entries)");
-    expect(joined).toContain("State: New");
-    expect(joined).toContain("Work in Progress");
+    expect(joined).toContain("State: Open");
+    expect(joined).toContain("Work in progress");
     expect(joined).toContain("State change");
   });
 

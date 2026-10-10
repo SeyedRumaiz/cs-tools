@@ -28,4 +28,14 @@ describe("ListPagination", () => {
     render(<ListPagination totalRecords={100} page={1} rowsPerPage={10} onPageChange={() => {}} onRowsPerPageChange={() => {}} />);
     expect(screen.getByRole("button", { name: /next page/i })).toBeInTheDocument();
   });
+
+  it("keeps the rows-per-page selector visible when rowsPerPage exceeds totalRecords", () => {
+    render(<ListPagination totalRecords={17} page={1} rowsPerPage={25} onPageChange={() => {}} onRowsPerPageChange={() => {}} />);
+    expect(screen.getByLabelText(/rows per page/i)).toBeInTheDocument();
+  });
+
+  it("keeps the rows-per-page selector visible when there are no records at all", () => {
+    render(<ListPagination totalRecords={0} page={1} rowsPerPage={10} onPageChange={() => {}} onRowsPerPageChange={() => {}} />);
+    expect(screen.getByLabelText(/rows per page/i)).toBeInTheDocument();
+  });
 });

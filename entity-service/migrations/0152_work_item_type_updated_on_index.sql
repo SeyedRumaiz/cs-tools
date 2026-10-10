@@ -1,0 +1,49 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- work_item (migration 0021) got an index on every FK-shaped column
+-- (account_id, project_id, deployment_id, ...) but never on `type` or
+-- `updated_on` -- the two columns SearchCases actually filters and sorts by
+-- on almost every call (case_repo.go's dataQuery: `WHERE ... wi.type = ANY(...)
+-- ... ORDER BY wi.updated_on DESC NULLS LAST, wi.id`). Confirmed live as the
+-- root cause of /announcements/registry/search's slowness: that handler has
+-- to page through every announcement-type work_item to build its grouped
+-- result (see AnnouncementRegistryHandler.fetchAllMatchingCases in
+-- apps/csm-portal/backend), and with no index backing either the filter or
+-- the sort, each individual SearchCases call was measured taking ~1.1s on
+-- its own on a real deployment (a full sequential scan of work_item filtered
+-- by type, then a full sort of the matching set by updated_on, repeated on
+-- every page) -- not a round-trip/latency problem, a genuine per-query cost
+-- problem no amount of client-side concurrency can fix.
+--
+-- A composite (type, updated_on DESC) index lets Postgres satisfy both the
+-- filter and the sort from one index scan, with no separate Sort node and no
+-- scan of any work_item row that doesn't match the requested type(s) --
+-- also benefits every OTHER `type IN (...) ORDER BY updated_on` case search
+-- (the far more common "default case-like types, newest first" list view),
+-- not just the announcement registry.
+--
+-- CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so this
+-- file (like an ALTER TYPE ... ADD VALUE migration) stays the only statement
+-- in its own file, run without BEGIN/COMMIT -- see this repo's own
+-- Makefile's `migrate` target, which applies each file via a plain
+-- `psql -f` with no `-1`/`--single-transaction`, so this runs as its own
+-- autocommitted statement. CONCURRENTLY also avoids taking the exclusive
+-- lock a plain CREATE INDEX would hold against writes to work_item for the
+-- full build duration -- necessary given how large and actively written
+-- that table already is.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_work_item_type_updated_on
+    ON work_item (type, updated_on DESC);

@@ -68,6 +68,7 @@ import {
   shouldAddClassificationProductToOptions,
 } from "@features/support/utils/caseCreation";
 import { isCreatedCaseSecurityReport } from "@features/support/utils/support";
+import { isEligibleWatcher } from "@features/support/utils/watchList";
 import {
   refreshCaseQueriesAfterCreation,
   triggerPostCreationApiCalls,
@@ -278,7 +279,7 @@ export default function CreateCasePage(): JSX.Element {
   useEffect(() => {
     if (!projectContacts) return;
     const eligibleEmails = projectContacts
-      .filter((c) => c.isCsAdmin || c.isCsIntegrationUser || c.isPortalUser || !c.isSecurityContact)
+      .filter(isEligibleWatcher)
       .map((c) => c.email);
     const creatorEmail = currentUser?.email;
     const merged = creatorEmail
@@ -1176,7 +1177,7 @@ export default function CreateCasePage(): JSX.Element {
 
         let failedAttachmentNames: string[] = [];
         let attachmentsStillUploading = false;
-        if (!isSecurityReport && attachments.length > 0) {
+        if (attachments.length > 0) {
           setIsPreparingAttachments(true);
           const uploadPromise = uploadAttachments();
           const timedOut = await Promise.race([
@@ -1503,9 +1504,7 @@ export default function CreateCasePage(): JSX.Element {
               />
 
               <WatchListSection
-                contacts={(projectContacts ?? []).filter(
-                  (c) => c.isCsAdmin || c.isCsIntegrationUser || c.isPortalUser || !c.isSecurityContact,
-                )}
+                contacts={(projectContacts ?? []).filter(isEligibleWatcher)}
                 selectedEmails={watchList}
                 onChange={setWatchList}
                 isLoading={isContactsLoading}

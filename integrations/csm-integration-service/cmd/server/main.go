@@ -51,12 +51,23 @@ func main() {
 	accountHandler := handler.NewAccountHandler(entityClient)
 	projectHandler := handler.NewProjectHandler(entityClient)
 	vulnerabilityHandler := handler.NewVulnerabilityHandler(entityClient)
-	caseHandler := handler.NewCaseHandler(entityClient)
+	// UMT_INTEGRATION_ACTOR_EMAIL is this service's own trusted M2M actor
+	// identity, asserted on POST /cases/{id}/comments (CreateCaseComment)
+	// and POST /cases/{id}/tags (AddCaseTag), as entity-service's
+	// actorEmail field. It must match an entry in entity-service's
+	// M2M_TRUSTED_ACTOR_EMAILS allowlist or every call needing it 403s.
+	// Optional here at startup by design: an empty/unset value is a
+	// deploy-time misconfiguration, not something this service validates
+	// defensively -- the resulting entity-service 403 surfaces normally.
+	umtActorEmail := os.Getenv("UMT_INTEGRATION_ACTOR_EMAIL")
+	caseHandler := handler.NewCaseHandler(entityClient, umtActorEmail)
 	opportunityHandler := handler.NewOpportunityHandler(entityClient)
 	invoiceHandler := handler.NewInvoiceHandler(entityClient)
 	projectOpportunityLinkHandler := handler.NewProjectOpportunityLinkHandler(entityClient)
 	incidentHandler := handler.NewIncidentHandler(entityClient)
+	itServiceHandler := handler.NewITServiceHandler(entityClient)
 	alertIncidentMappingHandler := handler.NewAlertIncidentMappingHandler(entityClient)
+	cloudStatusHandler := handler.NewCloudStatusHandler(entityClient)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -70,17 +81,26 @@ func main() {
 	mux.HandleFunc("POST /projects/{id}/contacts/search", projectHandler.SearchProjectContacts)
 	mux.HandleFunc("PATCH /projects/{id}", projectHandler.UpdateProject)
 	mux.HandleFunc("POST /vulnerabilities/sync", vulnerabilityHandler.SyncProductVulnerabilities)
+	mux.HandleFunc("POST /cases/search", caseHandler.SearchCases)
 	mux.HandleFunc("PATCH /cases/{id}", caseHandler.PatchCase)
 	mux.HandleFunc("POST /cases/{id}/comments", caseHandler.CreateCaseComment)
+	mux.HandleFunc("POST /cases/{id}/tags", caseHandler.AddCaseTag)
 	mux.HandleFunc("POST /opportunities/search", opportunityHandler.SearchOpportunities)
 	mux.HandleFunc("GET /opportunities/{id}", opportunityHandler.GetOpportunity)
 	mux.HandleFunc("POST /invoices/search", invoiceHandler.SearchInvoices)
 	mux.HandleFunc("GET /invoices/{id}", invoiceHandler.GetInvoice)
 	mux.HandleFunc("POST /project-opportunity-links/search", projectOpportunityLinkHandler.SearchProjectOpportunityLinks)
 	mux.HandleFunc("POST /incidents", incidentHandler.CreateIncident)
+	mux.HandleFunc("PATCH /incidents/{id}", incidentHandler.PatchIncident)
 	mux.HandleFunc("POST /incidents/search", incidentHandler.SearchIncidents)
+	mux.HandleFunc("POST /services/search", itServiceHandler.SearchITServices)
 	mux.HandleFunc("POST /alert-incident-mappings", alertIncidentMappingHandler.CreateAlertIncidentMapping)
 	mux.HandleFunc("POST /alert-incident-mappings/lookup", alertIncidentMappingHandler.LookupAlertIncidentMappings)
+	mux.HandleFunc("GET /cloud-status/monitors", cloudStatusHandler.GetMonitors)
+	mux.HandleFunc("GET /cloud-status/incidents", cloudStatusHandler.GetIncidents)
+	mux.HandleFunc("GET /cloud-status/availabilities", cloudStatusHandler.GetAvailabilities)
+	mux.HandleFunc("GET /cloud-status/availability-history", cloudStatusHandler.GetAvailabilityHistory)
+	mux.HandleFunc("GET /cloud-status/incidents/{id}", cloudStatusHandler.GetIncidentDetail)
 
 	addr := ":" + envOrDefault("PORT", "8080")
 

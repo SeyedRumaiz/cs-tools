@@ -17,6 +17,8 @@
 package dto
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/entity"
@@ -72,6 +74,29 @@ func TestBuildEntityUpdateCaseRequest_StateKeyTranslates(t *testing.T) {
 	}
 }
 
+// TestBuildEntityUpdateCaseRequest_ForwardsResolutionFields is the regression
+// test for a real, reported bug: closing a case failed with "resolutionCode,
+// cause, and closeNotes are required when state is closed or
+// solution_proposed" because this DTO had no fields for them at all -- the
+// webapp had nowhere to send them even once it started asking. Now that the
+// close dialog collects them, this layer must forward them unmodified.
+func TestBuildEntityUpdateCaseRequest_ForwardsResolutionFields(t *testing.T) {
+	state := 3 // closed
+	code, cause, notes := "SOLVED_WORKAROUND_PROVIDED", "PRODUCT_BUG", "Fixed via workaround."
+	got := BuildEntityUpdateCaseRequest("case-1", UpdateCaseRequest{
+		StateKey: &state, ResolutionCode: &code, Cause: &cause, CloseNotes: &notes,
+	})
+	if got.ResolutionCode == nil || *got.ResolutionCode != code {
+		t.Errorf("ResolutionCode = %v, want %q", got.ResolutionCode, code)
+	}
+	if got.Cause == nil || *got.Cause != cause {
+		t.Errorf("Cause = %v, want %q", got.Cause, cause)
+	}
+	if got.CloseNotes == nil || *got.CloseNotes != notes {
+		t.Errorf("CloseNotes = %v, want %q", got.CloseNotes, notes)
+	}
+}
+
 // TestBuildEntitySearchChangeRequestsRequest_ScopesProjectAndTranslatesKeys
 // verifies the change-request search translator forces project scope from
 // the path and translates stateKeys/impactKeys via the numeric-id mirror
@@ -89,6 +114,92 @@ func TestBuildEntitySearchChangeRequestsRequest_ScopesProjectAndTranslatesKeys(t
 	}
 	if len(got.Filters.Impacts) != 1 || got.Filters.Impacts[0] != "high" {
 		t.Fatalf("Impacts = %v, want [high]", got.Filters.Impacts)
+	}
+}
+
+// TestBuildEntitySearchChangeRequestsRequest_InventsNoStateFilter pins that the
+// change-request search no longer narrows by state on its own. Which change
+// requests a customer may see is entity-service's decision (designation, not
+// state): a state list invented here hid a designated change request that sat in
+// Authorize after the customer proposed a new time, and showed none of the others
+// the customer was never asked about only because the list left them out. The
+// translator now sends exactly what the caller asked for.
+func TestBuildEntitySearchChangeRequestsRequest_InventsNoStateFilter(t *testing.T) {
+	for name, keys := range map[string][]int{
+		"no keys":     nil,
+		"empty keys":  {},
+		"unknown ids": {99, 1000},
+	} {
+		got := BuildEntitySearchChangeRequestsRequest("proj-9", ChangeRequestSearchRequest{Filters: ChangeRequestSearchFilters{StateKeys: keys}})
+		if len(got.Filters.States) != 0 {
+			t.Errorf("%s: States = %v, want none (no state filter)", name, got.Filters.States)
+		}
+	}
+}
+
+// A requested subset is translated as asked, Authorize included, in the order
+// given: nothing is dropped and nothing is added.
+func TestBuildEntitySearchChangeRequestsRequest_TranslatesEveryStateIDItWasGiven(t *testing.T) {
+	got := BuildEntitySearchChangeRequestsRequest("proj-9", ChangeRequestSearchRequest{Filters: ChangeRequestSearchFilters{StateKeys: []int{5, -3, 3}}})
+	if strings.Join(got.Filters.States, ",") != "customer_approval,authorize,closed" {
+		t.Errorf("States = %v, want [customer_approval authorize closed]", got.Filters.States)
+	}
+
+	// Every state of the vocabulary round-trips: the id the response carries is
+	// the id a search accepts.
+	for enum, id := range crStateIDs {
+		n, err := strconv.Atoi(id)
+		if err != nil {
+			t.Fatalf("state %q has a non-numeric id %q", enum, id)
+		}
+		got := BuildEntitySearchChangeRequestsRequest("p", ChangeRequestSearchRequest{Filters: ChangeRequestSearchFilters{StateKeys: []int{n}}})
+		if len(got.Filters.States) != 1 || got.Filters.States[0] != enum {
+			t.Errorf("state id %d -> %v, want [%s]", n, got.Filters.States, enum)
+		}
+	}
+}
+
+// New and Assess are named in a search as what they are. A well-formed question
+// with the answer "none" must not decay into "no state filter" (which would be
+// every change request the customer may see): the ids are kept for the request
+// even though no response carries them.
+func TestBuildEntitySearchChangeRequestsRequest_NewAndAssessStayStatesNotNoFilter(t *testing.T) {
+	got := BuildEntitySearchChangeRequestsRequest("proj-9", ChangeRequestSearchRequest{Filters: ChangeRequestSearchFilters{StateKeys: []int{-5, -4}}})
+	if strings.Join(got.Filters.States, ",") != "new,assess" {
+		t.Errorf("States = %v, want [new assess]", got.Filters.States)
+	}
+}
+
+// The state vocabulary a customer is shown includes Authorize (a change request
+// waits there after the customer proposed a new time) and not New or Assess, which
+// no visible change request is ever in.
+func TestChangeRequestStateVocabulary_OffersAuthorizeButNotNewOrAssess(t *testing.T) {
+	if id, label := crStateIDs["authorize"], crStateLabels["authorize"]; id != "-3" || label != "Authorize" {
+		t.Errorf("authorize = {%q %q}, want {-3 Authorize}", id, label)
+	}
+	for _, state := range []string{"new", "assess"} {
+		if _, ok := crStateIDs[state]; ok {
+			t.Errorf("%q has a response id: no change request visible to a customer is ever in it", state)
+		}
+		if _, ok := crStateLabels[state]; ok {
+			t.Errorf("%q has a response label", state)
+		}
+	}
+	// Every state with a response id has a label and the reverse.
+	for state := range crStateIDs {
+		if crStateLabels[state] == "" {
+			t.Errorf("state %q has an id but no label", state)
+		}
+	}
+	for state := range crStateLabels {
+		if crStateIDs[state] == "" {
+			t.Errorf("state %q has a label but no id", state)
+		}
+	}
+	// The state a response shows for a change request waiting in Authorize.
+	authorize := "authorize"
+	if got := crStateRef(&authorize); got == nil || got.ID != "-3" || got.Label != "Authorize" {
+		t.Errorf("crStateRef(authorize) = %+v, want {-3 Authorize}", got)
 	}
 }
 

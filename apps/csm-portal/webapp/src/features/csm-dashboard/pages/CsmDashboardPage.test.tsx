@@ -24,6 +24,10 @@ import { useDashboardList } from "@features/csm-dashboard/api/useDashboardList";
 import { useTeams } from "@features/csm-dashboard/api/useTeams";
 import { useCurrentUser } from "@context/current-user/CurrentUserContext";
 import type { BeTeam } from "@api/backend/types";
+import {
+  DASHBOARD_SELECTION_STORAGE_KEY,
+  readStoredDashboardSelection,
+} from "@features/csm-dashboard/utils/dashboardSelectionStorage";
 
 /** Surfaces the router's current pathname for assertions — the
  * `MemoryRouter`'s history is in-memory, not reflected on `window.location`,
@@ -194,6 +198,7 @@ function mockTeams(
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   mockedUseDashboardList.mockReset();
   mockedUseCurrentUser.mockReset();
   mockedUseTeams.mockReset();
@@ -694,6 +699,150 @@ describe("CsmDashboardPage", () => {
         "agents_pilot",
       );
       expect(currentPath()).toBe("/dashboard/agents_pilot");
+    });
+  });
+
+  describe("remembered dashboard and team", () => {
+    const TEAM_LIST = [
+      { id: "agents_pilot", displayName: "Engineer overview", isDefault: true, isTeamBased: false },
+      { id: "iam", displayName: "IAM CS", isDefault: false, isTeamBased: false },
+      { id: "team_performance", displayName: "Team performance", isDefault: false, isTeamBased: true },
+    ];
+    const TEAMS = [
+      { id: "team_a", name: "Team A", family: "cre-abt" },
+      { id: "team_b", name: "Team B", family: "cre-abt" },
+    ] as BeTeam[];
+
+    function store(value: unknown): void {
+      window.localStorage.setItem(
+        DASHBOARD_SELECTION_STORAGE_KEY,
+        typeof value === "string" ? value : JSON.stringify(value),
+      );
+    }
+
+    it("persists the dashboard picked from the switcher", () => {
+      mockListResult({ data: DASHBOARD_LIST, isLoading: false });
+
+      renderAt("/dashboard");
+      fireEvent.mouseDown(screen.getByRole("combobox"));
+      fireEvent.click(within(screen.getByRole("listbox")).getByText("IAM CS"));
+
+      expect(readStoredDashboardSelection()).toEqual({
+        dashboardId: "iam",
+        teamId: undefined,
+      });
+    });
+
+    it("persists the team picked from the team selector", () => {
+      mockListResult({ data: TEAM_LIST, isLoading: false });
+      mockTeams(TEAMS);
+
+      renderAt("/dashboard/team_performance");
+      fireEvent.mouseDown(screen.getAllByRole("combobox")[1]);
+      fireEvent.click(within(screen.getByRole("listbox")).getByText("Team B"));
+
+      expect(readStoredDashboardSelection()).toEqual({
+        dashboardId: "team_performance",
+        teamId: "team_b",
+      });
+    });
+
+    it("restores the remembered dashboard on a bare /dashboard instead of the default", () => {
+      mockListResult({ data: DASHBOARD_LIST, isLoading: false });
+      store({ dashboardId: "iam" });
+
+      renderAt("/dashboard");
+
+      expect(screen.getByTestId("agents-landing-pilot")).toHaveTextContent("iam");
+      expect(currentPath()).toBe("/dashboard/iam");
+    });
+
+    it("restores the remembered team for the remembered team-based dashboard", () => {
+      mockListResult({ data: TEAM_LIST, isLoading: false });
+      mockTeams(TEAMS);
+      store({ dashboardId: "team_performance", teamId: "team_b" });
+
+      renderAt("/dashboard");
+
+      expect(screen.getByTestId("agents-landing-pilot")).toHaveTextContent(
+        "team_performance",
+      );
+      expect(screen.getByTestId("agents-landing-pilot")).toHaveAttribute(
+        "data-team-label",
+        "Team B",
+      );
+    });
+
+    it("does not override a dashboard named by the URL", () => {
+      mockListResult({ data: DASHBOARD_LIST, isLoading: false });
+      store({ dashboardId: "iam" });
+
+      renderAt("/dashboard/operations");
+
+      expect(screen.getByTestId("agents-landing-pilot")).toHaveTextContent("operations");
+    });
+
+    it("does not override a team named by the URL", () => {
+      mockListResult({ data: TEAM_LIST, isLoading: false });
+      mockTeams(TEAMS);
+      store({ dashboardId: "team_performance", teamId: "team_b" });
+
+      renderAt("/dashboard/team_performance/team_a");
+
+      expect(screen.getByTestId("agents-landing-pilot")).toHaveAttribute(
+        "data-team-label",
+        "Team A",
+      );
+    });
+
+    it("falls back to the default when the remembered dashboard no longer exists", () => {
+      mockListResult({ data: DASHBOARD_LIST, isLoading: false });
+      store({ dashboardId: "retired_dashboard" });
+
+      renderAt("/dashboard");
+
+      expect(screen.getByTestId("agents-landing-pilot")).toHaveTextContent("agents_pilot");
+    });
+
+    it("falls back to the default team when the remembered team no longer exists", () => {
+      mockListResult({ data: TEAM_LIST, isLoading: false });
+      mockTeams(TEAMS);
+      store({ dashboardId: "team_performance", teamId: "gone_team" });
+
+      renderAt("/dashboard");
+
+      // No home team, so the existing default is "All ABTs".
+      expect(screen.getByTestId("agents-landing-pilot")).toHaveAttribute(
+        "data-team-label",
+        "All ABTs",
+      );
+    });
+
+    it("falls back to the default when the stored value is malformed", () => {
+      mockListResult({ data: DASHBOARD_LIST, isLoading: false });
+      store("{not json");
+
+      renderAt("/dashboard");
+
+      expect(screen.getByTestId("agents-landing-pilot")).toHaveTextContent("agents_pilot");
+    });
+
+    it("still renders when localStorage throws", () => {
+      mockListResult({ data: DASHBOARD_LIST, isLoading: false });
+      const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new Error("blocked");
+      });
+      const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new Error("blocked");
+      });
+
+      renderAt("/dashboard");
+      fireEvent.mouseDown(screen.getByRole("combobox"));
+      fireEvent.click(within(screen.getByRole("listbox")).getByText("IAM CS"));
+
+      expect(screen.getByTestId("agents-landing-pilot")).toHaveTextContent("iam");
+      getItem.mockRestore();
+      setItem.mockRestore();
     });
   });
 });

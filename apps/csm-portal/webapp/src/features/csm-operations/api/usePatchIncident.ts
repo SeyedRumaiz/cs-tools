@@ -26,6 +26,16 @@ import type {
   BeUpdateIncidentPayload,
 } from "@api/backend/types";
 
+/**
+ * entity-service's incident flows (the report task on In Progress; the report,
+ * alert tasks and problem on Resolved) run in a background drain every 5s,
+ * after this PATCH has returned. The detail and its tasks are fetched again
+ * once that has had time to happen, so the new task or problem shows on the
+ * Related tab without a reload.
+ */
+const INCIDENT_FLOW_SETTLE_MS = 7_000;
+const STATES_WITH_FLOWS = new Set(["IN_PROGRESS", "RESOLVED"]);
+
 export interface PatchIncidentInput {
   id: string;
   patch: BeUpdateIncidentPayload;
@@ -57,6 +67,19 @@ export function usePatchIncident(): UseMutationResult<
       void queryClient.invalidateQueries({
         queryKey: [ApiQueryKeys.INCIDENTS],
       });
+      void queryClient.invalidateQueries({
+        queryKey: [ApiQueryKeys.CSM_INCIDENT_TASKS, variables.id],
+      });
+      if (variables.patch.state && STATES_WITH_FLOWS.has(variables.patch.state)) {
+        setTimeout(() => {
+          void queryClient.invalidateQueries({
+            queryKey: [ApiQueryKeys.INCIDENT_DETAILS, variables.id],
+          });
+          void queryClient.invalidateQueries({
+            queryKey: [ApiQueryKeys.CSM_INCIDENT_TASKS, variables.id],
+          });
+        }, INCIDENT_FLOW_SETTLE_MS);
+      }
     },
   });
 }

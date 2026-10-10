@@ -1,0 +1,25 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- Records the environment (e.g. "Staging", "Production") an incident's
+-- source alert fired against, from alert-core-service's own alert.environment
+-- field, so it's a structured column instead of living only in the incident
+-- title/subject text. Maps to ServiceNow's own custom incident.u_enviroment
+-- field (max_length 40, per its sys_dictionary entry -- name kept as-is,
+-- misspelling included, to match ServiceNow verbatim). This column is
+-- populated by postgres-servicenow-dual-write's createIncidentSNFirst,
+-- matching the same convention already used for correlation_id.
+ALTER TABLE incident ADD COLUMN IF NOT EXISTS environment VARCHAR(40);

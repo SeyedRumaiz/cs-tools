@@ -84,6 +84,26 @@ func TestCreateProblem(t *testing.T) {
 		}
 	})
 
+	t.Run("accepts an optional description and forwards it unchanged", func(t *testing.T) {
+		const reqPayload = `{"subject":"Recurring outage","description":"<p>Started after the 14:00 deploy.</p>"}`
+		var capturedBody []byte
+		client := &mockEntityProblemClient{
+			createProblemFn: func(_ context.Context, body []byte) ([]byte, error) {
+				capturedBody = body
+				return []byte(`{"id":"` + testProblemID + `","number":"PRB0001","subject":"Recurring outage","state":"new"}`), nil
+			},
+		}
+		h := NewProblemHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPost, "/problems", strings.NewReader(reqPayload)))
+		w := httptest.NewRecorder()
+		h.CreateProblem(w, r)
+
+		assertStatus(t, w, http.StatusCreated)
+		if string(capturedBody) != reqPayload {
+			t.Errorf("upstream received body %q, want %q", capturedBody, reqPayload)
+		}
+	})
+
 	t.Run("upstream errors are mapped correctly", func(t *testing.T) {
 		for _, tc := range upstreamErrorsGeneric("Failed to create problem.") {
 			t.Run(tc.name, func(t *testing.T) {

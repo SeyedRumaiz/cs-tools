@@ -521,3 +521,37 @@ describe("hasTeamPlaceholder", () => {
     expect(hasTeamPlaceholder({ states: ["open"], severities: ["critical"] })).toBe(false);
   });
 });
+
+describe("mixed arrays (field predicates alongside another entry shape)", () => {
+  const mixed = {
+    filters: [
+      { preset: "activeCaseStates" },
+      { field: "creTeam", op: "in", values: [CURRENT_TEAM_PLACEHOLDER] },
+      { field: "sreTeam", op: "in", values: [CURRENT_TEAM_PLACEHOLDER] },
+    ],
+  };
+
+  it("resolves the team predicates and leaves the other entries untouched", () => {
+    expect(resolveTeamPlaceholder(mixed, "cre-group", "sre-group")).toEqual({
+      filters: [
+        { preset: "activeCaseStates" },
+        { field: "creTeam", op: "in", values: ["cre-group"] },
+        { field: "sreTeam", op: "in", values: ["sre-group"] },
+      ],
+    });
+  });
+
+  it("still drops a predicate with no replacement (fail-open) and keeps the other entries", () => {
+    expect(resolveTeamPlaceholder(mixed, undefined, "sre-group")).toEqual({
+      filters: [
+        { preset: "activeCaseStates" },
+        { field: "sreTeam", op: "in", values: ["sre-group"] },
+      ],
+    });
+  });
+
+  it("is detected by hasTeamPlaceholder, and not when only other entries are present", () => {
+    expect(hasTeamPlaceholder(mixed)).toBe(true);
+    expect(hasTeamPlaceholder({ filters: [{ preset: "activeCaseStates" }] })).toBe(false);
+  });
+});

@@ -179,3 +179,93 @@ describe("EditIncidentDialog advanced-linking pickers", () => {
     expect(useSearchProblemsForSelectMock).toHaveBeenCalledWith("", true, undefined);
   });
 });
+
+describe("EditIncidentDialog optional subcategory", () => {
+  const CLASSIFIED: BeIncidentDetail = {
+    ...BASE_INCIDENT,
+    state: "IN_PROGRESS",
+    category: "SECURITY",
+    subcategory: null,
+    contactType: "EMAIL",
+    impact: "LOW",
+    urgency: "LOW",
+  };
+  const saveButton = (): HTMLElement => screen.getByRole("button", { name: /^save$/i });
+  const pick = (combobox: RegExp, option: string): void => {
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: combobox }));
+    fireEvent.click(within(screen.getByRole("listbox")).getByRole("option", { name: option }));
+  };
+
+  it("lets an incident with no subcategory be edited and saved without picking one", () => {
+    const onSave = vi.fn();
+    render(<EditIncidentDialog incident={CLASSIFIED} isSaving={false} onClose={vi.fn()} onSave={onSave} />);
+
+    pick(/^impact$/i, "High");
+    expect(saveButton()).not.toBeDisabled();
+    fireEvent.click(saveButton());
+
+    expect(onSave).toHaveBeenCalledWith({ impact: "HIGH" });
+  });
+
+  it("lets a category be set on an incident that had no subcategory, without picking one", () => {
+    const onSave = vi.fn();
+    render(<EditIncidentDialog incident={CLASSIFIED} isSaving={false} onClose={vi.fn()} onSave={onSave} />);
+
+    pick(/^category$/i, "Inquiry / Help");
+    fireEvent.click(saveButton());
+
+    expect(onSave).toHaveBeenCalledWith({ category: "INQUIRY" });
+  });
+
+  it("still requires a new subcategory when the category changes on an incident that has one", () => {
+    // PATCH can't clear a subcategory, so dropping it silently would leave
+    // PHISHING (a Security subcategory) paired with the new category.
+    const onSave = vi.fn();
+    render(
+      <EditIncidentDialog
+        incident={{ ...CLASSIFIED, subcategory: "PHISHING" }}
+        isSaving={false}
+        onClose={vi.fn()}
+        onSave={onSave}
+      />,
+    );
+
+    pick(/^category$/i, "Service Interruption");
+    expect(saveButton()).toBeDisabled();
+    expect(screen.getByText("Required when the category changes.")).toBeInTheDocument();
+
+    pick(/^subcategory$/i, "Slowness");
+    expect(saveButton()).not.toBeDisabled();
+    fireEvent.click(saveButton());
+    expect(onSave).toHaveBeenCalledWith({ category: "SERVICE_INTERRUPTION", subcategory: "SLOWNESS" });
+  });
+});
+
+describe("EditIncidentDialog channel", () => {
+  const WITH_CHANNEL: BeIncidentDetail = {
+    ...BASE_INCIDENT,
+    state: "IN_PROGRESS",
+    category: "SECURITY",
+    subcategory: "PHISHING",
+    contactType: "PHONE",
+    impact: "LOW",
+    urgency: "LOW",
+  };
+
+  it("shows the incident's current value under a Channel label", () => {
+    render(<EditIncidentDialog incident={WITH_CHANNEL} isSaving={false} onClose={vi.fn()} onSave={vi.fn()} />);
+    expect(screen.getByRole("combobox", { name: /^channel$/i })).toHaveTextContent("Phone");
+    expect(screen.queryByText(/contact type/i)).not.toBeInTheDocument();
+  });
+
+  it("sends a changed channel as the wire field contactType, and only that", () => {
+    const onSave = vi.fn();
+    render(<EditIncidentDialog incident={WITH_CHANNEL} isSaving={false} onClose={vi.fn()} onSave={onSave} />);
+
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /^channel$/i }));
+    fireEvent.click(within(screen.getByRole("listbox")).getByRole("option", { name: "Chat" }));
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(onSave).toHaveBeenCalledWith({ contactType: "CHAT" });
+  });
+});

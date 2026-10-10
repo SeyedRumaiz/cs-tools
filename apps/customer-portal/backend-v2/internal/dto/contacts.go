@@ -53,6 +53,11 @@ type Contact struct {
 	IsSecurityContact   bool            `json:"isSecurityContact"`
 	MembershipStatus    *string         `json:"membershipStatus,omitempty"`
 	Account             *ContactAccount `json:"account,omitempty"`
+	// CanResendInvitation is set only on database-backed rows
+	// (CSM_MIGRATION_PORTAL_CONTACTS_ENABLED) whose invitation is still
+	// outstanding, so the webapp shows the resend action exactly when
+	// POST .../resend-invitation can succeed. It is never set before cutover.
+	CanResendInvitation bool `json:"canResendInvitation,omitempty"`
 }
 
 // MapContact builds the portal response from a usermanagement.Contact.
@@ -186,3 +191,20 @@ type ContactValidationResponse struct {
 	Message        string   `json:"message"`
 	ContactDetails *Contact `json:"contactDetails,omitempty"`
 }
+
+// The messages POST /projects/{id}/contacts/validate answers with. They are
+// part of the webapp's contract: it shows them as they are, so both the
+// pre-cutover and the entity-service path use exactly these.
+const (
+	// ContactValidationMsgExistingContact accompanies a 200 whose
+	// contactDetails carry the Salesforce contact the invitation would reuse.
+	ContactValidationMsgExistingContact = "Contact is valid but already exists in the project!"
+	// ContactValidationMsgNewContact accompanies a 200 for a new address.
+	ContactValidationMsgNewContact = "Project contact is valid and can be added to the project!"
+	// ContactValidationMsgConflict is the 409 message.
+	ContactValidationMsgConflict = "Contact with the provided email already exists in the project!"
+	// ContactValidationMsgInvalidEmail is the pre-cutover onboarding
+	// service's own wording for an address that is not one.
+	ContactValidationMsgInvalidEmail = "We're sorry, but the email address you entered for your contact information is invalid. " +
+		"Please provide a valid email address to proceed."
+)

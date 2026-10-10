@@ -795,3 +795,35 @@ func TestSNProjectService_GetProjectByID_EmptyOptionalDates(t *testing.T) {
 		t.Errorf("GetProjectByID Account.DeactivationDate = %v, want nil for empty upstream deactivationDate", *got.Account.DeactivationDate)
 	}
 }
+
+// TestIsProjectContractEnded mirrors the exact boundary semantics of
+// apps/customer-portal/webapp/src/utils/permission.ts's own
+// isProjectContractEnded (end-of-day UTC comparison, strictly after) — the
+// two must agree, or a project the customer portal blocks as contract-ended
+// could still be treated as eligible for an EOL announcement audience by
+// fetchEligibleProjectIDs, or vice versa.
+func TestIsProjectContractEnded(t *testing.T) {
+	day := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		endDate *time.Time
+		now     time.Time
+		want    bool
+	}{
+		{"nil end date is never ended", nil, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), false},
+		{"now before end date's day", &day, time.Date(2026, 6, 14, 23, 0, 0, 0, time.UTC), false},
+		{"now during end date's own day", &day, time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC), false},
+		{"now at exact end-of-day instant is not yet ended", &day, time.Date(2026, 6, 15, 23, 59, 59, 999000000, time.UTC), false},
+		{"now one millisecond after end-of-day is ended", &day, time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC), true},
+		{"now well after end date", &day, time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isProjectContractEnded(tt.endDate, tt.now); got != tt.want {
+				t.Errorf("isProjectContractEnded(%v, %v) = %v, want %v", tt.endDate, tt.now, got, tt.want)
+			}
+		})
+	}
+}

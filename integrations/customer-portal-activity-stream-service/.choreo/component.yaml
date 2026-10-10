@@ -16,14 +16,14 @@ endpoints:
     type: REST
     networkVisibilities:
       - Public
-    schemaFilePath: openapi-stream.yaml
+    schemaFilePath: openapi.yaml
 
   # Health check endpoint on the same process but separate listener on
   # port 8080. Choreo's liveness probe targets this. SecurityHeaders +
   # CORS + CorrelationID + Logger middleware; Auth is NOT applied to
   # /health (see middleware.Auth).
   - name: customer-portal-activity-stream-service-health
-    displayName: Customer Portal Activity Stream Service Health
+    displayName: Customer Portal Case Activity Stream
     service:
       basePath: /
       port: 8080

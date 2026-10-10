@@ -20,6 +20,7 @@ import useNormalizedIdParam from "@hooks/useNormalizedIdParam";
 import { useLoader } from "@context/linear-loader/LoaderContext";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import useGetCaseDetails from "@features/support/api/useGetCaseDetails";
+import { useCaseActivityStream } from "@features/support/api/useCaseActivityStream";
 import CaseDetailsContent from "@case-details-details/CaseDetailsContent";
 import {
   isAnnouncementType,
@@ -47,6 +48,8 @@ export default function CaseDetailsPage(): JSX.Element {
     projectId || "",
     caseId || "",
   );
+
+  useCaseActivityStream(caseId);
 
   const isEngagementRoute = location.pathname.includes("/engagements/");
   const isSecurityReportAnalysisRoute = location.pathname.includes(

@@ -65,6 +65,9 @@ vi.mock("@hooks/useLogger", () => ({
 }));
 
 const { useCaseActivityStream } = await import("./useCaseActivityStream");
+const { CaseTabVisibilityProvider } = await import(
+  "@context/case-tabs/CaseTabVisibilityContext"
+);
 
 const invalidateQueriesMock = vi.fn();
 
@@ -92,6 +95,7 @@ describe("useCaseActivityStream", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it("does not connect when caseId is unset", async () => {
@@ -212,6 +216,42 @@ describe("useCaseActivityStream", () => {
     randomSpy.mockRestore();
   });
 
+  it("falls back to a slow idle retry after sustained consecutive failures, instead of hammering the backend every 30s forever", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // Math.random() fixed at 1 makes reconnectDelay's jitter deterministic.
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1);
+
+    renderHook(() => useCaseActivityStream("case-1"), { wrapper });
+    await waitFor(() => expect(mockInstances).toHaveLength(1));
+
+    // 10 consecutive failures (no successful "open" in between) — delay
+    // grows 3s/6s/12s/24s then caps at 30s for the remainder, same as the
+    // exponential-backoff test above, just carried further.
+    const backoffDelaysMs = [3_000, 6_000, 12_000, 24_000, 30_000, 30_000, 30_000, 30_000, 30_000, 30_000];
+    for (const delay of backoffDelaysMs) {
+      act(() => mockInstances[mockInstances.length - 1].dispatchEvent(new Event("error")));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(delay);
+      });
+    }
+    expect(mockInstances).toHaveLength(11);
+
+    // The 11th consecutive failure (attempt index 10, past MAX_BACKOFF_ATTEMPTS)
+    // must NOT reconnect after another 30s — only after the slow idle delay.
+    act(() => mockInstances[mockInstances.length - 1].dispatchEvent(new Event("error")));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(mockInstances).toHaveLength(11);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60_000 - 30_000);
+    });
+    await waitFor(() => expect(mockInstances).toHaveLength(12));
+
+    randomSpy.mockRestore();
+  });
+
   it("closes the connection on unmount", async () => {
     const { unmount } = renderHook(() => useCaseActivityStream("case-1"), { wrapper });
     await waitFor(() => expect(mockInstances).toHaveLength(1));
@@ -220,5 +260,103 @@ describe("useCaseActivityStream", () => {
     unmount();
 
     expect(source.closed).toBe(true);
+  });
+
+  describe("visibility", () => {
+    function setDocumentVisibility(state: "visible" | "hidden") {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => state,
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }
+
+    // A stable QueryClient (unlike `wrapper` above, which builds a new one on every
+    // render) so a re-render caused by a visibility flip does not itself re-run
+    // the effect.
+    function renderVisibilityHook(initialVisible: boolean) {
+      let tabVisible = initialVisible;
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      queryClient.invalidateQueries = invalidateQueriesMock.mockImplementation(() =>
+        Promise.resolve(),
+      );
+      const result = renderHook(() => useCaseActivityStream("case-1"), {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={queryClient}>
+            <CaseTabVisibilityProvider isVisible={tabVisible}>{children}</CaseTabVisibilityProvider>
+          </QueryClientProvider>
+        ),
+      });
+      return {
+        ...result,
+        setTabVisible: (visible: boolean) => {
+          tabVisible = visible;
+          result.rerender();
+        },
+      };
+    }
+
+    afterEach(() => {
+      setDocumentVisibility("visible");
+    });
+
+    it("does not connect while its case tab is not the active one", async () => {
+      renderVisibilityHook(false);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockInstances).toHaveLength(0);
+      expect(invalidateQueriesMock).not.toHaveBeenCalled();
+    });
+
+    it("does not connect while the browser tab is hidden", async () => {
+      setDocumentVisibility("hidden");
+      renderVisibilityHook(true);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockInstances).toHaveLength(0);
+    });
+
+    it("closes when the browser tab is hidden, and reconnects with one invalidation when it is shown again", async () => {
+      renderVisibilityHook(true);
+      await waitFor(() => expect(mockInstances).toHaveLength(1));
+      expect(invalidateQueriesMock).not.toHaveBeenCalled();
+
+      act(() => setDocumentVisibility("hidden"));
+      expect(mockInstances[0].closed).toBe(true);
+      expect(mockInstances).toHaveLength(1);
+
+      act(() => setDocumentVisibility("visible"));
+      await waitFor(() => expect(mockInstances).toHaveLength(2));
+      expect(mockInstances[1].closed).toBe(false);
+      // Comments + activities, once: events emitted while closed were not delivered.
+      expect(invalidateQueriesMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("closes when its case tab is deactivated, and reconnects when it is activated again", async () => {
+      const { setTabVisible } = renderVisibilityHook(true);
+      await waitFor(() => expect(mockInstances).toHaveLength(1));
+
+      act(() => setTabVisible(false));
+      expect(mockInstances[0].closed).toBe(true);
+      expect(invalidateQueriesMock).not.toHaveBeenCalled();
+
+      act(() => setTabVisible(true));
+      await waitFor(() => expect(mockInstances).toHaveLength(2));
+      expect(invalidateQueriesMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("cancels a pending reconnect when it goes inactive", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      renderVisibilityHook(true);
+      await waitFor(() => expect(mockInstances).toHaveLength(1));
+
+      act(() => mockInstances[0].dispatchEvent(new Event("error")));
+      act(() => setDocumentVisibility("hidden"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+
+      expect(mockInstances).toHaveLength(1);
+    });
   });
 });

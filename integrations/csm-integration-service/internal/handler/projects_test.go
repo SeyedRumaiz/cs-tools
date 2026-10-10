@@ -257,6 +257,29 @@ func TestSearchProjectContacts(t *testing.T) {
 		}
 	})
 
+	t.Run("passes the Business Contact role through untouched", func(t *testing.T) {
+		client := &mockEntityProjectClient{
+			searchProjectContactsFn: func(context.Context, string, []byte) ([]byte, error) {
+				return []byte(`{"contacts":[{"email":"deep@acme.com","roles":["BUSINESS_CONTACT","PORTAL_USER"]}],"total":1}`), nil
+			},
+		}
+		h := NewProjectHandler(client)
+		r := httptest.NewRequest(http.MethodPost, "/projects/"+projectID+"/contacts/search", nil)
+		r.SetPathValue("id", projectID)
+		w := httptest.NewRecorder()
+		h.SearchProjectContacts(w, r)
+
+		assertStatus(t, w, http.StatusOK)
+		resp := decodeJSON[struct {
+			Contacts []struct {
+				Roles []string `json:"roles"`
+			} `json:"contacts"`
+		}](t, w)
+		if len(resp.Contacts) != 1 || len(resp.Contacts[0].Roles) != 2 || resp.Contacts[0].Roles[0] != "BUSINESS_CONTACT" {
+			t.Errorf("contacts = %+v, want roles [BUSINESS_CONTACT PORTAL_USER]", resp.Contacts)
+		}
+	})
+
 	t.Run("upstream errors are mapped correctly", func(t *testing.T) {
 		for _, tc := range upstreamErrors("Failed to search project contacts.") {
 			t.Run(tc.name, func(t *testing.T) {

@@ -15,6 +15,9 @@
 // under the License.
 
 import { formatBackendTimestampForDisplay } from "@utils/dateTime";
+import { severityFromBe } from "@api/backend/mappers";
+import { SEVERITY_LABEL, stateLabel } from "@features/csm-dashboard/utils/abtDashboard";
+import type { Severity } from "@features/csm-dashboard/types/abtDashboard";
 import type {
   CaseAttachment,
   CaseAuditEntry,
@@ -55,6 +58,25 @@ export function compareFeedEntries(a: FeedEntry, b: FeedEntry): number {
   return feedEntryId(a).localeCompare(feedEntryId(b));
 }
 
+/**
+ * Same ordering/tie-break as {@link compareFeedEntries}, for call sites that
+ * only ever have a flat `CsmCaseComment[]` to sort (no `FeedEntry` wrapper) —
+ * the standalone conversation transcript views (`ConversationDetailPage.tsx`,
+ * `ConversationPreviewContent.tsx`), which never go through the case activity
+ * feed's merge step. The backend returns conversation messages
+ * `created_on DESC` with a random-UUID tie-break (`comment.id`, unrelated to
+ * insertion order), so without this sort a Novera reply and the user message
+ * that triggered it can render in either order when they share a timestamp.
+ */
+export function compareCommentsChronologically(a: CsmCaseComment, b: CsmCaseComment): number {
+  const t = a.createdAt.localeCompare(b.createdAt);
+  if (t !== 0) return t;
+  const aBot = a.authorRole === "chatbot";
+  const bBot = b.authorRole === "chatbot";
+  if (aBot !== bBot) return aBot ? 1 : -1;
+  return a.id.localeCompare(b.id);
+}
+
 // Matches the handful of backend timestamp shapes `parseBackendTimestamp`
 // understands (space-separated, "M/D/YYYY h:m:s", ISO "T"-separated). Plain
 // text values ("High", "3", "2026") must NOT match — `new Date(...)` parses
@@ -64,11 +86,33 @@ export function compareFeedEntries(a: FeedEntry, b: FeedEntry): number {
 const AUDIT_TIMESTAMP_VALUE_PATTERN =
   /^(\d{4}-\d{1,2}-\d{1,2}[T ]\d{1,2}:\d{1,2}(:\d{1,2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?|\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{1,2}(:\d{1,2})?)$/;
 
-function formatAuditChangeValue(value: string): string {
-  if (!AUDIT_TIMESTAMP_VALUE_PATTERN.test(value.trim())) return value;
-  return (
-    formatBackendTimestampForDisplay(value, { dateStyle: "medium", timeStyle: "short" }) ?? value
-  );
+/**
+ * Display label for a severity field-change value — mirrors
+ * `CaseActivitiesFeed.tsx`'s own (unexported) `severityChangeLabel`,
+ * duplicated for the same reason `AUDIT_TIMESTAMP_VALUE_PATTERN` above is.
+ * `severityFromBe` handles a humanized domain word ("Critical") and
+ * ServiceNow P-notation ("P1") but NOT a bare S0-S4 code — it returns
+ * `"unset"` for `severityFromBe("S1")` — so that shape is checked directly
+ * first. Anything else `severityFromBe` doesn't recognize is already
+ * human-readable text, so it passes through unchanged rather than becoming
+ * "Unset".
+ */
+function severityChangeLabel(value: string): string {
+  const upper = value.trim().toUpperCase();
+  if (upper in SEVERITY_LABEL) return SEVERITY_LABEL[upper as Severity];
+  const severity = severityFromBe(value);
+  return severity === "unset" ? value : SEVERITY_LABEL[severity];
+}
+
+function formatAuditChangeValue(value: string, field?: string): string {
+  if (AUDIT_TIMESTAMP_VALUE_PATTERN.test(value.trim())) {
+    return (
+      formatBackendTimestampForDisplay(value, { dateStyle: "medium", timeStyle: "short" }) ?? value
+    );
+  }
+  if (field === "state") return stateLabel(value);
+  if (field === "severity") return severityChangeLabel(value);
+  return value;
 }
 
 /**
@@ -85,8 +129,10 @@ export function describeAuditEntry(entry: CaseAuditEntry): string {
       .map((c) => {
         const previous = c.previousValue?.trim();
         const next = c.newValue?.trim();
-        const to = next ? formatAuditChangeValue(next) : "cleared";
-        return previous ? `${c.fieldLabel}: ${formatAuditChangeValue(previous)} → ${to}` : `${c.fieldLabel}: ${to}`;
+        const to = next ? formatAuditChangeValue(next, c.field) : "cleared";
+        return previous
+          ? `${c.fieldLabel}: ${formatAuditChangeValue(previous, c.field)} → ${to}`
+          : `${c.fieldLabel}: ${to}`;
       })
       .join("; ");
   }

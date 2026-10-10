@@ -202,6 +202,29 @@ export const ESCALATION_REASON =
   "Automated E2E test escalation - please ignore. Raised to verify the " +
   "escalation flow from EL0 to EL1.";
 
+/** The case the export spec narrows the list to before exporting.
+ *
+ * A pre-existing, read-only record: exporting creates nothing, and searching
+ * for one case keeps the exported file small and its contents predictable.
+ * If this case is ever closed or removed, point this at another on the same
+ * project — the spec asserts it was found rather than exporting an empty list. */
+export const CASE_EXPORT_INPUT = {
+  projectType: ProjectType.SUBSCRIPTION,
+  caseNumber: "CS0441444",
+} as const;
+
+/** The question asked of the assistant before raising a case, for the
+ * knowledge-base spec.
+ *
+ * Phrased as a real product question on purpose: the case's description is
+ * built from the exchange, and the backend recommends articles from that text —
+ * a nonsense prompt would produce a case with nothing to match against, and the
+ * spec would fail for the wrong reason. */
+export const KNOWLEDGE_BASE_INPUT = {
+  projectType: ProjectType.SUBSCRIPTION,
+  question: "how to increase api throttle",
+} as const;
+
 /** Case content submitted by the create-case flow. */
 export interface CaseInput {
   /** Goes in the field labelled "Title" — "Case Details" is the section

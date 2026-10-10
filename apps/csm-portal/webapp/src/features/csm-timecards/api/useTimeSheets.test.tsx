@@ -93,7 +93,10 @@ function mockApi(page: BeSearchTimeCardsResponse): { api: BackendApi; post: Retu
     get: vi.fn(),
     post: post as unknown as BackendApi["post"],
     patch: vi.fn(),
+    put: vi.fn(),
     postEmpty: vi.fn(),
+    // BackendApi carries both: `delete` (void) and `del` (returns a body).
+    delete: vi.fn(),
     del: vi.fn(),
     getBlob: vi.fn(),
   };
@@ -239,7 +242,7 @@ describe("useApprovalQueue — states default/override", () => {
 
   it("defaults to states: ['submitted'] when the caller passes no states filter", async () => {
     const { result } = renderHook(
-      () => useApprovalQueue(true, undefined, { page: 0, rowsPerPage: 20 }),
+      () => useApprovalQueue(true, undefined, { page: 0, rowsPerPage: 20 }, false),
       { wrapper },
     );
 
@@ -253,7 +256,7 @@ describe("useApprovalQueue — states default/override", () => {
 
   it("respects the caller's own states instead of silently overriding them (the Approvals State filter)", async () => {
     const { result } = renderHook(
-      () => useApprovalQueue(true, { states: ["approved"] }, { page: 0, rowsPerPage: 20 }),
+      () => useApprovalQueue(true, { states: ["approved"] }, { page: 0, rowsPerPage: 20 }, false),
       { wrapper },
     );
 
@@ -270,6 +273,7 @@ describe("useApprovalQueue — states default/override", () => {
           true,
           { states: ["submitted", "approved", "rejected"] },
           { page: 0, rowsPerPage: 20 },
+          false,
         ),
       { wrapper },
     );
@@ -278,6 +282,19 @@ describe("useApprovalQueue — states default/override", () => {
 
     const body = postMock.mock.calls[0][1] as BeSearchTimeCardsPayload;
     expect(body.filters?.states).toEqual(["submitted", "approved", "rejected"]);
+  });
+
+  it("omits approverId entirely for an admin, instead of scoping to their own id (approve-by-exception)", async () => {
+    const { result } = renderHook(
+      () => useApprovalQueue(true, undefined, { page: 0, rowsPerPage: 20 }, true),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const body = postMock.mock.calls[0][1] as BeSearchTimeCardsPayload;
+    expect(body.filters?.approverId).toBeUndefined();
+    expect(body.filters?.states).toEqual(["submitted"]);
   });
 });
 

@@ -162,7 +162,15 @@ test.describe("Create Case — validation", () => {
           // "Select deployment first" and stays disabled until one is picked.
           await expect(form.productVersionSelect()).toBeDisabled();
           await form.selectDeployment(project.deployment);
-          await expect(form.productVersionSelect()).toBeEnabled();
+
+          // The gate having lifted, rather than the placeholder becoming
+          // enabled: a deployment with a single product auto-selects it, so the
+          // placeholder is replaced by the product's name and never becomes an
+          // "enabled placeholder" at all.
+          await expect(
+            form.productGateMessage(),
+            "choosing a deployment should unlock the product field",
+          ).toHaveCount(0, { timeout: 60_000 });
         });
 
         test("keeps submit disabled until a deployment is chosen", async ({

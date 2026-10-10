@@ -15,7 +15,7 @@
 // under the License.
 
 import { Box, Skeleton, Typography } from "@wso2/oxygen-ui";
-import { useCallback, useEffect, useMemo, type JSX } from "react";
+import { useCallback, useEffect, useMemo, useState, type JSX } from "react";
 import { useNavigate, useParams } from "react-router";
 import AbtDashboardHeader from "@features/csm-dashboard/components/AbtDashboardHeader";
 import AgentsLandingPagePilot from "@features/csm-dashboard/components/AgentsLandingPagePilot";
@@ -27,6 +27,10 @@ import {
 } from "@features/csm-dashboard/api/useTeams";
 import { useCurrentUser } from "@context/current-user/CurrentUserContext";
 import type { DashboardKey } from "@features/csm-dashboard/types/abtDashboard";
+import {
+  readStoredDashboardSelection,
+  writeStoredDashboardSelection,
+} from "@features/csm-dashboard/utils/dashboardSelectionStorage";
 import { ALL_TEAMS_SENTINEL } from "@features/csm-dashboard/utils/teamFilterPlaceholder";
 
 /**
@@ -72,6 +76,12 @@ import { ALL_TEAMS_SENTINEL } from "@features/csm-dashboard/utils/teamFilterPlac
  * refresh or share always lands on an explicit dashboard id, never the bare
  * index.
  *
+ * A dashboard/team the user picks from the dropdowns is remembered in
+ * localStorage (see `dashboardSelectionStorage.ts`) and restored when a later
+ * visit lands on a bare `/dashboard`. It ranks above the derived defaults but
+ * below anything the URL names, and is ignored when it no longer matches the
+ * loaded dashboards/teams.
+ *
  * Dashboards are selected purely by dropdown — there is no other
  * per-dashboard scoping control. Every dashboard in the registry has at
  * least one real (config-driven) widget, so this always renders the real
@@ -97,6 +107,17 @@ export default function CsmDashboardPage(): JSX.Element {
   const currentUser = useCurrentUser();
 
   const urlEntry = list?.find((d) => d.id === urlDashboardId);
+
+  // Read once per mount: it is only a starting hint. Once the user picks
+  // something the URL carries the selection, and the write below refreshes
+  // the stored copy for the next visit.
+  const [stored] = useState(readStoredDashboardSelection);
+  // Restored only for a bare `/dashboard` (an explicit URL selection, valid
+  // or not, is never overridden) and only if that dashboard still exists.
+  const storedEntry =
+    urlDashboardId === undefined
+      ? list?.find((d) => d.id === stored?.dashboardId)
+      : undefined;
 
   const userHasTeam = Boolean(currentUser.user?.team);
   // Every team, unfiltered — needed for three independent reasons: (1)
@@ -178,7 +199,7 @@ export default function CsmDashboardPage(): JSX.Element {
   // never crashes). Only when it doesn't do we need to pick a default —
   // and picking that default depends on the user's own team membership, so
   // hold off (skeleton) until that's resolved, unless it errored.
-  let currentEntry = urlEntry;
+  let currentEntry = urlEntry ?? storedEntry;
   if (!currentEntry && list) {
     if (userProfilePending) {
       currentEntry = undefined;
@@ -207,7 +228,19 @@ export default function CsmDashboardPage(): JSX.Element {
         ? currentUser.user?.team?.teamKey
         : ALL_TEAMS_SENTINEL
       : undefined;
-  const selectedTeamId = urlTeamId ?? defaultTeamId;
+  // A remembered team applies only to the remembered dashboard, only when the
+  // URL names no team, and only once the teams list confirms it still exists
+  // ("All ABTs" is always valid).
+  const storedTeamId =
+    isTeamBased &&
+    !urlTeamId &&
+    stored?.teamId !== undefined &&
+    stored.dashboardId === dashboardKey &&
+    (stored.teamId === ALL_TEAMS_SENTINEL ||
+      teams.data?.some((t) => t.id === stored.teamId))
+      ? stored.teamId
+      : undefined;
+  const selectedTeamId = urlTeamId ?? storedTeamId ?? defaultTeamId;
 
   // "All ABTs" resolves to every team in the CURRENT DASHBOARD's own family
   // specifically (not the signed-in user's own team's family, which is what
@@ -284,6 +317,7 @@ export default function CsmDashboardPage(): JSX.Element {
       // Switching between two team-based dashboards keeps the current
       // selection instead of resetting it.
       const nextTeamId = nextEntry?.isTeamBased ? selectedTeamId : undefined;
+      writeStoredDashboardSelection({ dashboardId: key, teamId: nextTeamId });
       writePath(key, nextTeamId);
     },
     [list, selectedTeamId, writePath],
@@ -292,6 +326,7 @@ export default function CsmDashboardPage(): JSX.Element {
   const handleTeamChange = useCallback(
     (teamId: string | undefined) => {
       if (!dashboardKey) return;
+      writeStoredDashboardSelection({ dashboardId: dashboardKey, teamId });
       writePath(dashboardKey, teamId);
     },
     [dashboardKey, writePath],

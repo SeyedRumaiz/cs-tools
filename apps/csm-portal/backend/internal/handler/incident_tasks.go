@@ -28,12 +28,12 @@ import (
 )
 
 // entityIncidentTaskClient abstracts the entity service incident-task operations used
-// by IncidentTaskHandler. Search and get only -- there is no create/update path, same
-// as the entity service's own IncidentTaskHandler.
+// by IncidentTaskHandler: search, aggregate, get, and the state/close-notes PATCH.
 type entityIncidentTaskClient interface {
 	SearchIncidentTasks(ctx context.Context, body []byte) ([]byte, error)
 	AggregateIncidentTasks(ctx context.Context, body []byte) ([]byte, error)
 	GetIncidentTask(ctx context.Context, id string) ([]byte, error)
+	UpdateIncidentTask(ctx context.Context, id string, body []byte) ([]byte, error)
 }
 
 // IncidentTaskHandler handles HTTP requests for incident-task operations, delegating
@@ -140,6 +140,48 @@ func (h *IncidentTaskHandler) GetIncidentTask(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity GetIncidentTask failed", "userID", user.UserID, "id", id, "err", err)
 		mapUpstreamErrorGeneric(w, err, "Failed to retrieve incident task.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// PatchIncidentTask handles PATCH /incident-tasks/{id}: change a task's
+// state and/or close notes. The body is validated as JSON here and passed
+// through; entity-service validates the fields.
+func (h *IncidentTaskHandler) PatchIncidentTask(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" || !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, ErrMsgTooLarge)
+			return
+		}
+		writeError(w, http.StatusBadRequest, errMsgReadBody)
+		return
+	}
+	if !json.Valid(body) {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	result, err := h.entity.UpdateIncidentTask(r.Context(), id, body)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity UpdateIncidentTask failed", "userID", user.UserID, "id", id, "err", err)
+		mapUpstreamError(w, err, "Failed to update incident task.")
 		return
 	}
 

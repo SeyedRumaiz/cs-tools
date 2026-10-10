@@ -66,6 +66,13 @@ export interface ChangeRequestDetailDto extends ChangeRequestSearchViewDto {
   testPlan: string | null;
   hasCustomerApproved: boolean;
   hasCustomerReviewed: boolean;
+  /**
+   * WSO2's answer to a time the customer proposed ("agree" / "disagree"), and the backend's derived read model of that
+   * conversation. A change WSO2 scheduled by accepting the customer's proposal is answered "agree" but never stamped
+   * `hasCustomerApproved` (no staff action records the customer's approval).
+   */
+  confirmCustomerUpdatedDate?: string | null;
+  customerProposal?: { answer?: string | null } | null;
   approvedBy: EntityRefDto | null;
   approvedOn: string | null;
 }
@@ -100,8 +107,8 @@ export interface ChangeRequestSearchResponseDto {
 export interface PatchChangeRequestPayloadDto {
   /** "YYYY-MM-DD HH:MM:SS", or null to clear a previously-set planned start. */
   plannedStartOn?: string | null;
-  isCustomerApproved?: boolean;
-  isCustomerReviewed?: boolean;
+  // isCustomerApproved / isCustomerReviewed are deliberately not modeled: they are the CUSTOMER's own answer (given in the
+  // Customer Portal) and the backend refuses them from staff with a 400.
 }
 
 export interface PatchChangeRequestResponseDto {

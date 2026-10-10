@@ -27,6 +27,12 @@ import type {
  * `GET /catalogs/{catalogId}/items/{catalogItemId}/variables`. Returned sorted
  * by the backend's `order` so the form renders fields in the catalog's intended
  * sequence. Disabled until both ids are present.
+ *
+ * A 404 is an error, not an empty form: `api.get` resolves a GET 404 to `null`,
+ * and treating that as "no variables" rendered "This catalog item has no
+ * additional fields." and let a service request be created without the item's
+ * required answers whenever the backend could not find the item (e.g. its
+ * catalog data not yet synced).
  */
 export function useCatalogItemVariables(
   catalogId: string | undefined,
@@ -46,7 +52,10 @@ export function useCatalogItemVariables(
           catalogItemId as string,
         )}/variables`,
       );
-      const variables = res?.variables ?? [];
+      if (res == null) {
+        throw new Error("Could not load the request form for this catalog item.");
+      }
+      const variables = res.variables ?? [];
       // Stable sort by display order; variables without an order sink to the end.
       return [...variables].sort(
         (a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER),

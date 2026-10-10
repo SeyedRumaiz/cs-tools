@@ -152,6 +152,14 @@ type createGitHubIssueRequest struct {
 	Labels []string `json:"labels,omitempty"`
 }
 
+// Health calls the engineering entity service's own health endpoint and
+// returns an error unless it answers 200. Used by the portal's aggregating
+// dependency health check, never on the request path.
+func (c *EngineeringEntityClient) Health(ctx context.Context) error {
+	_, err := c.do(ctx, http.MethodGet, "/health", nil)
+	return err
+}
+
 // CreateGitIssue creates a GitHub issue in the given org/owner/repo via the
 // engineering entity service.
 func (c *EngineeringEntityClient) CreateGitIssue(ctx context.Context, orgName, owner, repoName, title, body string, labels []string) (GitHubIssue, error) {

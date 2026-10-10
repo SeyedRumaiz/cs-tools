@@ -20,16 +20,19 @@ import illustration from "@assets/error/error-403.svg";
 
 interface Error403PageProps {
   message?: string;
+  error?: unknown;
 }
 
 export default function Error403Page({
   message,
+  error,
 }: Error403PageProps): JSX.Element {
   return (
     <ErrorPage
       illustration={illustration}
       illustrationAlt="403 forbidden illustration"
       description={message ?? "You don't have permission to access this page."}
+      error={error}
     />
   );
 }

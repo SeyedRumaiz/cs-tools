@@ -1,18 +1,95 @@
 openapi: 3.0.1
 info:
-  title: Customer Portal Activity Stream Service Health
-  description: Health check endpoint for customer-portal-activity-stream-service.
+  title: Customer Portal Case Activity Stream
+  description: >
+    Server-Sent Events endpoint and health check for
+    customer-portal-activity-stream-service. The stream runs on its own
+    dedicated :9092 listener (see cmd/server/main.go) behind the same JWT
+    auth as every other endpoint; /health runs on a separate :8080
+    listener and requires no auth.
   version: 1.0.0
-servers:
-  - url: "{server}:{port}/"
-    variables:
-      server:
-        default: http://localhost
-      port:
-        default: "8080"
+security:
+  - jwtAssertion: []
 paths:
-  /health:
+  /cases/{id}/activities/stream:
+    servers:
+      - url: "{server}:{port}/"
+        description: SSE stream listener
+        variables:
+          server:
+            default: http://localhost
+          port:
+            default: "9092"
     get:
+      summary: Live case-activity updates.
+      description: >
+        Opens a long-lived Server-Sent Events connection. Emits a
+        `case_updated` event (data: a compact JSON object, at minimum
+        `{caseId, type, timestamp}` — never comment text or field values)
+        whenever the case gets a new comment or its status changes; a
+        comment-only `: ping` heartbeat every 15s otherwise. Returns 503
+        when Event Hub isn't configured on the service, since there would
+        be nothing to broadcast.
+      operationId: getCasesIdActivitiesStream
+      parameters:
+        - name: id
+          in: path
+          description: UUID of the case.
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: x-user-id-token
+          in: header
+          description: >
+            Forwarded to upstream entity-service calls as the caller's
+            identity for per-case ACL checks. Optional — falls back to the
+            x-jwt-assertion value itself when absent (see middleware.Auth).
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Ok
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "503":
+          description: ServiceUnavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+  /health:
+    servers:
+      - url: "{server}:{port}/"
+        description: Health check listener
+        variables:
+          server:
+            default: http://localhost
+          port:
+            default: "8080"
+    get:
+      security: []
       summary: Health check.
       description: Returns 200 OK if the service is running. No auth required.
       operationId: getHealth
@@ -27,3 +104,24 @@ paths:
                   status:
                     type: string
                     enum: [ok]
+components:
+  securitySchemes:
+    jwtAssertion:
+      type: apiKey
+      in: header
+      name: x-jwt-assertion
+      description: >
+        Unlike the main :8080 REST API — where the browser sends
+        Authorization: Bearer and Choreo's gateway translates it to
+        x-jwt-assertion before this backend sees it — this listener's own
+        Choreo endpoint is not guaranteed to apply the same translation, so
+        the EventSource polyfill connecting to it sets x-jwt-assertion
+        directly (native EventSource cannot set custom headers at all,
+        which is why this stream uses a polyfill in the first place). See
+        middleware.Auth, which reads this header directly.
+  schemas:
+    ErrorPayload:
+      type: object
+      properties:
+        message:
+          type: string

@@ -25,7 +25,9 @@ import {
   useTheme,
   type Theme,
 } from "@wso2/oxygen-ui";
-import CaseStateConfirmDialog from "@features/support/components/case-details/dialogs/CaseStateConfirmDialog";
+import CaseStateConfirmDialog, {
+  type CaseResolutionFields,
+} from "@features/support/components/case-details/dialogs/CaseStateConfirmDialog";
 import RejectSolutionDialog from "@features/support/components/case-details/dialogs/RejectSolutionDialog";
 import EscalateCaseModal from "../escalation/EscalateCaseModal";
 import DeescalateCaseModal from "../escalation/DeescalateCaseModal";
@@ -40,6 +42,7 @@ import {
   type CaseStatusPaletteIntent,
 } from "@features/support/constants/supportConstants";
 import useGetProjectFilters from "@api/useGetProjectFilters";
+import { useCustomerPermissions } from "@hooks/useCustomerPermissions";
 import { usePatchCase } from "@features/support/api/usePatchCase";
 import { usePostComment } from "@features/support/api/usePostComment";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
@@ -58,6 +61,15 @@ const ACTION_BUTTON_ICON_SIZE = 12;
 const DEESCALATE_PERMISSION_TOOLTIP =
   "Only customer admins, project leads, or (at escalation level 1-3) the user who created the escalation can de-escalate this case.";
 const REJECT_SOLUTION_LABEL = "Reject Solution";
+// Both actions map to the "Closed" case state (see ACTION_TO_CASE_STATE_LABEL
+// in utils/support.ts). entity-service requires resolutionCode/cause/
+// closeNotes when an INTERNAL (WSO2 staff) caller closes a case — never an
+// external one: those fields are WSO2's own case-resolution taxonomy
+// ("Product Bug", "Infrastructure Network", ...), vocabulary a customer
+// closing their own case was never meant to classify it with. See
+// entity-service's own UpdateCase doc comment for the server-side half of
+// this rule — this only decides when the webapp should ask at all.
+const RESOLUTION_REQUIRED_ACTIONS = new Set(["Closed", "Accept Solution"]);
 
 function getActionButtonSx(
   theme: Theme,
@@ -117,6 +129,9 @@ export default function CaseDetailsActionRow({
   const theme = useTheme();
   const { data: filterMetadata } = useGetProjectFilters(projectId);
   const caseStates = filterMetadata?.caseStates;
+  const resolutionCodes = filterMetadata?.resolutionCodes ?? [];
+  const causes = filterMetadata?.causes ?? [];
+  const { isExternalUser } = useCustomerPermissions();
 
   const { showSuccess } = useSuccessBanner();
   const { showError } = useErrorBanner();
@@ -324,12 +339,28 @@ export default function CaseDetailsActionRow({
         actionLabel={confirmAction ? toPresentTenseActionLabel(confirmAction.label) : ""}
         isPending={patchCase.isPending}
         onClose={() => setConfirmAction(null)}
-        onConfirm={() => {
+        requiresResolutionFields={
+          !!confirmAction &&
+          !isExternalUser &&
+          RESOLUTION_REQUIRED_ACTIONS.has(confirmAction.label)
+        }
+        resolutionCodes={resolutionCodes}
+        causes={causes}
+        onConfirm={(resolution?: CaseResolutionFields) => {
           if (!confirmAction) return;
           const { label, stateKey } = confirmAction;
           setPendingActionLabel(label);
           patchCase.mutate(
-            { stateKey },
+            {
+              stateKey,
+              ...(resolution
+                ? {
+                    resolutionCode: resolution.resolutionCode,
+                    cause: resolution.cause,
+                    closeNotes: resolution.closeNotes,
+                  }
+                : {}),
+            },
             {
               onSuccess: () => {
                 showSuccess("State updated successfully.");

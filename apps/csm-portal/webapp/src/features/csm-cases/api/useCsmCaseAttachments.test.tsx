@@ -219,6 +219,7 @@ describe("usePostCsmCaseAttachment", () => {
       mimeType: FILE.type,
       sizeBytes: FILE.size,
       description: null,
+      referenceType: "case",
     });
 
     expect(uploadFileViaTusMock).toHaveBeenCalledTimes(1);
@@ -292,6 +293,36 @@ describe("usePostCsmCaseAttachment", () => {
     });
     await waitFor(() => expect(result.current.uploadProgress).toBeNull());
   });
+
+  it.each(["change_request", "incident"] as const)(
+    "flag on, referenceType %s: skips the mint endpoint and uses the legacy base64 path",
+    async (referenceType) => {
+      sftpgoFlag.enabled = true;
+      postMock.mockResolvedValue({});
+
+      const { result } = renderHook(() => usePostCsmCaseAttachment(), {
+        wrapper,
+      });
+
+      await act(() =>
+        result.current.mutateAsync({
+          caseId: "case-1",
+          file: FILE,
+          uploadedBy: "Jane Doe",
+          referenceType,
+        }),
+      );
+
+      expect(uploadFileViaTusMock).not.toHaveBeenCalled();
+      expect(postMock).toHaveBeenCalledTimes(1);
+      const [path, payload] = postMock.mock.calls[0];
+      expect(path).toBe("/attachments");
+      expect(payload.referenceType).toBe(referenceType);
+      expect(typeof payload.file).toBe("string");
+      expect(payload.file.startsWith("data:")).toBe(true);
+      expect(result.current.uploadProgress).toBeNull();
+    },
+  );
 });
 
 describe("useDownloadCsmCaseAttachment", () => {

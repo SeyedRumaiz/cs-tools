@@ -48,48 +48,182 @@ versa) and stay on this device/browser.
 
 The detail page shows:
 
-- An **overview** card: project, type, linked case, deployment, deployed
-  product, assigned engineer/team, duration, planned start/end, and audit
-  fields.
+- A **lifecycle line** across the top, plotting the same eleven-stage workflow
+  the customer sees in the Customer Portal: New, Assess, Authorize, Customer
+  Approval, Scheduled, Implement, Review, Customer Review, **Rollback**,
+  Closed and **Canceled**. Stages already passed are ticked and the current
+  stage is highlighted. Rollback and Canceled are the two exits off the normal
+  path, so they stay faint until the change really ends there, when the stage
+  turns red. Customer Approval and Customer Review only appear when the change
+  requires them. An **Emergency** change never takes Assess (it goes from New
+  straight to Authorize, for the CAB alone), so Assess reads "not taken" on its
+  line like Rollback and Canceled, and it never shows the two customer stages. A
+  canceled change keeps no record of where it was canceled,
+  so a stage the approvals cannot prove it passed is drawn faint (and read out
+  as "history not recorded") rather than guessed. When the customer rejects the
+  change at Customer Approval (canceled) or Customer Review (rolled back), that
+  stage shows a red cross and, on a canceled change, the stages after it read
+  "not taken". Hover a stage for what it means (it also says when a stage was
+  not taken or its history is not recorded).
+- An **overview** card: Customer Project, type, linked case, deployment,
+  deployed product, the selected deployments and their deployment products,
+  the Customer Group, category, assigned engineer/team, duration, planned
+  start/end, and audit fields.
 - Tabs for **Approval**, **Plan**, **Comments**, and **Attachments**.
-  - **Approval** shows the customer-approval/review flags plus a full
-    approval-stage breakdown (e.g. Assess, Authorize, Customer Approval) with
-    each individual approver's status. These flags are read-only in this
-    portal — see below.
+  - **Approval** shows whether the change requires customer approval and
+    customer review, what the customer has confirmed, and a full
+    approval-stage breakdown (Peer Approval, CAB Approval, Customer
+    Approval, Customer Review) with each individual approver's status. An
+    Emergency change has one stage, CAB Approval, and the customer's part reads
+    "Not applicable". (A change raised before this keeps the stage it already
+    has, even one named "ECAB Approval", and the approvers it asked can still
+    decide it.) The Assignment group of each stage is a link: it opens a dialog
+    listing the group's members. What the customer has confirmed is read-only — it is
+    recorded by the approval itself.
   - **Plan** shows the change-review packet: description, justification,
     impact description, rollback plan, test plan, service outage notes, the
     communication plan, the implementation plan, and the affected
     services/components text and rollback duration. Below that, an **SRE
     details** card shows further fields the backing system tracks:
-    priority, category, requested by, customer group, change request type,
-    likelihood, whether the Implementation Plan is visible to customers,
-    when the customer last updated it, work start/end, a git reference (if
-    any), and any linked environments, deployment products, deployments, or
-    labels. Most of these are read-only with no edit control anywhere yet —
-    they're shown for context. "Implementation Plan visible to customers"
-    is the exception: it's editable from Create/Edit (see below).
+    priority, requested by, change request type, likelihood, whether the
+    Implementation Plan is visible to customers, when the customer last
+    proposed a time and WSO2's answer to it, work start/end, a git reference (if any), and any labels. Most
+    of these are read-only with no edit control anywhere yet — they're shown
+    for context. "Implementation Plan visible to customers" is the exception:
+    it's editable from Create/Edit (see below).
+    The **Customer Group** is not picked: it is the change request's customer
+    project's registered contacts (read-only), the people asked at Customer
+    Approval / Customer Review.
+  - Planned start and end times you enter when creating or editing a change
+    are in your own time zone (the one on your profile, or your browser's if
+    none is set) and are stored as UTC, so they mean the same instant to
+    everyone.
 
 From the detail page a CS engineer can:
 
 - **Change state**: the action bar's buttons are driven entirely by the
   record's own legal next states, so only valid transitions are ever offered.
-  Moving to a destructive state (rollback, cancel) requires typing a reason
-  first, which is recorded as an internal note before the state change is
-  applied.
+  The forward move (for example **Request Approval**, **Start implementation**,
+  **Mark implemented**, **Send for customer review**) is the main button;
+  **Re-schedule** (Customer Approval only; **Propose a different time** while a
+  time the customer proposed waits for you) sits beside it; everything else is
+  behind the **Change state** menu. Moving to a destructive state (**Roll back**
+  from Review or Customer Review, **Cancel change**) requires typing a reason
+  first, which is recorded as an internal note (the customer does not see it)
+  before the state change is applied. **Go back** in that dialog leaves the
+  change as it was.
+- **The customer's answer is theirs to give.** Staff never record a customer's
+  approval or review: while a change waits at Customer Approval or Customer
+  Review, only the customer moves it on, by answering in the Customer Portal, so
+  there is no action for it here, not even a greyed-out one. At
+  Customer Approval you can **Re-schedule** (the customer is asked to approve
+  the new time) or **Cancel change**; at Customer Review you can **Roll back** or **Cancel
+  change**, and there is no Close. While the customer's review is still pending,
+  **Roll back** is held back and says who the change is waiting on, since a
+  failed review is the customer's to give in the Customer Portal.
+- **When nobody can be asked.** The customer's request goes to the Customer
+  Project's registered contacts, leaving out whoever raised the change and anyone
+  no longer active. A change with Customer Approval and/or Customer Review ticked
+  is therefore **not sent for approval while nobody can be asked**: **Request
+  Approval** is refused, with a message that says so. Where the project has no
+  registered contact at all the button is greyed out with the reason ("Register a
+  contact for the Customer Project before requesting approval"); where it has
+  contacts but none can be asked (its only contact is the person who raised the
+  change, or its contacts are no longer active) the request goes out and the
+  refusal appears as an error. Register a contact for the project, then request
+  approval. Ticking a customer box on after approval was requested is refused the
+  same way. The Customer Project cannot be changed once approval has been
+  requested, which is why the contact has to be there first.
+  Only an older change can still be left waiting at a gate with nobody to answer:
+  one that reached Customer Approval or Customer Review before this was refused,
+  one whose contacts left the project since, or one migrated from the previous
+  system without a request. The Approval tab says so in a note, and since staff never
+  answer for the customer the exits are the ones staff always have there. When
+  nobody can be asked, **Cancel change** is the only way out of Customer
+  Approval: **Re-schedule** asks the project's registered contacts again at
+  once, and is refused, with the same message as Request Approval, while nobody
+  can be asked (an older change with no request, on a project that has eligible
+  contacts, is the case where it helps). **Roll back** or **Cancel change** are
+  the ways out of Customer Review.
+- **A time the customer proposed.** A customer who cannot make the planned
+  window proposes a new **start** in the Customer Portal; the planned length
+  stays the same. The change **stays in Customer Approval** and the planned
+  window stays what you planned until you answer, so the page shows a banner
+  under the stepper ("The customer proposed a new time") with the planned window
+  beside the proposed one, who proposed it and when, and the header reads
+  "Waiting for WSO2 to respond to the customer's proposed time". You answer it
+  in one of two ways, Agree and Disagree:
+  - **Accept proposed time** (after a confirmation) applies the proposal to the
+    planned window and moves the change straight to **Scheduled**. No CAB
+    approval is needed (the change itself has not changed) and the customer is
+    not asked again: the proposal is their own consent. The Customer approved
+    cell then reads "Proposed time accepted", because nobody on staff records a
+    customer's approval. Accept is held back, with the reason, while the change
+    is on hold, once the proposed time has passed, when there is no planned
+    window to keep the length of, when the window it would give ends after the
+    year 2100 (a date the previous system left far ahead), or when nobody is
+    recorded as having proposed the time (see below).
+  - **Propose a different time** asks the customer to approve the time you set
+    instead (again with no CAB). Keeping the current time **declines** the
+    proposal: only the answer is recorded and the customer keeps their request
+    to approve the current time. The loop repeats with their next proposal. The
+    optional reason you type is recorded as an internal note once the change has
+    been updated, so a refused attempt leaves no note behind.
+
+  A date a WSO2 user wrote in the previous system, or one left over from an
+  earlier round, looks like a proposal too. The only thing on record about who
+  proposed a time is who last changed the change request, and only when that is
+  one of the project's registered contacts: so a customer's genuine proposal
+  also reads "nobody is recorded" once anyone at WSO2 has edited the change
+  request since (an unrelated edit too, such as a plan or the assigned
+  engineer). When nobody is recorded as having proposed the stored time, it is
+  not a proposal and nothing waits for your answer: the banner reads "A time is stored on this change request" ("A time is
+  stored (...) but nobody is recorded as having proposed it."), the header stays
+  at "Awaiting Customer Approval", and **Accept proposed time** is disabled with
+  the reason, because no staff action stands in for the customer's own answer.
+  **Propose a different time** stays available as a plain Re-schedule: there is
+  no proposal to decline, so the window must change, and the customer is asked to
+  approve the time you set (the stored time itself will do, when it is the one
+  the customer wanted: it costs the customer one more approval).
+
+  If the proposal or the planned window moves while one of these dialogs is open
+  (the customer proposes again, or a colleague answers), the page does not send
+  the request it was opened on: when the answer is refused for that reason the
+  dialog closes, a notice at the top of the page says why and the page shows the
+  current state.
+
+  Proposals and your answers are kept in PostgreSQL only: they are not mirrored
+  to the previous system (there is no field for them), Accept's mirror is best
+  effort, and while the sync still runs it can rewrite these columns.
 - **Approve or reject** a pending approval stage, if the engineer is listed
   as an approver on it: the Approve/Reject buttons only appear on that
   engineer's own pending approval.
-- **Edit** the planned window, assignment group, assigned engineer, requested
-  by, customer group, rollback duration, whether the Implementation Plan is
-  visible to customers, and the implementation/rollback/test/
-  affected-services/affected-components plans, or **Clone** the change request
-  into a new one pre-filled with this one's values (useful for promoting the same
-  change through another environment). The customer-approved/reviewed flags
-  aren't editable here — they reflect an automation-only stage of the
-  change's lifecycle and have no manual UI action in the backing system
-  either. Category is also not editable — the backing change-request form
-  has no real category control either, so this portal doesn't invent one.
-- Add comments (public or internal) and upload/download attachments.
+- **Emergency changes proceed without the customer.** An Emergency change goes
+  New -> Request Approval -> Authorize (one CAB Approval stage; no Peer stage) ->
+  Scheduled, and is never sent to Customer Approval or Customer Review. In the
+  create form and the Edit dialog the two customer checkboxes are therefore
+  disabled and unticked while the type is Emergency ("Emergency changes proceed
+  without customer approval or review."); choosing Emergency clears them, and
+  choosing another type leaves them off for you to tick again. The CAB Approval
+  stage is asked of the members of the **CAB Approval** group. A group may have no
+  members: that is an operations matter (there is no screen for it), and where
+  nobody maintains that group's membership in the portal database, Request
+  Approval on a new Emergency change is refused with a message naming the group.
+- **Edit** the Customer Project, deployments, category, planned window,
+  assignment group, assigned engineer, requested by, rollback duration,
+  whether the Implementation Plan is visible to customers, the Customer
+  Approval / Customer Review checkboxes (until the step they control has
+  passed), and the implementation/rollback/test/affected-services/
+  affected-components plans, or **Clone** the change request into a new one
+  pre-filled with this one's values (useful for promoting the same change
+  through another environment). The Customer Project, deployments and
+  deployment products can only be changed until implementation starts; the
+  deployment products follow from the chosen deployments and are not picked.
+  What the customer has confirmed isn't editable here — it is recorded by the
+  customer's approval itself.
+- Add comments (public or internal) and upload/download attachments. A comment's own author,
+  or an admin, can edit or delete it from the **⋮** menu on that comment — deleting is a soft,
+  audited removal (an admin can still read the original text; nobody else can).
 
 ## Incidents
 
@@ -103,11 +237,19 @@ device/browser.
 
 A **Create incident** button (or a case's own **Create incident from case…**
 action) opens a form for Caller, Service, and a classification (category,
-subcategory, contact type, impact, urgency — Priority is computed live from
-impact × urgency and not itself editable). **Assignment group** is not a
-manual pick here: it's shown read-only, auto-filled from the selected
-Service's ServiceNow support group, and blank with a hint if that service
-has none set in ServiceNow.
+subcategory (optional), channel, impact, urgency — Priority is computed live from
+impact × urgency and not itself editable). **Assignment group** defaults to
+the selected Service's support group and follows the Service as you change
+it. If the Service has no support group, the default team is used instead
+(with no default team configured, the field stays empty and the incident is
+created unassigned unless you pick a group). You can pick any group that is
+some service's support group — the list is not limited to the chosen
+Service, and the Service's own group (or the default team) is listed first.
+Once you pick a group yourself it stays when the Service changes, and the
+hint under the field shows the Service's support group with a **Use it**
+link to go back to it; clearing the field also goes back to following the
+Service. If the group is refused on create, the reason is shown on the field
+and the rest of the form is kept.
 
 The detail page shows:
 
@@ -115,7 +257,7 @@ The detail page shows:
   created by, and last updated.
 - Tabs for **Activities**, **Details**, **Related**, **Watchers**, and
   **Attachments**.
-  - **Details** covers classification (category, subcategory, contact type,
+  - **Details** covers classification (category, subcategory, channel,
     impact, urgency) and service/configuration-item information.
   - **Related** shows linked records (parent incident, change request,
     problem, and any linked service requests), plus a "caused by" reference
@@ -152,7 +294,9 @@ From the detail page a CS engineer can:
   updates** / **Unfollow incident updates** button on the Watchers tab also
   lets you add or remove yourself with one click.
 - Add comments (public or internal) and upload/download attachments, with
-  inline preview for supported attachment types.
+  inline preview for supported attachment types. A comment's own author, or an admin, can
+  edit or delete it from the **⋮** menu on that comment — deleting is a soft, audited removal
+  (an admin can still read the original text; nobody else can).
 
 Work notes on an incident often reference the alert or smart alert that
 triggered it. Those references render as an inline **View alert** / **View
@@ -217,6 +361,10 @@ time, and an optional end time (leave it blank for an outage that's still
 ongoing; close it later from the detail page). You can optionally link a
 configuration item and a related incident, and seed the first external and/or
 internal communication entries.
+
+Begin, end, and close times are entered in your own time zone (the one on
+your profile, or your browser's if none is set) and stored as UTC, so they
+mean the same instant to everyone.
 
 **Linking a configuration item is the one choice that can make an outage
 public.** If the item you pick is tracked on a monitored cloud's status

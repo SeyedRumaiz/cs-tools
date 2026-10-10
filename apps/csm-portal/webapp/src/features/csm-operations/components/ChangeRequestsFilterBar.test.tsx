@@ -39,6 +39,15 @@ vi.mock("@config/apiConfig", () => ({
 vi.mock("@features/csm-dashboard/api/useTeams", () => ({
   useTeams: vi.fn(),
 }));
+vi.mock("@features/saved-filter-views/useSavedFilterViews", () => ({
+  useSavedFilterViews: () => ({
+    views: [],
+    isLoading: false,
+    saveFilterView: vi.fn(),
+    deleteFilterView: vi.fn(),
+    moveFilterView: vi.fn(),
+  }),
+}));
 const mockedUseTeams = vi.mocked(useTeams);
 
 beforeEach(() => {
@@ -90,5 +99,34 @@ describe("ChangeRequestsFilterBar — Project filter", () => {
   it("shows a Clear filters action once a project is selected", () => {
     renderBar({ ...DEFAULT_CR_FILTERS, projectIds: ["proj-1"] });
     expect(screen.getByRole("button", { name: /Clear filters/i })).toBeInTheDocument();
+  });
+});
+
+describe("ChangeRequestsFilterBar — field order", () => {
+  it("groups Closed from and Closed to together, after Project", () => {
+    // Reported live: Closed from/to used to sit apart (Closed from ending
+    // row 1, Project + Closed to on row 2) — moved so Project follows SRE
+    // Team and the two closed-date fields are adjacent on row 2.
+    const { container } = render(
+      (
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <ChangeRequestsFilterBar
+            filters={DEFAULT_CR_FILTERS}
+            onChange={vi.fn()}
+            onReset={() => {}}
+            isFiltersOpen
+            onFiltersToggle={() => {}}
+          />
+        </QueryClientProvider>
+      ) as ReactNode,
+    );
+    const html = container.innerHTML;
+    const sreTeamIdx = html.indexOf("SRE Team");
+    const projectIdx = html.indexOf(">Project<");
+    const closedFromIdx = html.indexOf("Closed from");
+    const closedToIdx = html.indexOf("Closed to");
+    expect(sreTeamIdx).toBeLessThan(projectIdx);
+    expect(projectIdx).toBeLessThan(closedFromIdx);
+    expect(closedFromIdx).toBeLessThan(closedToIdx);
   });
 });

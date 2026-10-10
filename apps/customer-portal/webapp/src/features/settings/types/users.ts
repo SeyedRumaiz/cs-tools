@@ -58,6 +58,9 @@ export type ProjectContact = {
   isSecurityContact: boolean;
   membershipStatus: string;
   account?: AccountInfo;
+  // Set by the backend only when a resend can succeed (invitation still
+  // outstanding, contacts served from the CSM database).
+  canResendInvitation?: boolean;
 };
 
 // Item type for account information.

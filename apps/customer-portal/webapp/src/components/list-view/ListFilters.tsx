@@ -144,12 +144,32 @@ export default function ListFilters({
             );
           }
           if (isCreatedByFilter) {
-            return (
-              contacts?.map((contact) => ({
-                label: `${contact.firstName} ${contact.lastName}`.trim() || contact.email,
-                value: contact.email,
-              })) ?? []
-            );
+            // De-duplicated by normalized email (trim + lower-case), not raw
+            // string equality: entity-service's own user/contact rows carry
+            // no email-uniqueness constraint, so the same real person can
+            // reach this list twice with their email differently cased or
+            // spaced between the two rows -- reported live as the same name
+            // appearing more than once in this dropdown. First occurrence
+            // wins; the dropdown's own value is still the real, unmodified
+            // email of that first row.
+            const seen = new Set<string>();
+            const deduped: ProjectContact[] = [];
+            for (const contact of contacts ?? []) {
+              const key = contact.email.trim().toLowerCase();
+              if (!key || seen.has(key)) continue;
+              seen.add(key);
+              deduped.push(contact);
+            }
+            return deduped.map((contact) => ({
+              label: `${contact.firstName} ${contact.lastName}`.trim() || contact.email,
+              // Trimmed: the surviving row after dedup above isn't
+              // necessarily the "clean" one if a messy-email duplicate was
+              // seen first, and the backend's createdBy filter matches
+              // wi.created_by by exact string equality (no case/whitespace
+              // normalization there) -- an un-trimmed value here would
+              // silently match nothing.
+              value: contact.email.trim(),
+            }));
           }
           if (!def.metadataKey) return [];
           const metadataOptions = filterMetadata?.[def.metadataKey];

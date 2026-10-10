@@ -78,7 +78,7 @@ func TestProcessLicenseDownload_AcceptsFloatStatus(t *testing.T) {
 			_, _ = w.Write([]byte(`{"result":{"status":5.0,"applicationId":"app-1"}}`))
 		default:
 			licenceCalled = true
-			_, _ = w.Write([]byte(`{"result":{"license":{}}}`))
+			_, _ = w.Write([]byte(`{"result":{"success":true,"license":{"subscriptionData":{},"signature":"sig"}}}`))
 		}
 	}))
 	defer srv.Close()

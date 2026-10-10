@@ -20,14 +20,16 @@ import illustration from "@assets/error/error-404.svg";
 
 interface Error404PageProps {
   message?: string;
+  error?: unknown;
 }
 
-export default function Error404Page({ message }: Error404PageProps): JSX.Element {
+export default function Error404Page({ message, error }: Error404PageProps): JSX.Element {
   return (
     <ErrorPage
       illustration={illustration}
       illustrationAlt="404 not found illustration"
       description={message ?? "The page you're looking for doesn't exist or has been moved."}
+      error={error}
     />
   );
 }

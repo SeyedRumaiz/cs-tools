@@ -93,7 +93,7 @@ func TestEmailNotifier_Send_CustomerNoticeNeverGetsOpenInSalesforce(t *testing.T
 		InvoiceSfIDs: []string{"a0IE2000006XBu5MAG"},
 		Recipients: Recipients{
 			AccountOwner: recipients.Contact{Email: "am@wso2.com"},
-			Customer:     &recipients.Contact{Email: "customer@wso2.com"},
+			Customers:    []recipients.Contact{{Email: "customer@wso2.com"}},
 		},
 	})
 	if err != nil {

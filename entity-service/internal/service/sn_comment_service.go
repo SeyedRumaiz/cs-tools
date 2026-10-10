@@ -21,21 +21,33 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/events"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/middleware"
 	integrationservice "github.com/wso2-open-operations/cs-tools/entity-service/internal/servicenow-integration-service"
 )
 
 type snCommentSearchService struct {
 	client *integrationservice.Client
+	// publisher may be nil — the same optional-publisher contract
+	// snIncidentService and snCaseService use. A deployment with no event bus
+	// configured still creates comments; it just publishes nothing.
+	publisher EventPublisherService
 }
 
-// NewServiceNowCommentService constructs a CommentService backed by the Choreo API.
-func NewServiceNowCommentService(client *integrationservice.Client) CommentService {
-	return &snCommentSearchService{client: client}
+// NewServiceNowCommentService constructs a CommentService backed by the Choreo
+// API. publisher may be nil (see snCommentSearchService.publisher).
+func NewServiceNowCommentService(client *integrationservice.Client, publisher EventPublisherService) CommentService {
+	return &snCommentSearchService{client: client, publisher: publisher}
 }
+
+// publishIncidentCommentAddedTimeout bounds the publish call below, matching
+// publishIncidentEscalationSignalTimeout's reasoning: the comment is already
+// in ServiceNow by the time this runs.
+const publishIncidentCommentAddedTimeout = 5 * time.Second
 
 func (s *snCommentSearchService) SearchComments(ctx context.Context, req domain.SearchCommentsRequest) (domain.SearchCommentsResponse, error) {
 	if err := normalizePagination(&req.Pagination); err != nil {
@@ -164,12 +176,91 @@ func (s *snCommentSearchService) CreateComment(ctx context.Context, req domain.C
 		return domain.CreateCommentResponse{}, fmt.Errorf("sn create comment: parse createdOn %q: %w", snResp.Comment.CreatedOn, err)
 	}
 
+	commentID := sysidToUUID(snResp.Comment.ID)
+	if req.ReferenceType == domain.ReferenceTypeIncident {
+		s.publishIncidentCommentAdded(ctx, req, commentID)
+	}
+
 	return domain.CreateCommentResponse{
 		Message: snResp.Message,
 		Comment: domain.CaseCommentDetail{
-			ID:        sysidToUUID(snResp.Comment.ID),
+			ID:        commentID,
 			CreatedOn: createdOn,
 			CreatedBy: snResp.Comment.CreatedBy,
 		},
 	}, nil
+}
+
+// publishIncidentCommentAdded best-effort publishes incident.comment_added,
+// the signal that stops a call escalation started by a priority elevation.
+//
+// Published for work notes as well as public comments, with IsPublic saying
+// which — the consumer is what decides that only a public one acknowledges
+// (see events.IncidentCommentAddedPayload). Publishing only the public ones
+// here would bake a notification policy into the service that owns the data.
+//
+// Runs synchronously, bounded by its own timeout, and never fails
+// CreateComment: the comment exists in ServiceNow by this point, exactly the
+// reasoning publishIncidentCreated applies.
+func (s *snCommentSearchService) publishIncidentCommentAdded(ctx context.Context, req domain.CreateCommentRequest, commentID string) {
+	if s.publisher == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, publishIncidentCommentAddedTimeout)
+	defer cancel()
+
+	payload, err := json.Marshal(events.IncidentCommentAddedPayload{
+		CommentID: commentID,
+		IsPublic:  req.Type == domain.CommentTypeComment,
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "sn create comment: encode incident.comment_added payload failed",
+			"incidentId", req.ReferenceID, "error", err)
+		return
+	}
+	if err := s.publisher.Publish(ctx, events.TypeIncidentCommentAdded, req.ReferenceID, payload); err != nil {
+		// Not logging err itself: it can carry raw Event Hub client detail —
+		// same reasoning as every other publisher in this package.
+		slog.ErrorContext(ctx, "sn create comment: publish incident.comment_added failed",
+			"incidentId", req.ReferenceID)
+	}
+}
+
+// commentEditDeleteUnsupportedOnSNMsg is returned by every method below --
+// ServiceNow's own sys_journal_field is append-only (confirmed separately:
+// stock ServiceNow does not let an agent edit or delete a journal entry
+// either), so edit/soft-delete is a net-new CSM Portal capability that only
+// the Postgres data source implements. This is not a temporary gap to fill
+// in later; there is no ServiceNow-side operation to back it with -- same
+// "genuinely unsupported by this data source" posture (503, not 400) as
+// unavailableTaskService/unavailableFeedbackService and
+// SyncProductVulnerabilities elsewhere in this codebase.
+const commentEditDeleteUnsupportedOnSNMsg = "editing or deleting a comment is not supported by the ServiceNow data source"
+
+// GetComment implements CommentService. Always rejected -- see
+// commentEditDeleteUnsupportedOnSNMsg. (This data source has no single-comment
+// fetch at all today, edit/delete or otherwise -- rejecting rather than
+// silently returning nothing keeps this service's behavior uniform with
+// UpdateComment/DeleteComment below, the only other callers of this method's
+// purpose.)
+func (s *snCommentSearchService) GetComment(_ context.Context, _ string) (domain.Comment, error) {
+	return domain.Comment{}, &apierror.ServiceUnavailableError{Msg: commentEditDeleteUnsupportedOnSNMsg}
+}
+
+// UpdateComment implements CommentService. Always rejected -- see
+// commentEditDeleteUnsupportedOnSNMsg.
+func (s *snCommentSearchService) UpdateComment(_ context.Context, _ domain.UpdateCommentRequest) (domain.UpdateCommentResponse, error) {
+	return domain.UpdateCommentResponse{}, &apierror.ServiceUnavailableError{Msg: commentEditDeleteUnsupportedOnSNMsg}
+}
+
+// DeleteComment implements CommentService. Always rejected -- see
+// commentEditDeleteUnsupportedOnSNMsg.
+func (s *snCommentSearchService) DeleteComment(_ context.Context, _ string) error {
+	return &apierror.ServiceUnavailableError{Msg: commentEditDeleteUnsupportedOnSNMsg}
+}
+
+// GetCommentEditHistory implements CommentService. Always rejected -- see
+// commentEditDeleteUnsupportedOnSNMsg.
+func (s *snCommentSearchService) GetCommentEditHistory(_ context.Context, _ string) (domain.GetCommentEditHistoryResponse, error) {
+	return domain.GetCommentEditHistoryResponse{}, &apierror.ServiceUnavailableError{Msg: commentEditDeleteUnsupportedOnSNMsg}
 }

@@ -22,9 +22,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/apierror"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/directory"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/scim"
 )
@@ -67,6 +70,12 @@ func TestGetMe(t *testing.T) {
 
 	t.Run("upstream errors from the entity service are mapped correctly", func(t *testing.T) {
 		for _, tc := range upstreamErrorsGeneric("Failed to fetch the current user.") {
+			// "apierror 404" is excluded: GetMe deliberately maps a 404 to 403
+			// instead of the generic table's 404->404 pass-through, asserted
+			// in its own test below.
+			if tc.name == "apierror 404" {
+				continue
+			}
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
 				entityClient := &mockEntityUserClient{
@@ -83,6 +92,28 @@ func TestGetMe(t *testing.T) {
 				assertContentType(t, w, "application/json")
 			})
 		}
+	})
+
+	// Regression guard: a caller authenticated by a valid JWT whose email has
+	// no "user" row at all (never provisioned downstream) made entity-service
+	// 404 GetUserMe. Passing that 404 straight through used to leave the
+	// webapp's profile-fetch hook with nothing to render and no 403 state to
+	// fall into, spinning forever instead. GetMe now maps it to the same 403
+	// the UI already knows how to show, while the real reason is still logged
+	// server-side.
+	t.Run("entity 404 (user not found) maps to 403, not 404", func(t *testing.T) {
+		entityClient := &mockEntityUserClient{
+			getUserMeFn: func(_ context.Context) ([]byte, error) {
+				return nil, &apierror.Error{StatusCode: http.StatusNotFound}
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodGet, "/users/me", nil))
+		w := httptest.NewRecorder()
+		h.GetMe(w, r)
+		assertStatus(t, w, http.StatusForbidden)
+		assertErrorMessage(t, w, ErrMsgForbidden)
+		assertContentType(t, w, "application/json")
 	})
 
 	t.Run("returns email from JWT when SCIM returns no user", func(t *testing.T) {
@@ -247,154 +278,95 @@ func TestGetMeSftpgoAttachmentStorageEnabled(t *testing.T) {
 	}
 }
 
-// TestGetMeDashboardDesignerEmails verifies the DASHBOARD_DESIGNER_EMAILS allow-list
-// grants a synthetic "dashboard_designer" role on GET /users/me to a matching
-// caller, additively and case-insensitively, and leaves every other caller
-// untouched.
-func TestGetMeDashboardDesignerEmails(t *testing.T) {
-	allowlist := map[string]struct{}{"agent@example.com": {}}
+// meBody is the part of the GET /users/me response these tests inspect.
+type meBody struct {
+	Roles *[]string `json:"roles"`
+}
 
-	t.Run("allowlisted email with no entity roles gets exactly dashboard_designer", func(t *testing.T) {
-		entityClient := &mockEntityUserClient{
-			getUserMeFn: func(_ context.Context) ([]byte, error) {
-				return []byte(`{"id":"u-1","email":"agent@example.com","lastName":"Doe"}`), nil
-			},
-		}
-		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, allowlist)
-		r := withUser(httptest.NewRequest(http.MethodGet, "/users/me", nil))
-		w := httptest.NewRecorder()
-		h.GetMe(w, r)
+// getMeAs calls GET /users/me for a caller whose token carries tokenRoles and
+// whose email is email, against an entity service that reports entityBody.
+func getMeAs(t *testing.T, h *UsersHandler, email string, tokenRoles []string) meBody {
+	t.Helper()
+	user := &middleware.UserInfo{Email: email, UserID: "u-1", Roles: tokenRoles}
+	r := httptest.NewRequest(http.MethodGet, "/users/me", nil)
+	r = r.WithContext(middleware.WithUserInfo(r.Context(), user))
+	w := httptest.NewRecorder()
+	h.GetMe(w, r)
+	assertStatus(t, w, http.StatusOK)
+	return decodeJSON[meBody](t, w)
+}
 
-		assertStatus(t, w, http.StatusOK)
-		type getMeResp struct {
-			Roles []string `json:"roles"`
-		}
-		resp := decodeJSON[getMeResp](t, w)
-		if len(resp.Roles) != 1 || resp.Roles[0] != "dashboard_designer" {
-			t.Errorf("roles = %v, want [dashboard_designer]", resp.Roles)
+func joined(l *[]string) string {
+	if l == nil {
+		return "<null>"
+	}
+	return strings.Join(*l, ",")
+}
+
+// TestGetMeRoles verifies GET /users/me reports the portal roles the caller's
+// token roles grant, always as an array, and that a caller holding no portal
+// role still gets a profile rather than an error.
+func TestGetMeRoles(t *testing.T) {
+	newHandler := func(t *testing.T, entity *mockEntityUserClient, cfg AccessConfig) *UsersHandler {
+		return NewUsersHandler(&mockSCIMClient{}, entity, testDirectory(t), false, nil).WithAccessGuard(NewAccessGuard(cfg))
+	}
+	def := testAccessConfig()
+
+	t.Run("reports the portal role the token role grants", func(t *testing.T) {
+		resp := getMeAs(t, newHandler(t, &mockEntityUserClient{}, def), "agent@example.com", []string{"test-escalator"})
+		if joined(resp.Roles) != "escalator" {
+			t.Errorf("roles = %s, want escalator", joined(resp.Roles))
 		}
 	})
 
-	t.Run("allowlisted email with existing entity roles gets dashboard_designer appended", func(t *testing.T) {
-		entityClient := &mockEntityUserClient{
-			getUserMeFn: func(_ context.Context) ([]byte, error) {
-				return []byte(`{"id":"u-1","email":"agent@example.com","lastName":"Doe","roles":["agent","admin"]}`), nil
-			},
-		}
-		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, allowlist)
-		r := withUser(httptest.NewRequest(http.MethodGet, "/users/me", nil))
-		w := httptest.NewRecorder()
-		h.GetMe(w, r)
-
-		assertStatus(t, w, http.StatusOK)
-		type getMeResp struct {
-			Roles []string `json:"roles"`
-		}
-		resp := decodeJSON[getMeResp](t, w)
-		want := []string{"agent", "admin", "dashboard_designer"}
-		if len(resp.Roles) != len(want) {
-			t.Fatalf("roles = %v, want %v", resp.Roles, want)
-		}
-		for i, r := range want {
-			if resp.Roles[i] != r {
-				t.Errorf("roles = %v, want %v", resp.Roles, want)
-				break
-			}
+	t.Run("a caller can hold several roles, and unrelated token roles are ignored", func(t *testing.T) {
+		resp := getMeAs(t, newHandler(t, &mockEntityUserClient{}, def), "agent@example.com",
+			[]string{"test-cs-engineer", "test-usage-metrics-viewer", "wso2-everyone"})
+		if joined(resp.Roles) != "cs_engineer,usage_metrics_viewer" {
+			t.Errorf("roles = %s, want cs_engineer,usage_metrics_viewer", joined(resp.Roles))
 		}
 	})
 
-	t.Run("entity roles already containing dashboard_designer are not duplicated", func(t *testing.T) {
-		entityClient := &mockEntityUserClient{
+	t.Run("the entity service's own roles are not reported", func(t *testing.T) {
+		entity := &mockEntityUserClient{
 			getUserMeFn: func(_ context.Context) ([]byte, error) {
-				return []byte(`{"id":"u-1","email":"agent@example.com","lastName":"Doe","roles":["dashboard_designer"]}`), nil
+				return []byte(`{"id":"u-1","email":"agent@example.com","lastName":"Doe","roles":["internal","admin"]}`), nil
 			},
 		}
-		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, allowlist)
-		r := withUser(httptest.NewRequest(http.MethodGet, "/users/me", nil))
-		w := httptest.NewRecorder()
-		h.GetMe(w, r)
-
-		assertStatus(t, w, http.StatusOK)
-		type getMeResp struct {
-			Roles []string `json:"roles"`
-		}
-		resp := decodeJSON[getMeResp](t, w)
-		if len(resp.Roles) != 1 || resp.Roles[0] != "dashboard_designer" {
-			t.Errorf("roles = %v, want exactly one dashboard_designer entry", resp.Roles)
+		resp := getMeAs(t, newHandler(t, entity, def), "agent@example.com", []string{"test-viewer"})
+		if joined(resp.Roles) != "viewer" {
+			t.Errorf("roles = %s, want only viewer: the entity roles must not leak in", joined(resp.Roles))
 		}
 	})
 
-	t.Run("email not in the allowlist is unaffected", func(t *testing.T) {
-		entityClient := &mockEntityUserClient{
-			getUserMeFn: func(_ context.Context) ([]byte, error) {
-				return []byte(`{"id":"u-1","email":"agent@example.com","lastName":"Doe","roles":["agent"]}`), nil
-			},
-		}
-		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false,
-			map[string]struct{}{"someone.else@example.com": {}})
-		r := withUser(httptest.NewRequest(http.MethodGet, "/users/me", nil))
-		w := httptest.NewRecorder()
-		h.GetMe(w, r)
-
-		assertStatus(t, w, http.StatusOK)
-		type getMeResp struct {
-			Roles []string `json:"roles"`
-		}
-		resp := decodeJSON[getMeResp](t, w)
-		if len(resp.Roles) != 1 || resp.Roles[0] != "agent" {
-			t.Errorf("roles = %v, want [agent]", resp.Roles)
+	t.Run("the dashboard designer role is reported", func(t *testing.T) {
+		resp := getMeAs(t, newHandler(t, &mockEntityUserClient{}, def), "agent@example.com", []string{"test-dashboard-designer"})
+		if joined(resp.Roles) != "dashboard_designer" {
+			t.Errorf("roles = %s, want dashboard_designer", joined(resp.Roles))
 		}
 	})
 
-	t.Run("matching is case-insensitive", func(t *testing.T) {
-		// The allow-list is keyed lower-case (as loadDashboardDesignerEmails
-		// always stores it), but the caller's JWT email arrives in whatever
-		// case the identity provider happened to send -- mixed-case here --
-		// so this exercises GetMe's own strings.ToLower on the caller's
-		// email before the lookup.
-		mixedCaseUser := &middleware.UserInfo{
-			Email:  "Agent@Example.com",
-			UserID: testUser.UserID,
-		}
-		entityClient := &mockEntityUserClient{
-			getUserMeFn: func(_ context.Context) ([]byte, error) {
-				return []byte(`{"id":"u-1","email":"Agent@Example.com","lastName":"Doe"}`), nil
-			},
-		}
-		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, allowlist)
-		r := httptest.NewRequest(http.MethodGet, "/users/me", nil)
-		r = r.WithContext(middleware.WithUserInfo(r.Context(), mixedCaseUser))
-		w := httptest.NewRecorder()
-		h.GetMe(w, r)
-
-		assertStatus(t, w, http.StatusOK)
-		type getMeResp struct {
-			Roles []string `json:"roles"`
-		}
-		resp := decodeJSON[getMeResp](t, w)
-		if len(resp.Roles) != 1 || resp.Roles[0] != "dashboard_designer" {
-			t.Errorf("roles = %v, want [dashboard_designer]", resp.Roles)
+	t.Run("a caller holding no portal role gets an empty array, not null", func(t *testing.T) {
+		resp := getMeAs(t, newHandler(t, &mockEntityUserClient{}, def), "agent@example.com", []string{"wso2-everyone"})
+		if resp.Roles == nil || len(*resp.Roles) != 0 {
+			t.Errorf("roles = %s, want an empty non-null array", joined(resp.Roles))
 		}
 	})
 
-	t.Run("empty allowlist changes nothing (regression safety net)", func(t *testing.T) {
-		entityClient := &mockEntityUserClient{
-			getUserMeFn: func(_ context.Context) ([]byte, error) {
-				return []byte(`{"id":"u-1","email":"agent@example.com","lastName":"Doe","roles":["agent"]}`), nil
-			},
+	t.Run("no guard wired reports an empty array, not null", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, nil)
+		resp := getMeAs(t, h, "agent@example.com", []string{"test-admin"})
+		if resp.Roles == nil || len(*resp.Roles) != 0 {
+			t.Errorf("roles = %s, want an empty non-null array", joined(resp.Roles))
 		}
-		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
-		r := withUser(httptest.NewRequest(http.MethodGet, "/users/me", nil))
-		w := httptest.NewRecorder()
-		h.GetMe(w, r)
+	})
 
-		assertStatus(t, w, http.StatusOK)
-		type getMeResp struct {
-			Roles []string `json:"roles"`
-		}
-		resp := decodeJSON[getMeResp](t, w)
-		if len(resp.Roles) != 1 || resp.Roles[0] != "agent" {
-			t.Errorf("roles = %v, want [agent]", resp.Roles)
+	t.Run("honours configured role names", func(t *testing.T) {
+		cfg := testAccessConfig()
+		cfg.Admin = []string{"corp-csm-admins"}
+		resp := getMeAs(t, newHandler(t, &mockEntityUserClient{}, cfg), "agent@example.com", []string{"corp-csm-admins"})
+		if joined(resp.Roles) != "admin" {
+			t.Errorf("roles = %s, want admin", joined(resp.Roles))
 		}
 	})
 }
@@ -477,6 +449,212 @@ func TestPatchMe(t *testing.T) {
 		resp := decodeJSON[patchResp](t, w)
 		if resp.PhoneNumber == nil || *resp.PhoneNumber != updated {
 			t.Errorf("phoneNumber = %v, want %q", resp.PhoneNumber, updated)
+		}
+	})
+
+	t.Run("phone mirrors to entity after SCIM with the stored value", func(t *testing.T) {
+		var order []string
+		var entityBody []byte
+		stored := "+15555550123"
+		scimClient := &mockSCIMClient{
+			updateUserPhoneFn: func(_ context.Context, _, _ string) (*string, error) {
+				order = append(order, "scim")
+				return &stored, nil
+			},
+		}
+		entityClient := &mockEntityUserClient{
+			patchUserMeFn: func(_ context.Context, body []byte) ([]byte, error) {
+				order = append(order, "entity")
+				entityBody = body
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewUsersHandler(scimClient, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me", strings.NewReader(`{"phoneNumber":" +1 555 555 0123"}`)))
+		w := httptest.NewRecorder()
+		h.PatchMe(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if strings.Join(order, ",") != "scim,entity" {
+			t.Errorf("call order = %v, want scim then entity", order)
+		}
+		if string(entityBody) != `{"phone":"+15555550123"}` {
+			t.Errorf("entity body = %s", entityBody)
+		}
+		resp := decodeJSON[struct {
+			PhoneNumber *string `json:"phoneNumber"`
+		}](t, w)
+		if resp.PhoneNumber == nil || *resp.PhoneNumber != stored {
+			t.Errorf("phoneNumber = %v, want %q", resp.PhoneNumber, stored)
+		}
+	})
+
+	t.Run("phone falls back to requested value when SCIM returns none", func(t *testing.T) {
+		var entityBody []byte
+		entityClient := &mockEntityUserClient{
+			patchUserMeFn: func(_ context.Context, body []byte) ([]byte, error) {
+				entityBody = body
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me", strings.NewReader(`{"phoneNumber":"+15555550123"}`)))
+		w := httptest.NewRecorder()
+		h.PatchMe(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if string(entityBody) != `{"phone":"+15555550123"}` {
+			t.Errorf("entity body = %s", entityBody)
+		}
+	})
+
+	t.Run("empty phone clears via entity", func(t *testing.T) {
+		var entityBody []byte
+		entityClient := &mockEntityUserClient{
+			patchUserMeFn: func(_ context.Context, body []byte) ([]byte, error) {
+				entityBody = body
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me", strings.NewReader(`{"phoneNumber":""}`)))
+		w := httptest.NewRecorder()
+		h.PatchMe(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if string(entityBody) != `{"phone":""}` {
+			t.Errorf("entity body = %s", entityBody)
+		}
+	})
+
+	t.Run("phone and timeZone share one entity call", func(t *testing.T) {
+		calls := 0
+		var entityBody []byte
+		entityClient := &mockEntityUserClient{
+			patchUserMeFn: func(_ context.Context, body []byte) ([]byte, error) {
+				calls++
+				entityBody = body
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me", strings.NewReader(`{"phoneNumber":"+15555550123","timeZone":"UTC"}`)))
+		w := httptest.NewRecorder()
+		h.PatchMe(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if calls != 1 {
+			t.Errorf("entity calls = %d, want 1", calls)
+		}
+		if string(entityBody) != `{"phone":"+15555550123","timeZone":"UTC"}` {
+			t.Errorf("entity body = %s", entityBody)
+		}
+		resp := decodeJSON[struct {
+			TimeZone *string `json:"timeZone"`
+		}](t, w)
+		if resp.TimeZone == nil || *resp.TimeZone != "UTC" {
+			t.Errorf("timeZone = %v", resp.TimeZone)
+		}
+	})
+
+	t.Run("timeZone only does not call SCIM", func(t *testing.T) {
+		scimCalled := false
+		scimClient := &mockSCIMClient{
+			updateUserPhoneFn: func(_ context.Context, _, _ string) (*string, error) {
+				scimCalled = true
+				return nil, nil
+			},
+		}
+		var entityBody []byte
+		entityClient := &mockEntityUserClient{
+			patchUserMeFn: func(_ context.Context, body []byte) ([]byte, error) {
+				entityBody = body
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewUsersHandler(scimClient, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me", strings.NewReader(`{"timeZone":"UTC"}`)))
+		w := httptest.NewRecorder()
+		h.PatchMe(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if scimCalled {
+			t.Error("SCIM must not be called for timeZone only")
+		}
+		if string(entityBody) != `{"timeZone":"UTC"}` {
+			t.Errorf("entity body = %s", entityBody)
+		}
+	})
+
+	t.Run("rejects empty or blank timeZone without upstream calls", func(t *testing.T) {
+		for name, body := range map[string]string{
+			"empty with phone": `{"phoneNumber":"+15555550123","timeZone":""}`,
+			"empty alone":      `{"timeZone":""}`,
+			"whitespace only":  `{"timeZone":"   "}`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				called := false
+				scimClient := &mockSCIMClient{
+					updateUserPhoneFn: func(_ context.Context, _, _ string) (*string, error) {
+						called = true
+						return nil, nil
+					},
+				}
+				entityClient := &mockEntityUserClient{
+					patchUserMeFn: func(_ context.Context, _ []byte) ([]byte, error) {
+						called = true
+						return []byte(`{}`), nil
+					},
+				}
+				h := NewUsersHandler(scimClient, entityClient, testDirectory(t), false, nil)
+				r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me", strings.NewReader(body)))
+				w := httptest.NewRecorder()
+				h.PatchMe(w, r)
+				assertStatus(t, w, http.StatusBadRequest)
+				assertErrorMessage(t, w, "timeZone must not be empty.")
+				if called {
+					t.Error("no SCIM or entity call expected")
+				}
+			})
+		}
+	})
+
+	t.Run("SCIM failure does not call entity", func(t *testing.T) {
+		entityCalled := false
+		scimClient := &mockSCIMClient{
+			updateUserPhoneFn: func(_ context.Context, _, _ string) (*string, error) {
+				return nil, errors.New("boom")
+			},
+		}
+		entityClient := &mockEntityUserClient{
+			patchUserMeFn: func(_ context.Context, _ []byte) ([]byte, error) {
+				entityCalled = true
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewUsersHandler(scimClient, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me", strings.NewReader(`{"phoneNumber":"+15555550123","timeZone":"UTC"}`)))
+		w := httptest.NewRecorder()
+		h.PatchMe(w, r)
+		if w.Code < 400 {
+			t.Errorf("status = %d, want error", w.Code)
+		}
+		if entityCalled {
+			t.Error("entity must not be called after SCIM failure")
+		}
+	})
+
+	t.Run("entity errors after SCIM success are mapped", func(t *testing.T) {
+		for _, tc := range upstreamErrors("Failed to update phone number.") {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				entityClient := &mockEntityUserClient{
+					patchUserMeFn: func(_ context.Context, _ []byte) ([]byte, error) {
+						return nil, tc.err
+					},
+				}
+				h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+				r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me", strings.NewReader(`{"phoneNumber":"+15555550123"}`)))
+				w := httptest.NewRecorder()
+				h.PatchMe(w, r)
+				assertStatus(t, w, tc.wantCode)
+				assertErrorMessage(t, w, tc.wantMsg)
+			})
 		}
 	})
 
@@ -574,6 +752,433 @@ func TestSearchUsers(t *testing.T) {
 				assertErrorMessage(t, w, tc.wantMsg)
 				assertContentType(t, w, "application/json")
 			})
+		}
+	})
+}
+
+// ----- CreateUser -----
+//
+// Route-level admin-only enforcement (PermAdmin) is covered in access_test.go;
+// these tests cover the handler's own request validation and upstream forwarding.
+func TestCreateUser(t *testing.T) {
+	t.Run("requires authenticated user", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, nil)
+		r := httptest.NewRequest(http.MethodPost, "/users", strings.NewReader(`{}`))
+		w := httptest.NewRecorder()
+		h.CreateUser(w, r)
+		assertStatus(t, w, http.StatusUnauthorized)
+		assertErrorMessage(t, w, ErrMsgUnauthorized)
+	})
+
+	t.Run("rejects body exceeding 1 MiB", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPost, "/users", strings.NewReader(strings.Repeat("x", maxRequestBodyBytes+1))))
+		w := httptest.NewRecorder()
+		h.CreateUser(w, r)
+		assertStatus(t, w, http.StatusRequestEntityTooLarge)
+		assertErrorMessage(t, w, ErrMsgTooLarge)
+	})
+
+	t.Run("rejects invalid JSON body", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPost, "/users", strings.NewReader(`not-json`)))
+		w := httptest.NewRecorder()
+		h.CreateUser(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		assertErrorMessage(t, w, ErrMsgBadRequest)
+	})
+
+	t.Run("rejects a role not in the directory's allow-list, before reaching upstream", func(t *testing.T) {
+		called := false
+		entityClient := &mockEntityUserClient{
+			createUserFn: func(context.Context, []byte) ([]byte, error) {
+				called = true
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPost, "/users",
+			strings.NewReader(`{"firstName":"Jane","email":"jane@example.com","roles":["not-a-real-role"]}`)))
+		w := httptest.NewRecorder()
+		h.CreateUser(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		if called {
+			t.Fatal("entity service must not be called for an invalid role")
+		}
+	})
+
+	t.Run("enforces the internal-email and external-type-disabled constraints, before reaching upstream", func(t *testing.T) {
+		teams, err := directory.ParseTeamRegistry(testTeamRegistry)
+		if err != nil {
+			t.Fatalf("ParseTeamRegistry: %v", err)
+		}
+		roles, err := directory.ParseRoles("internal,external,admin,agent,partner,customer,partner_admin,customer_admin")
+		if err != nil {
+			t.Fatalf("ParseRoles: %v", err)
+		}
+		dir, err := directory.New(teams, roles)
+		if err != nil {
+			t.Fatalf("directory.New: %v", err)
+		}
+		for _, role := range []string{"internal", "admin"} {
+			t.Run(role, func(t *testing.T) {
+				called := false
+				entityClient := &mockEntityUserClient{
+					createUserFn: func(context.Context, []byte) ([]byte, error) {
+						called = true
+						return []byte(`{}`), nil
+					},
+				}
+				h := NewUsersHandler(&mockSCIMClient{}, entityClient, dir, false, nil)
+				r := withUser(httptest.NewRequest(http.MethodPost, "/users",
+					strings.NewReader(`{"firstName":"Jane","email":"jane@example.com","roles":["`+role+`"]}`)))
+				w := httptest.NewRecorder()
+				h.CreateUser(w, r)
+				assertStatus(t, w, http.StatusBadRequest)
+				if called {
+					t.Fatal("entity service must not be called when an internal-resolving role is requested for a non-wso2.com email")
+				}
+			})
+		}
+
+		t.Run("allows the same role for a wso2.com email", func(t *testing.T) {
+			entityClient := &mockEntityUserClient{
+				createUserFn: func(context.Context, []byte) ([]byte, error) {
+					return []byte(`{"id":"u-1"}`), nil
+				},
+			}
+			h := NewUsersHandler(&mockSCIMClient{}, entityClient, dir, false, nil)
+			r := withUser(httptest.NewRequest(http.MethodPost, "/users",
+				strings.NewReader(`{"firstName":"Jane","email":"jane@wso2.com","roles":["internal"]}`)))
+			w := httptest.NewRecorder()
+			h.CreateUser(w, r)
+			assertStatus(t, w, http.StatusCreated)
+		})
+
+		t.Run("allows a non-wso2.com email for a role that resolves to neither internal nor external", func(t *testing.T) {
+			entityClient := &mockEntityUserClient{
+				createUserFn: func(context.Context, []byte) ([]byte, error) {
+					return []byte(`{"id":"u-1"}`), nil
+				},
+			}
+			h := NewUsersHandler(&mockSCIMClient{}, entityClient, dir, false, nil)
+			r := withUser(httptest.NewRequest(http.MethodPost, "/users",
+				strings.NewReader(`{"firstName":"Jane","email":"jane@example.com","roles":["agent"]}`)))
+			w := httptest.NewRecorder()
+			h.CreateUser(w, r)
+			assertStatus(t, w, http.StatusCreated)
+		})
+
+		t.Run("rejects an external-resolving role -- creating an external-type user is temporarily disabled", func(t *testing.T) {
+			for _, role := range []string{"external", "partner", "customer", "partner_admin", "customer_admin"} {
+				t.Run(role, func(t *testing.T) {
+					called := false
+					entityClient := &mockEntityUserClient{
+						createUserFn: func(context.Context, []byte) ([]byte, error) {
+							called = true
+							return []byte(`{}`), nil
+						},
+					}
+					h := NewUsersHandler(&mockSCIMClient{}, entityClient, dir, false, nil)
+					r := withUser(httptest.NewRequest(http.MethodPost, "/users",
+						strings.NewReader(`{"firstName":"Jane","email":"jane@example.com","roles":["`+role+`"]}`)))
+					w := httptest.NewRecorder()
+					h.CreateUser(w, r)
+					assertStatus(t, w, http.StatusBadRequest)
+					if called {
+						t.Fatal("entity service must not be called when an external-resolving role is requested")
+					}
+				})
+			}
+		})
+	})
+
+	t.Run("forwards the body unchanged and returns 201 with the upstream response", func(t *testing.T) {
+		const reqPayload = `{"firstName":"Jane","lastName":"Doe","email":"jane.doe@example.com","roles":["agent"]}`
+		var capturedBody []byte
+		entityClient := &mockEntityUserClient{
+			createUserFn: func(_ context.Context, body []byte) ([]byte, error) {
+				capturedBody = body
+				return []byte(`{"id":"u-1","email":"jane.doe@example.com"}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPost, "/users", strings.NewReader(reqPayload)))
+		w := httptest.NewRecorder()
+		h.CreateUser(w, r)
+
+		assertStatus(t, w, http.StatusCreated)
+		assertContentType(t, w, "application/json")
+		if string(capturedBody) != reqPayload {
+			t.Errorf("upstream received body %q, want %q (unchanged)", capturedBody, reqPayload)
+		}
+		resp := decodeJSON[map[string]any](t, w)
+		if resp["id"] != "u-1" {
+			t.Errorf("id = %v, want u-1", resp["id"])
+		}
+	})
+
+	t.Run("upstream errors are mapped correctly", func(t *testing.T) {
+		for _, tc := range upstreamErrorsGeneric("Failed to create the user.") {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				entityClient := &mockEntityUserClient{
+					createUserFn: func(context.Context, []byte) ([]byte, error) {
+						return nil, tc.err
+					},
+				}
+				h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+				r := withUser(httptest.NewRequest(http.MethodPost, "/users",
+					strings.NewReader(`{"firstName":"Jane","email":"jane@example.com"}`)))
+				w := httptest.NewRecorder()
+				h.CreateUser(w, r)
+				assertStatus(t, w, tc.wantCode)
+				assertErrorMessage(t, w, tc.wantMsg)
+				assertContentType(t, w, "application/json")
+			})
+		}
+	})
+}
+
+// ----- GetTimeCardApprovers -----
+
+func TestGetTimeCardApprovers(t *testing.T) {
+	t.Run("requires authenticated user", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, []string{"role-1"})
+		r := httptest.NewRequest(http.MethodGet, "/users/time-card-approvers", nil)
+		w := httptest.NewRecorder()
+		h.GetTimeCardApprovers(w, r)
+		assertStatus(t, w, http.StatusUnauthorized)
+		assertErrorMessage(t, w, ErrMsgUnauthorized)
+	})
+
+	t.Run("fetches the configured role id and maps members to id/email", func(t *testing.T) {
+		var gotRoleID string
+		scimClient := &mockSCIMClient{
+			getRoleFn: func(_ context.Context, roleID string) ([]scim.RoleMember, error) {
+				gotRoleID = roleID
+				return []scim.RoleMember{
+					{ID: "u-1", Email: "jane.doe@wso2.com"},
+					{ID: "u-2", Email: "john.smith@wso2.com"},
+				}, nil
+			},
+		}
+		h := NewUsersHandler(scimClient, &mockEntityUserClient{}, testDirectory(t), false, []string{"role-1"})
+		r := withUser(httptest.NewRequest(http.MethodGet, "/users/time-card-approvers", nil))
+		w := httptest.NewRecorder()
+		h.GetTimeCardApprovers(w, r)
+
+		assertStatus(t, w, http.StatusOK)
+		assertContentType(t, w, "application/json")
+		if gotRoleID != "role-1" {
+			t.Errorf("roleID passed to scim.GetRole = %q, want %q", gotRoleID, "role-1")
+		}
+		resp := decodeJSON[timeCardApproversResponse](t, w)
+		want := []timeCardApproverRef{
+			{ID: "u-1", Email: "jane.doe@wso2.com"},
+			{ID: "u-2", Email: "john.smith@wso2.com"},
+		}
+		if !reflect.DeepEqual(resp.Approvers, want) {
+			t.Errorf("approvers = %+v, want %+v", resp.Approvers, want)
+		}
+	})
+
+	t.Run("returns 404 when no role id is configured, rather than falling through to GetUser", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodGet, "/users/time-card-approvers", nil))
+		w := httptest.NewRecorder()
+		h.GetTimeCardApprovers(w, r)
+		assertStatus(t, w, http.StatusNotFound)
+		assertErrorMessage(t, w, ErrMsgNotFound)
+	})
+
+	// A SCIM 401/403 means this backend's own credentials lack a roles-read
+	// scope, not that the caller lacks permission -- excluded from the shared
+	// upstreamErrorsGeneric table (which asserts the ordinary 401->401/403->403
+	// pass-through) and asserted separately below.
+	t.Run("upstream errors are mapped correctly", func(t *testing.T) {
+		for _, tc := range upstreamErrorsGeneric("Failed to list time card approvers.") {
+			if tc.wantCode == http.StatusUnauthorized || tc.wantCode == http.StatusForbidden {
+				continue
+			}
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				scimClient := &mockSCIMClient{
+					getRoleFn: func(context.Context, string) ([]scim.RoleMember, error) {
+						return nil, tc.err
+					},
+				}
+				h := NewUsersHandler(scimClient, &mockEntityUserClient{}, testDirectory(t), false, []string{"role-1"})
+				r := withUser(httptest.NewRequest(http.MethodGet, "/users/time-card-approvers", nil))
+				w := httptest.NewRecorder()
+				h.GetTimeCardApprovers(w, r)
+				assertStatus(t, w, tc.wantCode)
+				assertErrorMessage(t, w, tc.wantMsg)
+				assertContentType(t, w, "application/json")
+			})
+		}
+	})
+
+	t.Run("a SCIM 401 or 403 is reported as a sanitized 502, never the caller's own 401/403", func(t *testing.T) {
+		for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+			t.Run(http.StatusText(code), func(t *testing.T) {
+				scimClient := &mockSCIMClient{
+					getRoleFn: func(context.Context, string) ([]scim.RoleMember, error) {
+						return nil, &apierror.Error{StatusCode: code, Body: "scim detail that must not leak"}
+					},
+				}
+				h := NewUsersHandler(scimClient, &mockEntityUserClient{}, testDirectory(t), false, []string{"role-1"})
+				r := withUser(httptest.NewRequest(http.MethodGet, "/users/time-card-approvers", nil))
+				w := httptest.NewRecorder()
+				h.GetTimeCardApprovers(w, r)
+				assertStatus(t, w, http.StatusBadGateway)
+				assertErrorMessage(t, w, "Failed to list time card approvers.")
+			})
+		}
+	})
+}
+
+func TestListSavedFilterViews(t *testing.T) {
+	t.Run("requires authenticated user", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, nil)
+		r := httptest.NewRequest(http.MethodGet, "/users/me/saved-filter-views?listKey=cases", nil)
+		w := httptest.NewRecorder()
+		h.ListSavedFilterViews(w, r)
+		assertStatus(t, w, http.StatusUnauthorized)
+		assertErrorMessage(t, w, ErrMsgUnauthorized)
+	})
+
+	t.Run("requires listKey", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodGet, "/users/me/saved-filter-views", nil))
+		w := httptest.NewRecorder()
+		h.ListSavedFilterViews(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		assertErrorMessage(t, w, "listKey is required.")
+	})
+
+	t.Run("forwards listKey and returns upstream body", func(t *testing.T) {
+		var gotKey string
+		entityClient := &mockEntityUserClient{
+			listSavedFilterViewsFn: func(_ context.Context, listKey string) ([]byte, error) {
+				gotKey = listKey
+				return []byte(`{"views":[{"name":"Open","qs":"states=open"}]}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodGet, "/users/me/saved-filter-views?listKey=cases", nil))
+		w := httptest.NewRecorder()
+		h.ListSavedFilterViews(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if gotKey != "cases" {
+			t.Errorf("listKey = %q, want cases", gotKey)
+		}
+	})
+
+	t.Run("upstream errors are mapped correctly", func(t *testing.T) {
+		for _, tc := range upstreamErrorsGeneric("Failed to list saved filter views.") {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				entityClient := &mockEntityUserClient{
+					listSavedFilterViewsFn: func(_ context.Context, _ string) ([]byte, error) {
+						return nil, tc.err
+					},
+				}
+				h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+				r := withUser(httptest.NewRequest(http.MethodGet, "/users/me/saved-filter-views?listKey=cases", nil))
+				w := httptest.NewRecorder()
+				h.ListSavedFilterViews(w, r)
+				assertStatus(t, w, tc.wantCode)
+				assertErrorMessage(t, w, tc.wantMsg)
+			})
+		}
+	})
+}
+
+func TestSaveSavedFilterView(t *testing.T) {
+	t.Run("requires authenticated user", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, nil)
+		r := httptest.NewRequest(http.MethodPatch, "/users/me/saved-filter-views", strings.NewReader(`{}`))
+		w := httptest.NewRecorder()
+		h.SaveSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusUnauthorized)
+	})
+
+	t.Run("rejects invalid JSON", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me/saved-filter-views", strings.NewReader(`not-json`)))
+		w := httptest.NewRecorder()
+		h.SaveSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		assertErrorMessage(t, w, ErrMsgBadRequest)
+	})
+
+	t.Run("forwards body", func(t *testing.T) {
+		const payload = `{"listKey":"cases","name":"Open","qs":"states=open"}`
+		var captured []byte
+		entityClient := &mockEntityUserClient{
+			saveSavedFilterViewFn: func(_ context.Context, body []byte) ([]byte, error) {
+				captured = body
+				return []byte(`{"views":[{"name":"Open","qs":"states=open"}]}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/users/me/saved-filter-views", strings.NewReader(payload)))
+		w := httptest.NewRecorder()
+		h.SaveSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if string(captured) != payload {
+			t.Errorf("body = %q, want %q", captured, payload)
+		}
+	})
+}
+
+func TestDeleteSavedFilterView(t *testing.T) {
+	t.Run("requires listKey and name", func(t *testing.T) {
+		h := NewUsersHandler(&mockSCIMClient{}, &mockEntityUserClient{}, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodDelete, "/users/me/saved-filter-views?listKey=cases", nil))
+		w := httptest.NewRecorder()
+		h.DeleteSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusBadRequest)
+		assertErrorMessage(t, w, "listKey and name are required.")
+	})
+
+	t.Run("forwards query params", func(t *testing.T) {
+		var gotKey, gotName string
+		entityClient := &mockEntityUserClient{
+			deleteSavedFilterViewFn: func(_ context.Context, listKey, name string) ([]byte, error) {
+				gotKey, gotName = listKey, name
+				return []byte(`{"views":[]}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodDelete, "/users/me/saved-filter-views?listKey=incidents&name=Mine", nil))
+		w := httptest.NewRecorder()
+		h.DeleteSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if gotKey != "incidents" || gotName != "Mine" {
+			t.Errorf("got %s/%s", gotKey, gotName)
+		}
+	})
+}
+
+func TestReorderSavedFilterView(t *testing.T) {
+	t.Run("forwards body", func(t *testing.T) {
+		const payload = `{"listKey":"cases","name":"Open","direction":"down"}`
+		var captured []byte
+		entityClient := &mockEntityUserClient{
+			reorderSavedFilterViewFn: func(_ context.Context, body []byte) ([]byte, error) {
+				captured = body
+				return []byte(`{"views":[]}`), nil
+			},
+		}
+		h := NewUsersHandler(&mockSCIMClient{}, entityClient, testDirectory(t), false, nil)
+		r := withUser(httptest.NewRequest(http.MethodPost, "/users/me/saved-filter-views/reorder", strings.NewReader(payload)))
+		w := httptest.NewRecorder()
+		h.ReorderSavedFilterView(w, r)
+		assertStatus(t, w, http.StatusOK)
+		if string(captured) != payload {
+			t.Errorf("body = %q, want %q", captured, payload)
 		}
 	})
 }

@@ -16,7 +16,11 @@
 
 package dto
 
-import "github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/entity"
+import (
+	"strings"
+
+	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/entity"
+)
 
 // ReferenceItem is a flattened {id, label, count?} view of entity-service's
 // ChoiceListItem/ReferenceTableItem — this API collapses both into one
@@ -57,9 +61,54 @@ func mapReferenceTableItems(items []entity.ReferenceTableItem) []ReferenceItem {
 }
 
 // restrictedChangeRequestStateIDs are excluded from ProjectFilterOptions'
-// changeRequestStates — internal ServiceNow workflow states never meant to
-// be offered as a customer-facing filter option.
-var restrictedChangeRequestStateIDs = map[string]bool{"-3": true, "-4": true, "-5": true}
+// changeRequestStates and the change-request stats' state counts: ServiceNow's own
+// numeric ids for the three pre-approval workflow states a customer is never shown
+// on that data source (New, Assess, Authorize).
+//
+// A ServiceNow-sourced id is the one thing that tells the two data sources apart
+// here, and it decides what Authorize ("-3") means:
+//
+//   - On the ServiceNow data source nothing is designated to a customer: every
+//     change request is "legacy" and is visible in every state except these
+//     three, and ServiceNow's own search does not hide them (entity-service
+//     narrows a customer's search to the visible states and leaves these out of
+//     the vocabulary it serves, and this list is the second line). So "-3" is
+//     dropped, exactly like "-5" and "-4".
+//   - On the Postgres data source a change request is visible once it was
+//     designated to the customer, in whatever state it is in. A customer's
+//     proposed time and a Re-schedule keep the change in Customer Approval, but
+//     one that an older build sent back to Authorize (through the CAB again)
+//     waits there and stays on their list, so the state filter has to offer it.
+//     Its id there is the raw enum label ("AUTHORIZE", see
+//     restrictedChangeRequestStateLabels), never "-3", so it passes this check
+//     and is kept.
+var restrictedChangeRequestStateIDs = map[string]bool{"-5": true, "-4": true, "-3": true}
+
+// restrictedChangeRequestStateLabels is the Postgres-mode equivalent: on
+// that data source ReferenceDataRepository.EnumLabels (entity-service)
+// returns the raw enum label as id, e.g. {"id":"NEW"}, never a ServiceNow
+// number, so the id check above never matches there and these two would
+// leak into the response unfiltered without this. crStateIDs (see
+// change_request_enum_mapping.go) also has no entries for them, by the same
+// "no visible change request is ever in them" design (a designated change
+// request left New when approval was requested and never returns to Assess), so
+// they pass normalizeChoices unchanged and keep their raw label -- matched here
+// before that happens.
+//
+// Authorize is not in this list: on the Postgres data source it is a state a
+// designated customer's change request waits in. Its ServiceNow-sourced id is
+// dropped by the id check above.
+//
+// Checked case-insensitively and kept alongside the id check above, not in
+// place of it: a Postgres-mode label is reliably UPPER_SNAKE, but this
+// endpoint also serves the ServiceNow data source, whose own raw label
+// casing isn't guaranteed to match — dropping the id check here would trade
+// one data source's gap for the other's.
+var restrictedChangeRequestStateLabels = map[string]bool{"NEW": true, "ASSESS": true}
+
+func isRestrictedChangeRequestState(s ReferenceItem) bool {
+	return restrictedChangeRequestStateIDs[s.ID] || restrictedChangeRequestStateLabels[strings.ToUpper(s.Label)]
+}
 
 // ProjectFilterOptions is the portal's response for GET /projects/{id}/filters
 // — a flattened, filter-dropdown-ready view of entity-service's project
@@ -80,6 +129,11 @@ type ProjectFilterOptions struct {
 	TimeCardStates              []ReferenceItem `json:"timeCardStates"`
 	EngagementTypes             []ReferenceItem `json:"engagementTypes"`
 	EngagementPaymentTypes      []ReferenceItem `json:"engagementPaymentTypes"`
+	// ResolutionCodes/Causes back the resolution fields the webapp must
+	// collect before closing (or proposing a solution for) a case — see
+	// PATCH /cases/{id}'s own dto.UpdateCaseRequest doc comment.
+	ResolutionCodes             []ReferenceItem `json:"resolutionCodes"`
+	Causes                      []ReferenceItem `json:"causes"`
 	SeverityBasedAllocationTime map[string]int  `json:"severityBasedAllocationTime"`
 }
 
@@ -88,24 +142,26 @@ type ProjectFilterOptions struct {
 func MapProjectFilterOptions(m entity.ProjectMetadataResponse) ProjectFilterOptions {
 	changeRequestStates := make([]ReferenceItem, 0, len(m.ChangeRequestStates))
 	for _, s := range mapChoiceListItems(m.ChangeRequestStates) {
-		if !restrictedChangeRequestStateIDs[s.ID] {
+		if !isRestrictedChangeRequestState(s) {
 			changeRequestStates = append(changeRequestStates, s)
 		}
 	}
 
 	return ProjectFilterOptions{
-		CaseStates:                  mapChoiceListItems(m.CaseStates),
-		Severities:                  mapChoiceListItems(m.Severities),
-		IssueTypes:                  mapChoiceListItems(m.IssueTypes),
-		DeploymentTypes:             mapChoiceListItems(m.DeploymentTypes),
+		CaseStates:                  normalizeCaseStateChoices(mapChoiceListItems(m.CaseStates)),
+		Severities:                  normalizeCaseSeverityChoices(mapChoiceListItems(m.Severities)),
+		IssueTypes:                  normalizeCaseIssueTypeChoices(mapChoiceListItems(m.IssueTypes)),
+		DeploymentTypes:             normalizeDeploymentTypeChoices(mapChoiceListItems(m.DeploymentTypes)),
 		CallRequestStates:           mapChoiceListItems(m.CallRequestStates),
-		ChangeRequestStates:         changeRequestStates,
-		ChangeRequestImpacts:        mapChoiceListItems(m.ChangeRequestImpacts),
-		ConversationStates:          mapChoiceListItems(m.ConversationStates),
+		ChangeRequestStates:         normalizeChangeRequestStateChoices(changeRequestStates),
+		ChangeRequestImpacts:        normalizeChangeRequestImpactChoices(mapChoiceListItems(m.ChangeRequestImpacts)),
+		ConversationStates:          normalizeConversationStateChoices(mapChoiceListItems(m.ConversationStates)),
 		CaseTypes:                   mapReferenceTableItems(m.CaseTypes),
 		TimeCardStates:              mapChoiceListItems(m.TimeCardStates),
-		EngagementTypes:             mapChoiceListItems(m.EngagementTypes),
+		EngagementTypes:             normalizeCaseEngagementTypeChoices(mapChoiceListItems(m.EngagementTypes)),
 		EngagementPaymentTypes:      mapChoiceListItems(m.EngagementPaymentTypes),
+		ResolutionCodes:             mapChoiceListItems(m.ResolutionCodes),
+		Causes:                      mapChoiceListItems(m.Causes),
 		SeverityBasedAllocationTime: m.SeverityBasedAllocationTime,
 	}
 }
@@ -136,7 +192,7 @@ type ProjectFeatures struct {
 // ProjectMetadataResponse.
 func MapProjectFeatures(m entity.ProjectMetadataResponse) ProjectFeatures {
 	return ProjectFeatures{
-		AcceptedSeverityValues:         mapChoiceListItems(m.Features.AcceptedSeverityValues),
+		AcceptedSeverityValues:         normalizeCaseSeverityChoices(mapChoiceListItems(m.Features.AcceptedSeverityValues)),
 		HasServiceRequestWriteAccess:   m.Features.HasServiceRequestWriteAccess,
 		HasServiceRequestReadAccess:    m.Features.HasServiceRequestReadAccess,
 		HasSraWriteAccess:              m.Features.HasSraWriteAccess,
@@ -278,7 +334,7 @@ type CasesTrend struct {
 func mapCasesTrend(trends []entity.CasesTrend) []CasesTrend {
 	out := make([]CasesTrend, 0, len(trends))
 	for _, t := range trends {
-		out = append(out, CasesTrend{Period: t.Period, Severities: mapChoiceListItems(t.Severities)})
+		out = append(out, CasesTrend{Period: t.Period, Severities: normalizeCaseSeverityChoices(mapChoiceListItems(t.Severities))})
 	}
 	return out
 }
@@ -312,13 +368,13 @@ func MapProjectCaseStats(r entity.ProjectCaseStatsResponse) ProjectCaseStats {
 		AverageResponseTime:            r.AverageResponseTime,
 		ResolvedCases:                  mapResolvedCountBreakdown(r.ResolvedCount),
 		ChangeRate:                     CaseStatsChangeRate(r.ChangeRate),
-		StateCount:                     mapChoiceListItems(r.StateCount),
-		SeverityCount:                  mapChoiceListItems(r.SeverityCount),
-		OutstandingSeverityCount:       mapChoiceListItems(r.OutstandingSeverityCount),
+		StateCount:                     normalizeCaseStateChoices(mapChoiceListItems(r.StateCount)),
+		SeverityCount:                  normalizeCaseSeverityChoices(mapChoiceListItems(r.SeverityCount)),
+		OutstandingSeverityCount:       normalizeCaseSeverityChoices(mapChoiceListItems(r.OutstandingSeverityCount)),
 		CaseTypeCount:                  mapReferenceTableItems(r.CaseTypeCount),
 		CasesTrend:                     mapCasesTrend(r.CasesTrend),
-		EngagementTypeCount:            mapChoiceListItems(r.EngagementTypeCount),
-		OutstandingEngagementTypeCount: mapChoiceListItems(r.OutstandingEngagementTypeCount),
+		EngagementTypeCount:            normalizeCaseEngagementTypeChoices(mapChoiceListItems(r.EngagementTypeCount)),
+		OutstandingEngagementTypeCount: normalizeCaseEngagementTypeChoices(mapChoiceListItems(r.OutstandingEngagementTypeCount)),
 	}
 }
 
@@ -336,8 +392,16 @@ type ConversationStats struct {
 
 // MapConversationStats builds the portal response from entity-service's
 // ProjectConversationStatsResponse.
+//
+// StateCount is normalised first (normalizeConversationStateChoices): on the
+// Postgres data source entity-service returns the raw enum label as the id
+// ({"id":"ACTIVE"}), so a lookup by ServiceNow's numeric id ("2") found nothing
+// and every count came back absent. Support's Active Chats card then showed 0
+// while the Active Chats list behind it (which filters on that same numeric
+// state key) held hundreds of conversations. Ids that are already numeric
+// (the ServiceNow data source) pass through untouched.
 func MapConversationStats(r entity.ProjectConversationStatsResponse) ConversationStats {
-	stateCount := mapChoiceListItems(r.StateCount)
+	stateCount := normalizeConversationStateChoices(mapChoiceListItems(r.StateCount))
 	return ConversationStats{
 		OpenCount:      countForState(stateCount, conversationStateIDOpen),
 		ActiveCount:    countForState(stateCount, conversationStateIDActive),
@@ -369,7 +433,15 @@ func BuildProjectSupportStats(caseStats *entity.ProjectCaseStatsResponse, conver
 	if conversationStats != nil {
 		mapped := MapConversationStats(*conversationStats)
 		out.ActiveChats = mapped.ActiveCount
+		// Resolved via Chat (Last 30d): the 30-day figure when entity-service sends one,
+		// else the Resolved count of the state breakdown (not limited to any period),
+		// which is what a build that predates the 30-day figure, and the ServiceNow data
+		// source, still send.
 		out.ResolvedChats = mapped.ResolvedCount
+		if conversationStats.ResolvedPastThirtyDays != nil {
+			resolved := *conversationStats.ResolvedPastThirtyDays
+			out.ResolvedChats = &resolved
+		}
 	}
 	return out
 }
@@ -408,13 +480,38 @@ type ProjectChangeRequestStats struct {
 
 // MapProjectChangeRequestStats builds the portal response from
 // entity-service's ProjectChangeRequestStatsResponse.
+//
+// StateCount is normalized the same way GET /projects/{id}/filters'
+// changeRequestStates is (see normalizeChangeRequestStateChoices): on the
+// Postgres data source entity-service returns the raw enum as both id and
+// label (e.g. {"id":"SCHEDULED","label":"SCHEDULED"}), but the Operations page
+// finds its Scheduled / Customer Approval / Customer Review counts by the
+// display label, so an un-normalized "SCHEDULED" never matched and the
+// Upcoming Changes card fell back to "--" while the list beside it showed
+// Scheduled changes.
+//
+// New and Assess are left out of StateCount, as they are out of the filter
+// options: entity-service lists every state with a count, but a customer is only
+// counted the change requests designated to them and none of those is ever in
+// either, so they would be two rows of 0 under raw ids ("NEW", "ASSESS") no
+// screen has a name for. Authorize is kept on the Postgres data source, as
+// {id: "-3", label: "Authorize"}: a change request the customer proposed a new
+// time for waits there. On the ServiceNow data source (ids "-5", "-4", "-3") all
+// three are left out, as they are of the filter options: see
+// restrictedChangeRequestStateIDs.
 func MapProjectChangeRequestStats(r entity.ProjectChangeRequestStatsResponse) ProjectChangeRequestStats {
+	stateCount := make([]ReferenceItem, 0, len(r.StateCount))
+	for _, s := range mapChoiceListItems(r.StateCount) {
+		if !isRestrictedChangeRequestState(s) {
+			stateCount = append(stateCount, s)
+		}
+	}
 	return ProjectChangeRequestStats{
 		TotalCount:          r.TotalCount,
 		ActiveCount:         r.ActiveCount,
 		OutstandingCount:    r.OutstandingCount,
 		ActionRequiredCount: r.ActionRequiredCount,
-		StateCount:          mapChoiceListItems(r.StateCount),
+		StateCount:          normalizeChangeRequestStateChoices(stateCount),
 		ResolvedCount:       mapResolvedCountBreakdown(r.ResolvedCount),
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/middleware"
 	integrationservice "github.com/wso2-open-operations/cs-tools/entity-service/internal/servicenow-integration-service"
@@ -110,6 +111,14 @@ func (s *snAccountService) SearchAccounts(ctx context.Context, req domain.Search
 	}
 	if err := validateSearchQuery(req.Filters.SearchQuery); err != nil {
 		return domain.SearchAccountsResponse{}, err
+	}
+	if req.Filters.OwnerEmail != "" {
+		// ServiceNow's own /accounts/search has no equivalent of the
+		// three-role OwnerEmail predicate the Postgres data source applies
+		// (see SearchAccountsFilters.OwnerEmail's own doc comment) --
+		// silently dropping it here would turn a "my accounts" search into
+		// "every account", which must fail loudly instead.
+		return domain.SearchAccountsResponse{}, &apierror.ValidationError{Msg: "ownerEmail filtering is not supported when DATA_SOURCE=servicenow"}
 	}
 
 	token := middleware.UserIDTokenFromContext(ctx)

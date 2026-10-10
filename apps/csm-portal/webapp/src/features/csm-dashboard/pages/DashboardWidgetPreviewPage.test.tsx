@@ -25,6 +25,15 @@ const postMock = vi.fn();
 vi.mock("@api/backend/client", () => ({
   useBackendApi: () => ({ post: postMock }),
 }));
+vi.mock("@features/saved-filter-views/useSavedFilterViews", () => ({
+  useSavedFilterViews: () => ({
+    views: [],
+    isLoading: false,
+    saveFilterView: vi.fn(),
+    deleteFilterView: vi.fn(),
+    moveFilterView: vi.fn(),
+  }),
+}));
 // Pulls in widgetListConfig.tsx -> useTimeSheets.ts (time_card's mapper),
 // which reads `window.config` at load via `@config/apiConfig` — same
 // workaround as DashboardWidgetTile.test.tsx.

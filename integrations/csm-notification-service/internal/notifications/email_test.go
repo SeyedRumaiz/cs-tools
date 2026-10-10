@@ -174,3 +174,12 @@ func TestSendEmail_ConstructsWithZeroValueConfig(t *testing.T) {
 		t.Fatal("NewEmailClient returned nil for zero-value EmailConfig")
 	}
 }
+
+func TestEmailClient_ReplyTo(t *testing.T) {
+	if got := NewEmailClient(EmailConfig{ReplyTo: []string{" support@wso2.com ", ""}}).ReplyTo(); len(got) != 1 || got[0] != "support@wso2.com" {
+		t.Errorf("ReplyTo() = %v, want [support@wso2.com]", got)
+	}
+	if got := NewEmailClient(EmailConfig{ReplyTo: []string{""}}).ReplyTo(); got != nil {
+		t.Errorf("ReplyTo() = %v, want nil for an empty config", got)
+	}
+}

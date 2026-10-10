@@ -65,6 +65,7 @@ describe("useWidgetPieData", () => {
       {
         filters: { states: ["open"], severities: "critical" },
         pagination: { offset: 0, limit: 1 },
+        countOnly: true,
       },
       { signal: expect.any(AbortSignal) },
     );
@@ -73,6 +74,7 @@ describe("useWidgetPieData", () => {
       {
         filters: { states: ["open"], severities: "high" },
         pagination: { offset: 0, limit: 1 },
+        countOnly: true,
       },
       { signal: expect.any(AbortSignal) },
     );
@@ -81,6 +83,27 @@ describe("useWidgetPieData", () => {
       { label: "High", query: { severities: "high" }, value: 3 },
     ]);
     expect(result.current.total).toBe(4);
+  });
+
+  it("posts each project slice through the resourceType's flat body, with no `filters` key", async () => {
+    postMock.mockResolvedValue({ total: 2 });
+
+    const { result } = renderHook(
+      () =>
+        useWidgetPieData("widget-1", "project", {}, [
+          { label: "In progress", query: { onboardingStatus: ["In-Progress"] } },
+        ]),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(postMock).toHaveBeenCalledWith(
+      "/projects/search",
+      { onboardingStatus: ["In-Progress"], pagination: { offset: 0, limit: 1 } },
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(postMock.mock.calls[0][1]).not.toHaveProperty("filters");
   });
 
   it("fires no queries and returns a zero total for an empty slices array", () => {
@@ -133,6 +156,7 @@ describe("useWidgetPieData", () => {
           ],
         },
         pagination: { offset: 0, limit: 1 },
+        countOnly: true,
       },
       { signal: expect.any(AbortSignal) },
     );
@@ -179,6 +203,7 @@ describe("useWidgetPieData", () => {
           ],
         },
         pagination: { offset: 0, limit: 1 },
+        countOnly: true,
       },
       { signal: expect.any(AbortSignal) },
     );
@@ -218,6 +243,7 @@ describe("useWidgetPieData", () => {
           filters: [{ field: "state", op: "in", values: ["open"] }],
         },
         pagination: { offset: 0, limit: 1 },
+        countOnly: true,
       },
       { signal: expect.any(AbortSignal) },
     );
@@ -265,6 +291,7 @@ describe("useWidgetPieData", () => {
           ],
         },
         pagination: { offset: 0, limit: 1 },
+        countOnly: true,
       },
       { signal: expect.any(AbortSignal) },
     );

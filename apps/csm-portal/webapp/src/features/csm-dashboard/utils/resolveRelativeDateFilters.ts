@@ -15,7 +15,7 @@
 // under the License.
 
 import { resolveRelativeDatePlaceholder } from "@utils/resolveRelativeDatePlaceholder";
-import { isCaseFieldFilterArray, type WidgetCaseFieldFilterLike } from "./widgetPreviewUrl";
+import { hasFieldFilterEntries, isFieldFilterEntry } from "./widgetPreviewUrl";
 
 /**
  * Resolves every relative-date placeholder (see
@@ -51,10 +51,11 @@ export function resolveRelativeDateFilters(
   now: Date = new Date(),
 ): Record<string, unknown> {
   const fieldFilters = filters.filters;
-  if (!isCaseFieldFilterArray(fieldFilters)) return filters;
+  if (!hasFieldFilterEntries(fieldFilters)) return filters;
 
   let changed = false;
-  const resolved: WidgetCaseFieldFilterLike[] = fieldFilters.map((entry) => {
+  const resolved = fieldFilters.map((entry) => {
+    if (!isFieldFilterEntry(entry)) return entry;
     const values = entry.values;
     if (!values || values.length === 0) return entry;
 

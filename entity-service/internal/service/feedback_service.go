@@ -103,6 +103,38 @@ type snAggregateFeedbackResponse struct {
 	TotalRecords int                   `json:"totalRecords"`
 }
 
+// feedbackUnavailableMsg is the reason returned by every
+// unavailableFeedbackService method. It matches the 503 description the
+// OpenAPI spec documents for the feedback endpoints.
+const feedbackUnavailableMsg = "case feedback is only supported for the ServiceNow data source"
+
+// unavailableFeedbackService is the FeedbackService stand-in for a data
+// source that has no feedback store. Every operation reports a 503 rather than
+// the route being left unregistered: an unregistered route answers 404, which
+// the OpenAPI spec does not document for these paths and which callers cannot
+// distinguish from a genuinely missing resource. Mirrors
+// unavailableTaskService (task_service.go), which exists for the identical
+// reason.
+//
+// routes.go no longer selects it for either Postgres data source
+// (pgFeedbackService serves them from work_item_feedback); it is kept as the
+// fallback for any future data source without a feedback store.
+type unavailableFeedbackService struct{}
+
+// NewUnavailableFeedbackService returns a FeedbackService that reports every
+// feedback operation as unavailable for the current data source.
+func NewUnavailableFeedbackService() FeedbackService { return &unavailableFeedbackService{} }
+
+// SearchFeedback implements FeedbackService.
+func (s *unavailableFeedbackService) SearchFeedback(_ context.Context, _ domain.SearchFeedbackRequest) (domain.SearchFeedbackResponse, error) {
+	return domain.SearchFeedbackResponse{}, &apierror.ServiceUnavailableError{Msg: feedbackUnavailableMsg}
+}
+
+// AggregateFeedback implements FeedbackService.
+func (s *unavailableFeedbackService) AggregateFeedback(_ context.Context, _ domain.AggregateFeedbackRequest) (domain.AggregateFeedbackResponse, error) {
+	return domain.AggregateFeedbackResponse{}, &apierror.ServiceUnavailableError{Msg: feedbackUnavailableMsg}
+}
+
 type snFeedbackService struct {
 	client *integrationservice.Client
 }

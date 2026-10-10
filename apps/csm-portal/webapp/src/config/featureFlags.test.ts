@@ -211,7 +211,7 @@ describe("firstEnabledDestination", () => {
   });
 
   it("skips restricted sections so a hidden page never redirects into one", () => {
-    setOverrides({ dashboard: "hidden", support: "wip" });
+    setOverrides({ dashboard: "hidden", support: "wip", chat: "hidden" });
     expect(firstEnabledDestination()).toBe("/operations");
   });
 

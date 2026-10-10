@@ -35,6 +35,7 @@ import {
 import { useLoader } from "@context/linear-loader/LoaderContext";
 import useGetProjectFilters from "@api/useGetProjectFilters";
 import { useSearchConversations } from "@features/support/api/useSearchConversations";
+import { getLast30DaysUtcRange } from "@features/support/utils/support";
 import { useCloseConversationFlow } from "@features/support/hooks/useCloseConversationFlow";
 import CloseChatConfirmDialog from "@features/support/components/close-chat/CloseChatConfirmDialog";
 import type {
@@ -52,6 +53,7 @@ import AllConversationsList from "@features/support/components/all-conversations
 import {
   hasListSearchOrFilters,
   countListSearchAndFilters,
+  isValidNumericIdFilters,
 } from "@features/support/utils/support";
 import { ConversationStatus } from "@features/support/constants/supportConstants";
 import { SortOrder } from "@/types/common";
@@ -84,7 +86,7 @@ export default function AllConversationsPage(): JSX.Element {
   const [filters, setFilters] = useSessionState<AllConversationsFilterValues>(
     `${sessionPrefix}-filters`,
     {},
-    undefined,
+    isValidNumericIdFilters<AllConversationsFilterValues>,
     { popOnly: true },
   );
   const [isFiltersOpen, setIsFiltersOpen] = useState(
@@ -132,6 +134,19 @@ export default function AllConversationsPage(): JSX.Element {
     return undefined;
   }, [statusFilter, filterMetadata?.conversationStates]);
 
+  // "Resolved via Chat (Last 30d)": a conversation has no resolved-on date, so the window
+  // is its last update, the same definition the Support card counts. Only the start is
+  // sent: the card counts everything updated since then, and an end fixed at page load
+  // would hide a chat resolved while the page is open. Memoised so the request (and its
+  // query key) stays stable between renders.
+  const resolvedViaChatSince = useMemo(
+    () =>
+      statusFilter === "resolvedViaChat"
+        ? getLast30DaysUtcRange().closedStartDate
+        : undefined,
+    [statusFilter],
+  );
+
   const searchRequest = useMemo(
     () => ({
       filters: {
@@ -140,6 +155,7 @@ export default function AllConversationsPage(): JSX.Element {
           fixedStateKeys ??
           (filters.stateId ? [Number(filters.stateId)] : undefined),
         createdByMe: createdByMe || undefined,
+        startUpdatedDate: resolvedViaChatSince,
       },
       pagination: {
         offset: (page - 1) * rowsPerPage,
@@ -152,6 +168,7 @@ export default function AllConversationsPage(): JSX.Element {
     }),
     [
       fixedStateKeys,
+      resolvedViaChatSince,
       searchTerm,
       filters.stateId,
       page,
@@ -226,7 +243,6 @@ export default function AllConversationsPage(): JSX.Element {
 
   const handleClearFilters = () => {
     setFilters({});
-    setSearchTerm("");
     setPage(1);
   };
 

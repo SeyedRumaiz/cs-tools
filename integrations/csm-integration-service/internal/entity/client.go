@@ -116,7 +116,8 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		const maxErrBody = 256
+		// Large enough for entity-service's longest 400 message (accepted-value lists).
+		const maxErrBody = 4096
 		excerpt, err := io.ReadAll(io.LimitReader(resp.Body, maxErrBody))
 		if err != nil {
 			return nil, fmt.Errorf("entity: read error response body: %w", err)

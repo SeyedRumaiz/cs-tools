@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -164,6 +165,21 @@ func parseSNDateTime(ctx context.Context, callSite, field, value string) (time.T
 		return alt, nil
 	}
 	return time.Time{}, err
+}
+
+// isProjectContractEnded reports whether endDate's day has fully elapsed as
+// of now — mirroring apps/customer-portal/webapp/src/utils/permission.ts's
+// isProjectContractEnded exactly (end-of-day UTC comparison, strictly after),
+// so a project the customer portal itself treats as contract-ended is
+// treated the same way here. endDate is nil when the backing data source has
+// no end date recorded, in which case the contract is never considered
+// ended.
+func isProjectContractEnded(endDate *time.Time, now time.Time) bool {
+	if endDate == nil {
+		return false
+	}
+	endOfDay := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 23, 59, 59, 999000000, time.UTC)
+	return now.After(endOfDay)
 }
 
 type snProjectService struct {
@@ -714,6 +730,19 @@ var validClosureStatuses = map[string]struct{}{
 	"Restricted": {},
 }
 
+// closureStatusNames lists validClosureStatuses for error messages.
+var closureStatusNames = []string{"Open", "Restricted", "Suspended"}
+
+// subscriptionTypeNames lists validSubscriptionTypes, sorted, for error messages.
+func subscriptionTypeNames() []string {
+	out := make([]string, 0, len(validSubscriptionTypes))
+	for t := range validSubscriptionTypes {
+		out = append(out, string(t))
+	}
+	sort.Strings(out)
+	return out
+}
+
 // validSortOrders is the set of accepted SortOrder values.
 var validSortOrders = map[string]struct{}{
 	"":     {}, // unset defaults to the service's own default ordering
@@ -726,33 +755,33 @@ var validSortOrders = map[string]struct{}{
 func validateProjectSearchFilters(req domain.SearchProjectsRequest) error {
 	if req.ClosureStatus != "" {
 		if _, ok := validClosureStatuses[req.ClosureStatus]; !ok {
-			return &apierror.ValidationError{Msg: "closureStatus must be one of: Open, Suspended, Restricted"}
+			return apierror.InvalidValue("closureStatus", req.ClosureStatus, "closure state", closureStatusNames)
 		}
 	}
 	if req.SortBy != "" && req.SortBy != "endDate" {
-		return &apierror.ValidationError{Msg: `sortBy must be "endDate" if provided`}
+		return apierror.InvalidValue("sortBy", req.SortBy, "sort field", []string{"endDate"})
 	}
 	if _, ok := validSortOrders[req.SortOrder]; !ok {
-		return &apierror.ValidationError{Msg: `sortOrder must be "asc" or "desc" if provided`}
+		return apierror.InvalidValue("sortOrder", req.SortOrder, "sort order", []string{"asc", "desc"})
 	}
 	if req.EndDateFrom != "" {
 		if _, err := time.Parse(snDateLayout, req.EndDateFrom); err != nil {
-			return &apierror.ValidationError{Msg: "endDateFrom must be a valid date (yyyy-MM-dd)"}
+			return apierror.InvalidValue("endDateFrom", req.EndDateFrom, "date", []string{"yyyy-MM-dd"})
 		}
 	}
 	if req.EndDateTo != "" {
 		if _, err := time.Parse(snDateLayout, req.EndDateTo); err != nil {
-			return &apierror.ValidationError{Msg: "endDateTo must be a valid date (yyyy-MM-dd)"}
+			return apierror.InvalidValue("endDateTo", req.EndDateTo, "date", []string{"yyyy-MM-dd"})
 		}
 	}
 	for _, s := range req.ExcludeClosureStates {
 		if _, ok := validClosureStatuses[s]; !ok {
-			return &apierror.ValidationError{Msg: "excludeClosureStates must each be one of: Open, Suspended, Restricted"}
+			return apierror.InvalidValue("excludeClosureStates", s, "closure state", closureStatusNames)
 		}
 	}
 	for _, t := range req.ExcludeSubscriptionTypes {
 		if _, ok := validSubscriptionTypes[t]; !ok {
-			return &apierror.ValidationError{Msg: "excludeSubscriptionTypes contains invalid value: " + string(t)}
+			return apierror.InvalidValue("excludeSubscriptionTypes", string(t), "subscription type", subscriptionTypeNames())
 		}
 	}
 	for _, k := range req.ExcludeProjectKeys {
@@ -900,12 +929,17 @@ func (s *snProjectContactService) SearchProjectContacts(ctx context.Context, pro
 			name = strPtr(c.Name)
 		}
 		contacts = append(contacts, domain.ProjectContact{
-			ID:                     contactID,
-			Name:                   name,
-			Email:                  c.Email,
-			RegistrationState:      c.RegistrationState,
-			NotificationsEnabled:   c.NotificationsEnabled,
-			Roles:                  c.Roles,
+			ID:                   contactID,
+			Name:                 name,
+			Email:                c.Email,
+			RegistrationState:    c.RegistrationState,
+			NotificationsEnabled: c.NotificationsEnabled,
+			Roles:                c.Roles,
+			// ServiceNow has no notion of the account-level role set at all
+			// (it is derived from the Postgres membership tables), so this
+			// data source answers with an empty list rather than a null --
+			// absent, not unknown.
+			AccountRoles:           []string{},
 			CustomerContactPresent: c.CustomerContactPresent,
 			GrantsCaseAccess:       c.GrantsCaseAccess,
 		})

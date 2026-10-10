@@ -89,15 +89,26 @@ to see the onboarding owner (or "Unassigned" if none is set yet); it's just a po
 the project's own **Onboarding Owner** field (see Customers → Projects) and disappears once
 onboarding moves past "in progress."
 
+Two banners can also appear just below that header, and they stay on screen for as long as
+the condition holds (they can't be dismissed). A **Managed Cloud** banner shows when the
+case's project is a Managed Cloud project: it reminds you not to ask the customer for logs,
+configuration files, deployment artefacts or other deployment-related information, to check
+with the WSO2 MS team instead, and not to move the case to Awaiting info while you wait on
+them. A **Customer onboarding in progress** banner shows when the project's onboarding is in
+progress: it asks you to confirm you have the account context, to check first with the
+onboarding owner (or "Unassigned" if none is set) and, if they aren't available, to review
+the customer's solution context before responding. A project can trigger both at once.
+Neither banner shows on announcements.
+
 **Escalation** shows the case's current level (EL0 "not escalated" through EL5 "CEO") as a
 badge, with a read-only history of every past escalate/de-escalate step below it — who made
 each change, when, and their stated reason. **Escalate** and **De-escalate** buttons sit next
 to the badge (whichever apply at the current level: neither shows past EL5, only "Escalate"
 shows at EL0). Either opens a short confirm dialog asking for a reason — required when
 escalating, optional when de-escalating — and posts a case work note recording the change
-automatically. Any signed-in engineer can escalate a case. De-escalating is restricted to
-whoever was notified about the case's current escalation level — the **De-escalate** button
-only shows for you if you're on that notified list. Escalation is a ServiceNow data source
+automatically. Any internal engineer can escalate a case. De-escalating is restricted to the
+case's ABT team lead (the lead of the account's CRE team) — the **De-escalate** button only
+shows for you if you're one of them, and it always returns the case to EL0. Escalation is a ServiceNow data source
 feature only; a non-ServiceNow-backed case shows no escalation level at all. The Cases list
 also has an optional **Escalation** column
 (via **Customise columns**) that shows the level badge for escalated cases only, left blank for
@@ -141,6 +152,11 @@ customer, or an **internal note**:
 Comments in the timeline are color/role-tagged (Customer, WSO2, System, AI Agent) so you can
 scan who said what at a glance, and each has a permalink (click the timestamp) for referencing
 a specific comment.
+
+A comment's own author, or an admin, can **edit** or **delete** it from the **⋮** menu on that
+comment. Editing shows an "(edited)" marker afterward; deleting is a soft, audited removal, not
+a hard delete — the customer never sees a deleted comment at all, and it's shown to other
+internal users as removed. Only an admin can still read a deleted comment's original text.
 
 Moving a case to **Awaiting info** or **Solution proposed** while it has no public comment yet
 (only internal notes, or none at all) shows a confirm dialog first — the customer would

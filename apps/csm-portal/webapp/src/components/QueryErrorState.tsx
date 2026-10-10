@@ -34,6 +34,9 @@ interface QueryErrorStateProps {
   /** Pass the raw error object to enable error-type-aware presentation and
    *  the tracking ID copy button when a correlation ID is available. */
   error?: unknown;
+  /** When provided, renders a "Try again" button that calls it (typically a
+   *  query's `refetch`). Omit for errors that retrying cannot fix. */
+  onRetry?: () => void;
 }
 
 interface ErrorPresentation {
@@ -58,7 +61,11 @@ function resolvePresentation(error: unknown): ErrorPresentation {
  * derived from the HTTP status, the human-readable message, and — when a
  * correlation ID is present — a tracking ID copy button for support handoffs.
  */
-export default function QueryErrorState({ message, error }: QueryErrorStateProps): JSX.Element {
+export default function QueryErrorState({
+  message,
+  error,
+  onRetry,
+}: QueryErrorStateProps): JSX.Element {
   const { Icon, title } = resolvePresentation(error);
   const referenceId = getErrorReferenceId(error);
   const [copied, setCopied] = useState(false);
@@ -81,6 +88,11 @@ export default function QueryErrorState({ message, error }: QueryErrorStateProps
         <Typography variant="body2" color="text.secondary" textAlign="center">
           {message}
         </Typography>
+        {onRetry && (
+          <Button size="small" variant="outlined" onClick={onRetry}>
+            Try again
+          </Button>
+        )}
         {referenceId && (
           <Box
             sx={{

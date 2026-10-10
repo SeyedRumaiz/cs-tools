@@ -1,0 +1,42 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- The two checkboxes of the change request creation form, "Customer Approval"
+-- and "Customer Review", decide whether the change goes through a customer
+-- step:
+--
+--   customer_approval_required -- the change needs the customer's approval
+--       before it is scheduled: the internal approvals (CAB / ECAB, or Request
+--       Approval on a Standard change) move it to Customer Approval instead of
+--       Scheduled, and it is scheduled once the customer's approval is
+--       recorded.
+--   customer_review_required -- the change needs the customer's review before
+--       it is closed: Review offers Customer Review (then Closed) instead of
+--       Closed.
+--
+-- They are deliberately NOT is_customer_approved / is_customer_reviewed
+-- (migration 0043). Those record the customer's OUTCOME -- "the customer has
+-- confirmed" -- are authorized and one-way-locked
+-- (authorizeChangeRequestCustomerFlagWrite), and in the ServiceNow scripted
+-- API are only writable while the change sits in the matching state. The
+-- columns below are the REQUIREMENT, set when the change is created and
+-- editable only until the gate they control has been passed.
+--
+-- NOT NULL DEFAULT false: every existing row keeps behaving as before for
+-- approval (no customer approval step) and gets Review -> Closed directly.
+-- Idempotent (IF NOT EXISTS), so a re-run is a no-op.
+ALTER TABLE change_request ADD COLUMN IF NOT EXISTS customer_approval_required BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE change_request ADD COLUMN IF NOT EXISTS customer_review_required BOOLEAN NOT NULL DEFAULT false;

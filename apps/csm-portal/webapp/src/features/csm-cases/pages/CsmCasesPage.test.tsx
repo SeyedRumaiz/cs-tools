@@ -16,7 +16,7 @@
 
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
 // `CsmIssuesView` does all the real search/filtering work and is covered by
@@ -32,10 +32,63 @@ vi.mock("@features/csm-cases/components/CsmIssuesView", () => ({
   },
 }));
 
+// CsmCasesPage now reads usePortalAccess (to gate its "Create case" button),
+// which transitively imports the real backend client/config — mock both so
+// this test doesn't need real window.config. Defaults to full write access;
+// the "hides the Create button" test below overrides it per-case.
+let mockCanWrite = true;
+let mockCanUseOperations = true;
+let mockCanUseSecurityCenter = true;
+vi.mock("@context/current-user/usePortalAccess", () => ({
+  usePortalAccess: () => ({
+    hasAnyRole: true,
+    canEscalate: true,
+    canDownloadAttachment: true,
+    canUseOperations: mockCanUseOperations,
+    canUseSecurityCenter: mockCanUseSecurityCenter,
+    canUseTimeCardsAndUpdates: true,
+    canWrite: mockCanWrite,
+  }),
+}));
+
 import CsmCasesPage from "@features/csm-cases/pages/CsmCasesPage";
 
+beforeEach(() => {
+  mockCanWrite = true;
+  mockCanUseOperations = true;
+  mockCanUseSecurityCenter = true;
+});
+
+describe("CsmCasesPage — Create case button gating", () => {
+  it("passes a Create case action when the caller can write", () => {
+    mockCanWrite = true;
+    issuesViewSpy.mockClear();
+    render(
+      <MemoryRouter>
+        <CsmCasesPage />
+      </MemoryRouter>,
+    );
+
+    const props = issuesViewSpy.mock.calls[0][0] as Record<string, unknown>;
+    expect(props.actions).toBeDefined();
+  });
+
+  it("omits the Create case action for a caller without write access — matches viewer/escalator/attachment_downloader/usage_metrics_viewer roles seeing a live enabled button in production", () => {
+    mockCanWrite = false;
+    issuesViewSpy.mockClear();
+    render(
+      <MemoryRouter>
+        <CsmCasesPage />
+      </MemoryRouter>,
+    );
+
+    const props = issuesViewSpy.mock.calls[0][0] as Record<string, unknown>;
+    expect(props.actions).toBeUndefined();
+  });
+});
+
 describe("CsmCasesPage — case-type filter visibility", () => {
-  it("no longer passes hideTypeFilter, so the case-type control is shown", () => {
+  it("no longer passes hideTypeFilter, so the case-type control is shown (a caller who can open every record type)", () => {
     issuesViewSpy.mockClear();
     render(
       <MemoryRouter>
@@ -52,6 +105,44 @@ describe("CsmCasesPage — case-type filter visibility", () => {
     // visible, no longer pins the *query* -- see
     // CsmIssuesView.typeFilterLock.test.tsx for that behavior.
     expect(props.lockedFilters).toEqual({ caseTypes: ["case"] });
+  });
+});
+
+// A viewer can't open service-request or security-report records,
+// and an "every type" search including security reports is rejected by the
+// backend for them -- so the list is held to plain cases for them.
+describe("CsmCasesPage — viewer is held to support cases", () => {
+  it("hides the type control and pins the query to cases without Operations or Security Center access", () => {
+    mockCanWrite = false;
+    mockCanUseOperations = false;
+    mockCanUseSecurityCenter = false;
+    issuesViewSpy.mockClear();
+    render(
+      <MemoryRouter>
+        <CsmCasesPage />
+      </MemoryRouter>,
+    );
+
+    const props = issuesViewSpy.mock.calls[0][0] as Record<string, unknown>;
+    expect(props.hideTypeFilter).toBe(true);
+    expect(props.lockedFilters).toEqual({ caseTypes: ["case"] });
+    expect(props.actions).toBeUndefined();
+  });
+
+  it("hides the type control when only one of the two is missing", () => {
+    for (const [ops, sec] of [[true, false], [false, true]] as const) {
+      mockCanUseOperations = ops;
+      mockCanUseSecurityCenter = sec;
+      issuesViewSpy.mockClear();
+      const { unmount } = render(
+        <MemoryRouter>
+          <CsmCasesPage />
+        </MemoryRouter>,
+      );
+      const props = issuesViewSpy.mock.calls[0][0] as Record<string, unknown>;
+      expect(props.hideTypeFilter).toBe(true);
+      unmount();
+    }
   });
 });
 

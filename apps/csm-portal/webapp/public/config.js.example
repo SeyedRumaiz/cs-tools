@@ -42,6 +42,15 @@ window.config = {
   CSM_PORTAL_THEME: "acrylicOrange",
   CSM_PORTAL_LOG_LEVEL: "ERROR",
 
+  // TEMPORARY / LOCAL DEV ONLY. Bypasses the post-sign-in *authorization*
+  // checks (portal-role gate, per-section capabilities, SPL audience gate)
+  // for an account the real backend hasn't provisioned a portal role for
+  // yet — does NOT touch Asgardeo sign-in itself. See
+  // src/config/authConfig.ts's devBypassAccessCheck. Leave unset/false here
+  // and in any committed config — only set true in your own local,
+  // gitignored config.js.
+  // CSM_PORTAL_DEV_BYPASS_ACCESS_CHECK: true,
+
   // Per-page visibility. Keys are nav-node ids from src/config/csmNavItems.ts:
   // a section id ("operations") or one of its tabs ("operations.incidents").
   // Values:
@@ -87,9 +96,92 @@ window.config = {
   // CSM_PORTAL_MAINTENANCE_BANNER_ACTION_LABEL: "Learn more",
   // CSM_PORTAL_MAINTENANCE_BANNER_ACTION_URL: "https://example.com",
 
+  // ── Top banners ─────────────────────────────────────────────────────────────
+  //
+  // CSM_PORTAL_TOP_BANNERS  (optional, default: [])
+  //   An ordered array of banner objects rendered at the very top of every
+  //   page, stacked above the main header, top-to-bottom in array order.
+  //
+  //   To add a banner  -> push a new object into the array.
+  //   To remove one    -> delete its object, or set enabled: false.
+  //   No code changes are required, only this file needs updating.
+  //
+  //   Each object supports four fields, plus two optional ones (startsAt, expiresAt):
+  //
+  //   enabled {boolean}
+  //     true  - banner is rendered on every page.
+  //     false - banner is skipped entirely. Safe to leave in the array.
+  //
+  //   closeable {boolean}
+  //     true  - a close (x) button appears in the top-right corner. When
+  //             clicked the banner is hidden and the dismissed state is saved
+  //             in localStorage under `storageKey`. The banner will not
+  //             reappear until storageKey is changed.
+  //     false - no close button; banner is always visible.
+  //
+  //   storageKey {string}
+  //     Unique localStorage key used to track whether this banner was
+  //     dismissed. Required when closeable is true; if missing a warning is
+  //     logged and a shared fallback key is used (risks collisions).
+  //     Change this value whenever banner content changes so returning users
+  //     see the updated version again.
+  //     Recommended format: "<purpose>_banner_<year>_v<version>"
+  //
+  //   html {string}
+  //     Self-contained HTML for the banner body. All styling must be inline;
+  //     no external CSS classes are available. The HTML is sanitized: scripts
+  //     and event-handler attributes are removed. Inline styles, <a>
+  //     (including target="_blank"), <img> and basic text tags are kept.
+  //     - Host images on a stable CDN; temporary signed URLs expire.
+  //     - Do NOT add a close button inside html: the app injects one when
+  //       closeable is true.
+  //
+  //   startsAt {string}  (optional)
+  //     ISO 8601 timestamp WITH a UTC offset, e.g. "2026-10-08T09:00:00+05:30"
+  //     or "2026-10-08T03:30:00Z". The banner is not rendered before that
+  //     instant and appears from then on (still subject to enabled / closeable /
+  //     dismissal). A page that is already open shows it live when the time
+  //     arrives, no reload needed. Omit it to show the banner immediately.
+  //     An unparseable value is ignored (no start gate) and a warning is
+  //     logged. If startsAt is at or after expiresAt the banner never shows
+  //     (a warning is logged).
+  //
+  //   expiresAt {string}  (optional)
+  //     ISO 8601 timestamp WITH a UTC offset, e.g. "2026-10-10T18:00:00+05:30"
+  //     or "2026-10-10T12:30:00Z". From that instant on the banner is not
+  //     rendered, regardless of enabled / closeable / dismissal. A page that
+  //     is already open hides it live when the time passes, no reload needed.
+  //     Omit it for a banner that never expires. An unparseable value is
+  //     ignored (the banner stays visible) and a warning is logged.
+  //
+  CSM_PORTAL_TOP_BANNERS: [
+    // Banner 1: non-dismissable event/promotion banner
+    {
+      enabled: false,
+      closeable: false,
+      storageKey: "event_banner_2026_v1",
+      startsAt: "2026-10-08T09:00:00+05:30", // optional: show only from this time
+      expiresAt: "2026-10-10T18:00:00+05:30", // optional: auto-hide after this time
+      html: '<div style="background-color:#000;height:3rem"><a href="https://example.com" target="_blank"><img style="object-fit:cover;height:100%;width:100%" src="https://cdn.example.com/event-banner.png" role="presentation"></a></div>',
+    },
+    // Banner 2: dismissable announcement banner (close button injected automatically)
+    {
+      enabled: false,
+      closeable: true,
+      storageKey: "announcement_banner_2026_v1",
+      html: '<div style="background-color:#000;height:3rem;overflow:hidden"><img style="object-fit:cover;height:100%;width:100%;display:block" src="https://cdn.example.com/announcement.png" role="presentation"></div>',
+    },
+  ],
+
+  // Legacy single banner (still supported, rendered before CSM_PORTAL_TOP_BANNERS):
+  //   CSM_PORTAL_TOP_BANNER_HTML as a raw HTML string is shown as one
+  //   non-closeable banner only when CSM_PORTAL_TOP_BANNER_ENABLED is true.
+  //   CSM_PORTAL_TOP_BANNER_HTML may also be a banner object
+  //   ({ enabled, closeable, storageKey, html, startsAt?, expiresAt? }); it then
+  //   follows that object's own fields (including startsAt and expiresAt) and CSM_PORTAL_TOP_BANNER_ENABLED is ignored.
+  //   New deployments should use CSM_PORTAL_TOP_BANNERS instead.
   CSM_PORTAL_TOP_BANNER_ENABLED: false,
-  // Optional top banner rendered above the header (raw HTML string):
-  // CSM_PORTAL_TOP_BANNER_HTML: '<div style="background-color:#000;height:6.8rem"><a href="https://wso2.com/wso2con/" target="_blank"><img style="object-fit:cover;height:100%;width:100%" src="banner.png" role="presentation"></a></div>',
+  // CSM_PORTAL_TOP_BANNER_HTML: '<div style="background-color:#000;height:3rem">...</div>',
 
   // Dismissible banner nudging engineers on a detected mobile phone browser
   // toward the WSO2 Super App micro-app. Unlike the customer portal, this
@@ -101,6 +193,14 @@ window.config = {
   // CSM_PORTAL_MOBILE_APP_ANDROID_STORE_URL: "https://play.google.com/store/apps/details?id=com.example.app",
   // Also show the banner on tablets, not just phones (default false).
   // CSM_PORTAL_MOBILE_APP_INCLUDE_TABLETS: false,
+
+  // Customer-onboarding status column on a project's Contacts tab: per
+  // contact, how far their Customer Portal invitation got (IDENTITY /
+  // DATABASE / EMAIL / REGISTRATION), with the failing step and its last
+  // error on hover. Off by default; only `true` turns it on, and the backend
+  // must have the env var of the same name set to "true" too, or the column
+  // reads "Unavailable". Off means no column and no request.
+  CSM_MIGRATION_ONBOARDING_STATUS_ENABLED: true,
 
   // Project key an announcement's "Send test" dry run creates its one real
   // test case in (mirrors the ServiceNow flow's own hardcoded

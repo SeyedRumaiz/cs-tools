@@ -27,6 +27,7 @@ import {
   CurrentUserProvider,
   useCurrentUser,
 } from "@context/current-user/CurrentUserContext";
+import { getPortalAccess } from "@context/current-user/portalAccess";
 import RouteSuspenseFallback from "@components/route-fallback/RouteSuspenseFallback";
 import NoPortalAccessPage from "@components/error/NoPortalAccessPage";
 import EngineerAlertNotification from "@features/csm-chat/components/EngineerAlertNotification";
@@ -34,6 +35,7 @@ import { ChatSessionsProvider } from "@context/chat-sessions/ChatSessionsContext
 import { useLogger } from "@hooks/useLogger";
 import { trySilentSignInOnce } from "@hooks/silentSignIn";
 import { isForbiddenError, isUnauthorizedError } from "@utils/ApiError";
+import { devBypassAccessCheck } from "@config/devFlags";
 
 /**
  * The app shell with the routed page deliberately suppressed.
@@ -169,9 +171,27 @@ function SignInRedirect({ bare = false }: { bare?: boolean }): JSX.Element {
  * page, or the "not authorized" page in its content area.
  */
 function AuthorizedAppShell(): JSX.Element {
-  const { isLoading, isError, error } = useCurrentUser();
+  const { user, isLoading, isError, error } = useCurrentUser();
+  // `GET /users/me` deliberately succeeds for a signed-in user who holds no
+  // portal role (so this page can be shown rather than an error), while every
+  // other endpoint 403s them. `roles` absent means an older backend or a
+  // profile that failed to parse, which must not lock anyone out.
+  //
+  // No separate "sales_solutions" exemption here (there used to be one,
+  // and there used to be a separate Sales/SA "SPL" portal view gated on
+  // "viewer" too -- both are gone, viewer is just another portal role now,
+  // sharing the same routes/pages as everyone else). "viewer" is one of
+  // getPortalAccess's own checked roles, so any caller holding it already
+  // passes via hasAnyRole below with no special case needed. A caller
+  // holding ONLY "sales_solutions" (no viewer, no other portal role)
+  // correctly fails this gate: it grants nothing on its own.
+  const holdsNoPortalRole =
+    !!user && Array.isArray(user.roles) && !getPortalAccess(user.roles).hasAnyRole;
+  // TEMPORARY / LOCAL DEV ONLY — see authConfig.ts's devBypassAccessCheck.
   const notAuthorized =
-    isError && (isUnauthorizedError(error) || isForbiddenError(error));
+    !devBypassAccessCheck &&
+    (holdsNoPortalRole ||
+      (isError && (isUnauthorizedError(error) || isForbiddenError(error))));
 
   if (isLoading) {
     return (
@@ -195,6 +215,20 @@ function AuthorizedAppShell(): JSX.Element {
       <EngineerAlertNotification />
     </ChatSessionsProvider>
   );
+}
+
+export interface AuthGuardProps {
+  /** Skips `AppLayout` (header, sidebar, banners, idle-timeout provider)
+   * once authenticated, rendering a bare `<Outlet />` instead — for a route
+   * that needs real authentication but must show nothing else on screen
+   * (e.g. `/cs-monitor-dashboard`, a full-screen kiosk-style view).
+   * `false` (the default) is every other route's normal, chrome-wrapped
+   * behavior. Deliberately a prop on THIS guard rather than a second,
+   * parallel guard component — the sign-in latching/redirect-preservation
+   * logic below is exactly the same either way; only the shells it renders
+   * (the pending, sign-in-redirect and authenticated states) swap from
+   * `AppLayout`-based to `BareAuthLoader` / a plain `<Outlet />`. */
+  bare?: boolean;
 }
 
 /**

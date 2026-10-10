@@ -1,0 +1,36 @@
+# LOCAL DEV ONLY -- the SRE escalation ladder end to end.
+#
+# Layered over docker-compose.yml by scripts/csm-compose/sre-e2e.sh:
+#
+#   docker compose -f docker-compose.yml -f scripts/csm-compose/sre-e2e.compose.yml up -d
+#
+# The base stack runs the notification service on the stand-in JSON roster,
+# which cannot tell an SRE incident from a CRE one, so the SRE ladder never
+# starts there. This switches it to the Team Schedule -- the resolver
+# production uses -- and puts a gateway shim in front of entity-service for it,
+# because entity-service only reads a caller's identity from x-jwt-assertion,
+# which only the Choreo gateway adds. Everything else is the base stack's.
+services:
+  entity-gateway-shim:
+    build:
+      context: ./scripts/csm-compose/gateway-shim
+      dockerfile: ../../../docker/local/gateway-shim.Dockerfile
+    depends_on:
+      - entity-service
+    environment:
+      PORT: "8080"
+      UPSTREAM_URL: http://entity-service:8080
+
+  csm-notification-service:
+    depends_on:
+      entity-gateway-shim:
+        condition: service_started
+    environment:
+      INCIDENT_ESCALATION_RESOLVER: team-schedule
+      CUSTOMER_ENTITY_BASE_URL: http://entity-gateway-shim:8080
+      # The base stack's "false" stops the engine before it reaches any
+      # channel, so the log channel never says who it would have called. Safe
+      # to turn on here: paging-alert.yaml runs both ladders on the log channel,
+      # which reaches nobody, and INCIDENT_DEFAULT_CALL_TO is unset, so the
+      # dispatcher's own one-off incident call skips itself too.
+      CALL_SENDING_ENABLED: "true"

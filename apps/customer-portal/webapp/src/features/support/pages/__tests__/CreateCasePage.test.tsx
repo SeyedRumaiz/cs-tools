@@ -90,10 +90,12 @@ vi.mock("@/hooks/useAuthApiClient", () => ({
 // results by identity, so a mock that returns a fresh array/object literal
 // on every render would re-trigger those effects forever.
 const EMPTY_PROJECT_CONTACTS: unknown[] = [];
+// Mutable per test; tests that need contacts reassign it to a stable array.
+let mockProjectContacts: unknown[] = EMPTY_PROJECT_CONTACTS;
 const MOCK_USER_DETAILS = { email: "jane.doe@example.com" };
 
 vi.mock("@features/settings/api/useGetProjectContacts", () => ({
-  default: () => ({ data: EMPTY_PROJECT_CONTACTS, isLoading: false }),
+  default: () => ({ data: mockProjectContacts, isLoading: false }),
 }));
 
 vi.mock("@features/settings/api/useGetUserDetails", () => ({
@@ -191,7 +193,21 @@ vi.mock(
 vi.mock(
   "@features/support/components/case-creation-layout/form-sections/watch-list-section/WatchListSection",
   () => ({
-    WatchListSection: () => <div>Watch List Section</div>,
+    WatchListSection: ({
+      contacts,
+      selectedEmails,
+    }: {
+      contacts: { email: string }[];
+      selectedEmails: string[];
+    }) => (
+      <div>
+        Watch List Section
+        <span data-testid="watch-options">
+          {contacts.map((c) => c.email).join(",")}
+        </span>
+        <span data-testid="watch-selected">{selectedEmails.join(",")}</span>
+      </div>
+    ),
   }),
 );
 
@@ -300,6 +316,7 @@ const EMPTY_INFINITE_QUERY = {
 describe("CreateCasePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockProjectContacts = EMPTY_PROJECT_CONTACTS;
     mockUseParams.mockReturnValue({ projectId: "project-1" });
     mockUseLocation.mockReturnValue({
       pathname: "/projects/project-1/support/chat/create-case",
@@ -349,6 +366,62 @@ describe("CreateCasePage", () => {
     fireEvent.click(screen.getByText("Back Header"));
 
     expect(mockNavigate).toHaveBeenCalledWith("/projects/project-1/support/chat/conv-1");
+  });
+
+  describe("watch list eligibility", () => {
+    const contact = (
+      email: string,
+      membershipStatus: string,
+      overrides: Record<string, unknown> = {},
+    ) => ({
+      id: email,
+      email,
+      firstName: "Test",
+      lastName: "User",
+      isCsAdmin: false,
+      isCsIntegrationUser: false,
+      isPortalUser: true,
+      isSecurityContact: false,
+      membershipStatus,
+      ...overrides,
+    });
+
+    it("offers and pre-selects only registered contacts, plus the creator", () => {
+      mockProjectContacts = [
+        contact("registered@example.com", "REGISTERED"),
+        contact("invited@example.com", "INVITED"),
+        contact("reinvited@example.com", "RE-INVITED"),
+        contact("deactivated@example.com", "DEACTIVATED"),
+      ];
+      render(<CreateCasePage />);
+
+      expect(screen.getByTestId("watch-options")).toHaveTextContent(
+        /^registered@example\.com$/,
+      );
+      expect(screen.getByTestId("watch-selected")).toHaveTextContent(
+        /^jane\.doe@example\.com,registered@example\.com$/,
+      );
+    });
+
+    it("still applies the role filter on top of the registered check", () => {
+      mockProjectContacts = [
+        contact("portal@example.com", "REGISTERED"),
+        contact("security@example.com", "REGISTERED", {
+          isPortalUser: false,
+          isSecurityContact: true,
+        }),
+        contact("security-admin@example.com", "REGISTERED", {
+          isCsAdmin: true,
+          isPortalUser: false,
+          isSecurityContact: true,
+        }),
+      ];
+      render(<CreateCasePage />);
+
+      expect(screen.getByTestId("watch-options")).toHaveTextContent(
+        /^portal@example\.com,security-admin@example\.com$/,
+      );
+    });
   });
 
   it("should hide case details, watch list, and submit when the project has no deployments", () => {

@@ -25,9 +25,7 @@ import (
 )
 
 // entityInvoiceClient abstracts the entity service invoice operations used by
-// InvoiceHandler. ServiceNow data source only; read-only, so a pure M2M caller
-// succeeds here (unlike ServiceNow-backed write operations elsewhere in this
-// service).
+// InvoiceHandler. Read-only and M2M-safe on both data sources.
 type entityInvoiceClient interface {
 	SearchInvoices(ctx context.Context, body []byte) ([]byte, error)
 	GetInvoice(ctx context.Context, id string) ([]byte, error)

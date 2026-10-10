@@ -1,0 +1,469 @@
+# Incident call escalation — the local compose stack's configuration.
+#
+# Every knob here changes how many telephone calls a ladder places, which is
+# why it is a file rather than a set of environment variables: narrowing which
+# incidents escalate, capping a ladder's reach, or switching a deployment to
+# the log channel are all things somebody does between incidents, without
+# waiting for a build.
+#
+# Both ladders are configured here. They share an engine, a Twilio account,
+# and a bill.
+#
+# Point the service at this file with INCIDENT_ESCALATION_CONFIG. With no such
+# variable the service behaves as it did before this file existed: enabled, on
+# INCIDENT_ESCALATION_CHANNEL, with no conditions and no caps.
+
+enabled: true
+
+# Which ladders an incident climbs. Both engines read these rules; each asks
+# only about its own ladder, so an incident can climb both.
+#
+# Which ladders a record climbs is NOT configured here: it is the Case Paging
+# design, kept in code (internal/paging/routing.go, DefaultRouting), so a
+# change to it goes through a code review rather than a file edit on a running
+# deployment. A routing: section in this file is refused at start-up.
+#
+#   customer case S0        -> CRE + SRE
+#   customer case S1-S4     -> CRE only (S4 only if cre.trigger.priorities lists it)
+#   SRE incident            -> SRE only, any priority
+#   incident on a CRE team  -> nobody: CRE work arrives as a case
+#
+# What stays here are the small, between-incidents knobs: channels, which
+# severities page, caps, teams, Chat spaces.
+
+cre:
+  enabled: true
+
+  # log | chat | call | both
+  #
+  # `log` is the local default on purpose. It runs the whole ladder for real —
+  # the consumer, the resolver, the Redis state, the wake loop, the work note —
+  # and writes a line per rung saying who it would have reached, without a
+  # Twilio account and without posting into a room real colleagues are sitting
+  # in. Switch to `call` or `both` only against numbers you control.
+  channel: log
+
+  trigger:
+    # Which case severities get a chain at all. Empty means every severity
+    # that has a policy row. S4 Low (Query) is left out on purpose: paging it
+    # is optional (Case Paging Rules); add S4 here to switch it on.
+    priorities: [S0, S1, S2, S3]
+
+    # Assignment-group allowlist, and a stronger exclude list that wins over
+    # it. Empty means any team.
+    teams: []
+    excludeTeams: []
+
+    # Restrict to certain shifts, e.g. [LK_MORNING, LK] to leave the Americas
+    # night alone while a policy is being trialled.
+    shifts: []
+
+    # Refuse to start a ladder for an incident whose team cannot be resolved,
+    # rather than guessing. Left on here because guessing means falling
+    # through to the CRE ladder, which is how an SRE incident ends up waking
+    # CRE engineers.
+    requireKnownTeam: true
+
+  # The teams the rules refer to by role rather than by name. These are
+  # deployment facts -- there are seven ABTs today and there will not always
+  # be -- and they are what answers the rule table's "is this incident
+  # assigned to an ABT team" column. Get one wrong and that rule silently
+  # routes the other way, so they are configuration, not a constant.
+  teams:
+    # The ABT this ladder escalates within, as team.type spells it in the
+    # database. There are two: cre-abt holds seven teams (atlas, castor,
+    # draco, phoenix, rigel, sirius, vega) and sre-abt holds two (apollo,
+    # artemis). Each of those teams has exactly one lead, its Team lead.
+    #
+    # Naming the type rather than the teams is deliberate: which teams an ABT
+    # holds is already recorded per team, so adding one needs no change here
+    # and a team moved between ABTs cannot leave a stale key behind.
+    abtType: cre-abt
+
+    # The seven teams cre-abt holds, named outright. This WINS over abtType
+    # above, so the ladder reaches exactly these and nothing else -- empty it
+    # to have entity-service answer from team.type instead, which is the
+    # version that survives a team being added.
+    abts: [atlas, castor, draco, phoenix, rigel, sirius, vega]
+
+    # Americas is NOT an ABT -- its team.type is cre. It covers 9pm-6am IST,
+    # has its own alert-duty nominees, and three Team leads of its own with a
+    # single Americas lead above them, which is why R5 and R6 read
+    # americas_team_leads at LEVEL_1 and americas_team_lead at LEVEL_2.
+    # The three Team leads hold role 'lead'; the America Team lead above them
+    # holds 'americas_team_lead' (migration 0185), set from the Team Schedule.
+    americas: americas
+
+    # Only used when heads.cre / heads.cs below are left empty.
+    leadership: cre-leadership
+
+    # How many leads the "Team leads" rung calls, out of the pool below.
+    # Zero calls all of them.
+    #
+    # The rung is "at least three team leads from the pool", and the pool is
+    # every ABT team's lead -- seven for cre-abt. So the sheet's three and the
+    # pool's seven were never in conflict: one is how many get called, the
+    # other how many there are to choose from.
+    #
+    # Which three rotates, by who has gone longest without a call, so the duty
+    # spreads across the pool instead of landing on the same names every time.
+    teamLeadsToCall: 3
+
+    # The pool itself. Empty means every team in the ABT above.
+    teamLeads: []
+
+    # Caps the rota-sourced Level 0 rungs, per shift.
+    #
+    # "Rota Members" means everyone on duty, and that is what the ladder calls.
+    # The rules sheet's counts for those rungs -- 2 on LK_MORNING, 3 on
+    # LK_WEEKEND, 7 on LK_EVENING without an ABT -- describe how many people
+    # are rostered in each shift, not a limit the code imposes.
+    #
+    # Empty is the default and the recommended setting: a cap means somebody
+    # who IS on duty does not get called, which is a strange thing to want
+    # from a pager. It exists because these counts decide the Twilio bill and
+    # a deployment may need a ceiling it can set without a release. Name only
+    # the shifts you want capped, e.g.
+    #
+    #   rotaMembersToCall:
+    #     LK_EVENING: 7
+    #
+    # Shift names are LK, LK_MORNING, LK_EVENING, LK_WEEKEND, USA,
+    # USA_WEEKEND; anything else is refused at startup rather than ignored.
+    # Which members a cap drops rotates by longest-since-called, so it does
+    # not always spare the same names.
+    rotaMembersToCall: {}
+
+    # Weekend night (R6) Level 0 = one Americas weekend rota member plus the
+    # Americas nominated first responders. These are the Team Schedule shift
+    # codes that member is taken from. Empty means CRE_WEEKEND_NIGHT ("Americas
+    # weekend"). The on-call shift beside it, CRE_WEEKEND_NIGHT_OC, is
+    # deliberately not included: it is fallback cover, not the first page.
+    # Nobody rostered on these shifts means the rung calls the nominees alone.
+    americasWeekendRotaShifts: [CRE_WEEKEND_NIGHT]
+
+    # Whose rota the rota rungs may reach. Empty means this ladder's ABT teams
+    # above plus Americas. The Team Schedule also holds the SRE rotas (apollo,
+    # artemis); they are never CRE rota members -- SRE is reached only by its
+    # own ladder, on a P0. With them excluded the counts match the rules
+    # sheet: 7 on a weekday evening, 3 on a weekend day.
+    rotaTeams: []
+
+    # Level 1 ("Team lead") when the incident is on no ABT -- R3, R4b, and R1
+    # when the incident carries no team at all.
+    #
+    # That rung takes the incident's OWN ABT lead, and an unassigned incident
+    # has no ABT to take one from, so it used to reach nobody: the rung was
+    # recorded NO_RECIPIENTS and skipped. Skipping is right when a lead is
+    # merely unconfigured -- the ladder climbs and somebody above answers --
+    # but for an unassigned incident the rung can never fire at all, and the
+    # rungs above keep their own offsets. A P0 went from +0m straight to
+    # +4m with nobody called, where the rules sheet says one call.
+    #
+    #   pool  one lead from teamLeads above, longest-since-called
+    #   none  reach nobody and climb, the behaviour before this existed
+    unassignedTeamLead: pool
+
+    # How many of that pool it calls. One is what the sheet counts at Level 1,
+    # against three at Level 2 -- which is what keeps the two rungs distinct.
+    unassignedTeamLeadCount: 1
+
+  # rules: the R1-R6 table. Omitted here, which uses the shipped
+  # transcription of the spreadsheet (see internal/paging/rules.go).
+  # Override a row only to correct it ahead of a release; the shape is
+  #   - id: R2
+  #     shift: LK
+  #     assignedToABT: yes
+  #     levels: [alert_duty_own_abt, team_lead, all_team_leads, cre_head, cs_head]
+  #     expectedCalls: [3, 1, 3, 1, 1]
+  #
+  # Every source a level may name:
+  #   rota_members · rota_pair · alert_duty_own_abt · alert_duty_each_abt
+  #   alert_duty_americas · rota_member_and_alert_duty_americas
+  #   team_lead · all_team_leads · americas_team_lead · americas_team_leads
+  #   cre_head · cs_head
+
+  # Where a recipient's phone number comes from. The Team Schedule says who is
+  # on duty and who holds which rank, never how to reach them -- and a call
+  # tier drops anyone without a number (NO_NUMBER on the work note).
+  #
+  #   profile  the mobile number each person set on their own CSM Portal
+  #            profile (avatar > Profile), read from Asgardeo through the
+  #            SCIM operations service. Needs SCIM_BASE_URL. The default.
+  #   none     only numbers named in this file (heads below).
+  #
+  # A number named in this file always wins over the profile.
+  phones:
+    source: profile
+
+  # The last two rungs, named outright. They are two people, not a team, so
+  # the ladder asks for them here rather than looking them up by role inside a
+  # leadership team. Leave a head empty to fall back to that lookup.
+  heads:
+    cre: {name: "", email: "", phone: ""}
+    cs:  {name: "", email: "", phone: ""}
+
+  # How the nominated rungs are read.
+  alertDuty:
+    # The nominations that exist. Each ABT has three, and so does Americas.
+    tiers: [T1, T2, T3]
+
+    # How many nominees a rung takes from each team it spans. 0 takes all of
+    # them.
+    #
+    # This is the other half of the 3-vs-7 question: "the team's nominees" is
+    # all three of one team, while "one nominee from each team in the ABT" is
+    # one each across seven. Set it to 1 and every nominated rung calls one person per
+    # team; leave it 0 and it calls all of them.
+    perTeam: 3
+
+  # Where a rung's Google Chat card goes.
+  #
+  # webhookUrlEnv is the NAME of the environment variable that holds this
+  # ladder's webhook URL -- never the URL. The URL carries the space's key and
+  # token, and this file is public; the URL goes in the service's git-ignored
+  # .env locally and in a secret when deployed. To move the ladder to another
+  # room, point this at a different variable. A URL written here is refused
+  # at startup. If the named variable is empty, every rung is recorded
+  # NO_CHAT_SPACE -- there is no quiet fallback to another room.
+  #
+  # Leave webhookUrlEnv empty to route by audience instead, through
+  # GOOGLE_CHAT_SPACES ({"audience": "...", "webhookUrl": "..."}). With a
+  # webhook set, audience only names the room in the logs.
+  chat:
+    webhookUrlEnv: CRE_CHAT_WEBHOOK_URL
+    audience: "Incident Monitor"
+
+  # What stops a ladder.
+  acknowledgement:
+    # Acknowledgement is BOTH gestures: the incident moved out of NEW AND a
+    # public comment written. Either alone leaves it climbing, which is the
+    # point -- a dispatcher moving a status while triaging has not picked the
+    # incident up. Set false to accept either gesture on its own.
+    requireBoth: true
+
+  # Someone who holds a rung but is on leave that day: skip (the default)
+  # leaves them out, so the rung goes to whoever else holds it or the ladder
+  # climbs past; call rings them anyway, after anyone available on the same
+  # tier. Responders, leads and heads are checked against the Team Schedule
+  # absences for the incident's date in IST.
+  onLeave: skip
+
+  safety:
+    # The most calls one ladder may place across every rung. A plan larger
+    # than this is truncated and says so, so a rota that suddenly resolves to
+    # forty people fails loudly at planning time instead of arriving as a bill.
+    #
+    # R3 is the rule to watch: an incident assigned to no ABT reaches one
+    # nominee in EVERY ABT, which is seven calls at LEVEL_0 alone.
+    maxCallsPerLadder: 12
+
+    # The highest rung the ladder may climb, 0..4. Omit for no cap. Setting it
+    # to 2 keeps an escalation away from the heads while a policy is trialled.
+    # maxLevel: 2
+
+    # Calls switch on only when every lead in the ABT lead pool (the people
+    # LEVEL_1 and LEVEL_2 call) has a mobile number on their CSM Portal
+    # profile. Until then no call is placed -- otherwise a lead tier with no
+    # numbers is skipped and even a low-priority incident climbs straight to
+    # the heads. Held ladders are logged with the leads still missing a
+    # number; nothing is written to the incident. With channel "both" the
+    # chat cards still post. Set true to place calls before the pool is
+    # complete.
+    callWithoutVerifiedLeads: false
+
+    # The heads (LEVEL_3 CRE head, LEVEL_4 CS head) are paged only when at
+    # least one person on LEVEL_0..LEVEL_2 has a number to call; otherwise
+    # their calls are held (logged only). Set true to page them anyway.
+    callHeadsWithoutLowerTiers: false
+
+    # When set, the ONLY numbers that may be dialled; every other recipient is
+    # dropped before the call is placed. This is what makes a real ladder safe
+    # to exercise against a real Twilio account — the resolver still runs and
+    # the plan is still built from the real rota, but only these ring.
+    allowedNumbers: []
+
+# The SRE ladder: an incident assigned to an SRE team, called by on-call tier.
+#
+#   LEVEL_0  L1 support   the moment the incident is created
+#   LEVEL_1  L2 support   +interval, if nobody has been assigned
+#   LEVEL_2  L3 support   +interval
+#   LEVEL_3  L4 support   +interval, only with timing.includeL4 (NOT CONFIRMED)
+#
+# One person per rung, whoever holds that tier on the rota when the incident
+# arrives: the incident's own SRE team first, then the zone whose L1 block is
+# live (so the weekday 12:00-15:00 TZ1/TZ2 overlap calls one person, not two),
+# then the order of teams.abts below. It stops when an engineer is assigned, or
+# the incident leaves NEW. A public comment alone does not stop it.
+#
+# No priority gate: every SRE incident gets a ladder. Which incidents are SRE
+# incidents is the routing section at the top. The rules this follows are in
+# "SRE Notification Escalation rules .xlsx" (R1-R7).
+sre:
+  enabled: true
+
+  # log | chat | call | both -- see cre.channel above.
+  channel: log
+  trigger:
+    # Which priorities get a ladder at all. Empty means every priority --
+    # unlike CRE, the SRE clock does not depend on priority.
+    priorities: []
+
+    teams: []
+    excludeTeams: []
+    shifts: []
+    requireKnownTeam: true
+
+
+  # The clock. One call per rung, the same for every priority.
+  timing:
+    initialWait: 0s
+    interval: 5m
+    # L4 support has no source: the rota's tiers stop at L3. On, it reaches
+    # the lead of the SRE team answering the incident -- an assumption.
+    includeL4: false
+
+  # The SRE ladder's own Google Chat space, the same mechanism as cre.chat:
+  # webhookUrlEnv is the NAME of the variable holding the webhook URL, never
+  # the URL itself (a credential). Keep it in scripts/csm-compose/.env, which
+  # is git-ignored. Used when channel is chat or both.
+  chat:
+    webhookUrlEnv: SRE_CHAT_WEBHOOK_URL
+    audience: "SRE"
+
+  # Each SRE team's own Google Chat space, by team key, the same shape as
+  # chat: its rung cards and its closing message go there. A team not listed,
+  # or an incident with no team, uses chat above. e.g.
+  #   teamChats:
+  #     apollo:  { webhookUrlEnv: SRE_CHAT_WEBHOOK_URL_APOLLO,  audience: "Apollo SRE" }
+  #     artemis: { webhookUrlEnv: SRE_CHAT_WEBHOOK_URL_ARTEMIS, audience: "Artemis SRE" }
+  teamChats: {}
+
+  # When L1, L2 and L3 have all been called and nobody acknowledged, post a
+  # closing message to the team's space (teamChats, else chat) saying the
+  # calls have ended. Posted whatever channel is, so a call-only ladder still
+  # tells the room. Off here: SRE_CHAT_WEBHOOK_URL in .env is a real room, and
+  # every local ladder nobody answers would post into it.
+  unansweredChat: false
+
+  # When a SaaS SRE incident is escalated to an SME team ("Escalate to
+  # specialist team"), post one message to the incident's SRE team space
+  # (teamChats, else chat): who escalated it, that SRE paging stopped, and
+  # that the SMEs are being paged. Off here for the same reason as above.
+  smeHandoffChat: false
+
+  teams:
+    # The other ABT, as team.type spells it: sre-abt holds two teams.
+    abtType: sre-abt
+    # Named outright, which wins over abtType. An incident assigned to one of
+    # these climbs this ladder; the order breaks a tie when an incident belongs
+    # to none of them (a CRE P0) and both have somebody on the tier. A team
+    # must not also be in cre.teams.abts -- that is a configuration error.
+    #
+    # SaaS SRE (apollo, artemis; rota SRE_SAAS) and IaaS SRE (iaas, type
+    # sre-iaas; rota SRE_IAAS) each run their own L1 -> L2 -> L3 chain: an
+    # incident pages only the windows of its own team's rota, never the other's.
+    abts: [apollo, artemis, iaas]
+    # Assignment-group names that are not simply a team key. The alert flow
+    # assigns the service's support group; if its name is not "Apollo" or
+    # "Artemis", map it here, or its incidents climb the CRE ladder. Matched
+    # ignoring case and surrounding space, e.g.
+    #   "SRE - Apollo": apollo
+    aliases:
+      "SRE IaaS": iaas
+    # The rota that pages an incident with no SRE team of its own: a customer
+    # case at S0, or a monitoring alert raised with no team. Absent is SRE_SAAS.
+    defaultRota: SRE_SAAS
+    # Assignment groups that hold incidents with no SRE team of their own.
+    # Such an incident climbs this ladder on defaultRota: each rung reaches
+    # whoever holds that tier on the live window (Apollo before Artemis when
+    # both do). Matched as team keys are, ignoring case.
+    defaultGroups: [Default]
+
+  # As cre.onLeave: skip (the default) or call.
+  onLeave: skip
+
+  safety:
+    # L1 + L2 + L3 (+ L4) is at most four calls; anything above that means a
+    # rung resolved to more than one person, which it never should.
+    maxCallsPerLadder: 4
+    # maxLevel: 2
+    allowedNumbers: []
+
+# The Special Ops (SME) page. Not a ladder: when a SaaS SRE incident moves into
+# a Special Ops group (entity-service's incident.special_ops_alert on
+# sre-events -- the "Escalate to Special Ops Team" button today), the SaaS SRE
+# chain stops and ONE call goes to the SME on duty for the current Day/Night
+# window of the SME team. The same team alerted again while its page is open is
+# ignored; a different team gets its own call; an engineer assigned afterwards
+# closes the page. IaaS SRE incidents and customer cases never page SME.
+# Needs SRE_EVENT_HUB_TOPIC set on both services.
+#
+# Absent (or enabled: false) ignores the alert entirely.
+sme:
+  enabled: true
+
+  # log | chat | call | both -- see cre.channel above. `log` names who would
+  # have been paged and reaches nobody.
+  channel: log
+
+  # The SME page's own Google Chat space, the same mechanism as cre.chat:
+  # webhookUrlEnv is the NAME of the variable holding the webhook URL, never
+  # the URL itself. Used when channel is chat or both.
+  chat:
+    webhookUrlEnv: SME_CHAT_WEBHOOK_URL
+    audience: "Special Ops"
+
+  # Each SME team's own Google Chat space, by SME team key, the same shape as
+  # chat. Empty or absent: every team's cards go to chat above. Set: a listed
+  # team's cards go to its own space, and a team not listed gets no card (its
+  # calls still go out when channel includes calls). webhookUrlEnv is the
+  # NAME of the variable holding the URL, never the URL. e.g.
+  #   teamChats:
+  #     asgardeo:        { webhookUrlEnv: SME_CHAT_WEBHOOK_URL_ASGARDEO,       audience: "Asgardeo SME" }
+  #     choreo-runtime:  { webhookUrlEnv: SME_CHAT_WEBHOOK_URL_CHOREO_RUNTIME, audience: "Choreo Runtime SME" }
+  #     bijira:          { webhookUrlEnv: SME_CHAT_WEBHOOK_URL_BIJIRA,         audience: "Bijira SME" }
+  #     devant:          { webhookUrlEnv: SME_CHAT_WEBHOOK_URL_DEVANT,         audience: "Devant SME" }
+  #     cloud-agent:     { webhookUrlEnv: SME_CHAT_WEBHOOK_URL_CLOUD_AGENT,    audience: "WSO2 Cloud Agent platform SME" }
+  #     cloud-core:      { webhookUrlEnv: SME_CHAT_WEBHOOK_URL_CLOUD_CORE,     audience: "WSO2 Cloud Core SME" }
+  #     moesif:          { webhookUrlEnv: SME_CHAT_WEBHOOK_URL_MOESIF,         audience: "Moesif SME" }
+  #     u2:              { webhookUrlEnv: SME_CHAT_WEBHOOK_URL_U2,             audience: "U2 SME" }
+  #     b-central:       { webhookUrlEnv: SME_CHAT_WEBHOOK_URL_B_CENTRAL,      audience: "B-Central SME" }
+  teamChats: {}
+
+  # When the SME ladder has called L1 to L3 and nobody was assigned, post a
+  # closing message to the SME team's own space (teamChats), or to chat when
+  # teamChats is empty; a team teamChats leaves out gets none.
+  unansweredChat: false
+
+  # Special Ops team key (the alert's teamKey) -> the SME team's rota key, for
+  # an alert that does not name the SME team itself. A team in neither is
+  # written on the incident as NO_SME_TEAM. e.g.
+  #   teams:
+  #     choreo-runtime-team: choreo-sme
+  teams: {}
+
+  # The SME ladder: L1 of the SME team's current Day/Night window at once, L2
+  # after one interval, L3 after two. Someone rostered on the window with no
+  # tier counts as L1. Same shape as sre.timing (includeL4 is ignored here).
+  timing:
+    initialWait: 0s
+    interval: 5m
+
+  # As cre.onLeave: skip (the default) or call.
+  onLeave: skip
+
+  safety:
+    # As a ladder's: when non-empty, the only numbers the page may ring.
+    allowedNumbers: []
+
+# Paging-number test calls. A lead or admin can store a paging-only number for
+# somebody in CSM (used only when their profile has no number) and press "Test
+# call": ONE short call says "This is a Case Paging test call for <name>", and
+# how it ended (completed / no-answer / busy / failed) is written back to CSM.
+# Absent is on, to any number; CALL_SENDING_ENABLED=false still stops it.
+testCall:
+  enabled: true
+  # When non-empty, the only numbers a test call may ring; anything else is
+  # reported "failed" without dialling.
+  allowedNumbers: []

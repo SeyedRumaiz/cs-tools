@@ -41,8 +41,51 @@ describe("nav tree invariants", () => {
 
   it("keeps a query-param tab from claiming its section's landing route", () => {
     const incidents = navNodeById("operations.incidents");
-    expect(navNodeRoutes(incidents!)).toEqual(["/operations/incidents"]);
+    expect(navNodeRoutes(incidents!)).toEqual(["/operations/incidents", "/operations/incident-tasks"]);
     expect(navNodePath(incidents!)).toBe("/operations");
+  });
+});
+
+describe("top-level nav order", () => {
+  const ids = CSM_NAV_ITEMS.map((section) => section.id);
+  const below = (upper: string, lower: string): void => {
+    expect(ids.indexOf(lower)).toBe(ids.indexOf(upper) + 1);
+  };
+
+  it("puts Announcements directly below Engagements", () => {
+    below("engagements", "announcements");
+  });
+
+  it("puts Customers directly below Security Center, and Knowledge directly below Customers", () => {
+    below("security-center", "customers");
+    below("customers", "kb-articles");
+  });
+
+  it("puts Team Schedule directly below Time cards", () => {
+    below("time-cards", "team-schedule");
+  });
+
+  it("keeps the remaining sections in their existing relative order", () => {
+    expect(ids).toEqual([
+      "dashboard",
+      "support",
+      "chat",
+      "operations",
+      "engagements",
+      "announcements",
+      "security-center",
+      "customers",
+      "kb-articles",
+      "plg",
+      "updates",
+      "time-cards",
+      "team-schedule",
+      "customer-health",
+      "usage-metrics",
+      "user-scan",
+      "admin",
+      "help",
+    ]);
   });
 });
 
@@ -100,6 +143,13 @@ describe("navNodeMatchForPath", () => {
 
   it("returns undefined for an unknown route", () => {
     expect(navNodeMatchForPath("/nothing-here")).toBeUndefined();
+  });
+
+  it("prefers a child over its parent on an equal-length prefix tie (plg's href aliases plg.dashboard's)", () => {
+    expect(navNodeMatchForPath("/plg/dashboard")).toMatchObject({
+      node: { id: "plg.dashboard" },
+      prefix: "/plg/dashboard",
+    });
   });
 });
 

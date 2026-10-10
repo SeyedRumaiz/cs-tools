@@ -19,20 +19,100 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
+	"syscall"
+	"time"
 
+	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/dto"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/entity"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/apps/customer-portal/backend-v2/internal/usermanagement"
 )
 
+// entityWriteTimeout bounds an entity-service membership write that runs on a
+// context detached from the request (see entityWriteContext). It sits above
+// the entity client's own 25-second timeout, so in practice that timeout
+// fires first; this one only guarantees the detached call cannot run forever.
+const entityWriteTimeout = 30 * time.Second
+
+// entityWriteContext returns the context an entity-service membership write
+// runs on: the request's values (user token, correlation id) without its
+// cancellation, and with its own deadline. A write updates Salesforce and
+// then commits Postgres, so abandoning it halfway because the admin closed
+// the tab or the connection dropped would leave Salesforce written and the
+// database not. Letting it finish is the safer outcome in every case.
+func entityWriteContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), entityWriteTimeout)
+}
+
+// invitationOutcomeUnknown reports whether an invite failed in a way that
+// says nothing about whether entity-service committed it:
+//
+//   - The portal's own client stopped waiting (context.DeadlineExceeded).
+//   - The connection dropped before an answer arrived (EOF, reset).
+//   - A gateway in front of entity-service answered 502 or 504 because its
+//     backend went quiet. entity-service never answers either status
+//     itself; its own failures are 4xx, 500 or 503, which stay errors.
+func invitationOutcomeUnknown(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	var apiErr *apierror.Error
+	return errors.As(err, &apiErr) &&
+		(apiErr.StatusCode == http.StatusBadGateway || apiErr.StatusCode == http.StatusGatewayTimeout)
+}
+
+// invitationProcessingResponse is the 202 body CreateProjectContact returns
+// when the portal stopped waiting before entity-service answered.
+type invitationProcessingResponse struct {
+	Message string `json:"message"`
+	Status  string `json:"status"`
+}
+
+// invitationStatusProcessing is invitationProcessingResponse.Status: the
+// webapp keeps the row pending and refreshes the list until it appears.
+const invitationStatusProcessing = "PROCESSING"
+
+// accountAdminRoles are the account-level roles, as entity-service's
+// GET /users/me returns them, that allow managing a project's contacts.
+// customer_admin covers the caller's own account's projects and
+// partner_admin the customer projects a partner works on; the membership
+// check in requireProjectAdmin is what ties either one to a project.
+var accountAdminRoles = []string{"customer_admin", "partner_admin"}
+
+// membershipStateDeactivated is the membership state that no longer grants
+// anything, compared case-insensitively against the contact list's status.
+const membershipStateDeactivated = "DEACTIVATED"
+
 // entityProjectResolver is the subset of the entity client ContactHandler
 // needs — just enough to resolve a project's Salesforce ID for the
 // downstream project-contact onboarding service, which is keyed on it.
 type entityProjectResolver interface {
 	GetProject(ctx context.Context, id string) (entity.ProjectDetailsView, error)
+}
+
+// membershipsClient is the entity-service side of the same operations. It
+// replaces contactsClient after cutover: entity-service updates Postgres and
+// Salesforce in one transaction, so the portal no longer needs a second
+// service that writes Salesforce on its own. Keyed on the project UUID, not
+// the project's Salesforce Id.
+type membershipsClient interface {
+	CreateProjectMembership(ctx context.Context, projectID string, req entity.CreateProjectMembershipRequest) (entity.ProjectMembership, error)
+	UpdateProjectMembershipRoles(ctx context.Context, projectID, email string, req entity.UpdateProjectMembershipRolesRequest) (entity.ProjectMembership, error)
+	DeactivateProjectMembership(ctx context.Context, projectID, email string) error
+	ResendProjectMembershipInvitation(ctx context.Context, projectID, email string) error
+	// ValidateProjectMembership is the invitation's dry run: the same checks
+	// CreateProjectMembership makes, with nothing written.
+	ValidateProjectMembership(ctx context.Context, projectID string, req entity.ValidateProjectMembershipRequest) (entity.ProjectMembershipValidation, error)
+	ListProjectContacts(ctx context.Context, projectID string) ([]entity.ProjectContact, error)
+	// GetMe answers which account roles the caller holds, for the admin check.
+	GetMe(ctx context.Context) (entity.GetUserMeResponse, error)
 }
 
 // contactsClient abstracts the project-contact onboarding service operations
@@ -49,14 +129,27 @@ type contactsClient interface {
 // management, backed by a separate microservice (not entity-service, not
 // SCIM) keyed on the project's Salesforce ID.
 type ContactHandler struct {
-	entity   entityProjectResolver
-	contacts contactsClient
+	entity      entityProjectResolver
+	contacts    contactsClient
+	memberships membershipsClient
+	// portalContactsEnabled is CSM_MIGRATION_PORTAL_CONTACTS_ENABLED. On, the
+	// contact list, the admin check and every write below go to
+	// entity-service and the CSM database; off, they go to the pre-cutover
+	// onboarding service exactly as before. Keeping both paths is what makes
+	// the cutover reversible without a redeploy of anything but this flag.
+	portalContactsEnabled bool
 }
 
 // NewContactHandler creates a ContactHandler backed by the given entity and
-// project-contact onboarding service clients.
-func NewContactHandler(entityClient entityProjectResolver, contactsClient contactsClient) *ContactHandler {
-	return &ContactHandler{entity: entityClient, contacts: contactsClient}
+// project-contact onboarding service clients. memberships may be nil when
+// portalContacts is false, which is the pre-cutover shape.
+func NewContactHandler(entityClient entityProjectResolver, contactsClient contactsClient, memberships membershipsClient, portalContacts bool) *ContactHandler {
+	return &ContactHandler{
+		entity:                entityClient,
+		contacts:              contactsClient,
+		memberships:           memberships,
+		portalContactsEnabled: portalContacts && memberships != nil,
+	}
 }
 
 // GetProjectContacts handles GET /projects/{id}/contacts.
@@ -70,6 +163,17 @@ func (h *ContactHandler) GetProjectContacts(w http.ResponseWriter, r *http.Reque
 	projectID := r.PathValue("id")
 	if projectID == "" || !uuidRe.MatchString(projectID) {
 		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
+		return
+	}
+
+	if h.portalContactsEnabled {
+		contacts, err := h.memberships.ListProjectContacts(r.Context(), projectID)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "entity ListProjectContacts failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
+			mapUpstreamError(w, err, "Failed to retrieve project contacts.")
+			return
+		}
+		writeJSONValue(w, http.StatusOK, dto.MapEntityProjectContacts(contacts))
 		return
 	}
 
@@ -119,6 +223,35 @@ func (h *ContactHandler) CreateProjectContact(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if h.portalContactsEnabled {
+		if !h.requireProjectAdmin(w, r, user, projectID) {
+			return
+		}
+		wctx, cancel := entityWriteContext(r)
+		defer cancel()
+		membership, err := h.memberships.CreateProjectMembership(wctx, projectID, dto.BuildCreateProjectMembershipRequest(req, user.Email))
+		if invitationOutcomeUnknown(err) {
+			// The answer was lost, not refused: entity-service keeps going
+			// and commits, so reporting a failure here would tell the admin
+			// an invitation failed when it is about to exist. A retry would
+			// then be refused as a duplicate. 202 tells the webapp to keep
+			// the row pending and refresh the list until it shows up.
+			slog.WarnContext(r.Context(), "entity CreateProjectMembership still running when the portal stopped waiting", "userID", user.UserID, "projectID", projectID)
+			writeJSONValue(w, http.StatusAccepted, invitationProcessingResponse{
+				Message: "The invitation is still being processed.",
+				Status:  invitationStatusProcessing,
+			})
+			return
+		}
+		if err != nil {
+			slog.ErrorContext(r.Context(), "entity CreateProjectMembership failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
+			writeUpstreamMessage(w, err, "Failed to add project contact.")
+			return
+		}
+		writeJSONValue(w, http.StatusOK, dto.MapEntityMembership(membership))
+		return
+	}
+
 	project, err := h.entity.GetProject(r.Context(), projectID)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity GetProject failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
@@ -148,6 +281,21 @@ func (h *ContactHandler) RemoveProjectContact(w http.ResponseWriter, r *http.Req
 	email := r.PathValue("email")
 	if projectID == "" || !uuidRe.MatchString(projectID) || email == "" {
 		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	if h.portalContactsEnabled {
+		if !h.requireProjectAdmin(w, r, user, projectID) {
+			return
+		}
+		wctx, cancel := entityWriteContext(r)
+		defer cancel()
+		if err := h.memberships.DeactivateProjectMembership(wctx, projectID, email); err != nil {
+			slog.ErrorContext(r.Context(), "entity DeactivateProjectMembership failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
+			writeUpstreamMessage(w, err, "Failed to remove project contact.")
+			return
+		}
+		writeJSONValue(w, http.StatusOK, map[string]string{"message": "Project contact removed successfully!"})
 		return
 	}
 
@@ -194,6 +342,23 @@ func (h *ContactHandler) UpdateProjectContactRole(w http.ResponseWriter, r *http
 		return
 	}
 
+	if h.portalContactsEnabled {
+		if !h.requireProjectAdmin(w, r, user, projectID) {
+			return
+		}
+		wctx, cancel := entityWriteContext(r)
+		defer cancel()
+		membership, err := h.memberships.UpdateProjectMembershipRoles(wctx, projectID, email,
+			entity.UpdateProjectMembershipRolesRequest{Roles: dto.RolesFromRoleUpdateRequest(req)})
+		if err != nil {
+			slog.ErrorContext(r.Context(), "entity UpdateProjectMembershipRoles failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
+			writeUpstreamMessage(w, err, "Failed to update project contact.")
+			return
+		}
+		writeJSONValue(w, http.StatusOK, dto.MapEntityMembership(membership))
+		return
+	}
+
 	project, err := h.entity.GetProject(r.Context(), projectID)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity GetProject failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
@@ -211,7 +376,19 @@ func (h *ContactHandler) UpdateProjectContactRole(w http.ResponseWriter, r *http
 	writeJSONValue(w, http.StatusOK, dto.MapMembership(result))
 }
 
-// ValidateProjectContact handles POST /projects/{id}/contacts/validate.
+// ValidateProjectContact handles POST /projects/{id}/contacts/validate, which
+// the webapp calls before it shows the invite form.
+//
+// With CSM_MIGRATION_PORTAL_CONTACTS_ENABLED on it asks entity-service's
+// invitation dry run, which runs the very checks the invitation will (public
+// email domains, the account's domain list from Salesforce, duplicate
+// contacts, the inviter's account owning or partnering the project, and an
+// existing active membership). The admin check the pre-cutover service made
+// is requireProjectAdmin here, as for every write. Off, it asks the
+// pre-cutover onboarding service. Either way the webapp sees the same
+// contract: 200 with isContactValid and one of the dto.ContactValidationMsg*
+// messages, 409 for somebody already on the project, and any other refusal
+// as an error status whose message says why.
 func (h *ContactHandler) ValidateProjectContact(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
 	if user == nil {
@@ -235,6 +412,30 @@ func (h *ContactHandler) ValidateProjectContact(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	if h.portalContactsEnabled {
+		email := strings.TrimSpace(req.ContactEmail)
+		if !dto.ValidContactEmail(email) {
+			writeError(w, http.StatusBadRequest, dto.ContactValidationMsgInvalidEmail)
+			return
+		}
+		if !h.requireProjectAdmin(w, r, user, projectID) {
+			return
+		}
+		// A read: nothing is written, so unlike the writes this runs on the
+		// request's own context and may be abandoned with it.
+		result, err := h.memberships.ValidateProjectMembership(r.Context(), projectID, entity.ValidateProjectMembershipRequest{
+			Email:        email,
+			InviterEmail: strings.TrimSpace(user.Email),
+		})
+		if err != nil {
+			slog.ErrorContext(r.Context(), "entity ValidateProjectMembership failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
+			mapUpstreamError(w, err, "Failed to validate project contact.")
+			return
+		}
+		writeEntityContactValidation(w, r, user, projectID, result)
+		return
+	}
+
 	project, err := h.entity.GetProject(r.Context(), projectID)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity GetProject failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
@@ -248,7 +449,7 @@ func (h *ContactHandler) ValidateProjectContact(w http.ResponseWriter, r *http.R
 		AdminEmail:   user.Email,
 	})
 	if conflict {
-		writeError(w, http.StatusConflict, "Contact with the provided email already exists in the project!")
+		writeError(w, http.StatusConflict, dto.ContactValidationMsgConflict)
 		return
 	}
 	if err != nil {
@@ -261,7 +462,7 @@ func (h *ContactHandler) ValidateProjectContact(w http.ResponseWriter, r *http.R
 		mapped := dto.MapContact(*contact)
 		writeJSONValue(w, http.StatusOK, dto.ContactValidationResponse{
 			IsContactValid: true,
-			Message:        "Contact is valid but already exists in the project!",
+			Message:        dto.ContactValidationMsgExistingContact,
 			ContactDetails: &mapped,
 		})
 		return
@@ -269,6 +470,179 @@ func (h *ContactHandler) ValidateProjectContact(w http.ResponseWriter, r *http.R
 
 	writeJSONValue(w, http.StatusOK, dto.ContactValidationResponse{
 		IsContactValid: true,
-		Message:        "Project contact is valid and can be added to the project!",
+		Message:        dto.ContactValidationMsgNewContact,
 	})
+}
+
+// writeEntityContactValidation answers ValidateProjectContact from
+// entity-service's dry-run verdict, in the pre-cutover response contract:
+//
+//   - valid, with a contact to reuse: 200, contactDetails set, so the webapp
+//     prefills the name Salesforce already holds.
+//   - valid, new address: 200 with no contactDetails.
+//   - CONFLICT: 409 with the portal's fixed message, as before, whichever of
+//     the two conflicts it was.
+//   - FORBIDDEN / INVALID: 403 / 400 with entity-service's message. Those
+//     messages are the onboarding service's own user-facing wording, carried
+//     over for exactly this; an empty one falls back to a generic message.
+func writeEntityContactValidation(w http.ResponseWriter, r *http.Request, user *middleware.UserInfo, projectID string, v entity.ProjectMembershipValidation) {
+	if v.Valid {
+		if v.ExistingContact != nil {
+			details := dto.MapEntityValidatedInvitee(*v.ExistingContact)
+			writeJSONValue(w, http.StatusOK, dto.ContactValidationResponse{
+				IsContactValid: true,
+				Message:        dto.ContactValidationMsgExistingContact,
+				ContactDetails: &details,
+			})
+			return
+		}
+		writeJSONValue(w, http.StatusOK, dto.ContactValidationResponse{
+			IsContactValid: true,
+			Message:        dto.ContactValidationMsgNewContact,
+		})
+		return
+	}
+
+	slog.InfoContext(r.Context(), "project contact validation refused", "userID", user.UserID, "projectID", projectID, "reason", v.Reason)
+	msg := strings.TrimSpace(v.Message)
+	switch v.Reason {
+	case entity.MembershipValidationConflict:
+		writeError(w, http.StatusConflict, dto.ContactValidationMsgConflict)
+	case entity.MembershipValidationForbidden:
+		if msg == "" {
+			msg = ErrMsgForbidden
+		}
+		writeError(w, http.StatusForbidden, msg)
+	default:
+		// INVALID, and any reason this backend does not know yet: still a
+		// refusal, so still a 4xx the webapp shows, never a false "valid".
+		if msg == "" {
+			msg = "Failed to validate project contact."
+		}
+		writeError(w, http.StatusBadRequest, msg)
+	}
+}
+
+// ResendProjectContactInvitation handles
+// POST /projects/{id}/contacts/{email}/resend-invitation.
+//
+// There is no pre-cutover equivalent, so unlike the three writes above this
+// has no fallback branch: with CSM_MIGRATION_PORTAL_CONTACTS_ENABLED off it
+// answers 404, the same answer entity-service itself would give, rather than
+// pretending to have resent something.
+//
+// entity-service republishes the invitation with a resend marker, which makes
+// csm-notification-service bypass its duplicate-invitation guard and send the
+// reminder wording. That guard exists to stop an accidental second
+// invitation, and a requested resend is by definition not that.
+func (h *ContactHandler) ResendProjectContactInvitation(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	if !h.portalContactsEnabled {
+		writeError(w, http.StatusNotFound, "Resending invitations is not available.")
+		return
+	}
+
+	projectID := r.PathValue("id")
+	email := r.PathValue("email")
+	if projectID == "" || !uuidRe.MatchString(projectID) || email == "" {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	if !h.requireProjectAdmin(w, r, user, projectID) {
+		return
+	}
+
+	wctx, cancel := entityWriteContext(r)
+	defer cancel()
+	if err := h.memberships.ResendProjectMembershipInvitation(wctx, projectID, email); err != nil {
+		slog.ErrorContext(r.Context(), "entity ResendProjectMembershipInvitation failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
+		writeUpstreamMessage(w, err, "Failed to resend the invitation.")
+		return
+	}
+
+	writeJSONValue(w, http.StatusOK, map[string]string{"message": "Invitation resent successfully!"})
+}
+
+// requireProjectAdmin is the authorization every entity-service write needs
+// before it is sent. It writes the error response itself and reports whether
+// the caller may go ahead.
+//
+// entity-service deliberately does not make this decision: it only checks
+// that the caller is an allow-listed internal client, so whether this
+// particular user may change this particular project's contacts is the
+// portal's call. Two conditions, both required:
+//
+//   - The caller holds an account admin role (accountAdminRoles). Admin is a
+//     property of the person, not of each project, as it is in ServiceNow:
+//     the migration carries it into user_role, and the Salesforce ingest
+//     keeps it derived from there on.
+//   - The caller has an active membership on this project. user_role has no
+//     account or project column, so without this an admin of one customer
+//     could manage the contacts of any project whose id they know.
+//
+// Both are read by project UUID and the caller's own identity, so the answer
+// does not depend on how entity-service scopes the portal's other reads.
+func (h *ContactHandler) requireProjectAdmin(w http.ResponseWriter, r *http.Request, user *middleware.UserInfo, projectID string) bool {
+	me, err := h.memberships.GetMe(r.Context())
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity GetMe failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
+		mapUpstreamError(w, err, "Failed to retrieve user details.")
+		return false
+	}
+	if !hasAccountAdminRole(me.Roles) {
+		slog.WarnContext(r.Context(), "project contact write refused: caller holds no account admin role", "userID", user.UserID, "projectID", projectID)
+		writeError(w, http.StatusForbidden, ErrMsgForbidden)
+		return false
+	}
+
+	contacts, err := h.memberships.ListProjectContacts(r.Context(), projectID)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity ListProjectContacts failed", "userID", user.UserID, "projectID", projectID, "err", summarizeErr(err))
+		mapUpstreamError(w, err, "Failed to retrieve project contacts.")
+		return false
+	}
+	if !isActiveProjectMember(contacts, user.Email) {
+		slog.WarnContext(r.Context(), "project contact write refused: caller is not an active member of the project", "userID", user.UserID, "projectID", projectID)
+		writeError(w, http.StatusForbidden, ErrMsgForbidden)
+		return false
+	}
+	return true
+}
+
+// hasAccountAdminRole reports whether roles include one of accountAdminRoles.
+func hasAccountAdminRole(roles []string) bool {
+	for _, r := range roles {
+		for _, admin := range accountAdminRoles {
+			if strings.EqualFold(strings.TrimSpace(r), admin) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isActiveProjectMember reports whether email has a membership on the
+// project that has not been deactivated. Email comparison ignores case,
+// since Salesforce does not preserve the casing the address was typed in.
+func isActiveProjectMember(contacts []entity.ProjectContact, email string) bool {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return false
+	}
+	for _, c := range contacts {
+		if !strings.EqualFold(strings.TrimSpace(c.Email), email) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(c.RegistrationState), membershipStateDeactivated) {
+			continue
+		}
+		return true
+	}
+	return false
 }

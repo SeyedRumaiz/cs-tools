@@ -229,7 +229,12 @@ export default function ChangeCaseTypeDialog({
       : targetType === "security_report_analysis"
         ? hasAttachments
         : targetType === "service_request"
-          ? !!catalogId && !!catalogItemId && firstEmptyRequired === null
+          ? !!catalogId &&
+            !!catalogItemId &&
+            // isSuccess, not !isLoading && !isError: a query paused offline is
+            // neither, and would otherwise pass with no questions loaded.
+            variables.isSuccess &&
+            firstEmptyRequired === null
           : true;
 
   // fieldsStepValid already carries each target's own requirements (catalog +

@@ -17,6 +17,7 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { ApiQueryKeys } from "@constants/apiConstants";
 import { useBackendApi } from "@api/backend/client";
+import { postSkippingTotal } from "@api/backend/postSkippingTotal";
 import { severityFromBe, uiStateFromBe } from "@api/backend/mappers";
 import type {
   BeCaseFieldFilter,
@@ -30,11 +31,12 @@ import type {
   CaseWorkState,
   SeverityOrUnset,
 } from "@features/csm-dashboard/types/abtDashboard";
-import { ALL_CASE_TYPES } from "@features/csm-cases/utils/caseType";
+import { visibleCaseTypes } from "@features/csm-cases/utils/caseType";
 import {
   classifyCaseQuery,
   type CaseQueryScope,
 } from "@features/csm-cases/utils/caseQueryScope";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
 
 /** Don't fire a search until the user has typed something searchable. */
 export const QUICK_CASE_MIN_QUERY_LEN = 2;
@@ -89,10 +91,15 @@ export interface QuickCaseHit {
  * the query matches one of the exact patterns — the quick-nav palette's
  * "search in subject and description too" affordance uses this to widen a scoped result.
  *
- * Explicitly requests every known case sub-type ({@link ALL_CASE_TYPES}) —
- * `entity-service`'s `/cases/search` defaults `filters.types` to `["case"]`
- * only when the caller omits it, which silently hid Service Requests,
- * Security Report Analyses, announcements, and engagements from this search.
+ * Explicitly requests every case sub-type this caller can see
+ * ({@link visibleCaseTypes}) — `entity-service`'s `/cases/search` defaults
+ * `filters.types` to `["case"]` only when the caller omits it, which silently
+ * hid Service Requests, Security Report Analyses, announcements, and
+ * engagements from this search. Narrowed by security-report access rather
+ * than sending every type unconditionally: the backend 403s the WHOLE search
+ * when the type filter names `security_report_analysis` and the caller lacks
+ * `PermViewSecurityCenter`, so a caller without it would otherwise get no
+ * quick-search results at all, not just a lack of security-report hits.
  *
  * The query is disabled until the trimmed text reaches
  * {@link QUICK_CASE_MIN_QUERY_LEN}, so opening the palette costs no network.
@@ -102,16 +109,18 @@ export function useQuickCaseSearch(
   options?: { forceFreeText?: boolean },
 ): UseQueryResult<QuickCaseHit[], Error> {
   const api = useBackendApi();
+  const { canUseSecurityCenter, canUpdateDeleteAnyComment } = usePortalAccess();
+  const canSeeSecurityReports = canUseSecurityCenter || canUpdateDeleteAnyComment;
   const q = query.trim();
   const scope = options?.forceFreeText ? "text" : classifyQuickCaseQuery(q);
 
   return useQuery<QuickCaseHit[], Error>({
-    queryKey: [ApiQueryKeys.CSM_CASES, "quick-search", q, scope],
+    queryKey: [ApiQueryKeys.CSM_CASES, "quick-search", q, scope, canSeeSecurityReports],
     queryFn: async (): Promise<QuickCaseHit[]> => {
       const typeFilter: BeCaseFieldFilter = {
         field: "type",
         op: "in",
-        values: ALL_CASE_TYPES,
+        values: visibleCaseTypes(canSeeSecurityReports),
       };
       const filters: BeCaseSearchFilters =
         scope === "text"
@@ -122,7 +131,8 @@ export function useQuickCaseSearch(
                 { field: scope, op: "eq", values: [q] },
               ],
             };
-      const res = await api.post<BeCaseSearchPayload, BeCaseSearchResponse>(
+      const res = await postSkippingTotal<BeCaseSearchPayload, BeCaseSearchResponse>(
+        api,
         "/cases/search",
         {
           pagination: { offset: 0, limit: QUICK_CASE_LIMIT },

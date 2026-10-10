@@ -147,8 +147,9 @@ func caseIDsToEnums(ids []int, idToEnum map[string]string) []string {
 // returns. Every other dto in this package keeps using Ref{id, name} for
 // entity references; don't reuse this type there.
 type IDLabelRef struct {
-	ID    string `json:"id,omitempty"`
-	Label string `json:"label"`
+	ID     string `json:"id,omitempty"`
+	Label  string `json:"label"`
+	Number string `json:"number,omitempty"`
 }
 
 // caseStatusRef builds the {id, label} the frontend's CaseListItem.status
@@ -191,6 +192,31 @@ var caseSeverityDisplayLabels = map[string]string{
 	"high":         "High (P2)",
 	"medium":       "Medium (P3)",
 	"low":          "Low (P4)",
+}
+
+// caseIssueTypeDisplayLabels turns the issue type enum back into ServiceNow's
+// own human label (see snIssueTypeToEnum's doc comment in
+// sn_case_service.go: SN sends "Error", "Total Outage", etc. as issueType.name) —
+// the same restoration caseStateDisplayLabels does for case state.
+var caseIssueTypeDisplayLabels = map[string]string{
+	"total_outage":            "Total Outage",
+	"partial_outage":          "Partial Outage",
+	"performance_degradation": "Performance Degradation",
+	"question":                "Question",
+	"security_or_compliance":  "Security Or Compliance",
+	"error":                   "Error",
+}
+
+// caseEngagementTypeDisplayLabels turns the engagement type enum into the
+// Title Case label the frontend renders verbatim, matching this backend's own
+// caseEngagementTypeRef transform (lowercase, spaces/slashes to underscores)
+// in reverse.
+var caseEngagementTypeDisplayLabels = map[string]string{
+	"migration":               "Migration",
+	"consultancy":             "Consultancy",
+	"new_feature_improvement": "New Feature Improvement",
+	"follow_up":               "Follow Up",
+	"onboarding":              "Onboarding",
 }
 
 // displayLabelOr returns the mapped display label for enum, falling back to the
@@ -271,13 +297,19 @@ func caseSeverityRef(label *string) *IDLabelRef {
 // caseIssueTypeRef mirrors caseStatusRef for issue type, matching
 // entity-service's own snIssueTypeToEnum transform (lowercase, spaces to
 // underscores) rather than a lookup table of raw labels.
+//
+// Label goes through displayLabelOr the same way caseStatusRef's does --
+// echoing the raw input here (as this used to) rather than resolving it
+// through caseIssueTypeDisplayLabels meant a Postgres-mode caller (raw
+// UPPER_SNAKE enum labels) saw e.g. "PERFORMANCE_DEGRADATION" verbatim on
+// every case card instead of "Performance Degradation".
 func caseIssueTypeRef(label *string) *IDLabelRef {
 	if label == nil || *label == "" {
 		return nil
 	}
 	enum := strings.ToLower(strings.ReplaceAll(*label, " ", "_"))
 	if id, ok := caseIssueTypeIDs[enum]; ok {
-		return &IDLabelRef{ID: id, Label: *label}
+		return &IDLabelRef{ID: id, Label: displayLabelOr(caseIssueTypeDisplayLabels, enum)}
 	}
 	return &IDLabelRef{Label: *label}
 }
@@ -288,13 +320,20 @@ func caseIssueTypeRef(label *string) *IDLabelRef {
 // transform (lowercase, spaces and slashes to underscores) is this backend's
 // own best-effort match against caseEngagementTypeIDs's domain.EngagementType
 // keys, not a mirror of an existing entity-service function.
+//
+// Label goes through displayLabelOr the same way caseStatusRef's does --
+// echoing the raw input here (as this used to) rather than resolving it
+// through caseEngagementTypeDisplayLabels meant a Postgres-mode caller saw
+// the raw enum label (e.g. "new_feature_improvement" or
+// "NEW_FEATURE_IMPROVEMENT") verbatim on every engagement card instead of
+// "New Feature Improvement".
 func caseEngagementTypeRef(label *string) *IDLabelRef {
 	if label == nil || *label == "" {
 		return nil
 	}
 	enum := strings.ToLower(strings.NewReplacer(" ", "_", "/", "_").Replace(*label))
 	if id, ok := caseEngagementTypeIDs[enum]; ok {
-		return &IDLabelRef{ID: id, Label: *label}
+		return &IDLabelRef{ID: id, Label: displayLabelOr(caseEngagementTypeDisplayLabels, enum)}
 	}
 	return &IDLabelRef{Label: *label}
 }
@@ -369,4 +408,91 @@ func caseEscalationLevelRef(id *string) *IDLabelRef {
 		label = trimmed
 	}
 	return &IDLabelRef{ID: trimmed, Label: label}
+}
+
+// caseSeverityEnumToDomain mirrors entity-service's private caseSeverityFromEnum
+// (internal/repository/case_repo.go): case_severity_enum's labels are 'S0'..'S4',
+// an entirely different vocabulary from domain.CaseSeverity's
+// catastrophic/critical/high/medium/low.
+//
+// It is needed because a choice list's vocabulary depends on the data source.
+// ServiceNow returns its own numeric ids with display text; Postgres returns the
+// raw enum label as both id and label (see entity-service's choiceListFromLabels).
+// The frontend was built against the first and matches on it exactly, so the
+// second has to be translated here -- the same reason the tables above exist.
+var caseSeverityEnumToDomain = map[string]string{
+	"s0": "catastrophic",
+	"s1": "critical",
+	"s2": "high",
+	"s3": "medium",
+	"s4": "low",
+}
+
+// normalizeCaseSeverityChoices rewrites a severity choice list into the
+// vocabulary the frontend matches on: the ServiceNow numeric id and display
+// label ("Critical (P1)").
+//
+// Accepts any of the three spellings that can arrive -- the Postgres enum label
+// ("S1"), entity-service's domain enum ("critical"), or ServiceNow's numeric id
+// ("10") -- and leaves anything unrecognised untouched, so an id this does not
+// know still renders rather than vanishing. Counts pass through unchanged.
+func normalizeCaseSeverityChoices(items []ReferenceItem) []ReferenceItem {
+	return normalizeChoices(items, caseSeverityEnumToDomain, caseSeverityIDs, caseSeverityDisplayLabels)
+}
+
+// normalizeCaseStateChoices is normalizeCaseSeverityChoices for case states.
+// case_state_enum's labels are the UPPER_SNAKE form of the domain values, so
+// lower-casing is the whole conversion -- no lookup table is needed for that
+// half.
+func normalizeCaseStateChoices(items []ReferenceItem) []ReferenceItem {
+	return normalizeChoices(items, nil, caseStateIDs, caseStateDisplayLabels)
+}
+
+// normalizeCaseIssueTypeChoices is normalizeCaseSeverityChoices for issue
+// types. Like case state, case_issue_type_enum's Postgres labels are just the
+// UPPER_SNAKE form of the domain values (confirmed against the enum itself:
+// ERROR/PARTIAL_OUTAGE/PERFORMANCE_DEGRADATION/QUESTION/
+// SECURITY_OR_COMPLIANCE/TOTAL_OUTAGE), so no enum-to-domain table is needed
+// here either.
+//
+// Without this, GET /projects/{id}/filters returned issueTypes.id as the raw
+// Postgres label (e.g. "PERFORMANCE_DEGRADATION") whenever entity-service ran
+// in Postgres/dual-write mode, instead of the numeric ServiceNow-style id the
+// frontend's resolveIssueTypeKey expects -- parseInt on a non-numeric id
+// silently returns 0, which the create-case form treats as "no issue type
+// selected" even though the caller picked one.
+func normalizeCaseIssueTypeChoices(items []ReferenceItem) []ReferenceItem {
+	return normalizeChoices(items, nil, caseIssueTypeIDs, caseIssueTypeDisplayLabels)
+}
+
+// normalizeCaseEngagementTypeChoices is normalizeCaseSeverityChoices for
+// engagement types. engagement_type_enum's Postgres labels are the UPPER_SNAKE
+// form of the domain values too (CONSULTANCY/NEW_FEATURE_IMPROVEMENT/
+// FOLLOW_UP/ONBOARDING/MIGRATION), so again no enum-to-domain table is needed.
+func normalizeCaseEngagementTypeChoices(items []ReferenceItem) []ReferenceItem {
+	return normalizeChoices(items, nil, caseEngagementTypeIDs, caseEngagementTypeDisplayLabels)
+}
+
+// normalizeChoices maps each item's id to the frontend's {id, label} pair.
+// enumToDomain converts a data-source-specific enum label to the domain value
+// first, when the two differ; a nil table means lower-casing is enough.
+func normalizeChoices(items []ReferenceItem, enumToDomain, domainToID, domainToLabel map[string]string) []ReferenceItem {
+	out := make([]ReferenceItem, 0, len(items))
+	for _, item := range items {
+		key := strings.ToLower(strings.TrimSpace(item.ID))
+		if enumToDomain != nil {
+			if mapped, ok := enumToDomain[key]; ok {
+				key = mapped
+			}
+		}
+		id, ok := domainToID[key]
+		if !ok {
+			// Not a vocabulary this knows -- most often ServiceNow's own
+			// numeric id, which is already what the frontend wants.
+			out = append(out, item)
+			continue
+		}
+		out = append(out, ReferenceItem{ID: id, Label: displayLabelOr(domainToLabel, key), Count: item.Count})
+	}
+	return out
 }

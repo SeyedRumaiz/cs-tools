@@ -26,7 +26,7 @@ import (
 
 // entityProjectOpportunityLinkClient abstracts the entity service
 // project-opportunity-link operation used by ProjectOpportunityLinkHandler.
-// ServiceNow data source only; read-only, so a pure M2M caller succeeds here.
+// Read-only and M2M-safe on both data sources.
 // There is no by-id fetch for this resource — the underlying ServiceNow data has
 // no single-record endpoint (search only).
 type entityProjectOpportunityLinkClient interface {

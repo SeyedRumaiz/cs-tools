@@ -34,6 +34,10 @@ import { useSearchConfigurationItems } from "@api/useSearchConfigurationItems";
 import { useSearchIncidentsForSelect } from "@features/csm-operations/api/useSearchIncidentsForSelect";
 import { useGetOutageMetadata } from "@features/csm-operations/api/useOutages";
 import AsyncEntitySelect from "@components/AsyncEntitySelect";
+import AsyncEntityMultiSelect from "@components/AsyncEntityMultiSelect";
+import OutageNotificationFields, {
+  type OutageNotificationValues,
+} from "@features/csm-operations/components/OutageNotificationFields";
 import OutagePublicationNotice from "@features/csm-operations/components/OutagePublicationNotice";
 import { outageTypeLabel } from "@features/csm-operations/utils/outages";
 import type {
@@ -92,11 +96,34 @@ export default function EditOutageDialog({
   // pre-acknowledged so re-saving unrelated fields on an already-linked,
   // already-public outage doesn't re-block on a checkbox that adds nothing.
   const [acknowledged, setAcknowledged] = useState(outage.publishesToStatusPage);
+  const initialNotifications = useMemo<OutageNotificationValues>(
+    () => ({
+      notifyInternalStakeholders: outage.notifyInternalStakeholders ?? false,
+      outageCommunication: outage.outageCommunication ?? false,
+      impact: outage.impact ?? "",
+      state: outage.state ?? "",
+    }),
+    [outage.notifyInternalStakeholders, outage.outageCommunication, outage.impact, outage.state],
+  );
+  const [notifications, setNotifications] = useState<OutageNotificationValues>(initialNotifications);
+  const initialAffected = useMemo(
+    () => (outage.affectedConfigurationItems ?? []).map((ci) => ci.id),
+    [outage.affectedConfigurationItems],
+  );
+  const affectedLabels = useMemo(
+    () => Object.fromEntries((outage.affectedConfigurationItems ?? []).map((ci) => [ci.id, ci.name || ci.id])),
+    [outage.affectedConfigurationItems],
+  );
+  const [affectedIds, setAffectedIds] = useState<string[]>(initialAffected);
 
   const isShortDescriptionValid = shortDescription.trim().length > 0;
   const configurationItemChanged = configurationItemId !== initialConfigurationItemId;
-  const needsAcknowledgement =
-    !!configurationItemId && configurationItemChanged && !acknowledged;
+  // Only ADDED affected CIs can newly put the outage on the status page.
+  const addedAffected = affectedIds.filter((id) => !initialAffected.includes(id));
+  const affectedChanged =
+    addedAffected.length > 0 || initialAffected.some((id) => !affectedIds.includes(id));
+  const publicationMayChange = (configurationItemChanged && !!configurationItemId) || addedAffected.length > 0;
+  const needsAcknowledgement = publicationMayChange && !acknowledged;
 
   const patch = useMemo<BePatchOutagePayload>(() => {
     const next: BePatchOutagePayload = {};
@@ -108,8 +135,23 @@ export default function EditOutageDialog({
       next.configurationItemId = configurationItemId || null;
     }
     if (incidentId !== initialIncidentId) next.incidentId = incidentId || null;
-    if (configurationItemChanged && configurationItemId) {
+    if (affectedChanged) next.affectedConfigurationItemIds = affectedIds;
+    if (publicationMayChange) {
       next.acknowledgePublicPublication = acknowledged;
+    }
+    if (notifications.notifyInternalStakeholders !== initialNotifications.notifyInternalStakeholders) {
+      next.notifyInternalStakeholders = notifications.notifyInternalStakeholders;
+    }
+    if (notifications.outageCommunication !== initialNotifications.outageCommunication) {
+      next.outageCommunication = notifications.outageCommunication;
+    }
+    // Trimmed on both sides; an emptied field is sent as "" so the backend
+    // clears it rather than leaving the old value in the email.
+    if (notifications.impact.trim() !== initialNotifications.impact.trim()) {
+      next.impact = notifications.impact.trim();
+    }
+    if (notifications.state.trim() !== initialNotifications.state.trim()) {
+      next.state = notifications.state.trim();
     }
     return next;
   }, [
@@ -123,6 +165,11 @@ export default function EditOutageDialog({
     incidentId,
     initialIncidentId,
     acknowledged,
+    notifications,
+    initialNotifications,
+    affectedChanged,
+    affectedIds,
+    publicationMayChange,
   ]);
 
   const hasChanges = Object.keys(patch).length > 0;
@@ -203,9 +250,29 @@ export default function EditOutageDialog({
             knownLabel={outage.incident?.number}
           />
 
-          {configurationItemChanged && (
+          <AsyncEntityMultiSelect<BeConfigurationItem>
+            id="outage-edit-affected-configuration-items"
+            label="Affected configuration items"
+            placeholder="Search service offerings…"
+            values={affectedIds}
+            onChange={setAffectedIds}
+            disabled={isSaving}
+            useSearch={useSearchConfigurationItems}
+            getId={(c) => c.id}
+            getLabel={configurationItemLabel}
+            knownLabels={affectedLabels}
+            helperText="Other service offerings this outage affects. Each one's status-page monitor and availability reflect the outage."
+          />
+
+          <OutageNotificationFields
+            value={notifications}
+            onChange={setNotifications}
+            disabled={isSaving}
+          />
+
+          {(configurationItemChanged || addedAffected.length > 0) && (
             <OutagePublicationNotice
-              hasConfigurationItem={!!configurationItemId}
+              hasConfigurationItem={publicationMayChange}
               monitoredClouds={metadata?.statusPageClouds}
               acknowledged={acknowledged}
               onAcknowledgedChange={setAcknowledged}

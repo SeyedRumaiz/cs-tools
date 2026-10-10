@@ -134,7 +134,7 @@ func MapSearchAttachments(r entity.SearchAttachmentsResponse) SearchAttachmentsR
 			Type:          a.Type,
 			SizeBytes:     a.SizeBytes,
 			Description:   a.Description,
-			CreatedBy:     attachmentCreatedByName(a.CreatedBy),
+			CreatedBy:     attachmentCreatedByIdentity(a.CreatedBy),
 			CreatedOn:     a.CreatedOn,
 			DownloadURL:   a.DownloadURL,
 			PreviewURL:    a.PreviewURL,
@@ -161,21 +161,21 @@ type CaseAttachmentsResponse struct {
 	TotalRecords int                 `json:"totalRecords"`
 }
 
-// MapCaseAttachments builds the portal response from entity-service's
-// SearchAttachmentsResponse for GET /cases/{id}/attachments.
-// attachmentCreatedByName flattens entity-service's createdBy user object to the
-// single display string the portal contract exposes (the frontend's
-// AuditMetadata types createdBy as `string | null` and renders it directly, e.g.
-// "Uploaded by {createdBy}"). Prefers the resolved name and falls back to the
-// email, since Name is omitempty upstream and absent when the data source could
-// not resolve the uploader to a user record.
-func attachmentCreatedByName(u entity.UserRef) string {
-	if n := strings.TrimSpace(u.Name); n != "" {
-		return n
+// attachmentCreatedByIdentity flattens entity-service's createdBy user object to
+// the single string the portal contract exposes as createdBy. It returns the
+// uploader's email, because the frontend decides whether the signed-in user may
+// edit or delete an attachment by comparing createdBy (trimmed, lowercased) to
+// that user's email, and the earlier portal backend passed the email through
+// unchanged. It falls back to the resolved name only when the email is empty.
+func attachmentCreatedByIdentity(u entity.UserRef) string {
+	if e := strings.TrimSpace(u.Email); e != "" {
+		return e
 	}
-	return strings.TrimSpace(u.Email)
+	return strings.TrimSpace(u.Name)
 }
 
+// MapCaseAttachments builds the portal response from entity-service's
+// SearchAttachmentsResponse for GET /cases/{id}/attachments.
 func MapCaseAttachments(r entity.SearchAttachmentsResponse) CaseAttachmentsResponse {
 	items := make([]AttachmentSummary, 0, len(r.Attachments))
 	for _, a := range r.Attachments {
@@ -187,7 +187,7 @@ func MapCaseAttachments(r entity.SearchAttachmentsResponse) CaseAttachmentsRespo
 			Type:          a.Type,
 			SizeBytes:     a.SizeBytes,
 			Description:   a.Description,
-			CreatedBy:     attachmentCreatedByName(a.CreatedBy),
+			CreatedBy:     attachmentCreatedByIdentity(a.CreatedBy),
 			CreatedOn:     a.CreatedOn,
 			DownloadURL:   a.DownloadURL,
 			PreviewURL:    a.PreviewURL,
@@ -340,7 +340,7 @@ func MapDeploymentAttachments(r entity.SearchAttachmentsResponse) DeploymentAtta
 			Type:          a.Type,
 			SizeBytes:     a.SizeBytes,
 			Description:   a.Description,
-			CreatedBy:     attachmentCreatedByName(a.CreatedBy),
+			CreatedBy:     attachmentCreatedByIdentity(a.CreatedBy),
 			CreatedOn:     a.CreatedOn,
 			DownloadURL:   a.DownloadURL,
 			PreviewURL:    a.PreviewURL,

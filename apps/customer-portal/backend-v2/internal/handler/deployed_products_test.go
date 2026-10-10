@@ -129,6 +129,9 @@ func TestSearchDeployedProducts_AcceptsUUIDAndBareSysID(t *testing.T) {
 			if len(fake.gotSearch.DeploymentIDs) != 1 || fake.gotSearch.DeploymentIDs[0] != tc.wantDashedID {
 				t.Errorf("got DeploymentIDs = %v, want [%s]", fake.gotSearch.DeploymentIDs, tc.wantDashedID)
 			}
+			if len(fake.gotSearch.ProductCategories) != 1 || fake.gotSearch.ProductCategories[0] != "Integration" {
+				t.Errorf("got ProductCategories = %v, want [Integration]", fake.gotSearch.ProductCategories)
+			}
 		})
 	}
 }

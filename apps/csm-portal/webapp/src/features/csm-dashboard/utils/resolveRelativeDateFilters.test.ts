@@ -53,6 +53,22 @@ describe("resolveRelativeDateFilters", () => {
     });
   });
 
+  it("resolves placeholders in a mixed array, leaving non-predicate entries untouched", () => {
+    const filters = {
+      filters: [
+        { preset: "activeCaseStates" },
+        { field: "createdOn", op: "gte", values: ["__today__"] },
+      ],
+    };
+
+    expect(resolveRelativeDateFilters(filters, NOW)).toEqual({
+      filters: [
+        { preset: "activeCaseStates" },
+        { field: "createdOn", op: "gte", values: [localMidnightIso(2026, 7, 15)] },
+      ],
+    });
+  });
+
   it("leaves a literal (non-placeholder) filter value untouched", () => {
     const filters = {
       filters: [

@@ -144,3 +144,31 @@ func (h *IncidentHandler) HandOffIncidentToSpecialist(w http.ResponseWriter, r *
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
+
+// ListSpecialistHandoffTeams handles GET /specialist-handoff-teams
+// [?serviceId=]: the sub-teams the handoff dialog offers for an incident's
+// service.
+func (h *IncidentHandler) ListSpecialistHandoffTeams(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.svc.ListSpecialistHandoffTeams(r.Context(), r.URL.Query().Get("serviceId"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// GetIncidentCreateDefaults handles GET /incidents/create-defaults: the
+// default service (INCIDENT_DEFAULT_SERVICE_ID) and its support group, the
+// group POST /incidents assigns when the incident's own service has none.
+func (h *IncidentHandler) GetIncidentCreateDefaults(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.svc.GetIncidentCreateDefaults(r.Context())
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}

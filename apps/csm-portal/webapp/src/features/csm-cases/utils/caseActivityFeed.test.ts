@@ -16,7 +16,12 @@
 
 import { describe, expect, it } from "vitest";
 import type { CaseAuditEntry, CsmCaseComment } from "@features/csm-cases/types/csmCases";
-import { compareFeedEntries, describeAuditEntry, type FeedEntry } from "./caseActivityFeed";
+import {
+  compareCommentsChronologically,
+  compareFeedEntries,
+  describeAuditEntry,
+  type FeedEntry,
+} from "./caseActivityFeed";
 
 function commentEntry(
   id: string,
@@ -76,6 +81,52 @@ describe("compareFeedEntries", () => {
   });
 });
 
+describe("compareCommentsChronologically", () => {
+  function comment(
+    id: string,
+    createdAt: string,
+    role: CsmCaseComment["authorRole"],
+  ): CsmCaseComment {
+    return {
+      id,
+      caseId: "c",
+      authorName: role === "chatbot" ? "Novera" : "Someone",
+      authorRole: role,
+      bodyHtml: "",
+      createdAt,
+    };
+  }
+
+  it("orders by timestamp ascending", () => {
+    const older = comment("a", "2026-07-01T00:00:00Z", "customer");
+    const newer = comment("b", "2026-07-01T00:05:00Z", "chatbot");
+    expect(compareCommentsChronologically(older, newer)).toBeLessThan(0);
+    expect(compareCommentsChronologically(newer, older)).toBeGreaterThan(0);
+  });
+
+  // Regression: entity-service returns conversation messages `created_on
+  // DESC` with a random-UUID tie-break, so the standalone conversation
+  // transcript pages (which consume this flat CsmCaseComment[] directly,
+  // never through the case activity feed's FeedEntry merge) need their own
+  // sort to guarantee the user's question renders before Novera's reply
+  // when both share a whole-second timestamp.
+  it("puts the human question before the bot answer on a timestamp tie", () => {
+    const ts = "2026-07-01T00:51:54Z";
+    const question = comment("q", ts, "customer");
+    const answer = comment("a", ts, "chatbot");
+    expect(compareCommentsChronologically(question, answer)).toBeLessThan(0);
+    expect(compareCommentsChronologically(answer, question)).toBeGreaterThan(0);
+  });
+
+  it("is deterministic for two non-bot entries at the same time (by id)", () => {
+    const ts = "2026-07-01T00:51:54Z";
+    const a = comment("a", ts, "customer");
+    const b = comment("b", ts, "customer");
+    expect(compareCommentsChronologically(a, b)).toBeLessThan(0);
+    expect(compareCommentsChronologically(b, a)).toBeGreaterThan(0);
+  });
+});
+
 describe("describeAuditEntry", () => {
   function auditEntry(overrides: Partial<CaseAuditEntry> = {}): CaseAuditEntry {
     return {
@@ -87,23 +138,50 @@ describe("describeAuditEntry", () => {
     };
   }
 
-  it("describes a single field change as 'Label: old → new'", () => {
+  it("describes a single field change as 'Label: old → new', through the curated state label", () => {
     const entry = auditEntry({
-      changes: [{ field: "state", fieldLabel: "State", previousValue: "New", newValue: "Work in Progress" }],
+      changes: [{ field: "state", fieldLabel: "State", previousValue: "open", newValue: "work_in_progress" }],
     });
-    expect(describeAuditEntry(entry)).toBe("State: New → Work in Progress");
+    expect(describeAuditEntry(entry)).toBe("State: Open → Work in progress");
   });
 
   it("joins multiple field changes from the same transaction with a semicolon", () => {
     const entry = auditEntry({
       changes: [
-        { field: "state", fieldLabel: "State", previousValue: "New", newValue: "Work in Progress" },
+        { field: "state", fieldLabel: "State", previousValue: "open", newValue: "work_in_progress" },
         { field: "assignee", fieldLabel: "Assignee", previousValue: undefined, newValue: "Jane Doe" },
       ],
     });
     expect(describeAuditEntry(entry)).toBe(
-      "State: New → Work in Progress; Assignee: Jane Doe",
+      "State: Open → Work in progress; Assignee: Jane Doe",
     );
+  });
+
+  it("humanizes a raw, all-caps state value the same as an already-lowercase one", () => {
+    const entry = auditEntry({
+      changes: [
+        { field: "state", fieldLabel: "State", previousValue: "SOLUTION_PROPOSED", newValue: "CLOSED" },
+      ],
+    });
+    expect(describeAuditEntry(entry)).toBe("State: Solution proposed → Closed");
+  });
+
+  it("maps a severity field change through the curated severity label, both for an already-human value and a raw P-notation one", () => {
+    const entry = auditEntry({
+      changes: [
+        { field: "severity", fieldLabel: "Severity", previousValue: "Critical", newValue: "P2" },
+      ],
+    });
+    expect(describeAuditEntry(entry)).toBe("Severity: Critical → High");
+  });
+
+  it("maps a bare S0-S4 severity code too, which severityFromBe alone does not recognize", () => {
+    const entry = auditEntry({
+      changes: [
+        { field: "severity", fieldLabel: "Severity", previousValue: "S0", newValue: "s2" },
+      ],
+    });
+    expect(describeAuditEntry(entry)).toBe("Severity: Catastrophic → High");
   });
 
   it("renders 'cleared' when a field's new value is absent", () => {

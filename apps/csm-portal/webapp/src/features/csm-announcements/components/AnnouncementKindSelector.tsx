@@ -92,7 +92,19 @@ export default function AnnouncementKindSelector({
               opacity: disabled ? 0.6 : 1,
             }}
           >
-            <Radio checked={selected} disabled={disabled} size="small" sx={{ p: 0, mt: 0.25 }} />
+            {/* Purely presentational — the Card above is the actual role="radio"
+                control (it owns tabIndex and onKeyDown). Without readOnly +
+                inputProps, this native <input type="radio"> would be its own
+                separately focusable, separately announced control nested
+                inside another one. */}
+            <Radio
+              checked={selected}
+              disabled={disabled}
+              readOnly
+              size="small"
+              sx={{ p: 0, mt: 0.25 }}
+              inputProps={{ tabIndex: -1, "aria-hidden": true }}
+            />
             <Box sx={{ minWidth: 0 }}>
               <Typography variant="body2" fontWeight={600}>
                 {opt.label}

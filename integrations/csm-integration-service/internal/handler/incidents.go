@@ -28,6 +28,7 @@ import (
 type entityIncidentClient interface {
 	CreateIncident(ctx context.Context, body []byte) ([]byte, error)
 	SearchIncidents(ctx context.Context, body []byte) ([]byte, error)
+	UpdateIncident(ctx context.Context, id string, body []byte) ([]byte, error)
 }
 
 // IncidentHandler handles HTTP requests for incident operations, delegating to the
@@ -77,6 +78,49 @@ func (h *IncidentHandler) CreateIncident(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusCreated, result)
+}
+
+// PatchIncident handles PATCH /incidents/{id}. Unlike PATCH /cases/{id}
+// (CaseHandler.PatchCase), this operation has no Postgres-data-source path:
+// on a Postgres data source entity-service rejects it outright (503, not
+// supported on this data source yet — no field combination succeeds there
+// today); on a ServiceNow data source it goes through the same
+// M2M-credential-fallback mechanism as CreateIncident/SearchIncidents above,
+// so a mapped 401 here is possible (if that credential isn't configured in
+// the target environment) but not guaranteed. The request body is forwarded
+// verbatim; the entity service enforces its own field validation and 400s
+// otherwise, so this handler does not re-validate that.
+func (h *IncidentHandler) PatchIncident(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" || !uuidRe.MatchString(id) {
+		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		if _, ok := err.(*http.MaxBytesError); ok {
+			writeError(w, http.StatusRequestEntityTooLarge, ErrMsgTooLarge)
+			return
+		}
+		writeError(w, http.StatusBadRequest, errMsgReadBody)
+		return
+	}
+
+	if !json.Valid(body) {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	result, err := h.entity.UpdateIncident(r.Context(), id, body)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity UpdateIncident failed", "incidentID", id, "err", summarizeErr(err))
+		mapUpstreamError(w, err, "Failed to update incident.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 // SearchIncidents handles POST /incidents/search. Targets the same

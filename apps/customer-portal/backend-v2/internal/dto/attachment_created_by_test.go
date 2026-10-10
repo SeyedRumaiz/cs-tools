@@ -92,11 +92,11 @@ func TestAttachmentSearch_DecodesObjectCreatedBy(t *testing.T) {
 	}
 }
 
-// TestMapCaseAttachments_FlattensCreatedByToDisplayString checks the portal
-// contract stays a plain string — the frontend's AuditMetadata types createdBy
-// as `string | null` and renders it directly ("Uploaded by {createdBy}"), so the
-// upstream object must not leak through.
-func TestMapCaseAttachments_FlattensCreatedByToDisplayString(t *testing.T) {
+// TestMapCaseAttachments_FlattensCreatedByToEmail checks the portal contract
+// stays a plain string holding the uploader's email (the frontend's owner check
+// compares it to the signed-in user's email), so the upstream object must not
+// leak through.
+func TestMapCaseAttachments_FlattensCreatedByToEmail(t *testing.T) {
 	var resp entity.SearchAttachmentsResponse
 	if err := json.Unmarshal([]byte(entityAttachmentSearchPayload), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -106,14 +106,13 @@ func TestMapCaseAttachments_FlattensCreatedByToDisplayString(t *testing.T) {
 	if len(mapped.Attachments) != 2 {
 		t.Fatalf("mapped %d attachments, want 2", len(mapped.Attachments))
 	}
-	// Resolved uploader: prefer the name.
-	if got := mapped.Attachments[0].CreatedBy; got != "Jane Doe" {
-		t.Errorf("createdBy = %q, want %q", got, "Jane Doe")
+	// Resolved uploader: the email wins even when a name is present.
+	if got := mapped.Attachments[0].CreatedBy; got != "jane@example.com" {
+		t.Errorf("createdBy = %q, want %q", got, "jane@example.com")
 	}
-	// Unresolved uploader (no name upstream): fall back to the email rather
-	// than rendering an empty author.
+	// Uploader with an email but no name upstream.
 	if got := mapped.Attachments[1].CreatedBy; got != "ops@example.com" {
-		t.Errorf("createdBy = %q, want the email fallback %q", got, "ops@example.com")
+		t.Errorf("createdBy = %q, want %q", got, "ops@example.com")
 	}
 
 	// createdBy must serialise as a JSON string, never an object.
@@ -155,5 +154,27 @@ func TestMapCaseAttachments_EmitsTotalRecords(t *testing.T) {
 	}
 	if probe.Total != nil {
 		t.Errorf("legacy \"total\" key still emitted: %v", *probe.Total)
+	}
+}
+
+// TestAttachmentCreatedByIdentity covers the email-first rule and its fallback
+// to the name when the email is empty.
+func TestAttachmentCreatedByIdentity(t *testing.T) {
+	cases := []struct {
+		name string
+		in   entity.UserRef
+		want string
+	}{
+		{"email and name", entity.UserRef{Name: "Jane Doe", Email: " Jane@Example.com "}, "Jane@Example.com"},
+		{"email only", entity.UserRef{Email: "ops@example.com"}, "ops@example.com"},
+		{"empty email falls back to name", entity.UserRef{Name: " Jane Doe ", Email: "  "}, "Jane Doe"},
+		{"both empty", entity.UserRef{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := attachmentCreatedByIdentity(c.in); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
 	}
 }

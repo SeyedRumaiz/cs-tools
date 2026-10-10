@@ -110,6 +110,9 @@ type inlineImageSftpgoClient interface {
 	MintToken(ctx context.Context, email, jwtAssertion string) (*sftpgo.Token, error)
 	CreateShare(ctx context.Context, accessToken, storageKey string, scope int, ttl time.Duration) (string, error)
 	UploadBytes(ctx context.Context, shareID, storageKey string, data []byte, contentType string) error
+	// RemoveFile deletes one already-uploaded object during rollback — see
+	// Process's rollback closure.
+	RemoveFile(ctx context.Context, accessToken, storageKey string) error
 }
 
 // InlineImageProcessor extracts base64 data: URI images embedded in a
@@ -143,11 +146,19 @@ func NewInlineImageProcessor(entity entityCaseClient, sftpgo inlineImageSftpgoCl
 //
 // Any unsupported inline image MIME subtype anywhere in htmlContent is
 // rejected before any image is processed, mirroring ServiceNow's reject-fast
-// behavior. Any failure partway through a multi-image comment — a size
+// behavior.
+//
+// Each image follows the same pending-first ordering as the browser-driven
+// upload flow (see AttachmentStorageHandler.MintUploadToken/ConfirmUpload):
+// the metadata row is created in "pending" status, the bytes are uploaded to
+// SFTPGo, and only then is the row confirmed "complete" — so a crash or
+// upstream failure can never leave a durable "complete" row whose bytes do
+// not exist. Any failure partway through a multi-image comment — a size
 // violation, an entity-service error, or an SFTPGo error — rolls back every
-// attachment already created earlier in this same call (DELETE
-// /attachments/{id}) and rejects the whole comment: a partially-processed
-// comment is never posted.
+// attachment already created earlier in this same call, deleting both the
+// metadata rows (DELETE /attachments/{id}) and any bytes already uploaded to
+// SFTPGo, and rejects the whole comment: a partially-processed comment is
+// never posted.
 func (p *InlineImageProcessor) Process(ctx context.Context, email, jwtAssertion, caseID, projectID, htmlContent string) (string, *inlineImageError) {
 	for _, m := range unsupportedInlineImageTagRe.FindAllStringSubmatch(htmlContent, -1) {
 		detected := strings.ToLower(m[1])
@@ -167,11 +178,27 @@ func (p *InlineImageProcessor) Process(ctx context.Context, email, jwtAssertion,
 	result := htmlContent
 	var accessToken string
 	var createdAttachmentIDs []string
+	var uploadedStorageKeys []string
 
+	// Rollback runs on a context detached from the request's cancellation:
+	// the most likely moment to need cleanup is exactly when the request is
+	// being torn down (caller gone, deadline hit), and a rollback that dies
+	// with the request would leave the orphans it exists to remove. It
+	// deletes BOTH the metadata rows created earlier in this call AND any
+	// bytes already uploaded to SFTPGo (including the possibly-partial
+	// object of the upload that failed), logging — never propagating — each
+	// individual cleanup failure: the whole comment is already being
+	// rejected, and a half-finished cleanup must still attempt the rest.
 	rollback := func() {
+		rbCtx := context.WithoutCancel(ctx)
 		for _, id := range createdAttachmentIDs {
-			if _, err := p.entity.DeleteCaseAttachment(ctx, id); err != nil {
-				slog.ErrorContext(ctx, "inline-image rollback: DeleteCaseAttachment failed", "attachmentID", id, "err", summarizeErr(err))
+			if _, err := p.entity.DeleteCaseAttachment(rbCtx, id); err != nil {
+				slog.ErrorContext(rbCtx, "inline-image rollback: DeleteCaseAttachment failed", "attachmentID", id, "err", summarizeErr(err))
+			}
+		}
+		for _, key := range uploadedStorageKeys {
+			if err := p.sftpgo.RemoveFile(rbCtx, accessToken, key); err != nil {
+				slog.ErrorContext(rbCtx, "inline-image rollback: sftpgo RemoveFile failed", "storageKey", key, "err", summarizeErr(err))
 			}
 		}
 	}
@@ -220,7 +247,14 @@ func (p *InlineImageProcessor) Process(ctx context.Context, email, jwtAssertion,
 			Type:          contentType,
 			StorageKey:    storageKey,
 			SizeBytes:     len(decoded),
-			Status:        "complete",
+			// "pending" until the bytes are actually in SFTPGo — the row is
+			// only confirmed "complete" after UploadBytes succeeds below,
+			// mirroring the browser-driven two-phase flow
+			// (MintUploadToken/ConfirmUpload). A crash or upstream failure
+			// between here and the confirm leaves a pending row (invisible
+			// to attachment lists, reconcilable later), never a durable
+			// "complete" row whose bytes do not exist.
+			Status: "pending",
 		})
 		if err != nil {
 			rollback()
@@ -268,6 +302,19 @@ func (p *InlineImageProcessor) Process(ctx context.Context, email, jwtAssertion,
 
 		if err := p.sftpgo.UploadBytes(ctx, shareID, storageKey, decoded, contentType); err != nil {
 			slog.ErrorContext(ctx, "inline-image sftpgo UploadBytes failed", "caseID", caseID, "err", summarizeErr(err))
+			// A failed TUS upload can still have written a partial object;
+			// include this key in the byte cleanup rather than assuming the
+			// failure left nothing behind.
+			uploadedStorageKeys = append(uploadedStorageKeys, storageKey)
+			rollback()
+			return "", &inlineImageError{status: http.StatusBadGateway, message: "Failed to store an embedded image."}
+		}
+		uploadedStorageKeys = append(uploadedStorageKeys, storageKey)
+
+		// Bytes are in SFTPGo; only now does the row become durable
+		// "complete" — see the Status comment on the create call above.
+		if _, err := p.entity.ConfirmCaseAttachment(ctx, attachmentID); err != nil {
+			slog.ErrorContext(ctx, "inline-image entity ConfirmCaseAttachment failed", "caseID", caseID, "attachmentID", attachmentID, "err", summarizeErr(err))
 			rollback()
 			return "", &inlineImageError{status: http.StatusBadGateway, message: "Failed to store an embedded image."}
 		}

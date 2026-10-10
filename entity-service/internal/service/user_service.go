@@ -19,31 +19,112 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
+	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/auth"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/middleware"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/repository"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/validate"
 )
-
-var uuidRE = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // emailRE matches the Ballerina `Email` constraint used by the Customer Portal
 // backend (`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`).
 var emailRE = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 
+// internalUserTypeRoles are the role names recompute_user_type's trigger
+// (migration 0011_users_add_user_type.sql) resolves to user_type = INTERNAL.
+var internalUserTypeRoles = []string{"admin", "internal"}
+
+// requestsInternalUserType reports whether granting roles at user creation
+// would resolve the new user's user_type to INTERNAL via that trigger.
+func requestsInternalUserType(roles []domain.UserRole) bool {
+	for _, role := range roles {
+		for _, internal := range internalUserTypeRoles {
+			if strings.EqualFold(string(role), internal) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// externalUserTypeRoles are the role names recompute_user_type's trigger
+// resolves to user_type = EXTERNAL. Creating an EXTERNAL-type user via this
+// endpoint is temporarily disabled -- see requestsExternalUserType.
+var externalUserTypeRoles = []string{"external", "partner", "customer", "partner_admin", "customer_admin"}
+
+// requestsExternalUserType reports whether granting roles at user creation
+// would resolve the new user's user_type to EXTERNAL via that trigger.
+func requestsExternalUserType(roles []domain.UserRole) bool {
+	for _, role := range roles {
+		for _, external := range externalUserTypeRoles {
+			if strings.EqualFold(string(role), external) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validateEmail returns a ValidationError unless email is present and matches
+// emailRE. Used where a caller-supplied address is documented as
+// `format: email` in openapi.yaml and would otherwise be forwarded upstream
+// unchecked — a schema constraint the service does not enforce is not a
+// constraint.
+func validateEmail(email string) error {
+	if email == "" {
+		return &apierror.ValidationError{Msg: "email is required"}
+	}
+	if !emailRE.MatchString(email) {
+		return &apierror.ValidationError{Msg: "email is not a valid email address"}
+	}
+	return nil
+}
+
 // validateUUIDs returns a ValidationError if any element of ids is not a valid UUID.
 func validateUUIDs(field string, ids []string) error {
 	for _, id := range ids {
-		if !uuidRE.MatchString(id) {
+		if !validate.IsUUID(id) {
 			return &apierror.ValidationError{Msg: fmt.Sprintf("%s contains invalid UUID: %q", field, id)}
 		}
 	}
 	return nil
+}
+
+// derefSeverity/derefState dereference domain.CaseView/Case's now-optional
+// Severity/State (nil in practice for most real Postgres cases, but always
+// set on the ServiceNow data source) to their plain zero-valued type, for a
+// caller (map lookup, string conversion, equality check) that predates
+// those fields becoming optional and only ever runs against the
+// ServiceNow-backed path where a nil is not actually expected.
+func derefSeverity(s *domain.CaseSeverity) domain.CaseSeverity {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func derefState(s *domain.CaseState) domain.CaseState {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func derefWorkState(s *domain.CaseWorkState) domain.CaseWorkState {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // validateDateRange enforces the same rules as the Ballerina reference's
@@ -138,6 +219,30 @@ func NewUserService(repo repository.UserRepository) UserService {
 	return &userService{repo: repo}
 }
 
+// GetUser implements UserService.
+func (s *userService) GetUser(ctx context.Context, id string) (domain.UserDetail, error) {
+	if err := validateUUIDs("id", []string{id}); err != nil {
+		return domain.UserDetail{}, err
+	}
+	u, err := s.repo.GetUserDetail(ctx, id)
+	if err != nil {
+		return domain.UserDetail{}, err
+	}
+	if u.Roles, err = s.repo.GetUserRoles(ctx, id); err != nil {
+		return domain.UserDetail{}, err
+	}
+	if u.Groups, err = s.repo.GetUserGroups(ctx, id); err != nil {
+		return domain.UserDetail{}, err
+	}
+	// Project access is a customer concept: staff have no project-contact rows.
+	if u.UserType == domain.UserTypeCustomer && u.Email != "" {
+		if u.ProjectAccess, err = s.repo.GetUserProjectAccess(ctx, u.Email); err != nil {
+			return domain.UserDetail{}, err
+		}
+	}
+	return u, nil
+}
+
 // SearchUsers implements UserService.
 func (s *userService) SearchUsers(ctx context.Context, req domain.SearchUsersRequest) (domain.SearchUsersResponse, error) {
 	if err := normalizeUserPagination(&req.Pagination); err != nil {
@@ -146,24 +251,32 @@ func (s *userService) SearchUsers(ctx context.Context, req domain.SearchUsersReq
 	if err := validateSearchQuery(req.Filters.SearchQuery); err != nil {
 		return domain.SearchUsersResponse{}, err
 	}
-	if len(req.Filters.RoleIDs) > 0 {
-		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "roleIds filter is only supported for the ServiceNow data source"}
+	if err := validateUUIDs("userIds", req.Filters.UserIDs); err != nil {
+		return domain.SearchUsersResponse{}, err
 	}
-	if len(req.Filters.UserIDs) > 0 || len(req.Filters.GroupIDs) > 0 || len(req.Filters.GroupNames) > 0 {
-		return domain.SearchUsersResponse{}, &apierror.ValidationError{
-			Msg: "userIds, groupIds and groupNames filters are only supported for the ServiceNow data source"}
+	if err := validateUUIDs("groupIds", req.Filters.GroupIDs); err != nil {
+		return domain.SearchUsersResponse{}, err
 	}
-	if req.Filters.Active != nil {
-		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "active filter is only supported for the ServiceNow data source"}
+	if err := validateUUIDs("teamIds", req.Filters.TeamIDs); err != nil {
+		return domain.SearchUsersResponse{}, err
 	}
-	if req.SortBy.Field != "" {
-		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "sortBy is only supported for the ServiceNow data source"}
+	if req.SortBy.Field != "" && !validUserSortField[req.SortBy.Field] {
+		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "sortBy.field contains invalid value: " + string(req.SortBy.Field)}
+	}
+	if req.SortBy.Order != "" && req.SortBy.Field == "" {
+		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "sortBy.order requires sortBy.field to be set"}
+	}
+	if req.SortBy.Order != "" && !validUserSortOrder[req.SortBy.Order] {
+		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "sortBy.order contains invalid value: " + string(req.SortBy.Order)}
 	}
 	if len(req.Filters.UserNames) > 50 {
 		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "userNames cannot contain more than 50 values"}
 	}
 	if len(req.Filters.Emails) > 50 {
 		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "emails cannot contain more than 50 values"}
+	}
+	if len(req.Filters.RoleIDs) > 50 {
+		return domain.SearchUsersResponse{}, &apierror.ValidationError{Msg: "roleIds cannot contain more than 50 values"}
 	}
 
 	users, total, err := s.repo.SearchUsers(ctx, req)
@@ -189,10 +302,13 @@ func (s *userService) SearchUsers(ctx context.Context, req domain.SearchUsersReq
 // matching row. See case_service.go's identical pattern for CreateCase /
 // CreateCaseComment.
 //
-// Postgres users have no roles or group-membership tables (unlike the
-// ServiceNow data source), so Roles and Groups are always empty rather than
-// fabricated — the frontend's team/role resolution is simply a no-op for
-// this data source today.
+// Postgres has role/user_role tables (migrations 0008/0010 -- see
+// SearchUsers' roleIds filter, which does query them) and no group-membership
+// table at all. GetMe doesn't resolve either here: Roles is left empty rather
+// than queried, since no caller has asked for it on this path yet, and Groups
+// is always empty because there is genuinely nothing to resolve it from —
+// the frontend's team/role resolution is simply a no-op for this data source
+// today.
 func (s *userService) GetMe(ctx context.Context) (domain.GetUserMeResponse, error) {
 	token := middleware.UserIDTokenFromContext(ctx)
 	if token == "" {
@@ -204,7 +320,26 @@ func (s *userService) GetMe(ctx context.Context) (domain.GetUserMeResponse, erro
 	}
 	user, err := s.repo.GetUserByEmail(ctx, email)
 	if err != nil {
+		var nfe *apierror.NotFoundError
+		if errors.As(err, &nfe) {
+			// callerId, not email — see user_repo.go's GetUserByEmail for why
+			// no log line on this path may carry the caller's email address.
+			// UserID is Asgardeo's own stable per-account identifier (the
+			// validated x-user-id-token's "userid" claim), already resolved
+			// into context by auth.Middleware earlier in the chain.
+			slog.WarnContext(ctx, "get me: no user found for caller", "callerId", auth.IdentityFromContext(ctx).UserID)
+		}
 		return domain.GetUserMeResponse{}, err
+	}
+	roles, err := s.repo.GetUserRoles(ctx, user.ID)
+	if err != nil {
+		return domain.GetUserMeResponse{}, err
+	}
+	// GetUserMeResponse.Groups's own doc comment: best-effort, empty rather
+	// than a failed request when the lookup errors.
+	groups, err := s.repo.GetUserGroups(ctx, user.ID)
+	if err != nil {
+		groups = []domain.UserGroupRef{}
 	}
 
 	firstName := user.FirstName
@@ -214,7 +349,119 @@ func (s *userService) GetMe(ctx context.Context) (domain.GetUserMeResponse, erro
 		FirstName: &firstName,
 		LastName:  user.LastName,
 		TimeZone:  user.Timezone,
-		Roles:     []string{},
-		Groups:    []domain.UserGroupRef{},
+		Phone:     user.Phone,
+		Roles:     roles,
+		Groups:    groups,
 	}, nil
 }
+
+// GetUsersByIDs implements UserService.
+//
+// Ids that are not UUIDs are dropped rather than rejected. Callers build the
+// list from records whose user reference is not always a user id -- a KB
+// article's updated_by, for one, is free text (an email address, a system
+// name) -- and "user".id is a UUID column, so such a value can never match a
+// row. Passing it through makes Postgres reject the whole query ("invalid
+// input syntax for type uuid"), which fails the lookup for every valid id in
+// the same batch; a 400 (as validateUUIDs does for a single id) would fail it
+// just the same. Skipping gives the answer a query would have: no match.
+func (s *userService) GetUsersByIDs(ctx context.Context, ids []string) (domain.GetUsersByIDsResponse, error) {
+	validIDs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if validate.IsUUID(id) {
+			validIDs = append(validIDs, id)
+		}
+	}
+	if len(validIDs) == 0 {
+		return domain.GetUsersByIDsResponse{Users: []domain.User{}}, nil
+	}
+	users, err := s.repo.GetUsersByIDs(ctx, validIDs)
+	if err != nil {
+		return domain.GetUsersByIDsResponse{}, err
+	}
+	return domain.GetUsersByIDsResponse{Users: users}, nil
+}
+
+// PatchMe implements UserService. Resolves the caller the same way GetMe
+// does (x-user-id-token's email claim -> GetUserByEmail), so there is no
+// caller-supplied id to trust -- a user can only ever update their own
+// timezone through this endpoint.
+// maxPhoneLen is the width of "user".phone (migration 0141); checked up front
+// so an over-long value is a 400, not a database error.
+const maxPhoneLen = 32
+
+func (s *userService) PatchMe(ctx context.Context, req domain.PatchUserMeRequest) (domain.PatchUserMeResponse, error) {
+	var timezone, phone *string
+	if req.TimeZone != "" {
+		timezone = &req.TimeZone
+	}
+	if req.Phone != nil {
+		trimmed := strings.TrimSpace(*req.Phone)
+		if utf8.RuneCountInString(trimmed) > maxPhoneLen {
+			return domain.PatchUserMeResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("phone must be at most %d characters", maxPhoneLen)}
+		}
+		phone = &trimmed
+	}
+	if timezone == nil && phone == nil {
+		return domain.PatchUserMeResponse{}, &apierror.ValidationError{Msg: "at least one of timeZone or phone is required"}
+	}
+	token := middleware.UserIDTokenFromContext(ctx)
+	if token == "" {
+		return domain.PatchUserMeResponse{}, &apierror.UnauthorizedError{Msg: "x-user-id-token header is required"}
+	}
+	email, err := emailFromJWT(token)
+	if err != nil {
+		return domain.PatchUserMeResponse{}, &apierror.ValidationError{Msg: "x-user-id-token: " + err.Error()}
+	}
+	user, err := s.repo.GetUserByEmail(ctx, email)
+	if err != nil {
+		return domain.PatchUserMeResponse{}, err
+	}
+
+	updated, err := s.repo.UpdateUserProfile(ctx, user.ID, timezone, phone)
+	if err != nil {
+		return domain.PatchUserMeResponse{}, err
+	}
+
+	return domain.PatchUserMeResponse{
+		Message: "User updated successfully",
+		User: domain.PatchUserMeUpdated{
+			ID:        user.ID,
+			UpdatedBy: email,
+			UpdatedOn: updated.UpdatedOn.UTC().Format(time.RFC3339),
+			TimeZone:  updated.Timezone,
+			Phone:     updated.Phone,
+		},
+	}, nil
+}
+
+// CreateUser implements UserService.
+func (s *userService) CreateUser(ctx context.Context, req domain.CreateUserRequest) (domain.User, error) {
+	token := middleware.UserIDTokenFromContext(ctx)
+	if token == "" {
+		return domain.User{}, &apierror.UnauthorizedError{Msg: "x-user-id-token header is required"}
+	}
+	actor, err := emailFromJWT(token)
+	if err != nil {
+		return domain.User{}, &apierror.ValidationError{Msg: "x-user-id-token: " + err.Error()}
+	}
+
+	if err := validateEmail(req.Email); err != nil {
+		return domain.User{}, err
+	}
+	if strings.TrimSpace(req.FirstName) == "" && strings.TrimSpace(req.LastName) == "" {
+		return domain.User{}, &apierror.ValidationError{Msg: "firstName or lastName is required"}
+	}
+	if len(req.Roles) > 50 {
+		return domain.User{}, &apierror.ValidationError{Msg: "roles cannot contain more than 50 values"}
+	}
+	if requestsInternalUserType(req.Roles) && !strings.HasSuffix(strings.ToLower(req.Email), wso2EmailDomain) {
+		return domain.User{}, &apierror.ValidationError{Msg: "an internal-type user must have a " + wso2EmailDomain + " email address"}
+	}
+	if requestsExternalUserType(req.Roles) {
+		return domain.User{}, &apierror.ValidationError{Msg: "creating an external-type user is not available at this time"}
+	}
+
+	return s.repo.CreateUser(ctx, req, actor)
+}
+

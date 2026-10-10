@@ -19,6 +19,7 @@ package service
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -56,6 +57,7 @@ func TestSNIncidentService_CreateIncident_WatchListResolvedToEmails(t *testing.T
 	var gotBody map[string]any
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users/search", watchListUserSearchStub(t))
+	mux.HandleFunc("/services/search", snServicesStub(nil))
 	mux.HandleFunc("/incidents", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("expected POST, got %s", r.Method)
@@ -868,5 +870,110 @@ func TestSNIncidentService_AggregateIncidents_StateGroupByRemapsKeyToDomainEnum(
 	// Unrecognized numeric state id: falls back to leaving the key as-is.
 	if got, want := resp.Groups[2].Key, "42"; got != want {
 		t.Errorf("groups[2].Key: got %q, want %q (unrecognized state id falls back to raw key)", got, want)
+	}
+}
+
+// TestSNIncidentService_CreateIncident_CorrelationIDAndEnvironmentForwarded checks both fields reach the connector under its own keys.
+func TestSNIncidentService_CreateIncident_CorrelationIDAndEnvironmentForwarded(t *testing.T) {
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/services/search", snServicesStub(nil))
+	mux.HandleFunc("/incidents", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message": "ok", "incident": {"id": "` + testIncidentSysid + `", "number": "INC0001"}}`))
+	})
+
+	svc := NewServiceNowIncidentService(newTestSNClient(t, mux), nil)
+
+	req := validCreateIncidentRequest()
+	req.CorrelationID = strPtr("[fp:abc123def456:1]")
+	req.Environment = strPtr("Staging")
+	if _, err := svc.CreateIncident(contextWithUserIDToken("token"), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotBody["correlationId"] != "[fp:abc123def456:1]" {
+		t.Fatalf("correlationId: got %v, want %q", gotBody["correlationId"], "[fp:abc123def456:1]")
+	}
+	if gotBody["u_enviroment"] != "Staging" {
+		t.Fatalf("u_enviroment: got %v, want %q", gotBody["u_enviroment"], "Staging")
+	}
+	if _, has := gotBody["environment"]; has {
+		t.Fatalf("environment must be sent as u_enviroment only, got %+v", gotBody)
+	}
+}
+
+// TestSNIncidentService_CreateIncident_OmitsUnsetCorrelationIDAndEnvironment checks a create without them sends neither key.
+func TestSNIncidentService_CreateIncident_OmitsUnsetCorrelationIDAndEnvironment(t *testing.T) {
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/services/search", snServicesStub(nil))
+	mux.HandleFunc("/incidents", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message": "ok", "incident": {"id": "` + testIncidentSysid + `", "number": "INC0001"}}`))
+	})
+
+	svc := NewServiceNowIncidentService(newTestSNClient(t, mux), nil)
+
+	if _, err := svc.CreateIncident(contextWithUserIDToken("token"), validCreateIncidentRequest()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, key := range []string{"correlationId", "u_enviroment"} {
+		if _, has := gotBody[key]; has {
+			t.Fatalf("%s: expected omitted, got %v", key, gotBody[key])
+		}
+	}
+}
+
+// TestSNIncidentService_CreateIncident_EnvironmentTooLong checks an environment over 40 characters fails before any ServiceNow call.
+func TestSNIncidentService_CreateIncident_EnvironmentTooLong(t *testing.T) {
+	svc := NewServiceNowIncidentService(nil, nil)
+
+	req := validCreateIncidentRequest()
+	long := strings.Repeat("e", 41)
+	req.Environment = &long
+
+	_, err := svc.CreateIncident(contextWithUserIDToken("token"), req)
+	if _, ok := err.(*apierror.ValidationError); !ok {
+		t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+	}
+}
+
+// TestSNIncidentService_SearchIncidents_CorrelationIDFilterPassedThrough checks the filter is sent as an exact match, not free text.
+func TestSNIncidentService_SearchIncidents_CorrelationIDFilterPassedThrough(t *testing.T) {
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/incidents/search", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"incidents": [], "totalRecords": 0, "offset": 0, "limit": 1}`))
+	})
+
+	svc := NewServiceNowIncidentService(newTestSNClient(t, mux), nil)
+
+	req := domain.SearchIncidentsRequest{
+		Filters: domain.SearchIncidentsFilters{CorrelationID: strPtr("[fp:abc123def456:1]")},
+	}
+	if _, err := svc.SearchIncidents(contextWithUserIDToken("token"), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	gotFilters, ok := gotBody["filters"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected filters object in payload, got %+v", gotBody["filters"])
+	}
+	if gotFilters["correlationId"] != "[fp:abc123def456:1]" {
+		t.Fatalf("filters.correlationId: got %v, want %q", gotFilters["correlationId"], "[fp:abc123def456:1]")
+	}
+	if _, has := gotFilters["searchQuery"]; has {
+		t.Fatalf("filters.searchQuery: expected omitted, got %v", gotFilters["searchQuery"])
 	}
 }

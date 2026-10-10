@@ -335,6 +335,15 @@ export default function CsmCaseCreatePage(): JSX.Element {
                   Deployment
                 </InputLabel>
                 <Select
+                  MenuProps={{
+                    // Anchored under the field, not over it. MUI's default aligns the
+                    // selected item with the input, which lifts the list on top of the
+                    // control and clips the first option behind it. Same MenuProps
+                    // CsmUsersPage already carries, for the same reason.
+                    anchorOrigin: { vertical: "bottom", horizontal: "left" },
+                    transformOrigin: { vertical: "top", horizontal: "left" },
+                    slotProps: { paper: { sx: { maxHeight: 320 } } },
+                  }}
                   labelId="case-deployment-label"
                   label="Deployment"
                   value={deploymentId}
@@ -369,6 +378,15 @@ export default function CsmCaseCreatePage(): JSX.Element {
                 Deployed product
               </InputLabel>
               <Select
+                MenuProps={{
+                  // Anchored under the field, not over it. MUI's default aligns the
+                  // selected item with the input, which lifts the list on top of the
+                  // control and clips the first option behind it. Same MenuProps
+                  // CsmUsersPage already carries, for the same reason.
+                  anchorOrigin: { vertical: "bottom", horizontal: "left" },
+                  transformOrigin: { vertical: "top", horizontal: "left" },
+                  slotProps: { paper: { sx: { maxHeight: 320 } } },
+                }}
                 labelId="case-product-label"
                 label="Deployed product"
                 value={deployedProductId}
@@ -409,6 +427,15 @@ export default function CsmCaseCreatePage(): JSX.Element {
                 Severity
               </InputLabel>
               <Select
+                MenuProps={{
+                  // Anchored under the field, not over it. MUI's default aligns the
+                  // selected item with the input, which lifts the list on top of the
+                  // control and clips the first option behind it. Same MenuProps
+                  // CsmUsersPage already carries, for the same reason.
+                  anchorOrigin: { vertical: "bottom", horizontal: "left" },
+                  transformOrigin: { vertical: "top", horizontal: "left" },
+                  slotProps: { paper: { sx: { maxHeight: 320 } } },
+                }}
                 labelId="case-severity-label"
                 label="Severity"
                 value={severity}
@@ -435,6 +462,15 @@ export default function CsmCaseCreatePage(): JSX.Element {
                 Issue type
               </InputLabel>
               <Select
+                MenuProps={{
+                  // Anchored under the field, not over it. MUI's default aligns the
+                  // selected item with the input, which lifts the list on top of the
+                  // control and clips the first option behind it. Same MenuProps
+                  // CsmUsersPage already carries, for the same reason.
+                  anchorOrigin: { vertical: "bottom", horizontal: "left" },
+                  transformOrigin: { vertical: "top", horizontal: "left" },
+                  slotProps: { paper: { sx: { maxHeight: 320 } } },
+                }}
                 labelId="case-issue-type-label"
                 label="Issue type"
                 value={issueType}

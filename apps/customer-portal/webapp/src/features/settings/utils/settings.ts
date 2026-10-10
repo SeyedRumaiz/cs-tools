@@ -14,9 +14,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+import { normalizeCustomerRoles } from "@hooks/useCustomerPermissions";
 import { colors } from "@wso2/oxygen-ui";
 import { Code, Crown, Monitor, Shield, Star, Users } from "@wso2/oxygen-ui-icons-react";
 import {
+  SETTINGS_CUSTOMER_ADMIN_ROLES,
   NULL_PLACEHOLDER,
   SETTINGS_AVATAR_BACKGROUND_COLORS,
 } from "@features/settings/constants/settingsConstants";
@@ -29,6 +31,99 @@ import type { ProjectContact } from "@features/settings/types/users";
  * @param contact - The project contact.
  * @returns Array of role badges to display.
  */
+/**
+ * Reports whether the user's roles include the customer admin role, in either
+ * of the spellings entity-service uses (see SETTINGS_CUSTOMER_ADMIN_ROLES).
+ * Compare through this rather than against one raw string, which would stop
+ * matching at cutover.
+ *
+ * @param {string[] | undefined} roles - Roles as reported by entity-service.
+ * @returns {boolean} Whether the user is a customer admin.
+ */
+export function hasCustomerAdminRole(roles: string[] | undefined): boolean {
+  return (roles ?? []).some((r) =>
+    SETTINGS_CUSTOMER_ADMIN_ROLES.includes(r.trim().toLowerCase()),
+  );
+}
+
+/**
+ * Maps role strings to user-friendly labels. Returns highest role when multiple roles present.
+ * Supports both ServiceNow prefixes (e.g. sn_customerservice.customer_admin) and
+ * CSM database/Postgres roles (e.g. customer_admin, admin).
+ *
+ * @param {string[] | undefined} roles - Array of role strings from users/me endpoint.
+ * @returns {string} The user-friendly role label.
+ */
+export function getRoleLabel(roles: string[] | undefined): string {
+  if (!roles || roles.length === 0) return "Not Available";
+
+  const canonicalRoles = normalizeCustomerRoles(roles);
+  const rawLower = roles.map((r) => r.trim().toLowerCase());
+
+  // 1. Admin (ServiceNow, CSM Postgres, or Asgardeo variants)
+  if (
+    canonicalRoles.includes("admin") ||
+    canonicalRoles.includes("customer_admin") ||
+    rawLower.includes("customer_admin") ||
+    rawLower.includes("admin")
+  ) {
+    return "Admin";
+  }
+
+  // 2. Partner Admin
+  if (
+    canonicalRoles.includes("partner_admin") ||
+    rawLower.includes("partner_admin")
+  ) {
+    return "Partner Admin";
+  }
+
+  // 3. Lead
+  if (rawLower.includes("lead")) {
+    return "Lead";
+  }
+
+  // 4. Security User
+  if (
+    rawLower.includes("security_user") ||
+    rawLower.includes("security") ||
+    rawLower.includes("sn_customerservice.security_user")
+  ) {
+    return "Security User";
+  }
+
+  // 5. Partner User
+  if (
+    canonicalRoles.includes("partner_user") ||
+    rawLower.includes("partner")
+  ) {
+    return "Partner";
+  }
+
+  // 6. Internal / Agent
+  if (
+    canonicalRoles.includes("internal") ||
+    canonicalRoles.includes("agent") ||
+    rawLower.includes("internal") ||
+    rawLower.includes("agent")
+  ) {
+    return "Internal User";
+  }
+
+  // 7. System User (only when explicitly flagged as a system/integration user)
+  if (
+    rawLower.includes("system_user") ||
+    rawLower.includes("system") ||
+    rawLower.includes("integration_user") ||
+    rawLower.includes("sn_customerservice.integration_user")
+  ) {
+    return "System User";
+  }
+
+  // 8. Portal User (customer user persona)
+  return "Portal User";
+}
+
 export function getRoleBadges(contact: ProjectContact): SettingsRoleBadge[] {
   const badges: SettingsRoleBadge[] = [];
 

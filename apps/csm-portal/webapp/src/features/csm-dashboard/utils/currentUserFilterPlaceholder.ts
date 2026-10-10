@@ -14,7 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { isCaseFieldFilterArray, type WidgetCaseFieldFilterLike } from "./widgetPreviewUrl";
+import { hasFieldFilterEntries, isFieldFilterEntry } from "./widgetPreviewUrl";
 
 /**
  * Placeholder value a dashboard widget's own filters may carry wherever a
@@ -85,7 +85,7 @@ export function resolveCurrentUserPlaceholder(
 ): Record<string, unknown> {
   if (currentUserId === undefined) return filters;
   const fieldFilters = filters.filters;
-  if (isCaseFieldFilterArray(fieldFilters)) {
+  if (hasFieldFilterEntries(fieldFilters)) {
     return resolveCaseFieldFilters(filters, fieldFilters, currentUserId);
   }
   return resolveFlatFilters(filters, currentUserId);
@@ -101,8 +101,11 @@ export function resolveCurrentUserPlaceholder(
  */
 export function hasCurrentUserPlaceholder(filters: Record<string, unknown>): boolean {
   const fieldFilters = filters.filters;
-  if (isCaseFieldFilterArray(fieldFilters)) {
-    return fieldFilters.some((entry) => entry.values?.includes(CURRENT_USER_PLACEHOLDER) ?? false);
+  if (hasFieldFilterEntries(fieldFilters)) {
+    return fieldFilters.some(
+      (entry) =>
+        isFieldFilterEntry(entry) && (entry.values?.includes(CURRENT_USER_PLACEHOLDER) ?? false),
+    );
   }
   return Object.values(filters).some((value) => {
     if (value === CURRENT_USER_PLACEHOLDER) return true;
@@ -112,11 +115,12 @@ export function hasCurrentUserPlaceholder(filters: Record<string, unknown>): boo
 
 function resolveCaseFieldFilters(
   filters: Record<string, unknown>,
-  fieldFilters: WidgetCaseFieldFilterLike[],
+  fieldFilters: unknown[],
   currentUserId: string,
 ): Record<string, unknown> {
   let changed = false;
-  const resolved: WidgetCaseFieldFilterLike[] = fieldFilters.map((entry) => {
+  const resolved = fieldFilters.map((entry) => {
+    if (!isFieldFilterEntry(entry)) return entry;
     const values = entry.values;
     if (!values?.includes(CURRENT_USER_PLACEHOLDER)) return entry;
     changed = true;

@@ -268,8 +268,9 @@ export default function CreateServiceRequestPage(): JSX.Element {
       !!deployedProductId &&
       !!catalogId &&
       !!catalogItemId &&
-      !variables.isLoading &&
-      !variables.isError &&
+      // isSuccess, not !isLoading && !isError: a query paused offline is
+      // neither, and would otherwise allow submit with no questions loaded.
+      variables.isSuccess &&
       // Required-ness now comes from each variable's own `mandatory` flag
       // where the backend supplies one (see `isVariableRequired`), falling
       // back to the old "every typable field required" hot fix only where
@@ -289,8 +290,7 @@ export default function CreateServiceRequestPage(): JSX.Element {
       deployedProductId,
       catalogId,
       catalogItemId,
-      variables.isLoading,
-      variables.isError,
+      variables.isSuccess,
       firstEmptyRequired,
       firstExceedingMaxLength,
       firstFailingValidation,

@@ -19,6 +19,7 @@ import { Box, Typography } from "@wso2/oxygen-ui";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
 import { AdapterDateFns } from "@mui/x-date-pickers/AdapterDateFns";
 import { DatePicker } from "@mui/x-date-pickers/DatePicker";
+import { useControlledDatePickerValue, isPastOrPresentDate } from "@hooks/useControlledDatePickerValue";
 import {
   toUtcStartOfDay,
   toUtcEndOfDay,
@@ -44,6 +45,40 @@ function parseUtcIsoEndDate(value: string | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+// MUI's DatePicker has keyboard-editable year/month/day sections, so onChange
+// can fire mid-typing with a technically-valid, non-NaN Date whose year is
+// still incomplete (e.g. the user typed "2" and tabbed away before finishing
+// "2026") -- `!isNaN(date.getTime())` alone doesn't catch this, since year 2
+// AD is a legal JS Date. toUtcStartOfDay/toUtcEndOfDay zero-pad month/day but
+// not the year, so a short year used to serialize straight into a malformed
+// filter value (e.g. "2-01-10T00:00:00Z") and reach entity-service as a 400.
+// Treating an incomplete year the same as an invalid one -- waiting for the
+// rest of the digits rather than forwarding a technically-parseable but
+// nonsensical date -- is the correct fix; padding it to "0002-01-10" would
+// only make the malformed value syntactically valid, not correct.
+//
+// Every real caller of this component filters on "Created Date" or "Updated
+// Date" (a support case/engagement can't have either in the future), so a
+// future date is rejected here too, the same way `TimeCardsDateFilter`/
+// `UsageMetricsTimeRangeSelector` already reject one via `isPastOrPresentDate`
+// -- this component had no such guard at all before, on either the "From" or
+// "To" side, found live from a real screenshot of the calendar popup
+// happily offering every future day as clickable on the "From" field.
+// Composed with the short-year check above into one `isComplete` override
+// (below) passed to `useControlledDatePickerValue` for both fields -- see
+// that hook's own doc comment for why `isComplete` is the right layer for a
+// hand-typed date, and `disableFuture` on the `DatePicker` itself (below) is
+// the matching visual layer so the calendar popup actually greys out and
+// disables those days instead of silently swallowing a click on one.
+function isCompleteCalendarDate(date: unknown): date is Date {
+  return (
+    date instanceof Date &&
+    !isNaN(date.getTime()) &&
+    date.getFullYear() >= 1000 &&
+    isPastOrPresentDate(date)
+  );
+}
+
 export type DateRangeFilterProps = {
   label: string;
   startDate: string | undefined;
@@ -65,8 +100,20 @@ export default function DateRangeFilter({
   onStartChange,
   onEndChange,
 }: DateRangeFilterProps): JSX.Element {
-  const parsedStart = parseUtcIso(startDate);
-  const parsedEnd = parseUtcIsoEndDate(endDate);
+  const start = useControlledDatePickerValue({
+    value: startDate ?? "",
+    onChange: (next) => onStartChange(next || undefined),
+    parse: parseUtcIso,
+    format: toUtcStartOfDay,
+    isComplete: isCompleteCalendarDate,
+  });
+  const end = useControlledDatePickerValue({
+    value: endDate ?? "",
+    onChange: (next) => onEndChange(next || undefined),
+    parse: parseUtcIsoEndDate,
+    format: toUtcEndOfDay,
+    isComplete: isCompleteCalendarDate,
+  });
 
   return (
     <LocalizationProvider dateAdapter={AdapterDateFns}>
@@ -87,26 +134,24 @@ export default function DateRangeFilter({
         >
           <DatePicker
             label="From"
-            value={parsedStart}
-            maxDate={parsedEnd ?? undefined}
-            onChange={(date) => {
-              onStartChange(date instanceof Date && !isNaN(date.getTime()) ? toUtcStartOfDay(date) : undefined);
-            }}
+            value={start.localDate}
+            disableFuture
+            maxDate={end.localDate ?? undefined}
+            onChange={start.handleChange}
             slotProps={{
               textField: { size: "small", fullWidth: true },
-              field: { clearable: true },
+              field: { clearable: true, onClear: start.handleClear },
             }}
           />
           <DatePicker
             label="To"
-            value={parsedEnd}
-            minDate={parsedStart ?? undefined}
-            onChange={(date) => {
-              onEndChange(date instanceof Date && !isNaN(date.getTime()) ? toUtcEndOfDay(date) : undefined);
-            }}
+            value={end.localDate}
+            disableFuture
+            minDate={start.localDate ?? undefined}
+            onChange={end.handleChange}
             slotProps={{
               textField: { size: "small", fullWidth: true },
-              field: { clearable: true },
+              field: { clearable: true, onClear: end.handleClear },
             }}
           />
         </Box>

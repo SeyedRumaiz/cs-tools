@@ -26,26 +26,39 @@ import (
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/config"
 )
 
-const (
-	poolMaxConns        int32         = 20               // maximum open connections in the pool
-	poolMinConns        int32         = 2                // connections kept warm when idle
-	poolMaxConnLifetime time.Duration = 30 * time.Minute // rotate connections to avoid stale server-side state
-	poolMaxConnIdleTime time.Duration = 5 * time.Minute  // release unused connections back to the OS
-)
-
 // NewPool creates a pgxpool connection pool for the given DSN, pings the
 // database to confirm connectivity, and returns the pool ready for use.
 // The caller is responsible for calling pool.Close on shutdown.
-func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+//
+// maxConns/minConns/maxConnLifetime/maxConnIdleTime were fixed constants
+// here (20/2/30m/5m) until they became env-configurable
+// (DB_POOL_MAX_CONNS/DB_POOL_MIN_CONNS/DB_POOL_MAX_CONN_LIFETIME/
+// DB_POOL_MAX_CONN_IDLE_TIME, see config.Config's own doc comments for
+// those fields) — config.Load() already applies those same four values as
+// its defaults when the corresponding env var is unset, so this function
+// itself carries no defaults of its own any more and always receives a
+// real, non-zero value from every caller.
+func NewPool(ctx context.Context, dsn string, maxConns, minConns int32, maxConnLifetime, maxConnIdleTime time.Duration) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse pool config: %w", err)
 	}
 
-	cfg.MaxConns = poolMaxConns
-	cfg.MinConns = poolMinConns
-	cfg.MaxConnLifetime = poolMaxConnLifetime
-	cfg.MaxConnIdleTime = poolMaxConnIdleTime
+	// JIT off: row-level-security policies inflate the planner's cost
+	// estimates into the millions even for queries that touch a few rows, which
+	// crosses jit_above_cost and makes Postgres compile ~100 functions per
+	// request. Measured on the real-data copy, that compile time was 60-90% of
+	// the latency of cases/search and global search (e.g. 1.5s with JIT vs
+	// 0.38s without). These are short OLTP queries; JIT never pays for itself.
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	cfg.ConnConfig.RuntimeParams["jit"] = "off"
+
+	cfg.MaxConns = maxConns
+	cfg.MinConns = minConns
+	cfg.MaxConnLifetime = maxConnLifetime
+	cfg.MaxConnIdleTime = maxConnIdleTime
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -60,28 +73,31 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// NewPoolIfNeeded creates a Postgres connection pool when one is needed.
+// NewPoolIfNeeded creates a Postgres connection pool when database credentials
+// are configured, whatever the data source.
 //
-// Gated on whether DB credentials are actually configured (cfg.DBUser), not
-// on cfg.DataSource. DATA_SOURCE=servicenow only means case/account/etc.
-// reads go through the SN integration service instead of this pool — it
-// says nothing about whether Postgres itself is available. Side tables
-// (event_publish_failures, sla_clocks, scheduled_task_run,
-// alert_incident_mapping) have no ServiceNow equivalent and are always
-// backed by Postgres regardless of DATA_SOURCE (see each one's own domain
-// doc comment); gating on DataSource alone left them 404ing in any
-// SN-mode deployment that had a perfectly good Postgres instance configured
-// right next to it, simply unused. Gating on DBUser instead preserves the
-// one thing DataSource-gating was actually protecting: a local SN-mode
-// setup with no Postgres provisioned at all still gets (nil, nil), exactly
-// as before — see config.Config.Validate's doc comment, which is why
-// DB_USER/DB_PASSWORD/DB_NAME stay optional (not required) for
+// Gated on whether DB credentials are actually configured (cfg.HasDatabase()),
+// not on cfg.DataSource. DATA_SOURCE=servicenow only means case/account/etc.
+// reads go through the SN integration service instead of this pool — it says
+// nothing about whether Postgres itself is available. Product consumption keeps
+// its provisioning state in Postgres and dual-writes it alongside ServiceNow, so
+// a DATA_SOURCE=servicenow deployment -- which is what staging and production run
+// -- still needs a pool. Side tables (event_publish_failures, sla_clocks,
+// scheduled_task_run, alert_incident_mapping) have no ServiceNow equivalent and
+// are always backed by Postgres regardless of DATA_SOURCE; gating on DataSource
+// alone left them 404ing in any SN-mode deployment that had a perfectly good
+// Postgres instance configured right next to it, simply unused.
+//
+// Gating on HasDatabase preserves the one thing DataSource-gating was actually
+// protecting: a local SN-mode setup with no Postgres provisioned at all still
+// gets (nil, nil), exactly as before — see config.Config.Validate's doc comment,
+// which is why DB_USER/DB_PASSWORD/DB_NAME stay optional (not required) for
 // DATA_SOURCE=servicenow rather than becoming mandatory here.
 func NewPoolIfNeeded(cfg *config.Config) (*pgxpool.Pool, error) {
-	if cfg.DBUser == "" {
+	if !cfg.HasDatabase() {
 		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return NewPool(ctx, cfg.DSN())
+	return NewPool(ctx, cfg.DSN(), cfg.DBPoolMaxConns, cfg.DBPoolMinConns, cfg.DBPoolMaxConnLifetime, cfg.DBPoolMaxConnIdleTime)
 }

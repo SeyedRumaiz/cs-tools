@@ -172,8 +172,24 @@ setup("sign in and capture the session", async ({ page, baseURL }) => {
 
   // Signed in, allowed in, and the app has actually booted — the token lands in
   // sessionStorage during boot, so snapshotting before this captures nothing.
+  //
+  // The marker is the project list, which is where signing in lands. NOT "Get
+  // Help": that is a project-scoped header control, present only once a project
+  // is open, so it never appears here and the wait timed out on a sign-in that
+  // had in fact worked.
+  //
+  // The heading carries the count ("Projects (3)"), so it also proves the
+  // backend answered — a shell that rendered with a failed projects fetch shows
+  // an error illustration instead, and a session captured from it replays into
+  // the same broken state. Get Help is still accepted as an alternative, so a
+  // future landing page that is project-scoped does not break this.
   await expect(
-    page.getByRole("button", { name: "Get Help", exact: true }),
+    page
+      .getByRole("heading", { name: /^Projects \(\d+\)/ })
+      .or(page.getByRole("button", { name: "Get Help", exact: true }))
+      .first(),
+    "signed in, but neither the project list nor a project page rendered — " +
+      "the session would capture a broken state",
   ).toBeVisible({ timeout: 60_000 });
 
   const storage = await page.evaluate(() => {

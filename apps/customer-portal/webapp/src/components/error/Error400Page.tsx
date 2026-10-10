@@ -20,6 +20,7 @@ import illustration from "@assets/error/error-404.svg";
 
 interface Error400PageProps {
   message?: string;
+  error?: unknown;
 }
 
 /**
@@ -28,7 +29,7 @@ interface Error400PageProps {
  * @param {Error400PageProps} props - Optional message from the server.
  * @returns {JSX.Element} Bad request illustration and copy.
  */
-export default function Error400Page({ message }: Error400PageProps): JSX.Element {
+export default function Error400Page({ message, error }: Error400PageProps): JSX.Element {
   return (
     <ErrorPage
       illustration={illustration}
@@ -37,6 +38,7 @@ export default function Error400Page({ message }: Error400PageProps): JSX.Elemen
         message ??
         "This request could not be processed. Check the link or try again from the portal navigation."
       }
+      error={error}
     />
   );
 }

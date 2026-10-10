@@ -35,6 +35,8 @@ import {
 import {
   INSERT_ORDERED_LIST_COMMAND,
   INSERT_UNORDERED_LIST_COMMAND,
+  REMOVE_LIST_COMMAND,
+  ListNode,
 } from "@lexical/list";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import {
@@ -64,6 +66,7 @@ import {
   AlignJustify,
   ImageIcon,
   Code,
+  Code2,
   Link as LinkIcon,
   Indent,
   Outdent,
@@ -73,7 +76,7 @@ import {
   ChevronLeft,
   ChevronRight,
 } from "@wso2/oxygen-ui-icons-react";
-import { mergeRegister } from "@lexical/utils";
+import { mergeRegister, $getNearestNodeOfType } from "@lexical/utils";
 import {
   ALLOWED_IMAGE_MIME_TYPES,
   ALLOWED_IMAGE_TYPES_LABEL,
@@ -123,11 +126,13 @@ const Toolbar = ({
   const [isStrikethrough, setIsStrikethrough] = useState(false);
   const [isLink, setIsLink] = useState(false);
   const [isCode, setIsCode] = useState(false);
+  const [isInlineCode, setIsInlineCode] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [blockVariant, setBlockVariant] = useState("body1");
   const [elementAlign, setElementAlign] = useState<ElementFormatType>("");
   const [hasContent, setHasContent] = useState(false);
+  const [listType, setListType] = useState<"bullet" | "number" | null>(null);
 
   const [linkAnchorEl, setLinkAnchorEl] = useState<HTMLButtonElement | null>(
     null,
@@ -148,10 +153,19 @@ const Toolbar = ({
       setIsItalic(selection.hasFormat("italic"));
       setIsUnderline(selection.hasFormat("underline"));
       setIsStrikethrough(selection.hasFormat("strikethrough"));
+      setIsInlineCode(selection.hasFormat("code"));
 
       const node = selection.anchor.getNode();
       const parent = node?.getParent();
       setIsLink($isLinkNode(parent) || $isLinkNode(node));
+
+      const listNode = $getNearestNodeOfType(node, ListNode);
+      const nodeListType = listNode?.getListType();
+      setListType(
+        nodeListType === "bullet" || nodeListType === "number"
+          ? nodeListType
+          : null,
+      );
 
       let element: ReturnType<typeof selection.anchor.getNode>;
       try {
@@ -221,7 +235,7 @@ const Toolbar = ({
   }, [editor, updateToolbar]);
 
   const onFormatText = (
-    format: "bold" | "italic" | "underline" | "strikethrough",
+    format: "bold" | "italic" | "underline" | "strikethrough" | "code",
   ) => {
     focusEditor();
     editor.dispatchCommand(FORMAT_TEXT_COMMAND, format);
@@ -675,12 +689,17 @@ const Toolbar = ({
             <ToggleButton
               size="small"
               value="bullet"
+              selected={listType === "bullet"}
               onClick={() => {
                 focusEditor();
-                editor.dispatchCommand(
-                  INSERT_UNORDERED_LIST_COMMAND,
-                  undefined,
-                );
+                if (listType === "bullet") {
+                  editor.dispatchCommand(REMOVE_LIST_COMMAND, undefined);
+                } else {
+                  editor.dispatchCommand(
+                    INSERT_UNORDERED_LIST_COMMAND,
+                    undefined,
+                  );
+                }
               }}
             >
               <List size={16} />
@@ -691,9 +710,17 @@ const Toolbar = ({
             <ToggleButton
               size="small"
               value="numbered"
+              selected={listType === "number"}
               onClick={() => {
                 focusEditor();
-                editor.dispatchCommand(INSERT_ORDERED_LIST_COMMAND, undefined);
+                if (listType === "number") {
+                  editor.dispatchCommand(REMOVE_LIST_COMMAND, undefined);
+                } else {
+                  editor.dispatchCommand(
+                    INSERT_ORDERED_LIST_COMMAND,
+                    undefined,
+                  );
+                }
               }}
             >
               <ListOrdered size={16} />
@@ -769,10 +796,21 @@ const Toolbar = ({
             </Box>
           </Popover>
 
-          <Tooltip title="Code Snippet">
+          <Tooltip title="Inline Code">
             <ToggleButton
               size="small"
-              value="code"
+              value="inline-code"
+              selected={isInlineCode}
+              onClick={() => onFormatText("code")}
+            >
+              <Code2 size={16} />
+            </ToggleButton>
+          </Tooltip>
+
+          <Tooltip title="Code Block">
+            <ToggleButton
+              size="small"
+              value="code-block"
               selected={isCode}
               onClick={onFormatCode}
             >

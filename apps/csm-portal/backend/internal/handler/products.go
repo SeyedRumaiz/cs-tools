@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/middleware"
 )
@@ -31,6 +32,7 @@ import (
 type entityProductClient interface {
 	SearchProducts(ctx context.Context, body []byte) ([]byte, error)
 	SearchProductVersions(ctx context.Context, productID string, body []byte) ([]byte, error)
+	GetProductRepoMapping(ctx context.Context, name string) ([]byte, error)
 }
 
 // ProductHandler handles HTTP requests for product operations, delegating to the
@@ -123,5 +125,29 @@ func (h *ProductHandler) SearchProductVersions(w http.ResponseWriter, r *http.Re
 	}
 
 	// TODO: Unmarshal result and filter to only the fields required by the frontend.
+	writeJSON(w, http.StatusOK, result)
+}
+
+// GetProductRepoMapping handles GET /products/github-repo?name=
+func (h *ProductHandler) GetProductRepoMapping(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserInfoFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
+		return
+	}
+
+	result, err := h.entity.GetProductRepoMapping(r.Context(), name)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "entity GetProductRepoMapping failed", "userID", user.UserID, "err", err)
+		mapUpstreamErrorGeneric(w, err, "Failed to look up the GitHub repository.")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, result)
 }

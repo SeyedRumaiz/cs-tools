@@ -37,37 +37,29 @@ import type {
   BeCreateCaseGithubIssuePayload,
   BeCreateCaseGithubIssueResponse,
 } from "@api/backend/types";
-import { useGetGithubIssueRepoOptions } from "@features/csm-cases/api/useGetGithubIssueRepoOptions";
+import { useGetProductRepoMapping } from "@features/csm-cases/api/useGetProductRepoMapping";
 
 // ---------------------------------------------------------------------------
 // Option lists. Every select starts unset ("" → "-- Select --") and omits its
-// field from the payload when left unset. Values mirror the legacy SN "Open Git
-// Issue" form: Type is a GitHub label string, priority is only meaningful for
-// incidents (the SN side applies it as a label only when Type is Incident).
+// field from the payload when left unset. Type is Patch or Discussion. Severity
+// is sent as a GitHub priority label only for Discussion.
 // ---------------------------------------------------------------------------
 
 const UNSET = "";
 const SELECT_PLACEHOLDER = "-- Select --";
 
-type IssueTypeValue = "" | "Type/Query" | "Type/Incident" | "Type/Patch";
+type IssueTypeValue = "" | "Type/Patch" | "Type/Discussion";
 
 const TYPE_OPTIONS: Array<{ value: IssueTypeValue; label: string }> = [
-  { value: "Type/Query", label: "Query" },
-  { value: "Type/Incident", label: "Incident" },
   { value: "Type/Patch", label: "Patch" },
+  { value: "Type/Discussion", label: "Discussion" },
 ];
 
 const SEVERITY_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "P1", label: "P1 - Critical" },
-  { value: "P2", label: "P2 - High" },
-  { value: "P3", label: "P3 - Medium" },
+  { value: "Priority/Critical", label: "P1 - Critical" },
+  { value: "Priority/High", label: "P2 - High" },
+  { value: "Priority/Medium", label: "P3 - Medium" },
 ];
-
-// Cloud-case repositories. Fetched from GET /metadata's
-// githubIssueRepoOptions field (useGetGithubIssueRepoOptions) rather than
-// hardcoded here — each option
-// carries its own real owner/repo, sent as repoOverride to bypass the SN
-// product-unit routing (which only covers on-prem/product-unit-mapped cases).
 
 // ---------------------------------------------------------------------------
 // Types
@@ -88,11 +80,20 @@ export interface CreateGithubIssueDialogProps {
   defaultTitle?: string;
   /** Prefill for the Description field, taken from the case's description. */
   defaultDescription?: string;
-  /** Show the repository field only for cloud subscription / cloud
-   * evaluation subscription projects — other project types route by
-   * product unit on the SN side and have no repo to choose. Conversely,
-   * Update Level and Public Git Issue apply only when this is false. */
+  /** Cloud cases pass true. There is no repository dropdown either way.
+   * When true, Update Level and Public Git Issue are hidden. When false,
+   * a Patch must fill both. */
   showRepoField?: boolean;
+  /** Deployed product name on the case. Matched to the catalogue. */
+  productName?: string;
+  /** True when the case's project onboarding status is In-Progress. */
+  onboardingInProgress?: boolean;
+  /** True while a linked project's status is still loading. Projectless cases leave this unset. */
+  projectStatusPending?: boolean;
+  /** True when a linked project's lookup failed. Filing stays blocked until it resolves. */
+  projectStatusFailed?: boolean;
+  /** Retries the project lookup after projectStatusFailed. */
+  onRetryProjectStatus?: () => void;
   onClose: () => void;
   /** Body for `POST /cases/{id}/github-issues` (caseId is added by the caller). */
   onSubmit: (payload: BeCreateCaseGithubIssuePayload) => void;
@@ -109,17 +110,14 @@ export interface CreateGithubIssueDialogProps {
 // ---------------------------------------------------------------------------
 
 /**
- * Form for filing an internal GitHub issue from a case (ISSU-020). Mirrors the
- * legacy ServiceNow "Open Git Issue" form. Subject + Description are always
- * required; Type is required too and drives which other fields are shown/
- * required (per review on #1085):
- *   - Query: Severity and Hotfix Required are hidden.
- *   - Incident: Severity is required; Hotfix Required is hidden.
- *   - Patch: Severity is hidden; Update Level, Public Git Issue, and Hotfix
- *     Required are all required.
- * Reason is fixed to `default` (the migration / R&D-ticket variants were
- * separate SN actions). Repo selection is offered for cloud cases; when unset
- * the SN side routes by the case's product unit.
+ * Form for filing an internal GitHub issue from a case (ISSU-020).
+ * Subject and Description are always required. Type is Patch or Discussion:
+ *   - Discussion: Severity is required. Hotfix Required and Regression are hidden.
+ *   - Patch: Severity is hidden. Hotfix Required and Regression are shown. On a
+ *     non-cloud case, Update Level and Public Git Issue are required.
+ * Migration sends reason "migration"; otherwise reason is "default".
+ * The repository comes from GET /products/github-repo for the case product.
+ * Submit stays disabled until that lookup returns a mapping.
  */
 export function CreateGithubIssueDialog({
   open,
@@ -130,6 +128,11 @@ export function CreateGithubIssueDialog({
   defaultTitle,
   defaultDescription,
   showRepoField,
+  productName,
+  onboardingInProgress,
+  projectStatusPending,
+  projectStatusFailed,
+  onRetryProjectStatus,
   onClose,
   onSubmit,
   onOpenConfirm,
@@ -140,9 +143,9 @@ export function CreateGithubIssueDialog({
   const [updateLevel, setUpdateLevel] = useState(defaultUpdateLevel ?? "");
   const [publicIssueUrl, setPublicIssueUrl] = useState("");
   const [priorityLevel, setPriorityLevel] = useState<string>(UNSET);
-  const [repo, setRepo] = useState<string>(UNSET);
   const [hotFix, setHotFix] = useState(false);
   const [regression, setRegression] = useState(false);
+  const [migration, setMigration] = useState(false);
   // Set once the user clicks "Create issue" on the form; holds the built
   // payload until they confirm on the follow-up step below. Filing this issue
   // is a real write to an external GitHub repo, so it gets an explicit
@@ -153,32 +156,26 @@ export function CreateGithubIssueDialog({
 
   // The parent only mounts this dialog once it's actually opened (see
   // CsmCaseDetailPage.tsx's `githubIssueOpen &&` guard), so this only fires
-  // per open, not on every case detail page load. `repoOptions` itself is
-  // only ever rendered when `showRepoField` is true.
+  // per open, not on every case detail page load.
   const {
-    data: repoOptionsData,
+    data: productRepo,
     isLoading: repoOptionsLoading,
     isError: repoOptionsError,
-  } = useGetGithubIssueRepoOptions();
-  const repoOptions = repoOptionsData ?? [];
-  // Until this resolves (success or a confirmed-empty catalogue), a cloud
-  // case's submission must not be allowed through: handleSubmit only sets
-  // repoOverride when a repo is actually selected, and no repo can be
-  // selected before repoOptions is populated. Letting canSubmit go true in
-  // that window would silently fall back to product-unit routing — which
-  // this dialog's own doc comment above says only applies to non-cloud
-  // projects — for a case where the engineer never got the chance to choose.
-  const repoOptionsUnavailable =
-    showRepoField && (repoOptionsLoading || repoOptionsError);
-  const repoSelectOptions = repoOptions.map((o) => ({
-    value: o.value,
-    label: o.displayLabel,
-  }));
+  } = useGetProductRepoMapping(productName);
+  const repoOptionsUnavailable = repoOptionsLoading || repoOptionsError;
+  const selectedRepoOption = productRepo
+    ? {
+        owner: productRepo.owner,
+        repo: productRepo.repository,
+        displayLabel: productRepo.productName,
+      }
+    : undefined;
 
   // Type drives which fields apply — see the component doc comment above.
-  const showSeverity = type === "Type/Incident";
-  const requireSeverity = type === "Type/Incident";
+  const showSeverity = type === "Type/Discussion";
+  const requireSeverity = type === "Type/Discussion";
   const showHotFix = type === "Type/Patch";
+  const showRegression = type === "Type/Patch";
   // Update Level / Public Git Issue apply to non-cloud projects only — cloud
   // projects route via the repo field instead (see showRepoField).
   const showUpdateLevelAndIssueUrl = !showRepoField;
@@ -194,9 +191,9 @@ export function CreateGithubIssueDialog({
     setUpdateLevel(defaultUpdateLevel ?? "");
     setPublicIssueUrl("");
     setPriorityLevel(UNSET);
-    setRepo(UNSET);
     setHotFix(false);
     setRegression(false);
+    setMigration(false);
     setConfirmPayload(null);
     onClose();
   };
@@ -208,32 +205,30 @@ export function CreateGithubIssueDialog({
     (!requireSeverity || !!priorityLevel) &&
     (!requireUpdateLevel || updateLevel.trim().length > 0) &&
     (!requirePublicIssueUrl || publicIssueUrl.trim().length > 0) &&
-    !repoOptionsUnavailable;
-
-  const selectedRepoOption = repoOptions.find((o) => o.value === repo);
+    !repoOptionsUnavailable &&
+    !!selectedRepoOption &&
+    !projectStatusPending &&
+    !projectStatusFailed;
 
   const handleSubmit = () => {
-    if (!canSubmit) return;
+    if (!canSubmit || !selectedRepoOption) return;
 
     const payload: BeCreateCaseGithubIssuePayload = {
-      reason: "default",
+      reason: migration ? "migration" : "default",
       title: title.trim(),
       description: description.trim(),
       issueTypeLabel: type,
+      repoOverride: {
+        owner: selectedRepoOption.owner,
+        repo: selectedRepoOption.repo,
+      },
     };
     if (updateLevel.trim()) payload.updateLevel = updateLevel.trim();
     if (publicIssueUrl.trim()) payload.publicIssueUrl = publicIssueUrl.trim();
-    // Priority only carries meaning for incidents on the SN side; send it
-    // whenever the user picked one and let the SN side decide to apply it.
-    if (priorityLevel) payload.priorityLevel = priorityLevel;
-    if (selectedRepoOption) {
-      payload.repoOverride = {
-        owner: selectedRepoOption.owner,
-        repo: selectedRepoOption.repo,
-      };
-    }
+    if (showSeverity && priorityLevel) payload.priorityLevel = priorityLevel;
+    if (onboardingInProgress) payload.onboardingInProgress = true;
     if (showHotFix && hotFix) payload.hotFixRequired = true;
-    if (regression) payload.regression = true;
+    if (showRegression && regression) payload.regression = true;
 
     onOpenConfirm?.();
     setConfirmPayload(payload);
@@ -366,24 +361,47 @@ export function CreateGithubIssueDialog({
           <FormControlLabel
             control={
               <Switch
-                checked={regression}
-                onChange={(e) => setRegression(e.target.checked)}
+                checked={migration}
+                onChange={(e) => setMigration(e.target.checked)}
                 disabled={submitting}
               />
             }
-            label="Regression"
+            label="Migration"
           />
 
-          {showRepoField &&
-            renderSelect(
-              "ghi-repo",
-              "Choose repository",
-              repo,
-              setRepo,
-              repoSelectOptions,
-              false,
-              repoOptionsLoading,
-            )}
+          {showRegression && (
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={regression}
+                  onChange={(e) => setRegression(e.target.checked)}
+                  disabled={submitting}
+                />
+              }
+              label="Regression"
+            />
+          )}
+
+          {projectStatusFailed ? (
+            <Box>
+              <Typography variant="body2" color="error">
+                Could not load this case's project status.
+              </Typography>
+              <Button size="small" onClick={onRetryProjectStatus} disabled={submitting}>
+                Try again
+              </Button>
+            </Box>
+          ) : (
+            <Typography variant="body2" color={selectedRepoOption && !projectStatusPending ? "text.secondary" : "error"}>
+              {projectStatusPending
+                ? "Waiting for this case's project status…"
+                : repoOptionsLoading
+                  ? "Looking up the GitHub repository for this product…"
+                  : selectedRepoOption
+                    ? `This issue will be created in: ${selectedRepoOption.owner}/${selectedRepoOption.repo} (${selectedRepoOption.displayLabel})`
+                    : "No GitHub repository is mapped for this product."}
+            </Typography>
+          )}
         </Box>
       </DialogContent>
       <DialogActions>

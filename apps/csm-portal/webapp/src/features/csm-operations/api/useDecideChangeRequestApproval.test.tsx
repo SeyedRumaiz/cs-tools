@@ -25,10 +25,17 @@ const invalidateQueriesMock = vi.fn();
 // The real client reads runtime config at module load, which isn't present
 // under vitest; stub it (same approach as ChangeRequestApprovals.test.tsx).
 vi.mock("@api/backend/client", () => ({
-  BackendApiError: class BackendApiError extends Error {},
+  BackendApiError: class BackendApiError extends Error {
+    status: number;
+    constructor(status = 500, message = "") {
+      super(message);
+      this.status = status;
+    }
+  },
   useBackendApi: () => ({ post: postMock }),
 }));
 
+import { BackendApiError } from "@api/backend/client";
 import { useDecideChangeRequestApproval } from "@features/csm-operations/api/useDecideChangeRequestApproval";
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -89,6 +96,79 @@ describe("useDecideChangeRequestApproval", () => {
     expect(invalidateQueriesMock).toHaveBeenCalledWith(
       expect.objectContaining({ queryKey: ["change-requests"] }),
     );
+  });
+
+  it("also invalidates the approvals, detail, and list queries after an approval (an approval can move the CR on server-side, e.g. the CAB approval that schedules it)", async () => {
+    postMock.mockResolvedValue({ id: "approval-1", state: "approved" });
+    const { result } = renderHook(() => useDecideChangeRequestApproval(), {
+      wrapper,
+    });
+
+    act(() => {
+      result.current.mutate({ id: "cr-1", decision: "approved" });
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const keys = invalidateQueriesMock.mock.calls.map(
+      ([arg]) => (arg as { queryKey: unknown[] }).queryKey,
+    );
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        ["change-request-approvals", "cr-1"],
+        ["change-request-details", "cr-1"],
+        ["change-requests"],
+      ]),
+    );
+  });
+
+  // A 409 means the change moved on while the page was open (the approval is no
+  // longer pending): refresh, so the stale row stops being offered.
+  it("refreshes the approvals, detail and list queries when the decision is refused with a 409", async () => {
+    const stale = new (BackendApiError as unknown as new (s: number, m: string) => Error)(
+      409,
+      "this approval is no longer pending: the change request is in Closed, but the Review stage can only be decided while it is in Review",
+    );
+    postMock.mockRejectedValue(stale);
+    const { result } = renderHook(() => useDecideChangeRequestApproval(), {
+      wrapper,
+    });
+
+    act(() => {
+      result.current.mutate({ id: "cr-1", decision: "approved" });
+    });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.error).toBe(stale);
+    const keys = invalidateQueriesMock.mock.calls.map(
+      ([arg]) => (arg as { queryKey: unknown[] }).queryKey,
+    );
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        ["change-request-approvals", "cr-1"],
+        ["change-request-details", "cr-1"],
+        ["change-requests"],
+      ]),
+    );
+  });
+
+  it("does not refresh anything for any other failure (a 403, a 5xx, a non-backend error)", async () => {
+    for (const err of [
+      new (BackendApiError as unknown as new (s: number, m: string) => Error)(403, "the creator of a change request cannot approve it"),
+      new (BackendApiError as unknown as new (s: number, m: string) => Error)(500, "boom"),
+      new Error("network"),
+    ]) {
+      invalidateQueriesMock.mockClear();
+      postMock.mockRejectedValue(err);
+      const { result } = renderHook(() => useDecideChangeRequestApproval(), {
+        wrapper,
+      });
+      act(() => {
+        result.current.mutate({ id: "cr-1", decision: "approved" });
+      });
+      await waitFor(() => expect(result.current.isError).toBe(true));
+      expect(invalidateQueriesMock).not.toHaveBeenCalled();
+    }
   });
 
   it("surfaces upstream errors via mutation error state", async () => {

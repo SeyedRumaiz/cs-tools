@@ -72,7 +72,7 @@ export class IncidentDetailPage {
   }
 
   /** Opens a fixed-enum Select inside the edit dialog by its field label
-   * (Category, Subcategory, Contact type, Impact, Urgency) and picks the
+   * (Category, Subcategory, Channel, Impact, Urgency) and picks the
    * named option. Options are scoped to the just-opened MUI listbox
    * (`getByRole("listbox")`), never queried page-wide — the dialog may also
    * carry rich-text editor fields (e.g. Additional comments), whose "Font

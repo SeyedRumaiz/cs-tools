@@ -1,0 +1,24 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- Drops change_request.on_hold_started_on (added by 0178). It was display-only
+-- (no gating behaviour), has no ServiceNow counterpart (ServiceNow's change
+-- request carries on_hold / on_hold_reason / on_hold_task only), and nothing
+-- outside entity-service read it. is_on_hold and on_hold_reason are unchanged.
+-- Apply this migration only AFTER the code that no longer selects the column is
+-- live: until then the running code still reads on_hold_started_on, so dropping
+-- the column first would fail every change request read.
+ALTER TABLE change_request DROP COLUMN IF EXISTS on_hold_started_on;

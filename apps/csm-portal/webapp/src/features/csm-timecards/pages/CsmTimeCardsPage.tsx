@@ -58,6 +58,16 @@ function formatDateOnly(date: Date): string {
   const d = String(date.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
 }
+
+/** Today's local calendar date, as a local-midnight Date — the upper bound
+ * for both work-date range fields, since a card can't log time in the
+ * future. `workDate` is a plain calendar date with no UTC labeling (unlike
+ * `ChangeRequestsFilterBar`'s "Closed" dates, which the backend interprets
+ * as UTC), so "today" here is the viewer's own local date, not UTC's. */
+function todayDateOnly(): Date {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
 import {
   useAllTimeCards,
   useApprovalQueue,
@@ -126,13 +136,11 @@ const DEFAULT_ROWS_PER_PAGE = 20;
 // Top option is the backend's max page limit; larger requests are rejected.
 const ROWS_PER_PAGE_OPTIONS = [10, 20, BE_MAX_PAGE_LIMIT];
 
-// Static role contexts for `TimeCardsTable`'s `roleFor` — constant regardless
-// of which card is being rendered, unlike the "All" tab's (see allRoleFor in
-// the component, which depends on the signed-in user's id per card).
+// Static role context for `TimeCardsTable`'s `roleFor` on the "Mine" tab —
+// constant regardless of which card is being rendered, unlike "All"'s and
+// "Approvals"' own (see allRoleFor/approvalsRoleFor in the component, both
+// of which depend on the signed-in user's id per card).
 const mineRole = (): TimecardRoleCtx => ({ isOwner: true, isApprover: false, isAdmin: false });
-const approvalsRoleFor =
-  (isAdmin: boolean) =>
-  (): TimecardRoleCtx => ({ isOwner: false, isApprover: true, isAdmin });
 
 /** Page + rows-per-page state for one tab's `TablePagination`, following the
  * same shape/convention as `CsmUsersPage.tsx` and friends. Each tab gets its
@@ -178,7 +186,8 @@ export default function CsmTimeCardsPage(): JSX.Element {
   const { showError } = useErrorBanner();
   const { showSuccess } = useSuccessBanner();
   const [tab, setTab] = useState<TabId>("mine");
-  const activeTab: TabId = tab === "approvals" && !role.isApprover ? "mine" : tab;
+  const canApprove = role.isApprover || role.isAdmin;
+  const activeTab: TabId = tab === "approvals" && !canApprove ? "mine" : tab;
   // Stable per-render so re-renders while the page is open don't shift the
   // exported filename's date mid-session.
   const todayStamp = useMemo(() => new Date().toISOString().slice(0, 10), []);
@@ -309,9 +318,10 @@ export default function CsmTimeCardsPage(): JSX.Element {
   const myCards = useMyTimeCards(activeTab === "mine", baseFilters, minePagination.pagination);
   const allCards = useAllTimeCards(activeTab === "all", filtersForAll, allPagination.pagination);
   const queue = useApprovalQueue(
-    activeTab === "approvals" && role.isApprover,
+    activeTab === "approvals" && canApprove,
     filtersForApprovals,
     approvalsPagination.pagination,
+    role.isAdmin,
   );
   const decideCard = useDecideCard();
 
@@ -375,13 +385,16 @@ export default function CsmTimeCardsPage(): JSX.Element {
     resetAllPages();
   };
   const handleFilterFromChange = (v: string): void => {
-    setFilterFrom(v);
     // min/max on the date inputs only guide the picker UI — typing a date
-    // directly can still commit an inverted range, so clamp here too.
+    // directly can still commit an inverted or future-dated range, so
+    // clamp/reject here too.
+    if (v && v > formatDateOnly(todayDateOnly())) return;
+    setFilterFrom(v);
     if (filterTo && v > filterTo) setFilterTo(v);
     resetAllPages();
   };
   const handleFilterToChange = (v: string): void => {
+    if (v && v > formatDateOnly(todayDateOnly())) return;
     setFilterTo(v);
     if (filterFrom && v < filterFrom) setFilterFrom(v);
     resetAllPages();
@@ -426,7 +439,22 @@ export default function CsmTimeCardsPage(): JSX.Element {
     isApprover: false,
     isAdmin: false,
   });
-  const approvalsRole = approvalsRoleFor(role.isAdmin);
+  // Approvals: isOwner is computed per card, not hardcoded false, because an
+  // admin's own queue is no longer scoped by approverId (see
+  // useApprovalQueue's own doc comment) and so CAN include their own
+  // submitted cards -- cardActions already renders isOwner as edit/delete,
+  // never approve/reject, so this alone keeps an admin from being offered a
+  // self-decide that the backend would 403 anyway. For a plain approver this
+  // is always false in practice (the queue already excludes their own
+  // cards server-side via approverId), so this changes nothing for them.
+  const approvalsRoleFor = useCallback(
+    (card: CsmTimeCard): TimecardRoleCtx => ({
+      isOwner: card.userId === me.id,
+      isApprover: true,
+      isAdmin: role.isAdmin,
+    }),
+    [me.id, role.isAdmin],
+  );
 
   /** Client-side work-item filter (case number is in the selected set),
    * applied over an already-fetched page of cards. Stable per filterWorkItem
@@ -582,11 +610,9 @@ export default function CsmTimeCardsPage(): JSX.Element {
       approvalsFilteredCards.filter(
         (c) =>
           selectedIds.has(c.id) &&
-          cardActions(c.state, { isOwner: false, isApprover: true, isAdmin: role.isAdmin }).includes(
-            "approve",
-          ),
+          cardActions(c.state, approvalsRoleFor(c)).includes("approve"),
       ),
-    [approvalsFilteredCards, selectedIds, role.isAdmin],
+    [approvalsFilteredCards, selectedIds, approvalsRoleFor],
   );
   // The ids actually reflected in selectedApprovalCards -- passed to
   // TimeCardsTable instead of the raw selectedIds state so its row-disabling
@@ -639,7 +665,7 @@ export default function CsmTimeCardsPage(): JSX.Element {
       >
         <Tab value="mine" label="My time sheets" />
         <Tab value="all" label="All" />
-        {role.isApprover && <Tab value="approvals" label="Approvals" />}
+        {canApprove && <Tab value="approvals" label="Approvals" />}
       </Tabs>
 
       {/* My time sheets */}
@@ -808,7 +834,7 @@ export default function CsmTimeCardsPage(): JSX.Element {
       )}
 
       {/* Approvals */}
-      {activeTab === "approvals" && role.isApprover && (
+      {activeTab === "approvals" && canApprove && (
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
           <FilterBar
             projectNameSeed={projectNameCache}
@@ -887,7 +913,7 @@ export default function CsmTimeCardsPage(): JSX.Element {
                 groupBy={groupBy}
                 showEngineerColumn
                 showActionsColumn
-                roleFor={approvalsRole}
+                roleFor={approvalsRoleFor}
                 onCardAction={handleCardAction}
                 selectable
                 selectedIds={selectedApprovalCardIds}
@@ -1156,6 +1182,14 @@ function FilterBar({
 }): JSX.Element {
   const [isFiltersOpen, setIsFiltersOpen] = useState(true);
 
+  // Recomputed every render (not memoized) — a `useMemo(..., [])` would
+  // freeze this at the component's mount date and stop matching "today" for
+  // any session left open past midnight.
+  const today = todayDateOnly();
+  const parsedFilterFrom = parseDateOnly(filterFrom);
+  const parsedFilterTo = parseDateOnly(filterTo);
+  const fromMaxDate = parsedFilterTo && parsedFilterTo < today ? parsedFilterTo : today;
+
   const isStateActive = stateActive ?? !!filterState;
   const activeCount =
     (filterProject.length > 0 ? 1 : 0) +
@@ -1267,8 +1301,8 @@ function FilterBar({
                 <Box sx={{ flex: "1 1 0", minWidth: 160 }}>
                   <DatePicker
                     label="From"
-                    value={parseDateOnly(filterFrom)}
-                    maxDate={parseDateOnly(filterTo) ?? undefined}
+                    value={parsedFilterFrom}
+                    maxDate={fromMaxDate}
                     onChange={(date) =>
                       setFilterFrom(
                         date instanceof Date && !Number.isNaN(date.getTime())
@@ -1285,8 +1319,9 @@ function FilterBar({
                 <Box sx={{ flex: "1 1 0", minWidth: 160 }}>
                   <DatePicker
                     label="To"
-                    value={parseDateOnly(filterTo)}
-                    minDate={parseDateOnly(filterFrom) ?? undefined}
+                    value={parsedFilterTo}
+                    minDate={parsedFilterFrom ?? undefined}
+                    maxDate={today}
                     onChange={(date) =>
                       setFilterTo(
                         date instanceof Date && !Number.isNaN(date.getTime())

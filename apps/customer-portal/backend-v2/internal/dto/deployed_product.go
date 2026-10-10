@@ -211,10 +211,15 @@ type DeployedProductSearchRequest struct {
 // deployment in the URL (normalized to a canonical dashed UUID) — never a client-settable
 // body field (same reasoning as BuildEntitySearchCasesRequest's projectID parameter).
 func BuildEntitySearchDeployedProductsRequest(deploymentID string, req DeployedProductSearchRequest) entity.SearchDeployedProductsRequest {
-	return entity.SearchDeployedProductsRequest{
+	out := entity.SearchDeployedProductsRequest{
 		Pagination:    req.Pagination,
 		DeploymentIDs: []string{toDashedID(deploymentID)},
 	}
+	// Forwarded unchanged: entity-service upper-cases them for its enum cast.
+	if req.Filters != nil {
+		out.ProductCategories = req.Filters.ProductCategories
+	}
+	return out
 }
 
 // DeployedProductCreateRequest is the portal's request body for

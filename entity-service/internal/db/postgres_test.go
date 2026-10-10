@@ -24,7 +24,7 @@ import (
 
 // TestNewPoolIfNeeded_ServiceNowWithNoDBUserSkipsPool covers the one case
 // NewPoolIfNeeded must still skip: a local SN-mode setup with no Postgres
-// provisioned at all (DBUser empty) starts without a reachable database,
+// provisioned at all (DB credentials absent) starts without a reachable database,
 // regardless of DataSource.
 func TestNewPoolIfNeeded_ServiceNowWithNoDBUserSkipsPool(t *testing.T) {
 	pool, err := NewPoolIfNeeded(&config.Config{
@@ -42,7 +42,7 @@ func TestNewPoolIfNeeded_ServiceNowWithNoDBUserSkipsPool(t *testing.T) {
 // test for the actual bug: gating purely on DataSource left every
 // Postgres-only side table (alert_incident_mapping et al.) 404ing in any
 // SN-mode deployment that DID have Postgres configured. Confirms the gate
-// is DBUser, not DataSource — a real connection attempt fires (and fails,
+// is DB credentials, not DataSource — a real connection attempt fires (and fails,
 // since this host doesn't exist) rather than short-circuiting to (nil, nil).
 func TestNewPoolIfNeeded_ServiceNowWithDBUserAttemptsPool(t *testing.T) {
 	_, err := NewPoolIfNeeded(&config.Config{

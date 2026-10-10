@@ -60,6 +60,8 @@ export interface CustomerPortalWindowConfig {
     html: string;
     closeable: boolean;
     storageKey: string;
+    startsAt?: string;
+    expiresAt?: string;
   }>;
   CUSTOMER_PORTAL_ANNOUNCEMENT_BANNER_VISIBLE?: boolean;
   CUSTOMER_PORTAL_ANNOUNCEMENT_BANNER_STORAGE_KEY?: string;
@@ -77,6 +79,21 @@ export interface CustomerPortalWindowConfig {
    * ON when unset - this is a kill switch, not an opt-in.
    */
   CUSTOMER_PORTAL_ALLOW_DEPLOYMENT_SETUP_DURING_CASE_CREATION?: boolean;
+  /**
+   * Base URL of customer-portal-activity-stream-service, the case-activity
+   * SSE stream. A separate Choreo component from the main backend, so this
+   * is its own key rather than being derived from
+   * CUSTOMER_PORTAL_BACKEND_BASE_URL. Optional: that service only stands the
+   * stream listener up when Event Hub is configured, so a deployment without
+   * it simply leaves this unset and useCaseActivityStream no-ops.
+   */
+  CUSTOMER_PORTAL_STREAM_BASE_URL?: string;
+  /**
+   * Master on/off switch for the case-activity SSE stream, independent of
+   * whether CUSTOMER_PORTAL_STREAM_BASE_URL is set. Defaults to false, so a
+   * config predating this key never turns the stream on.
+   */
+  CUSTOMER_PORTAL_STREAM_ENABLED?: boolean;
 }
 
 declare global {

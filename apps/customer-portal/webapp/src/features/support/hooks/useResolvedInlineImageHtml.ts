@@ -16,7 +16,10 @@
 
 import { useMemo } from "react";
 import { useAttachmentPreviews } from "@api/useAttachmentPreview";
-import { extractInlineImageRefId } from "@features/support/utils/support";
+import {
+  extractInlineImageRefId,
+  isInlineImageRefSrc,
+} from "@features/support/utils/support";
 
 /**
  * Extracts all `.iix`-style attachment IDs referenced in img src attributes within HTML.
@@ -28,7 +31,7 @@ function extractIixAttachmentIds(html: string): string[] {
   let match;
   while ((match = regex.exec(html)) !== null) {
     const src = match[1] ?? match[2] ?? match[3] ?? "";
-    if (src.includes(".iix")) {
+    if (isInlineImageRefSrc(src)) {
       const id = extractInlineImageRefId(src);
       if (id && !ids.includes(id)) ids.push(id);
     }
@@ -56,7 +59,7 @@ export function useResolvedInlineImageHtml(
       /<img([^>]*?)\s+src\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))([^>]*)>/gi,
       (_match, before, doubleSrc, singleSrc, bareSrc, after) => {
         const src = (doubleSrc ?? singleSrc ?? bareSrc ?? "") as string;
-        if (!src.includes(".iix")) return _match;
+        if (!isInlineImageRefSrc(src)) return _match;
         const refId = extractInlineImageRefId(src);
         // Try direct id match first, then check if any fetched id corresponds
         const dataUrl =

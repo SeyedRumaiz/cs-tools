@@ -887,6 +887,10 @@ export function formatRelativeTime(date: string | Date | undefined): string {
 /**
  * Derives the label and pluralized "all" label from a filter ID.
  *
+ * `caseType`, `createdBy` and `state` have fixed wording (`state` reads as
+ * "Status" so every list page matches); any other ID is capitalised and
+ * pluralized.
+ *
  * @param id - The filter ID (e.g., "status").
  * @returns { label: string; allLabel: string } The derived labels.
  */
@@ -899,6 +903,11 @@ export function deriveFilterLabels(id: string): {
   }
   if (id === "createdBy") {
     return { label: "Created By", allLabel: "All Users" };
+  }
+  // Change requests and chat history key their filter as "state", but every
+  // list page words it "Status" (cases, announcements, security).
+  if (id === "state") {
+    return { label: "Status", allLabel: "All Statuses" };
   }
   const label = id.charAt(0).toUpperCase() + id.slice(1);
   const allLabel = `All ${
@@ -1159,6 +1168,112 @@ export function stripAllCodeBlocks(content: string): string {
     .replace(/\[\/?code\]/gi, "\n");
 }
 
+// Block-level and line-break elements. Whitespace next to one of these is never
+// content: a block starts its own line whatever surrounds it.
+const BLOCK_TAGS =
+  "p|div|ul|ol|li|dl|dt|dd|table|thead|tbody|tfoot|tr|th|td|caption|h[1-6]|blockquote|pre|br|hr";
+const HTML_STRUCTURE_TAG = new RegExp(`<(?:${BLOCK_TAGS})\\b[^<>]*>`, "i");
+// A newline with the indentation and blank space around it.
+const NEWLINE_WHITESPACE = "[ \\t]*[\\r\\n][ \\t\\r\\n]*";
+// `<pre>`/`<code>` content is whitespace-sensitive by design (a snippet's own
+// line breaks and indentation), so it is matched whole and left untouched.
+const PRESERVED_ELEMENT = "(?<kept><(?<tag>pre|code)\\b[\\s\\S]*?<\\/\\k<tag>\\s*>)";
+const NEWLINE_AROUND_BLOCK = new RegExp(
+  `${PRESERVED_ELEMENT}|${NEWLINE_WHITESPACE}(?=<\\/?(?:${BLOCK_TAGS})\\b)|(?<=<\\/?(?:${BLOCK_TAGS})\\b[^<>]*>)${NEWLINE_WHITESPACE}`,
+  "gi",
+);
+const NEWLINE_IN_TEXT = new RegExp(`${PRESERVED_ELEMENT}|${NEWLINE_WHITESPACE}`, "gi");
+
+/**
+ * Removes the whitespace that only exists because HTML *source* was laid out
+ * for reading: the newlines and indentation between `<ul>`, `<li>`, `<p>` and
+ * `<br>`, and the line wraps inside a paragraph, so it is not printed.
+ *
+ * Paragraphs are `white-space: pre-wrap` in the comment card (editor-authored
+ * text relies on it), which prints a newline inside a hand-wrapped `<p>` as a
+ * line break plus its indentation. A browser, and ServiceNow, treat a newline
+ * in HTML source as an ordinary space.
+ *
+ * Deliberately narrow, so nothing else changes:
+ * - Only content with real block/`<br>` markup is touched; plain text is left alone.
+ * - Only whitespace that contains a newline is touched; runs of spaces typed in
+ *   the editor are kept.
+ * - `<pre>` and `<code>` content is never touched, so code snippets keep their
+ *   line breaks and indentation.
+ * - A newline inside text becomes a space only when the source also has a
+ *   newline next to a block tag (the sign of laid-out source), so a note that
+ *   mixes a stray `<br>` with intentional line breaks keeps them.
+ *
+ * @param html - HTML string.
+ * @returns {string} HTML without the layout newlines and indentation.
+ */
+export function collapseHtmlSourceWhitespace(html: string): string {
+  if (!html || !HTML_STRUCTURE_TAG.test(html)) return html;
+  let sawLaidOutSource = false;
+  const withoutEdgeNewlines = html
+    .replace(/^[ \t]*[\r\n][ \t\r\n]*/, "")
+    .replace(/[ \t\r\n]*[\r\n][ \t]*$/, "")
+    .replace(NEWLINE_AROUND_BLOCK, (match, ...args) => {
+      const groups = args[args.length - 1] as { kept?: string };
+      if (groups.kept !== undefined) return match;
+      sawLaidOutSource = true;
+      return "";
+    });
+  if (!sawLaidOutSource) return withoutEdgeNewlines;
+  return withoutEdgeNewlines.replace(NEWLINE_IN_TEXT, (match, ...args) => {
+    const groups = args[args.length - 1] as { kept?: string };
+    return groups.kept !== undefined ? match : " ";
+  });
+}
+
+/**
+ * {@link collapseHtmlSourceWhitespace} applied to the inside of each
+ * `[code]...[/code]` block and, separately, to the text around the blocks. ServiceNow's
+ * `[code]` marks a stretch as raw HTML; text outside it is normally plain, and
+ * plain text is left alone by the helper (its newlines are line breaks), but HTML
+ * source laid out outside a block is cleaned the same way as inside one. The
+ * markers themselves are kept exactly as written, legacy escaped ones
+ * (`[\code]`, `[\/code]`) included, so the unwrapping functions see the same
+ * input they always did.
+ *
+ * @param content - Raw content with `[code]...[/code]` blocks.
+ * @returns {string} Content with each block's HTML source whitespace removed.
+ */
+export function collapseCodeBlockWhitespace(content: string): string {
+  const codeBlock = /(\[\\?code\])([\s\S]*?)(\[\\?\/code\])/gi;
+  const collapseBlock = (_match: string, open: string, inner: string, close: string): string =>
+    `${open}${collapseHtmlSourceWhitespace(inner)}${close}`;
+  // Each block is swapped for a placeholder so the text around it is cleaned in
+  // one pass with the right context (a newline on either side of a block is
+  // judged against its neighbours, not cut off at the marker) and so markup
+  // inside a block never decides whether the outside is laid-out HTML.
+  if (/[\uE000\uE001]/.test(content)) return content.replace(codeBlock, collapseBlock);
+  const blocks: string[] = [];
+  const masked = content.replace(codeBlock, (...args) => {
+    blocks.push(collapseBlock(...(args as [string, string, string, string])));
+    return `\uE000${blocks.length - 1}\uE001`;
+  });
+  return collapseHtmlSourceWhitespace(masked).replace(
+    /\uE000(\d+)\uE001/g,
+    (_match, index: string) => blocks[Number(index)],
+  );
+}
+
+/**
+ * Cleans the layout whitespace out of a raw comment body before its `[code]`
+ * markers are unwrapped: inside each `[code]` block when the body has any, else
+ * across the whole body. See {@link collapseHtmlSourceWhitespace}.
+ *
+ * @param content - Raw comment content.
+ * @returns {string} Content ready for the `[code]` unwrapping functions.
+ */
+export function collapseCommentSourceWhitespace(content: string): string {
+  if (!content || typeof content !== "string") return "";
+  return /\[\\?\/?code\]/i.test(content)
+    ? collapseCodeBlockWhitespace(content)
+    : collapseHtmlSourceWhitespace(content);
+}
+
 /**
  * Removes leading <br>, <br/>, <br /> and whitespace from HTML.
  * Fixes extra blank first line from content like "[code]<br><b>...</b>[/code]".
@@ -1240,7 +1355,34 @@ export type { InlineAttachment };
 export const INLINE_COMMENT_HTML_PURIFY: Record<string, never> = {};
 
 /**
+ * Matches a `src` that is exactly an attachment id: an optional single leading
+ * slash, a canonical hyphenated UUID or 32 hex chars (case-insensitive), and an
+ * optional `.iix` suffix, and nothing else (no query string, extra path
+ * segments, scheme or `//` prefix). Content migrated from the legacy data
+ * source carries inline images in this shape (`<img src="/<uuid>">`, with the
+ * `.iix` suffix dropped). Kept deliberately exact so ordinary image URLs are
+ * never mistaken for attachment references.
+ */
+const BARE_ATTACHMENT_SRC =
+  /^\/?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-f0-9]{32})(?:\.iix)?$/i;
+
+/**
+ * Whether an inline `<img>` `src` is an attachment reference that must be
+ * resolved through the backend: either a `.iix` reference or a bare attachment
+ * id as found in migrated content (see {@link BARE_ATTACHMENT_SRC}).
+ *
+ * @param src - Raw src attribute.
+ * @returns {boolean} True when the src should be resolved as an attachment.
+ */
+export function isInlineImageRefSrc(src: string): boolean {
+  return src.includes(".iix") || BARE_ATTACHMENT_SRC.test(src.trim());
+}
+
+/**
  * Extracts ServiceNow-style attachment id from img src (relative /id.iix or absolute https://host/id.iix).
+ * A bare hyphenated UUID (`/<uuid>`, migrated content) is normalized to the
+ * 32-char lowercase form so it dedupes with the `.iix` form of the same
+ * attachment and reaches the existing fetch path in the shape it expects.
  *
  * @param src - Raw src attribute.
  * @returns {string} Suspected attachment id/sys_id or empty string.
@@ -1250,6 +1392,10 @@ export function extractInlineImageRefId(src: string): string {
   const fromPath = s.match(/\/([a-f0-9]{32})\.iix(?:\?|#|$)/i);
   if (fromPath) {
     return fromPath[1];
+  }
+  const bare = s.match(BARE_ATTACHMENT_SRC);
+  if (bare && bare[1].includes("-")) {
+    return bare[1].replace(/-/g, "").toLowerCase();
   }
   const tail =
     s
@@ -1601,8 +1747,16 @@ export function isNoveraOrBotSender(
 ): boolean {
   const by = (createdBy ?? "").trim().toLowerCase();
   const ty = (type ?? "").trim().toLowerCase();
-  return ty === "bot" || by === "novera";
+  // The conversations/{id}/messages API sends an empty createdBy for a
+  // Novera reply rather than the literal name "Novera" -- every real
+  // comment/message in this feed has a non-empty author, so an empty one
+  // is itself the bot signal. Without this, a bot reply that shares its
+  // triggering user message's timestamp (common -- the transcript only
+  // stores whole-second precision) had no tiebreak to fall back on and
+  // could render above the question that caused it.
+  return ty === "bot" || by === "novera" || by === "agent" || by === "";
 }
+
 
 /** Shape accepted by {@link compareByCreatedOnThenId}. */
 export type CreatedOnSortable = {
@@ -1973,6 +2127,7 @@ export function computeMinScheduleDatetimeLocalForTimeZone(
 export {
   countListSearchAndFilters,
   hasListSearchOrFilters,
+  isValidNumericIdFilters,
   normalizeCaseSearchIssueIds,
 } from "@features/support/utils/listView";
 
@@ -1992,7 +2147,12 @@ export function toUtcStartOfDay(date: Date): string {
     throw new TypeError(`toUtcStartOfDay: invalid Date argument — ${String(date)}`);
   }
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T00:00:00Z`;
+  // The year is zero-padded too, not just month/day: getFullYear() can
+  // legitimately return fewer than 4 digits (e.g. a Date constructed from a
+  // partially-typed year), and an un-padded short year here previously
+  // serialized straight into a malformed RFC3339 string (e.g.
+  // "2-01-10T00:00:00Z") that entity-service's own filter parser rejects.
+  return `${String(date.getFullYear()).padStart(4, "0")}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T00:00:00Z`;
 }
 
 export function toUtcEndOfDay(date: Date): string {
@@ -2004,8 +2164,14 @@ export function toUtcEndOfDay(date: Date): string {
   // ServiceNow applies a strict < comparison on the date portion, so
   // "2026-06-10T23:59:59Z" becomes < 2026-06-10 (excludes Jun 10).
   // Sending "2026-06-11T00:00:00Z" becomes < 2026-06-11 (includes Jun 10).
-  const next = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
-  return `${next.getFullYear()}-${pad(next.getMonth() + 1)}-${pad(next.getDate())}T00:00:00Z`;
+  // Built with setDate on a copy, not `new Date(year, month, day+1)` --
+  // that 3-arg form re-triggers the Date constructor's year special-casing
+  // (a year argument 0-99 becomes 1900+year), which would silently corrupt
+  // an already-short year a second time.
+  const next = new Date(date.getTime());
+  next.setDate(next.getDate() + 1);
+  // Year zero-padded too -- see toUtcStartOfDay's identical comment above.
+  return `${String(next.getFullYear()).padStart(4, "0")}-${pad(next.getMonth() + 1)}-${pad(next.getDate())}T00:00:00Z`;
 }
 
 /**

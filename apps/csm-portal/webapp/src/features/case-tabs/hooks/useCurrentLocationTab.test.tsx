@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import type { JSX } from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
+
 import { useCurrentLocationTab } from "@features/case-tabs/hooks/useCurrentLocationTab";
 
 function Probe(): JSX.Element {

@@ -17,8 +17,17 @@
 import { type JSX } from "react";
 import { Box, Link, Stack, Typography } from "@wso2/oxygen-ui";
 import illustration from "@assets/access-control/portal-access-required.svg";
+import TrackingIdCopy from "@components/error/TrackingIdCopy";
 
-export default function PortalAccessRequiredPage(): JSX.Element {
+interface PortalAccessRequiredPageProps {
+  /** The /users/me error that triggered this page — passed through so a
+   *  "Tracking ID" copy affordance can render when it carries one. */
+  error?: unknown;
+}
+
+export default function PortalAccessRequiredPage({
+  error,
+}: PortalAccessRequiredPageProps): JSX.Element {
   return (
     <Box
       sx={{
@@ -64,6 +73,7 @@ export default function PortalAccessRequiredPage(): JSX.Element {
             </Link>
             .
           </Typography>
+          <TrackingIdCopy error={error} />
         </Stack>
       </Stack>
     </Box>

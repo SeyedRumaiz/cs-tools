@@ -14,79 +14,446 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import ChangeRequestLifecycleStepper from "@features/csm-operations/components/ChangeRequestLifecycleStepper";
 
+function list(): HTMLElement {
+  return screen.getByRole("list", { name: /change request lifecycle/i });
+}
+
+/** The stage's list item, found by its visible label. */
+function stage(label: string): HTMLElement {
+  return within(list()).getByText(label).closest('[role="listitem"]') as HTMLElement;
+}
+
+/** Every stage's accessible text, in order: "New, done", "Assess, current", ... */
+function readout(): string[] {
+  return within(list())
+    .getAllByRole("listitem")
+    .map((item) => item.textContent ?? "");
+}
+
 describe("ChangeRequestLifecycleStepper", () => {
-  it("renders all 9 forward states as list items", () => {
+  it("plots the customer portal's eleven stages, in its order, as list items", () => {
     render(<ChangeRequestLifecycleStepper state="new" />);
-    expect(screen.getAllByRole("listitem")).toHaveLength(9);
+    expect(screen.getAllByRole("listitem")).toHaveLength(11);
+    expect(readout().map((t) => t.split(",")[0])).toEqual([
+      "New",
+      "Assess",
+      "Authorize",
+      "Customer Approval",
+      "Scheduled",
+      "Implement",
+      "Review",
+      "Customer Review",
+      "Rollback",
+      "Closed",
+      "Canceled",
+    ]);
   });
 
   it("marks the CR's current state with aria-current='step'", () => {
     render(<ChangeRequestLifecycleStepper state="implement" />);
     const current = screen.getByText("Implement").closest('[aria-current="step"]');
     expect(current).not.toBeNull();
+    expect(document.querySelectorAll('[aria-current="step"]')).toHaveLength(1);
   });
 
   it("marks every state before the current one as complete, and none after", () => {
     render(<ChangeRequestLifecycleStepper state="implement" />);
-    const list = screen.getByRole("list", { name: /change request lifecycle/i });
 
     // Prior states (New, Assess, Authorize, Customer Approval, Scheduled) each
     // render a check icon (svg) inside their step marker.
     ["New", "Assess", "Authorize", "Customer Approval", "Scheduled"].forEach((label) => {
-      const item = within(list).getByText(label).closest('[role="listitem"]')!;
-      expect((item as HTMLElement).querySelector("svg")).not.toBeNull();
+      expect(stage(label).querySelector("svg")).not.toBeNull();
     });
 
     // The current step itself carries aria-current, states after it don't
     // and have no check icon.
-    const review = within(list).getByText("Review").closest('[role="listitem"]')!;
+    const review = stage("Review");
     expect(review).not.toHaveAttribute("aria-current");
-    expect((review as HTMLElement).querySelector("svg")).toBeNull();
+    expect(review.querySelector("svg")).toBeNull();
   });
 
-  it("does not plot rollback/canceled on the forward line", () => {
+  it("says each stage's status in words, not only by colour", () => {
     render(<ChangeRequestLifecycleStepper state="implement" />);
-    expect(screen.queryByText("Rollback")).not.toBeInTheDocument();
-    expect(screen.queryByText("Canceled")).not.toBeInTheDocument();
+    expect(readout()).toEqual([
+      "New, done",
+      "Assess, done",
+      "Authorize, done",
+      "Customer Approval, done",
+      "Scheduled, done",
+      "Implement, current",
+      "Review, upcoming",
+      "Customer Review, upcoming",
+      "Rollback, not taken",
+      "Closed, upcoming",
+      "Canceled, not taken",
+    ]);
   });
 
-  it("shows a separate off-ramp note instead of a forward-path highlight when canceled", () => {
-    render(<ChangeRequestLifecycleStepper state="canceled" />);
-    expect(screen.getByText(/diverted from the standard path/i)).toBeInTheDocument();
-    // The label appears in the off-ramp note itself.
-    expect(screen.getByText("Canceled")).toBeInTheDocument();
-    // Nothing on the forward line claims to be the current step.
-    expect(document.querySelector('[aria-current="step"]')).toBeNull();
+  describe("Rollback and Canceled", () => {
+    it("are plotted on a change that goes to plan, as not taken", () => {
+      render(<ChangeRequestLifecycleStepper state="implement" />);
+      expect(stage("Rollback")).toHaveTextContent("Rollback, not taken");
+      expect(stage("Canceled")).toHaveTextContent("Canceled, not taken");
+      expect(stage("Rollback")).not.toHaveAttribute("aria-current");
+      expect(stage("Canceled")).not.toHaveAttribute("aria-current");
+      // They keep their icon so they are still recognisable when faint.
+      expect(stage("Rollback").querySelector("svg")).not.toBeNull();
+      expect(stage("Canceled").querySelector("svg")).not.toBeNull();
+    });
+
+    it("is never shown as done, even once the change is closed", () => {
+      render(<ChangeRequestLifecycleStepper state="closed" />);
+      expect(stage("Closed")).toHaveAttribute("aria-current", "step");
+      expect(stage("Rollback")).toHaveTextContent("Rollback, not taken");
+      expect(stage("Canceled")).toHaveTextContent("Canceled, not taken");
+      expect(stage("Customer Review")).toHaveTextContent("Customer Review, done");
+    });
+
+    it("makes Canceled the current stage of a canceled change, with no note about a diversion", () => {
+      render(<ChangeRequestLifecycleStepper state="canceled" />);
+      const current = document.querySelector('[aria-current="step"]');
+      expect(current).toHaveTextContent("Canceled, current");
+      expect(document.querySelectorAll('[aria-current="step"]')).toHaveLength(1);
+      expect(screen.queryByText(/diverted from the standard path/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/current state:/i)).not.toBeInTheDocument();
+    });
+
+    it("makes Rollback the current stage of a rolled-back change", () => {
+      render(<ChangeRequestLifecycleStepper state="rollback" approvals={[]} hasCustomerContacts />);
+      expect(document.querySelector('[aria-current="step"]')).toHaveTextContent("Rollback, current");
+      expect(readout()).toEqual([
+        "New, done",
+        "Assess, done",
+        "Authorize, done",
+        "Customer Approval, done",
+        "Scheduled, done",
+        "Implement, done",
+        "Review, done",
+        "Customer Review, not taken",
+        "Rollback, current",
+        "Closed, not taken",
+        "Canceled, not taken",
+      ]);
+    });
+
+    it("shows Customer Review done on a rolled-back change when its stage proves the review happened", () => {
+      render(
+        <ChangeRequestLifecycleStepper
+          state="rollback"
+          approvals={[{ stage: "Customer Review", status: "APPROVED" }]}
+        />,
+      );
+      expect(stage("Customer Review")).toHaveTextContent("Customer Review, done");
+    });
+
+    it("says history not recorded for Customer Review of a rolled-back change when there is no stage and no contacts to have asked", () => {
+      render(<ChangeRequestLifecycleStepper state="rollback" approvals={[]} hasCustomerContacts={false} />);
+      expect(stage("Customer Review")).toHaveTextContent("Customer Review, history not recorded");
+      expect(stage("Review")).toHaveTextContent("Review, done");
+    });
+
+    it("shows Customer Review rejected on a change the customer's review rolled back, with a cross", () => {
+      render(
+        <ChangeRequestLifecycleStepper
+          state="rollback"
+          approvals={[{ stage: "Customer Review", status: "REJECTED" }]}
+        />,
+      );
+      expect(stage("Customer Review")).toHaveTextContent("Customer Review, rejected by the customer");
+      expect(stage("Customer Review").querySelector("svg")).toHaveClass("lucide-x");
+      expect(stage("Customer Review")).not.toHaveAttribute("aria-current");
+      expect(document.querySelector('[aria-current="step"]')).toHaveTextContent("Rollback, current");
+    });
+
+    it("shows a change the customer rejected at Customer Approval as canceled there, the later stages never reached", () => {
+      render(
+        <ChangeRequestLifecycleStepper
+          state="canceled"
+          approvals={[
+            { stage: "Peer Approval", status: "APPROVED" },
+            { stage: "CAB Approval", status: "APPROVED" },
+            { stage: "Customer Approval", status: "REJECTED" },
+          ]}
+        />,
+      );
+      expect(readout()).toEqual([
+        "New, done",
+        "Assess, done",
+        "Authorize, done",
+        "Customer Approval, rejected by the customer",
+        "Scheduled, not taken",
+        "Implement, not taken",
+        "Review, not taken",
+        "Customer Review, not taken",
+        "Rollback, not taken",
+        "Closed, not taken",
+        "Canceled, current",
+      ]);
+      expect(screen.queryByText(/history not recorded/i)).not.toBeInTheDocument();
+    });
+
+    it("counts a recorded customer approval on a canceled change as proof Customer Approval was passed", () => {
+      render(
+        <ChangeRequestLifecycleStepper
+          state="canceled"
+          approvals={[
+            { stage: "Peer Approval", status: "APPROVED" },
+            { stage: "CAB Approval", status: "APPROVED" },
+          ]}
+          customerApproved
+        />,
+      );
+      expect(stage("Customer Approval")).toHaveTextContent("Customer Approval, done");
+      expect(stage("Scheduled")).toHaveTextContent("Scheduled, history not recorded");
+    });
+
+    it("marks nothing done on a canceled change the approvals cannot vouch for", () => {
+      render(<ChangeRequestLifecycleStepper state="canceled" approvals={[]} />);
+      expect(readout()).toEqual([
+        "New, history not recorded",
+        "Assess, history not recorded",
+        "Authorize, history not recorded",
+        "Customer Approval, history not recorded",
+        "Scheduled, history not recorded",
+        "Implement, history not recorded",
+        "Review, history not recorded",
+        "Customer Review, history not recorded",
+        "Rollback, not taken",
+        "Closed, not taken",
+        "Canceled, current",
+      ]);
+    });
+
+    it("marks what the approvals prove done on a canceled change", () => {
+      render(
+        <ChangeRequestLifecycleStepper
+          state="canceled"
+          approvals={[
+            { stage: "Peer Approval", status: "APPROVED" },
+            { stage: "CAB Approval", status: "PENDING" },
+          ]}
+        />,
+      );
+      expect(stage("New")).toHaveTextContent("New, done");
+      expect(stage("Assess")).toHaveTextContent("Assess, done");
+      expect(stage("Authorize")).toHaveTextContent("Authorize, history not recorded");
+      expect(stage("Canceled")).toHaveTextContent("Canceled, current");
+    });
   });
 
-  it("shows the off-ramp note for rollback too", () => {
-    render(<ChangeRequestLifecycleStepper state="rollback" />);
-    expect(screen.getByText(/diverted from the standard path/i)).toBeInTheDocument();
-    expect(screen.getByText("Rollback")).toBeInTheDocument();
-  });
-
-  it("renders no off-ramp note for a normal forward state", () => {
+  it("shows no note for a normal forward state", () => {
     render(<ChangeRequestLifecycleStepper state="scheduled" />);
     expect(screen.queryByText(/diverted from the standard path/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/current state:/i)).not.toBeInTheDocument();
   });
 
-  it("shows a current-state note for a state that is neither a forward state nor a recognized off-ramp", () => {
+  it("shows a current-state note for a state that is not one of the eleven", () => {
     render(<ChangeRequestLifecycleStepper state="some_future_state" />);
     expect(screen.getByText(/current state:/i)).toBeInTheDocument();
     expect(screen.getByText("some future state")).toBeInTheDocument();
-    // No forward-line marker claims to be current, and none render complete.
+    // No marker claims to be current, and none render complete.
     expect(document.querySelector('[aria-current="step"]')).toBeNull();
-    expect(screen.queryByText(/diverted from the standard path/i)).not.toBeInTheDocument();
+    expect(readout().every((t) => /upcoming|not taken/.test(t))).toBe(true);
   });
 
   it("shows no current-state note when the CR has no state yet", () => {
     render(<ChangeRequestLifecycleStepper state={null} />);
     expect(screen.queryByText(/current state:/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/diverted from the standard path/i)).not.toBeInTheDocument();
+    expect(document.querySelector('[aria-current="step"]')).toBeNull();
+  });
+
+  it("highlights Customer Approval as the current step when the CR is in customer_approval", () => {
+    render(
+      <ChangeRequestLifecycleStepper
+        state="customer_approval"
+        customerApprovalRequired
+        customerReviewRequired={false}
+      />,
+    );
+    const current = document.querySelector('[aria-current="step"]');
+    expect(current).not.toBeNull();
+    expect(current).toHaveTextContent("Customer Approval, current");
+  });
+
+  it("leaves the optional customer steps off the line when their flags are false", () => {
+    render(
+      <ChangeRequestLifecycleStepper
+        state="scheduled"
+        customerApprovalRequired={false}
+        customerReviewRequired={false}
+      />,
+    );
+    // Seven stages of the path (New ... Closed minus the two) plus Rollback and Canceled.
+    expect(screen.getAllByRole("listitem")).toHaveLength(9);
+    expect(screen.queryByText("Customer Approval")).not.toBeInTheDocument();
+    expect(screen.queryByText("Customer Review")).not.toBeInTheDocument();
+    expect(screen.getByText("Rollback")).toBeInTheDocument();
+  });
+
+  it("keeps each optional customer step only when its own flag is on", () => {
+    render(
+      <ChangeRequestLifecycleStepper
+        state="implement"
+        customerApprovalRequired
+        customerReviewRequired={false}
+      />,
+    );
+    expect(screen.getAllByRole("listitem")).toHaveLength(10);
+    expect(screen.getByText("Customer Approval")).toBeInTheDocument();
+    expect(screen.queryByText("Customer Review")).not.toBeInTheDocument();
+  });
+
+  it("keeps a customer step the CR is currently in even if its flag reads false", () => {
+    render(<ChangeRequestLifecycleStepper state="customer_review" customerReviewRequired={false} />);
+    expect(document.querySelector('[aria-current="step"]')).toHaveTextContent("Customer Review");
+  });
+
+  describe("the line between the stages", () => {
+    /** How the connector leading into each stage is drawn, by stage label. */
+    function lines(): Record<string, string> {
+      const into: Record<string, string> = {};
+      for (const item of within(list()).getAllByRole("listitem")) {
+        const label = (item.textContent ?? "").split(",")[0]!;
+        into[label] = item.querySelectorAll("[data-segment]")[0]!.getAttribute("data-segment")!;
+      }
+      return into;
+    }
+
+    it("fills up to the current stage, and draws what is still ahead plain", () => {
+      render(<ChangeRequestLifecycleStepper state="implement" />);
+      expect(lines()).toMatchObject({
+        Assess: "filled",
+        Scheduled: "filled",
+        Implement: "filled",
+        Review: "plain",
+        "Customer Review": "plain",
+        Closed: "plain",
+      });
+    });
+
+    it("dashes the way into Rollback and Canceled while the change is on the path", () => {
+      render(<ChangeRequestLifecycleStepper state="implement" />);
+      expect(lines()).toMatchObject({ Rollback: "dashed", Canceled: "dashed" });
+    });
+
+    it("runs the filled line straight through the faint Rollback to Closed", () => {
+      render(<ChangeRequestLifecycleStepper state="closed" />);
+      expect(lines()).toMatchObject({ "Customer Review": "filled", Rollback: "filled", Closed: "filled", Canceled: "dashed" });
+    });
+
+    it("leads into the current Rollback in the error colour, then dashes what was not taken", () => {
+      render(<ChangeRequestLifecycleStepper state="rollback" approvals={[{ stage: "Customer Review", status: "APPROVED" }]} />);
+      expect(lines()).toMatchObject({ "Customer Review": "filled", Rollback: "error", Closed: "dashed", Canceled: "dashed" });
+    });
+
+    it("fills the line into a stage the customer rejected, and dashes the stages after it", () => {
+      render(
+        <ChangeRequestLifecycleStepper
+          state="canceled"
+          approvals={[{ stage: "Customer Approval", status: "REJECTED" }]}
+        />,
+      );
+      expect(lines()).toMatchObject({
+        Authorize: "filled",
+        "Customer Approval": "filled",
+        Scheduled: "dashed",
+        "Customer Review": "dashed",
+        Canceled: "error",
+      });
+    });
+
+    it("leads into the current Canceled in the error colour", () => {
+      render(<ChangeRequestLifecycleStepper state="canceled" approvals={[]} />);
+      expect(lines()).toMatchObject({ Assess: "plain", "Customer Review": "plain", Rollback: "dashed", Closed: "dashed", Canceled: "error" });
+    });
+  });
+
+  describe("captions", () => {
+    it("gives every stage the customer portal's caption as its accessible description", () => {
+      render(<ChangeRequestLifecycleStepper state="review" />);
+      expect(stage("New")).toHaveAttribute("aria-description", "Change request created");
+      expect(stage("Assess")).toHaveAttribute("aria-description", "Technical assessment completed");
+      expect(stage("Authorize")).toHaveAttribute("aria-description", "Internal authorization obtained");
+      expect(stage("Customer Approval")).toHaveAttribute("aria-description", "Customer approval received");
+      expect(stage("Scheduled")).toHaveAttribute("aria-description", "Maintenance window scheduled");
+      expect(stage("Implement")).toHaveAttribute("aria-description", "Change implementation");
+      expect(stage("Review")).toHaveAttribute("aria-description", "Internal review");
+      expect(stage("Customer Review")).toHaveAttribute("aria-description", "Customer validation");
+      expect(stage("Rollback")).toHaveAttribute("aria-description", "Change rollback if needed");
+      expect(stage("Closed")).toHaveAttribute("aria-description", "Change request completed");
+      expect(stage("Canceled")).toHaveAttribute("aria-description", "Change request canceled");
+    });
+
+    it("shows the caption in a tooltip on hover", async () => {
+      render(<ChangeRequestLifecycleStepper state="review" />);
+      fireEvent.mouseOver(stage("Implement"));
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Change implementation$/);
+    });
+
+    it("adds what a faint or crossed marker means to the tooltip, for the stages whose status the line does not explain", async () => {
+      render(<ChangeRequestLifecycleStepper state="review" />);
+      fireEvent.mouseOver(stage("Rollback"));
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Change rollback if needed \(not taken\)$/);
+      // The accessible description stays the plain caption.
+      expect(stage("Rollback")).toHaveAttribute("aria-description", "Change rollback if needed");
+    });
+
+    it("says history not recorded in the tooltip of a stage a canceled change cannot vouch for", async () => {
+      render(<ChangeRequestLifecycleStepper state="canceled" approvals={[]} />);
+      fireEvent.mouseOver(stage("Review"));
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Internal review \(history not recorded\)$/);
+    });
+  });
+});
+
+describe("ChangeRequestLifecycleStepper — an Emergency change", () => {
+  const noCustomerSteps = { type: "emergency", customerApprovalRequired: false, customerReviewRequired: false };
+
+  it("goes New, Authorize, Scheduled, Implement, Review, Closed, with Assess not taken (and Rollback / Canceled as ever)", () => {
+    render(<ChangeRequestLifecycleStepper state="authorize" {...noCustomerSteps} />);
+    expect(readout()).toEqual([
+      "New, done",
+      "Assess, not taken",
+      "Authorize, current",
+      "Scheduled, upcoming",
+      "Implement, upcoming",
+      "Review, upcoming",
+      "Rollback, not taken",
+      "Closed, upcoming",
+      "Canceled, not taken",
+    ]);
+  });
+
+  it("marks Assess with the same faint, dashed marker as the stages a change never takes, and explains it on hover", async () => {
+    render(<ChangeRequestLifecycleStepper state="new" {...noCustomerSteps} />);
+    expect(stage("Assess")).toHaveTextContent("Assess, not taken");
+    // The same hint the Rollback / Canceled stages carry.
+    fireEvent.mouseOver(stage("Assess"));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Technical assessment completed \(not taken\)$/);
+    // The line into Assess is dashed, like the one into any stage that is not on the path.
+    const connectors = Array.from(stage("Assess").querySelectorAll("[data-segment]")).map((c) => c.getAttribute("data-segment"));
+    expect(connectors).toEqual(["dashed", "plain"]);
+  });
+
+  it("fills the line straight through Assess to Authorize once the CAB stage is reached", () => {
+    render(<ChangeRequestLifecycleStepper state="scheduled" {...noCustomerSteps} />);
+    const into = (label: string): string[] =>
+      Array.from(stage(label).querySelectorAll("[data-segment]")).map((c) => c.getAttribute("data-segment") ?? "");
+    expect(into("Authorize")[0]).toBe("filled");
+  });
+
+  it("a Normal change of the same shape still passes through Assess", () => {
+    render(<ChangeRequestLifecycleStepper state="authorize" type="normal" customerApprovalRequired={false} customerReviewRequired={false} />);
+    expect(stage("Assess")).toHaveTextContent("Assess, done");
+  });
+
+  it("with the type unknown (not in the payload) the line reads as it always did", () => {
+    render(<ChangeRequestLifecycleStepper state="authorize" customerApprovalRequired={false} customerReviewRequired={false} />);
+    expect(stage("Assess")).toHaveTextContent("Assess, done");
   });
 });

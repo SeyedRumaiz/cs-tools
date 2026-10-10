@@ -1,0 +1,58 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- DATA_SOURCE=postgres-servicenow-dual-write: customer_call, time_card, and
+-- work_item_tag are all Postgres-first writes whose CREATE already dispatches
+-- a best-effort, asynchronous ServiceNow mirror (SNWritebackDispatcher), but
+-- none of them ever recorded the ServiceNow-side identifier that mirror
+-- write created. Without it, a later UPDATE/DELETE/REMOVE mirror has nothing
+-- to target: the Postgres row's own id is a plain gen_random_uuid() with no
+-- ServiceNow counterpart (unlike case/change_request/incident, whose CREATE
+-- is ServiceNow-first under this data source, so their Postgres id already
+-- IS the real sys_id round-tripped through sysidToUUID -- see
+-- callRequestService's/timeCardService's own doc comments).
+--
+-- sn_sys_id is nullable and populated best-effort, asynchronously, by the
+-- CREATE mirror's own success path (never synchronously, never blocking the
+-- request) -- see internal/service/{call_request,time_card,case}_service.go.
+-- A NULL value means either dual-write mode has never run against this row
+-- (any other data source), the CREATE mirror hasn't completed yet, or it
+-- failed (see sn_writeback_failures) -- in every case, the corresponding
+-- UPDATE/DELETE/REMOVE mirror must skip silently rather than error, since
+-- Postgres remains authoritative regardless (see each mirror's own doc
+-- comment).
+--
+-- comment (migration 0040) deliberately gets NO such column: ServiceNow's
+-- sys_journal_field is append-only -- snCommentSearchService.UpdateComment/
+-- DeleteComment already unconditionally return ServiceUnavailableError,
+-- documented as a permanent platform limitation, not a gap to fill in later
+-- (see commentEditDeleteUnsupportedOnSNMsg's own doc comment). There is no
+-- ServiceNow-side identifier a mirror could ever target, so storing one
+-- would be dead schema.
+ALTER TABLE customer_call ADD COLUMN IF NOT EXISTS sn_sys_id VARCHAR(32);
+ALTER TABLE time_card ADD COLUMN IF NOT EXISTS sn_sys_id VARCHAR(32);
+
+-- work_item_tag.sn_sys_id holds ServiceNow's own label_entry sys_id for this
+-- specific case-tag attachment, as returned by AddCaseTag's mirror (its
+-- response's tag.id, sysidToUUID-converted like everywhere else, then
+-- uuidToSysid'd back to raw form for storage). RemoveCaseTag identifies the
+-- tag to detach by the Postgres tag_id alone (migration 0026), which has
+-- no relationship to ServiceNow's label_entry sys_id -- that mismatch is
+-- exactly why RemoveCaseTag's mirror was previously left unbuilt (see that
+-- method's own prior doc comment in case_service.go). ServiceNow's own
+-- DELETE /cases/{id}/tags/{tagId} requires that label_entry sys_id, not the
+-- label text AddCaseTag's own mirror already carries.
+ALTER TABLE work_item_tag ADD COLUMN IF NOT EXISTS sn_sys_id VARCHAR(32);

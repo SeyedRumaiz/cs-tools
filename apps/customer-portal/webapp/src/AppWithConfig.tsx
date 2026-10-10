@@ -26,6 +26,7 @@ import { loggerConfig } from "@config/loggerConfig";
 import LoggerProvider from "@context/logger/LoggerProvider";
 import { FontSizeProvider } from "@context/font-size/FontSizeContext";
 import MobileAppGate from "@providers/MobileAppGate";
+import StableAuthLoadingProvider from "@providers/StableAuthLoadingProvider";
 import { authConfig } from "@config/authConfig";
 
 /**
@@ -90,29 +91,31 @@ export default function AppWithConfig(): JSX.Element {
         },
       }}
     >
-      <BrowserRouter>
-        <LoggerProvider config={loggerConfig}>
-          <OxygenUIThemeProvider theme={themeConfig}>
-            <GlobalStyles
-              styles={{
-                "html, body, #root": {
-                  width: "100%",
-                  maxWidth: "100vw",
-                  overflowX: "clip",
-                },
-              }}
-            />
-            <FontSizeProvider>
-              <QueryClientProvider client={queryClient}>
-                <MobileAppGate>
-                  <App />
-                </MobileAppGate>
-                <ReactQueryDevtools initialIsOpen={false} />
-              </QueryClientProvider>
-            </FontSizeProvider>
-          </OxygenUIThemeProvider>
-        </LoggerProvider>
-      </BrowserRouter>
+      <StableAuthLoadingProvider>
+        <BrowserRouter>
+          <LoggerProvider config={loggerConfig}>
+            <OxygenUIThemeProvider theme={themeConfig}>
+              <GlobalStyles
+                styles={{
+                  "html, body, #root": {
+                    width: "100%",
+                    maxWidth: "100vw",
+                    overflowX: "clip",
+                  },
+                }}
+              />
+              <FontSizeProvider>
+                <QueryClientProvider client={queryClient}>
+                  <MobileAppGate>
+                    <App />
+                  </MobileAppGate>
+                  <ReactQueryDevtools initialIsOpen={false} />
+                </QueryClientProvider>
+              </FontSizeProvider>
+            </OxygenUIThemeProvider>
+          </LoggerProvider>
+        </BrowserRouter>
+      </StableAuthLoadingProvider>
     </AsgardeoProvider>
   );
 }

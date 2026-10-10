@@ -550,6 +550,80 @@ describe("WIDGET_RESOURCE_CONFIG.case_feedback.buildSearchRequestBody", () => {
   });
 });
 
+describe("WIDGET_RESOURCE_CONFIG.project.buildSearchRequestBody", () => {
+  // `POST /projects/search` decodes a flat body and rejects unknown top-level
+  // fields, so a `filters` wrapper (even empty) is a 400.
+  const build = WIDGET_RESOURCE_CONFIG.project.buildSearchRequestBody!;
+
+  it("spreads filters flat next to pagination, with no `filters` key", () => {
+    const body = build({
+      filters: { onboardingStatus: ["In-Progress"] },
+      offset: 0,
+      limit: 1,
+    });
+
+    expect(body).toEqual({
+      onboardingStatus: ["In-Progress"],
+      pagination: { offset: 0, limit: 1 },
+    });
+    expect(body).not.toHaveProperty("filters");
+  });
+
+  it("sends only pagination for empty filters, still with no `filters` key", () => {
+    const body = build({ filters: {}, offset: 20, limit: 10 });
+
+    expect(body).toEqual({ pagination: { offset: 20, limit: 10 } });
+    expect(body).not.toHaveProperty("filters");
+  });
+
+  it("flattens a widget's {field, order} endDate sort to plain sortBy/sortOrder strings", () => {
+    const body = build({
+      filters: { onboardingStatus: ["In-Progress"] },
+      offset: 0,
+      limit: 10,
+      sortBy: { field: "endDate", order: "desc" },
+    });
+
+    expect(body).toEqual({
+      onboardingStatus: ["In-Progress"],
+      sortBy: "endDate",
+      sortOrder: "desc",
+      pagination: { offset: 0, limit: 10 },
+    });
+    expect(body).not.toHaveProperty("filters");
+  });
+
+  it("drops a sortBy field the endpoint does not accept, and an invalid order", () => {
+    expect(
+      build({ filters: {}, offset: 0, limit: 10, sortBy: { field: "name", order: "asc" } }),
+    ).toEqual({ pagination: { offset: 0, limit: 10 } });
+    expect(
+      build({ filters: {}, offset: 0, limit: 10, sortBy: { field: "endDate", order: "up" } }),
+    ).toEqual({ sortBy: "endDate", pagination: { offset: 0, limit: 10 } });
+  });
+
+  it("unwraps array-wrapped single-valued filters from the preview URL round trip, keeping list filters as arrays", () => {
+    const body = build({
+      filters: { accountId: ["acc-1"], subRegion: ["APAC"], onboardingStatus: ["In-Progress"] },
+      offset: 0,
+      limit: 10,
+    });
+
+    expect(body).toEqual({
+      accountId: "acc-1",
+      subRegion: "APAC",
+      onboardingStatus: ["In-Progress"],
+      pagination: { offset: 0, limit: 10 },
+    });
+  });
+
+  it("never lets a stray filter key override pagination", () => {
+    const body = build({ filters: { pagination: { offset: 99, limit: 99 } }, offset: 0, limit: 5 });
+
+    expect(body.pagination).toEqual({ offset: 0, limit: 5 });
+  });
+});
+
 /**
  * `translateCallRequestDashboardFilters`/`callRequestWidgetFiltersToQuery` —
  * the call-requests "View more" landing's own seed/query pair, mirroring

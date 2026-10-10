@@ -43,7 +43,7 @@ import { useSearchChangeRequestsForSelect } from "@features/csm-operations/api/u
 import { useSearchProblemsForSelect } from "@features/csm-operations/api/useSearchProblemsForSelect";
 import {
   CATEGORY_OPTIONS,
-  CONTACT_TYPE_OPTIONS,
+  CHANNEL_OPTIONS,
   IMPACT_OPTIONS,
   SUBCATEGORY_OPTIONS_BY_CATEGORY,
   URGENCY_OPTIONS,
@@ -110,7 +110,8 @@ interface EditState {
   subject: string;
   category: BeIncidentCategory | "";
   subcategory: BeIncidentSubcategory | "";
-  contactType: BeIncidentContactType | "";
+  /** "Channel" in the UI; the incident's wire field `contactType` (see CHANNEL_OPTIONS). */
+  channel: BeIncidentContactType | "";
   impact: BeIncidentImpact | "";
   urgency: BeIncidentUrgency | "";
   state: BeIncidentState | "";
@@ -128,6 +129,7 @@ interface EditState {
   changeRequestId: string;
   problemId: string;
   causedById: string;
+  environment: string;
 }
 
 function toEditState(incident: BeIncidentDetail): EditState {
@@ -135,7 +137,7 @@ function toEditState(incident: BeIncidentDetail): EditState {
     subject: incident.subject ?? "",
     category: incident.category ?? UNSET,
     subcategory: incident.subcategory ?? UNSET,
-    contactType: incident.contactType ?? UNSET,
+    channel: incident.contactType ?? UNSET,
     impact: incident.impact ?? UNSET,
     urgency: incident.urgency ?? UNSET,
     state: incident.state ?? UNSET,
@@ -150,6 +152,7 @@ function toEditState(incident: BeIncidentDetail): EditState {
     changeRequestId: incident.changeRequest?.id ?? "",
     problemId: incident.problem?.id ?? "",
     causedById: incident.causedBy?.id ?? "",
+    environment: incident.environment ?? "",
   };
 }
 
@@ -169,7 +172,7 @@ function buildPatch(initial: EditState, next: EditState): BeUpdateIncidentPayloa
   if (next.subject.trim() !== initial.subject && next.subject.trim()) patch.subject = next.subject.trim();
   if (next.category !== initial.category && next.category) patch.category = next.category;
   if (next.subcategory !== initial.subcategory && next.subcategory) patch.subcategory = next.subcategory;
-  if (next.contactType !== initial.contactType && next.contactType) patch.contactType = next.contactType;
+  if (next.channel !== initial.channel && next.channel) patch.contactType = next.channel;
   if (next.impact !== initial.impact && next.impact) patch.impact = next.impact;
   if (next.urgency !== initial.urgency && next.urgency) patch.urgency = next.urgency;
   if (next.state !== initial.state && next.state) patch.state = next.state;
@@ -187,6 +190,7 @@ function buildPatch(initial: EditState, next: EditState): BeUpdateIncidentPayloa
     patch.changeRequestId = next.changeRequestId.trim() || null;
   if (next.problemId.trim() !== initial.problemId) patch.problemId = next.problemId.trim() || null;
   if (next.causedById.trim() !== initial.causedById) patch.causedById = next.causedById.trim() || null;
+  if (next.environment.trim() !== initial.environment) patch.environment = next.environment.trim() || null;
   return patch;
 }
 
@@ -252,11 +256,19 @@ export default function EditIncidentDialog({
   // actually valid, rather than letting any of it silently no-op or 500.
   const isTransitioningToResolved =
     state.state !== initial.state && (state.state === "RESOLVED" || state.state === "CLOSED");
+  // Subcategory is optional (an incident can have none — see
+  // CreateIncidentPage). It only blocks Save when Category changed on an
+  // incident that already has a subcategory: PATCH has no way to clear a
+  // subcategory (omitted/null both mean "unchanged"), so a new category with
+  // a blank subcategory would leave the old category's subcategory on the
+  // record.
+  const isSubcategoryMissingForNewCategory =
+    state.category !== initial.category && !!initial.subcategory && !state.subcategory;
   const isValid =
     state.subject.trim().length > 0 &&
     !!state.category &&
-    !!state.subcategory &&
-    !!state.contactType &&
+    !isSubcategoryMissingForNewCategory &&
+    !!state.channel &&
     !!state.impact &&
     !!state.urgency &&
     !!state.state &&
@@ -336,11 +348,18 @@ export default function EditIncidentDialog({
                 state.subcategory,
                 (v) => set("subcategory", v as BeIncidentSubcategory | ""),
                 subcategoryOptions,
-                { disabled: !state.category, helperText: state.category ? undefined : "Pick a category first." },
+                {
+                  disabled: !state.category,
+                  helperText: !state.category
+                    ? "Pick a category first."
+                    : isSubcategoryMissingForNewCategory
+                      ? "Required when the category changes."
+                      : undefined,
+                },
               )}
             </Box>
             <Box sx={{ flex: "1 1 220px" }}>
-              {renderSelect("Contact type", state.contactType, (v) => set("contactType", v as BeIncidentContactType | ""), CONTACT_TYPE_OPTIONS)}
+              {renderSelect("Channel", state.channel, (v) => set("channel", v as BeIncidentContactType | ""), CHANNEL_OPTIONS)}
             </Box>
           </Box>
 
@@ -364,6 +383,20 @@ export default function EditIncidentDialog({
                     : undefined,
                 },
               )}
+            </Box>
+          </Box>
+
+          <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+            <Box sx={{ flex: "1 1 220px" }}>
+              <TextField
+                label="Environment"
+                value={state.environment}
+                onChange={(e) => set("environment", e.target.value)}
+                fullWidth
+                size="small"
+                disabled={isSaving}
+                placeholder="e.g. Production, Staging"
+              />
             </Box>
           </Box>
 

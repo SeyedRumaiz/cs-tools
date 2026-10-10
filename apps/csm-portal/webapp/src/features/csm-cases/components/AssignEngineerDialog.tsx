@@ -270,9 +270,6 @@ export default function AssignEngineerDialog({
             )}
           </Box>
 
-          <Typography variant="caption" color="text.secondary">
-            Assignment applies to ServiceNow-managed cases.
-          </Typography>
         </Box>
       </DialogContent>
       <DialogActions>

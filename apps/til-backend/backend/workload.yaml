@@ -1,0 +1,12 @@
+apiVersion: openchoreo.dev/v1alpha1
+metadata:
+  name: til-backend
+endpoints:
+- name: default-endpoint
+  displayName: Default Endpoint
+  port: 8077
+  type: HTTP
+  basePath: /
+  schemaFile: openapi.yaml
+  visibility:
+  - external

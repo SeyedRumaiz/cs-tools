@@ -17,6 +17,7 @@
 import { useQueries } from "@tanstack/react-query";
 import { ApiQueryKeys } from "@constants/apiConstants";
 import { useBackendApi } from "@api/backend/client";
+import { postCountingOnly } from "@api/backend/postCountingOnly";
 import type { BeDashboardPieSlice, BeWidgetResourceType } from "@api/backend/types";
 import { WIDGET_RESOURCE_CONFIG } from "@features/csm-dashboard/config/widgetResourceConfig";
 import { mergeWidgetFilters } from "@features/csm-dashboard/utils/widgetFilterMerge";
@@ -150,17 +151,30 @@ export function useWidgetPieData(
           // every other widget's own call, so it needs both at least as
           // much.
           return withWidgetFetchSlot(async (signal) => {
-            const res = await api.post<
-              { filters: Record<string, unknown>; pagination: { offset: number; limit: number } },
-              Record<string, unknown>
-            >(
-              config.searchEndpoint,
-              {
-                filters,
-                pagination: { offset: 0, limit: 1 },
-              },
-              { signal },
-            );
+            // `project`'s search takes flat filters (see its
+            // `buildSearchRequestBody`). Other overrides, e.g. case_feedback's,
+            // also change the response shape and aren't handled by this
+            // count-only path, so they keep the default body.
+            const body: Record<string, unknown> =
+              resourceType === "project" && config.buildSearchRequestBody
+                ? config.buildSearchRequestBody({ filters, offset: 0, limit: 1 })
+                : { filters, pagination: { offset: 0, limit: 1 } };
+            // Every slice query here only ever reads `total` -- skip the
+            // page query entirely via `countOnly` on the one search endpoint
+            // that supports it (see useWidgetData's identical reasoning). A
+            // pie/bar widget fires one of these per slice, so this is the
+            // biggest win of the two call sites.
+            const res =
+              config.searchEndpoint === "/cases/search"
+                ? await postCountingOnly<
+                    Record<string, unknown> & { countOnly?: boolean },
+                    Record<string, unknown>
+                  >(api, config.searchEndpoint, body, { signal })
+                : await api.post<Record<string, unknown>, Record<string, unknown>>(
+                    config.searchEndpoint,
+                    body,
+                    { signal },
+                  );
             return typeof res.total === "number" ? res.total : 0;
           }, teamKey);
         },

@@ -226,7 +226,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProjectUpdateResponse'
         "400":
-          description: BadRequest
+          description: >-
+            BadRequest. Entity-service's validation message is passed through when
+            it is safe to show, e.g. `sortBy: "name" is not a valid sort field; use
+            endDate`; otherwise "Invalid request payload."
           content:
             application/json:
               schema:
@@ -281,7 +284,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProjectSearchResponse'
         "400":
-          description: BadRequest
+          description: >-
+            BadRequest. Entity-service's validation message is passed through when
+            it is safe to show, e.g. `sortBy: "name" is not a valid sort field; use
+            endDate`; otherwise "Invalid request payload."
           content:
             application/json:
               schema:
@@ -417,17 +423,86 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /cases/search:
+    post:
+      summary: Search cases.
+      description: >
+        A generic passthrough to entity-service's own POST /cases/search —
+        the request body is forwarded verbatim (build whatever filter/
+        pagination shape entity-service's own contract accepts, e.g. an
+        exact-match filter on "number" to look up a case by case number) and
+        the response is returned as-is. No special-casing for any particular
+        lookup shape.
+      operationId: searchCases
+      requestBody:
+        description: Case search payload, mirroring entity-service's own POST /cases/search contract.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CaseSearchPayload'
+      responses:
+        "200":
+          description: Cases matching the search query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseSearchResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized (upstream reported an authorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /cases/{id}/comments:
     post:
       summary: Add a comment to a case.
       description: >
-        This entity-service operation requires a forwarded end-user identity
-        token unconditionally, on both data sources — the comment's author is
-        resolved from that token. This service is strictly M2M with no
-        mechanism to supply one, so calls here currently always receive a
-        mapped 401. Kept for API-shape completeness, not because it currently
-        succeeds. The request body is forwarded to the entity service
-        verbatim.
+        The caller supplies only "type" and "content"; this service supplies
+        entity-service's actorEmail field itself, from its own configured
+        trusted M2M identity (UMT_INTEGRATION_ACTOR_EMAIL), the same way it
+        does for POST /cases/{id}/tags — never from the caller, since
+        an unchecked caller-supplied actorEmail would let any caller claim to
+        be any user. On DATA_SOURCE=postgres, that configured value must
+        match an entry in entity-service's M2M_TRUSTED_ACTOR_EMAILS allowlist
+        or every call here receives a mapped 403; when it matches, the
+        comment is created successfully with no forwarded end-user identity
+        needed. On DATA_SOURCE=servicenow, entity-service's ServiceNow path
+        still requires a forwarded end-user identity token unconditionally
+        and ignores actorEmail entirely — since this service is strictly M2M
+        with no mechanism to supply one, calls against that data source
+        still receive a mapped 401.
       operationId: createCaseComment
       parameters:
         - name: id
@@ -456,7 +531,94 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         "401":
-          description: Unauthorized (upstream reported a missing or invalid forwarded identity — always, given this service's M2M-only design)
+          description: >
+            Unauthorized — always for DATA_SOURCE=servicenow, since this
+            service has no forwarded end-user identity to supply and that
+            data source's entity-service path requires one unconditionally.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: >
+            Forbidden — the configured UMT_INTEGRATION_ACTOR_EMAIL is unset
+            or is not on entity-service's M2M_TRUSTED_ACTOR_EMAILS allowlist
+            (DATA_SOURCE=postgres only).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cases/{id}/tags:
+    post:
+      summary: Add a tag/label to a case.
+      description: >
+        The caller supplies only "label"; this service supplies
+        entity-service's actorEmail field itself, from its own configured
+        trusted M2M identity (UMT_INTEGRATION_ACTOR_EMAIL), the same way it
+        does for POST /cases/{id}/comments — never from the caller, since
+        an unchecked caller-supplied actorEmail would let any caller claim to
+        be any user. Postgres-backed; a pure M2M call succeeds when that
+        configured value matches an entry in entity-service's
+        M2M_TRUSTED_ACTOR_EMAILS allowlist, and 403s otherwise.
+      operationId: addCaseTag
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CaseTagCreateRequest'
+      responses:
+        "201":
+          description: The tag was added.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseTagCreateResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: >
+            Unauthorized — on DATA_SOURCE=servicenow, entity-service forwards
+            this call to ServiceNow with an empty user token (this service has
+            no end-user identity to forward), and ServiceNow returns 401.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: >
+            Forbidden — the configured UMT_INTEGRATION_ACTOR_EMAIL is unset
+            or is not on entity-service's M2M_TRUSTED_ACTOR_EMAILS allowlist.
           content:
             application/json:
               schema:
@@ -484,7 +646,7 @@ paths:
     post:
       summary: Search opportunities.
       description: >
-        ServiceNow data source only; there is no Postgres equivalent. Read-only:
+        Served from ServiceNow, or from the CSM database on Postgres. Read-only:
         this operation does not require a forwarded end-user identity token, so a
         pure M2M call through this service succeeds (unlike the ServiceNow-backed
         write operations elsewhere in this API).
@@ -537,7 +699,7 @@ paths:
     get:
       summary: Get an opportunity by ID.
       description: >
-        ServiceNow data source only; there is no Postgres equivalent. Read-only:
+        Served from ServiceNow, or from the CSM database on Postgres. Read-only:
         this operation does not require a forwarded end-user identity token, so a
         pure M2M call through this service succeeds.
       operationId: getOpportunity
@@ -590,7 +752,7 @@ paths:
     post:
       summary: Search invoices.
       description: >
-        ServiceNow data source only; there is no Postgres equivalent. Read-only:
+        Served from ServiceNow, or from the CSM database on Postgres. Read-only:
         this operation does not require a forwarded end-user identity token, so a
         pure M2M call through this service succeeds.
       operationId: searchInvoices
@@ -642,7 +804,7 @@ paths:
     get:
       summary: Get an invoice by ID.
       description: >
-        ServiceNow data source only; there is no Postgres equivalent. Read-only:
+        Served from ServiceNow, or from the CSM database on Postgres. Read-only:
         this operation does not require a forwarded end-user identity token, so a
         pure M2M call through this service succeeds.
       operationId: getInvoice
@@ -695,7 +857,7 @@ paths:
     post:
       summary: Search project-opportunity links.
       description: >
-        ServiceNow data source only; there is no Postgres equivalent. A project can
+        Served from ServiceNow, or from the CSM database on Postgres. A project can
         have more than one linked opportunity — one row per link — so this always
         returns a list. No by-id fetch: the underlying data has no single-record
         endpoint. Read-only: this operation does not require a forwarded end-user
@@ -794,6 +956,321 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /cloud-status/monitors:
+    get:
+      summary: The public status dashboard's monitor view for one cloud.
+      description: >
+        Postgres-backed, forwarded to the entity service verbatim. Consumed by
+        wso2-enterprise/uptime-dashboard, which renders status.*.choreo.dev.
+        The response shape is that dashboard's and is reproduced field for
+        field from the ServiceNow resource it replaces.
+      operationId: getCloudStatusMonitors
+      parameters:
+        - name: cloud
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [asgardeo, choreo, bijira, devant, moesif, choreo-eu, agent-manager]
+      responses:
+        "200":
+          description: An object keyed by region, each holding the groups shown in that column.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudStatusResult'
+        "400":
+          description: BadRequest (unknown cloud)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized (upstream rejected this service's credentials)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden (upstream reported an authorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: NotFound (upstream has no such resource)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: ServiceUnavailable (upstream unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cloud-status/incidents/{id}:
+    get:
+      summary: One outage's public detail view.
+      description: >
+        Postgres-backed, forwarded verbatim. *** THE 200 BODY HAS TWO SHAPES,
+        AND THE SPARSE ONE IS THE COMMON CASE. *** An outage with no linked
+        incident, or one whose incident is still New, On Hold or Canceled,
+        returns an object carrying only `attachments` — no id, begin or type.
+        That is the majority of outages. Forwarding raw bytes is what keeps
+        both shapes intact.
+
+
+        `comments` are the outage's customer-facing external communications,
+        newest first — NOT the linked incident's comments, work notes or
+        approval history, which are internal and which ServiceNow does not
+        publish either.
+      operationId: getCloudStatusIncidentDetail
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: >-
+            The outage id. Either the 32-hex form the dashboard has always
+            used or the dashed uuid is accepted, so links created before the
+            cutover still resolve after it.
+        - name: cloud
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [asgardeo, choreo, bijira, devant, moesif, choreo-eu, agent-manager]
+      responses:
+        "200":
+          description: The outage's detail, or an attachments-only object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudStatusResult'
+        "400":
+          description: BadRequest (unknown cloud or missing id)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No outage with that id belongs to that cloud.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized (upstream rejected this service's credentials)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden (upstream reported an authorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: ServiceUnavailable (upstream unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cloud-status/incidents:
+    get:
+      summary: Six months of incident history for one cloud.
+      description: >
+        Postgres-backed, forwarded verbatim. Keyed "YYYY-M"; every month key is
+        present whether or not it has incidents, because the dashboard renders
+        a row per key.
+      operationId: getCloudStatusIncidents
+      parameters:
+        - name: cloud
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [asgardeo, choreo, bijira, devant, moesif, choreo-eu, agent-manager]
+      responses:
+        "200":
+          description: Six month keys.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudStatusResult'
+        "400":
+          description: BadRequest (unknown cloud)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized (upstream rejected this service's credentials)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden (upstream reported an authorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: NotFound (upstream has no such resource)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: ServiceUnavailable (upstream unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cloud-status/availabilities:
+    get:
+      summary: Weighted uptime per region per window for one cloud.
+      description: >
+        Postgres-backed, forwarded verbatim. *** THE availability FIELD IS A
+        JSON STRING FOR SIX CLOUDS AND A BARE NUMBER FOR asgardeo. *** That is
+        what the ServiceNow resource emits and what the dashboard renders;
+        anything that decodes and re-encodes this body would flatten the
+        distinction. This service forwards raw bytes precisely so it cannot.
+      operationId: getCloudStatusAvailabilities
+      parameters:
+        - name: cloud
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [asgardeo, choreo, bijira, devant, moesif, choreo-eu, agent-manager]
+      responses:
+        "200":
+          description: An object keyed by region, each holding four windows in render order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudStatusResult'
+        "400":
+          description: BadRequest (unknown cloud)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized (upstream rejected this service's credentials)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden (upstream reported an authorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: NotFound (upstream has no such resource)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: ServiceUnavailable (upstream unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cloud-status/availability-history:
+    get:
+      summary: The 90-day daily uptime chart for one cloud.
+      description: >
+        Postgres-backed, forwarded verbatim. Nested region -> group -> monitor.
+        Unlike the availabilities endpoint this one applies no weighting.
+      operationId: getCloudStatusAvailabilityHistory
+      parameters:
+        - name: cloud
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [asgardeo, choreo, bijira, devant, moesif, choreo-eu, agent-manager]
+      responses:
+        "200":
+          description: An object keyed by region, each holding the groups shown in that column.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudStatusResult'
+        "400":
+          description: BadRequest (unknown cloud)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized (upstream rejected this service's credentials)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden (upstream reported an authorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: NotFound (upstream has no such resource)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: ServiceUnavailable (upstream unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /incidents:
     post:
       summary: Create an incident.
@@ -857,6 +1334,94 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /incidents/{id}:
+    patch:
+      summary: Update an incident (e.g. push a work note or additional comment).
+      description: >
+        Unlike PATCH /cases/{id}, this operation has no Postgres-data-source
+        path at all: on a Postgres data source, entity-service rejects every
+        call outright (503, not supported on this data source yet — several
+        fields have no backing column, and others would need comment-table
+        side effects not implemented there). On a ServiceNow data source, it
+        goes through the same M2M-fallback mechanism as POST /incidents and
+        POST /incidents/search above: this service is strictly M2M with no
+        mechanism to forward an end-user identity token, but the
+        entity-service operation falls back to a separately-configured M2M
+        ServiceNow credential when no end-user token is present, and only
+        returns 401 if that fallback credential is itself unconfigured in the
+        target environment. So this call is unconditionally ServiceNow-backed
+        with no Postgres fallback — whether it succeeds depends on the target
+        environment's data source and, on ServiceNow, its M2M credential
+        configuration, not on which fields are sent (contrast PATCH
+        /cases/{id}, whose Postgres path narrows to specific fields instead
+        of failing outright). The request body is forwarded to the entity
+        service verbatim; it enforces its own field validation and 400s
+        otherwise, so this service does not re-validate that.
+      operationId: patchIncident
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        description: Incident fields to update (e.g. workNotes, additionalComments).
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IncidentUpdateRequest'
+      responses:
+        "200":
+          description: The incident was updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentUpdateResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized (upstream may report a missing or invalid forwarded identity if the target ServiceNow environment's M2M credential isn't configured — possible, not guaranteed, given this service's M2M-only design)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden (upstream reported an authorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: ServiceUnavailable (entity-service is running a Postgres data source, which does not support this operation yet)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /incidents/search:
     post:
       summary: Search incidents.
@@ -883,6 +1448,70 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SearchIncidentsResponse'
+        "400":
+          description: BadRequest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized (upstream may report a missing or invalid forwarded identity if the target ServiceNow environment's M2M credential isn't configured — possible, not guaranteed, given this service's M2M-only design)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden (upstream reported an authorization failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: NotFound
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "413":
+          description: RequestEntityTooLarge
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: InternalServerError
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /services/search:
+    post:
+      summary: Search CMDB IT services.
+      description: >
+        ServiceNow-backed, same M2M-fallback mechanism as POST /incidents and
+        POST /incidents/search above (confirmed to use the identical code
+        path). This service is strictly M2M with no mechanism to forward an
+        end-user identity token, but the entity-service operation falls back
+        to a separately-configured M2M ServiceNow credential when no
+        end-user token is present, and only returns 401 if that fallback
+        credential is itself unconfigured in the target environment. A 401
+        is therefore a possible response, not a guaranteed one.
+      operationId: searchITServices
+      requestBody:
+        description: Service search payload.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchITServicesRequest'
+      responses:
+        "200":
+          description: Services matching the search query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchITServicesResponse'
         "400":
           description: BadRequest
           content:
@@ -1035,6 +1664,37 @@ components:
           scopes: {}
 
   schemas:
+    CloudStatusResult:
+      type: object
+      description: >
+        The envelope ServiceNow's Scripted REST APIs return, reproduced here
+        so these endpoints are a DROP-IN REPLACEMENT rather than a second
+        integration. uptime-dashboard checks
+        `json?.result?.message == "success"` and then reads
+        `json.result.data`, so cutting over is a change to its endpoint URLs
+        and nothing else — no new controller, no parallel code path.
+
+
+        `data` is forwarded byte-for-byte from entity-service. That matters
+        beyond tidiness: on /availabilities the `availability` field is a
+        JSON STRING for six clouds and a bare NUMBER for asgardeo, and a
+        decode/re-encode would flatten the distinction.
+      properties:
+        result:
+          type: object
+          properties:
+            code:
+              type: integer
+              description: 0 on success. The dashboard gates on message, not this.
+            message:
+              type: string
+              enum: [success]
+            cloud:
+              type: string
+            data:
+              description: The endpoint's payload, forwarded unchanged.
+          required: [code, message, cloud, data]
+      required: [result]
     ErrorResponse:
       type: object
       properties:
@@ -1204,6 +1864,25 @@ components:
         searchQuery:
           type: string
           description: Case-insensitive match against name, key, and subscription type.
+        endDateFrom:
+          type: string
+          format: date
+          description: Only projects ending on or after this date (yyyy-MM-dd).
+        endDateTo:
+          type: string
+          format: date
+          description: Only projects ending on or before this date (yyyy-MM-dd).
+        onboardingStatus:
+          type: array
+          items:
+            type: string
+          description: Only projects whose onboarding status is any of these, e.g. "In-Progress".
+        subRegion:
+          type: string
+          description: Only projects whose account has this sub-region (case-insensitive).
+        arrTodayGte:
+          type: string
+          description: Minimum account ARR. Rejected with 400 on the Postgres data source.
 
     ProjectSearchResponse:
       type: object
@@ -1251,6 +1930,7 @@ components:
                 type: boolean
               roles:
                 type: array
+                description: Project roles, e.g. PORTAL_USER, SECURITY_CONTACT, BUSINESS_CONTACT.
                 items:
                   type: string
         offset:
@@ -1341,6 +2021,18 @@ components:
           type: string
         workState:
           type: string
+        markFixIssued:
+          type: boolean
+          description: >
+            True-only, first-write-wins: records that a fix has been issued
+            for the case. Mutually exclusive with state, severity, workState,
+            and every other field in this request. A second call on an
+            already-marked case is a no-op success, not an error. Postgres
+            data source only (or postgres-servicenow-dual-write, which
+            asynchronously mirrors the write to ServiceNow) — unlike
+            state/severity/workState, this succeeds through this M2M-only
+            service unconditionally, with no data-source-dependent 401.
+          enum: [true]
       additionalProperties: true
 
     CaseUpdateResult:
@@ -1381,6 +2073,10 @@ components:
           description: Comment type, e.g. comment, work_note, or activity.
         content:
           type: string
+          description: >
+            actorEmail is never accepted here — this service supplies it
+            itself from its own configured M2M identity
+            (UMT_INTEGRATION_ACTOR_EMAIL).
 
     CaseCommentCreateResult:
       type: object
@@ -1400,6 +2096,77 @@ components:
           type: string
         comment:
           $ref: '#/components/schemas/CaseCommentCreateResult'
+
+    CaseTagCreateRequest:
+      type: object
+      required:
+        - label
+      properties:
+        label:
+          type: string
+          description: >
+            The label text to add. actorEmail is never accepted here — this
+            service supplies it itself from its own configured M2M identity
+            (UMT_INTEGRATION_ACTOR_EMAIL).
+
+    CaseTagCreateResponse:
+      type: object
+      description: >
+        Mirrors entity-service's flat domain.Tag response verbatim — no
+        message/tag wrapper, no createdOn/createdBy.
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        color:
+          type: string
+          nullable: true
+
+    CaseFieldFilter:
+      type: object
+      description: A single "field op values" predicate in a case search filter expression, mirroring entity-service's own case-search contract.
+      properties:
+        field:
+          type: string
+        op:
+          type: string
+        values:
+          type: array
+          items:
+            type: string
+
+    CaseSearchPayload:
+      type: object
+      description: >
+        Forwarded verbatim to entity-service's own POST /cases/search — this
+        service does not define or validate the filter/pagination shape
+        itself. See entity-service's own OpenAPI spec for the full contract.
+      properties:
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+        filters:
+          type: object
+          properties:
+            filters:
+              type: array
+              items:
+                $ref: '#/components/schemas/CaseFieldFilter'
+
+    CaseSearchResponse:
+      type: object
+      properties:
+        cases:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
 
     ProductVulnerabilitySyncPayload:
       type: array
@@ -1437,8 +2204,7 @@ components:
     Opportunity:
       type: object
       description: >
-        Sourced from ServiceNow's Salesforce-sync data (ServiceNow data source only;
-        no Postgres equivalent). Every field but id is nullable — ServiceNow can
+        Salesforce data, read from ServiceNow or from the CSM database on Postgres. Every field but id is nullable — ServiceNow can
         omit any of them entirely for a sparsely-populated row.
       properties:
         id:
@@ -1457,6 +2223,10 @@ components:
         eulaVersionDecimal:
           type: string
           nullable: true
+        stage:
+          type: string
+          nullable: true
+          description: Sales stage, e.g. "50 - Closed Won".
 
     SearchOpportunitiesResponse:
       type: object
@@ -1487,8 +2257,7 @@ components:
     Invoice:
       type: object
       description: >
-        Sourced from ServiceNow's Salesforce-sync data (ServiceNow data source only;
-        no Postgres equivalent). Every field but id is nullable — ServiceNow can
+        Salesforce data, read from ServiceNow or from the CSM database on Postgres. Every field but id is nullable — ServiceNow can
         omit any of them entirely for a sparsely-populated row.
       properties:
         id:
@@ -1564,8 +2333,7 @@ components:
     ProjectOpportunityLink:
       type: object
       description: >
-        Sourced from ServiceNow's Salesforce-sync data (ServiceNow data source only;
-        no Postgres equivalent). Every field but id is nullable — ServiceNow can
+        Salesforce data, read from ServiceNow or from the CSM database on Postgres. Every field but id is nullable — ServiceNow can
         omit either reference entirely for a sparsely-populated row.
       properties:
         id:
@@ -1634,6 +2402,9 @@ components:
         serviceId:
           type: string
           format: uuid
+          description: >-
+            When no assignmentGroupId is sent, the incident's assignment group
+            is this service's support group (see assignmentGroupId).
         serviceOfferingId:
           type: string
           format: uuid
@@ -1661,9 +2432,28 @@ components:
         urgency:
           type: string
           enum: [HIGH, MEDIUM, LOW]
+        correlationId:
+          type: string
+          nullable: true
+          description: Optional caller-supplied external-system key, stored on ServiceNow's
+            correlation_id field. Look it up via SearchIncidentsRequest filters.correlationId
+            to find an incident this caller already created, without depending on
+            free-text search over subject or workNotes.
         assignmentGroupId:
           type: string
           format: uuid
+          nullable: true
+          description: >-
+            Optional; forwarded unchanged to the entity service, which decides
+            the group once for every caller. Sent: used when it is an active
+            group that is the support group of at least one service, otherwise
+            400 (a value that is not a UUID is a 400 too; blank counts as not
+            sent). Not sent: the service's support group; when the service has
+            none, the support group of the entity service's default service
+            (INCIDENT_DEFAULT_SERVICE_ID); with no default group either, the
+            incident is created unassigned. A failed lookup fails the request
+            and nothing is created. A work note records where the group came
+            from, after any workNotes sent.
         assignedEngineerId:
           type: string
           format: uuid
@@ -1706,6 +2496,53 @@ components:
             createdBy:
               type: string
 
+    IncidentUpdateRequest:
+      type: object
+      description: >
+        Incident fields to update — a thin proxy of entity-service's own
+        UpdateIncidentRequest, forwarded verbatim. All fields are optional,
+        but entity-service requires at least one. Not enumerated exhaustively
+        here (e.g. priority/state/resolutionCode key values); see
+        entity-service's own domain.UpdateIncidentRequest for the complete,
+        authoritative field set.
+      properties:
+        subject:
+          type: string
+        impact:
+          type: string
+          enum: [HIGH, MEDIUM, LOW]
+        urgency:
+          type: string
+          enum: [HIGH, MEDIUM, LOW]
+        assignmentGroupId:
+          type: string
+          format: uuid
+        assignedEngineerId:
+          type: string
+          format: uuid
+        serviceId:
+          type: string
+          format: uuid
+        additionalComments:
+          type: string
+        workNotes:
+          type: string
+        watchList:
+          type: array
+          items:
+            type: string
+
+    IncidentUpdateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        incident:
+          type: object
+          description: >
+            The full updated incident representation (entity-service's own
+            IncidentView), not enumerated exhaustively here.
+
     SearchIncidentsRequest:
       type: object
       properties:
@@ -1727,6 +2564,12 @@ components:
             number:
               type: string
               description: Exact match against the incident's human-readable number (e.g. "INC0010001").
+            correlationId:
+              type: string
+              description: >-
+                Exact match against the incident's correlation_id. Finds the
+                incident a caller created with CreateIncidentRequest.correlationId
+                without a free-text searchQuery scan.
             filters:
               type: array
               items:
@@ -1806,6 +2649,56 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SearchIncidentView'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    SearchITServicesRequest:
+      type: object
+      properties:
+        filters:
+          type: object
+          properties:
+            searchQuery:
+              type: string
+              description: Free-text search query, matched against the CMDB service's name.
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    ITService:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        class:
+          type: string
+        businessCriticality:
+          type: string
+          enum:
+            - most_critical
+            - somewhat_critical
+            - less_critical
+            - not_critical
+        serviceClassification:
+          type: string
+          enum:
+            - business_service
+            - technology_management_service
+            - application_service
+
+    SearchITServicesResponse:
+      type: object
+      properties:
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/ITService'
         total:
           type: integer
         limit:

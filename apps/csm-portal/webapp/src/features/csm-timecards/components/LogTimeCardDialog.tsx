@@ -351,9 +351,20 @@ export default function LogTimeCardDialog({
   );
   const recentApprovers: ApproverOption[] = useMemo(() => {
     if (recentApproverIds.length === 0) return [];
-    const eligibleIds = new Set((recentEligibility?.users ?? []).map((u) => u.id));
+    const myEmail = me.email.toLowerCase();
+    // Same self-exclusion as `candidates` above, by email (RecentApprover
+    // itself carries no email — only `recentEligibility`'s freshly-fetched
+    // users do): a past card could have recorded the signed-in user as an
+    // approver before this rule existed, or via a direct API call, and
+    // this list is otherwise sourced purely from history, not re-derived
+    // from who's currently allowed to be picked.
+    const eligibleIds = new Set(
+      (recentEligibility?.users ?? [])
+        .filter((u) => !u.email || u.email.toLowerCase() !== myEmail)
+        .map((u) => u.id),
+    );
     return rawRecentApprovers.filter((a) => eligibleIds.has(a.id));
-  }, [rawRecentApprovers, recentApproverIds, recentEligibility]);
+  }, [rawRecentApprovers, recentApproverIds, recentEligibility, me.email]);
   // Merges recents matching the current query ahead of the live search's own
   // candidates, deduped by id — a recent approver who still matches what was
   // typed should stay at the top rather than getting buried in whatever order

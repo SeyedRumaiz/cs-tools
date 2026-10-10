@@ -19,6 +19,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAttachmentPreviews } from "@api/useAttachmentPreview";
 import { useResolvedInlineImageHtml } from "@features/support/hooks/useResolvedInlineImageHtml";
 
+// The global test setup replaces this hook with a passthrough; use the real one.
+vi.unmock("@features/support/hooks/useResolvedInlineImageHtml");
+
 vi.mock("@api/useAttachmentPreview", () => ({
   useAttachmentPreviews: vi.fn(),
 }));
@@ -61,5 +64,81 @@ describe("useResolvedInlineImageHtml", () => {
     expect(useAttachmentPreviews).toHaveBeenCalledWith([]);
     expect(result.current.resolvedHtml).toBe("<p>No images here</p>");
     expect(result.current.isLoading).toBe(false);
+  });
+
+  describe("bare attachment-id src (migrated content)", () => {
+    const UUID = "0f15cbcc-c36b-8310-af2f-404599013196";
+    const HEX = UUID.replace(/-/g, "");
+    const DATA = "data:image/png;base64,AAA";
+
+    it("requests the 32-hex id for a bare hyphenated uuid and resolves it", () => {
+      vi.mocked(useAttachmentPreviews).mockReturnValue({
+        dataUrls: new Map([[HEX, DATA]]),
+        isLoading: false,
+      });
+      const { result } = renderHook(() =>
+        useResolvedInlineImageHtml(`<p><img src="/${UUID}"><br></p>`),
+      );
+      expect(useAttachmentPreviews).toHaveBeenCalledWith([HEX]);
+      expect(result.current.resolvedHtml).toContain(`src="${DATA}"`);
+    });
+
+    it.each([
+      ["bare 32-hex with slash", `/${HEX}`],
+      ["bare 32-hex without slash", HEX],
+      ["bare uuid without slash", UUID],
+      ["uppercase uuid", UUID.toUpperCase()],
+    ])("resolves %s", (_name, src) => {
+      vi.mocked(useAttachmentPreviews).mockReturnValue({
+        dataUrls: new Map([[HEX, DATA]]),
+        isLoading: false,
+      });
+      const { result } = renderHook(() =>
+        useResolvedInlineImageHtml(`<img src="${src}">`),
+      );
+      expect(useAttachmentPreviews).toHaveBeenCalledWith([HEX]);
+      expect(result.current.resolvedHtml).toContain(`src="${DATA}"`);
+    });
+
+    it("dedupes the same attachment across bare and .iix forms", () => {
+      vi.mocked(useAttachmentPreviews).mockReturnValue({
+        dataUrls: new Map([[HEX, DATA]]),
+        isLoading: false,
+      });
+      const html = `<img src="/${UUID}"><img src="/${HEX}.iix"><img src="/${HEX}">`;
+      const { result } = renderHook(() => useResolvedInlineImageHtml(html));
+      expect(useAttachmentPreviews).toHaveBeenCalledWith([HEX]);
+      expect(result.current.resolvedHtml.match(/data:image\/png/g)).toHaveLength(3);
+    });
+
+    it("strips an unresolved bare-id src like an unresolved .iix src", () => {
+      vi.mocked(useAttachmentPreviews).mockReturnValue({
+        dataUrls: new Map([["ffffffffffffffffffffffffffffffff", DATA]]),
+        isLoading: false,
+      });
+      const { result } = renderHook(() =>
+        useResolvedInlineImageHtml(`<img src="/${UUID}">`),
+      );
+      expect(result.current.resolvedHtml).toContain('data-unresolved="true"');
+      expect(result.current.resolvedHtml).not.toContain(UUID);
+    });
+
+    it.each([
+      ["query string", `/${UUID}?x=1`],
+      ["extra path segment", `/img/${UUID}`],
+      ["absolute url", `https://example.com/${UUID}`],
+      ["protocol-relative", `//${UUID}`],
+      ["other extension", `/${UUID}.png`],
+      ["data uri", "data:image/png;base64,AAAA"],
+    ])("does not fetch or rewrite a %s src", (_name, src) => {
+      vi.mocked(useAttachmentPreviews).mockReturnValue({
+        dataUrls: new Map([[HEX, DATA]]),
+        isLoading: false,
+      });
+      const html = `<img src="${src}">`;
+      const { result } = renderHook(() => useResolvedInlineImageHtml(html));
+      expect(useAttachmentPreviews).toHaveBeenCalledWith([]);
+      expect(result.current.resolvedHtml).toBe(html);
+    });
   });
 });

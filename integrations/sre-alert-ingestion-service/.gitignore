@@ -1,31 +1,9 @@
-# Environment
+# Deployment config and secrets; config.toml is supplied via Choreo file mount.
+config.toml
+vendor_alert_config.json
 .env
+/sre-alert-ingestion-service
 
-# Build output
-/server
-/bin/
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test output
-*.test
-*.out
-coverage.html
-coverage.out
-
-# Go workspace
-go.work
-go.work.sum
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
+# Local notes on unresolved issues.
+OPEN_ISSUES.md
+PLAN.md

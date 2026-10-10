@@ -76,19 +76,25 @@ func (s *eventPublisherService) Publish(ctx context.Context, eventType events.Ty
 		return nil
 	}
 
+	// failures is nil when no database is configured, which is legal when
+	// DATA_SOURCE=servicenow (see config.Config.HasDatabase). There is nowhere
+	// durable to record the failure in that case, so log loudly and return the
+	// original publish error — the alternative, dereferencing a nil service,
+	// would turn a recoverable publish failure into a panic.
 	if s.failures == nil {
-		slog.ErrorContext(ctx, "eventpublisher: publish failed; skipping failure record (no store)", "eventType", eventType, "entityId", entityID, "publishErr", pubErr)
-	} else {
-		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordFailureTimeout)
-		defer cancel()
-		if _, recErr := s.failures.CreateEventPublishFailure(recordCtx, domain.CreateEventPublishFailureRequest{
-			EventType: string(eventType),
-			EntityID:  entityID,
-			Payload:   payload,
-			Error:     pubErr.Error(),
-		}); recErr != nil {
-			slog.ErrorContext(ctx, "eventpublisher: publish failed and recording the failure also failed", "eventType", eventType, "entityId", entityID, "publishErr", pubErr, "recordErr", recErr)
-		}
+		slog.ErrorContext(ctx, "eventpublisher: publish failed and no database is configured to record it", "eventType", eventType, "entityId", entityID, "publishErr", pubErr)
+		return fmt.Errorf("eventpublisher: publish %s for entity %s: %w", eventType, entityID, pubErr)
+	}
+
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordFailureTimeout)
+	defer cancel()
+	if _, recErr := s.failures.CreateEventPublishFailure(recordCtx, domain.CreateEventPublishFailureRequest{
+		EventType: string(eventType),
+		EntityID:  entityID,
+		Payload:   payload,
+		Error:     pubErr.Error(),
+	}); recErr != nil {
+		slog.ErrorContext(ctx, "eventpublisher: publish failed and recording the failure also failed", "eventType", eventType, "entityId", entityID, "publishErr", pubErr, "recordErr", recErr)
 	}
 
 	return fmt.Errorf("eventpublisher: publish %s for entity %s: %w", eventType, entityID, pubErr)

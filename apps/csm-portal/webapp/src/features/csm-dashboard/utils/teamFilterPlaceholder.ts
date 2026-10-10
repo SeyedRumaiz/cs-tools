@@ -14,7 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { isCaseFieldFilterArray, type WidgetCaseFieldFilterLike } from "./widgetPreviewUrl";
+import { hasFieldFilterEntries, isFieldFilterEntry } from "./widgetPreviewUrl";
 
 /**
  * Placeholder value a `creTeam`/`sreTeam`/`assignmentGroupId` filter entry's
@@ -159,7 +159,7 @@ function resolveCaseFieldFilterPlaceholder(
   selectedTeamSreGroupId: string | string[] | undefined,
 ): Record<string, unknown> {
   const fieldFilters = filters.filters;
-  if (!isCaseFieldFilterArray(fieldFilters)) return filters;
+  if (!hasFieldFilterEntries(fieldFilters)) return filters;
 
   const replacementCreGroupId =
     typeof selectedTeamCreGroupId === "string" ? selectedTeamCreGroupId : undefined;
@@ -167,8 +167,12 @@ function resolveCaseFieldFilterPlaceholder(
     typeof selectedTeamSreGroupId === "string" ? selectedTeamSreGroupId : undefined;
 
   let changed = false;
-  const resolved: WidgetCaseFieldFilterLike[] = [];
+  const resolved: unknown[] = [];
   for (const entry of fieldFilters) {
+    if (!isFieldFilterEntry(entry)) {
+      resolved.push(entry);
+      continue;
+    }
     const values = entry.values;
     const isCreEntry = entry.field === CRE_TEAM_FILTER_FIELD;
     // `sreTeam` and `assignmentGroupId` both resolve from
@@ -247,8 +251,9 @@ function resolveAssignmentTeamIdsPlaceholder(
  */
 export function hasTeamPlaceholder(filters: Record<string, unknown>): boolean {
   const fieldFilters = filters.filters;
-  if (isCaseFieldFilterArray(fieldFilters)) {
+  if (hasFieldFilterEntries(fieldFilters)) {
     const hasCaseFieldPlaceholder = fieldFilters.some((entry) => {
+      if (!isFieldFilterEntry(entry)) return false;
       const isCreEntry = entry.field === CRE_TEAM_FILTER_FIELD;
       const isSreEntry =
         entry.field === SRE_TEAM_FILTER_FIELD || entry.field === ASSIGNMENT_GROUP_ID_FILTER_FIELD;

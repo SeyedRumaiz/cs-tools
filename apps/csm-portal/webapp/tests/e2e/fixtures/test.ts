@@ -27,7 +27,27 @@ import { test as base, expect, type Browser, type BrowserContext, type Page } fr
 import fs from "node:fs";
 import path from "node:path";
 
-export type TimecardRole = "approver" | "engineer";
+// The "cr*" roles are generated locally (see tests/e2e/auth/generate-session.spec.ts)
+// against the local docker-compose mock-oidc provider, one per persona of the
+// Change Request seed (scripts/csm-compose/seed-entity-service.sql, "Local seed
+// personas" in entity-service's CLAUDE.md). Unlike "approver"/"engineer" above
+// (captured by hand against a real staging backend), they are only ever valid
+// against the local stack:
+//
+//   crApprover          jane.doe@example.com          internal; the requester persona
+//                                                     (in no approval group)
+//   crInternalApprover  alice.perera@example.com      internal; peer / CAB
+//                                                     approver (also bob.fernando,
+//                                                     carol.silva hold the same seats)
+//
+// There is no session for the seed's customers (dave.mendis, erin.jayawardena, ...):
+// customers do not sign in to the CSM portal. They answer the Customer Approval /
+// Customer Review stages in the customer portal, and a CSM spec that needs that answer
+// applies it server-side (utils/customerPortalDecision.ts, or the fake API's
+// `customerDecides`) and checks what the CSM page shows to an internal user.
+//
+// Minting: auth/README.md.
+export type TimecardRole = "approver" | "engineer" | "crApprover" | "crInternalApprover";
 
 /** A captured session: the origin's localStorage + sessionStorage snapshots.
  * `cookies` (optional) carries the IdP-domain cookies so the SDK's silent

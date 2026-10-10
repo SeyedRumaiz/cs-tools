@@ -132,13 +132,13 @@ describe("CasesList — Subject cell has a capped width", () => {
 
     const subjectCell = screen.getByTitle(longSubject).parentElement;
     expect(subjectCell).not.toBeNull();
-    expect(getComputedStyle(subjectCell!).maxWidth).toBe("360px");
+    expect(getComputedStyle(subjectCell!).maxWidth).toBe("320px");
   });
 
   // Regression: reported live for Security Reports' Product column, but the
   // same shared CasesList renders Cases/Service Requests/Engagements too — an
   // optional column's track is mechanically identical to Subject's
-  // (minmax(140px, 1fr) vs. Subject's minmax(280px, 3fr)), so it needed the
+  // (minmax(140px, 220px) vs. Subject's minmax(280px, 320px)), so it needed the
   // same maxWidth treatment, not just Subject.
   it("also caps an optional column's wrapping cell for a long value", () => {
     const longCustomer =
@@ -161,7 +161,7 @@ describe("CasesList — Subject cell has a capped width", () => {
 
     const customerCell = screen.getByTitle(longCustomer).parentElement;
     expect(customerCell).not.toBeNull();
-    expect(getComputedStyle(customerCell!).maxWidth).toBe("260px");
+    expect(getComputedStyle(customerCell!).maxWidth).toBe("220px");
   });
 });
 

@@ -208,10 +208,10 @@ function LinkText({ to, children }: { to: string; children: ReactNode }): JSX.El
 // 1. Customer / Account context
 // ---------------------------------------------------------------------------
 
-/** "cloud_support" -> "cloud support". Matches the plain formatter already
- * used for the same enum on the project detail page. */
+/** "cloud_support" -> "Cloud Support". Matches the same formatter used for
+ * this enum on the account/project detail pages. */
 function formatSubscriptionType(value: string): string {
-  return value.replace(/_/g, " ");
+  return value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 export function CustomerContextWidget({
@@ -412,14 +412,16 @@ export function TagsWidget({
       title="Tags"
       icon={<Shield size={16} />}
       action={
-        <Button
-          size="small"
-          variant="text"
-          startIcon={<Plus size={14} />}
-          onClick={onAdd}
-        >
-          Tag
-        </Button>
+        onAdd ? (
+          <Button
+            size="small"
+            variant="text"
+            startIcon={<Plus size={14} />}
+            onClick={onAdd}
+          >
+            Tag
+          </Button>
+        ) : undefined
       }
     >
       {tags.length === 0 ? (
@@ -944,14 +946,16 @@ export function TimeLogsWidget({
       title="Time tracked"
       icon={<Clock size={16} />}
       action={
-        <Button
-          size="small"
-          variant="text"
-          startIcon={<Plus size={14} />}
-          onClick={onAdd}
-        >
-          Log time
-        </Button>
+        onAdd ? (
+          <Button
+            size="small"
+            variant="text"
+            startIcon={<Plus size={14} />}
+            onClick={onAdd}
+          >
+            Log time
+          </Button>
+        ) : undefined
       }
     >
       <Box
@@ -1124,15 +1128,25 @@ export function AttachmentsWidget({
                   : "Upload"}
               </Button>
             )}
-            <Button
-              size="small"
-              variant="text"
-              startIcon={<Download size={14} />}
-              onClick={onDownloadAll}
-              disabled={sorted.length === 0}
+            <Tooltip
+              title={
+                onDownloadAll
+                  ? ""
+                  : "You don't have permission to download attachments."
+              }
             >
-              Download all
-            </Button>
+              <Box component="span">
+                <Button
+                  size="small"
+                  variant="text"
+                  startIcon={<Download size={14} />}
+                  onClick={onDownloadAll}
+                  disabled={!onDownloadAll || sorted.length === 0}
+                >
+                  Download all
+                </Button>
+              </Box>
+            </Tooltip>
           </Box>
         }
       >
@@ -1235,29 +1249,48 @@ export function AttachmentsWidget({
                     · <RelativeTime iso={a.uploadedAt} />
                   </Typography>
                 </Box>
-                {preview &&
-                  getAttachmentPreviewKind(a.contentType) && (
+                {getAttachmentPreviewKind(a.contentType) && (
+                  <Tooltip
+                    title={
+                      preview
+                        ? ""
+                        : "You don't have permission to view attachments."
+                    }
+                  >
+                    <Box component="span" sx={{ flexShrink: 0 }}>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        startIcon={<Eye size={14} />}
+                        onClick={() => preview?.onPreviewTargetChange(a)}
+                        disabled={!preview}
+                        aria-label={`Preview ${a.filename}`}
+                      >
+                        Preview
+                      </Button>
+                    </Box>
+                  </Tooltip>
+                )}
+                <Tooltip
+                  title={
+                    onDownload
+                      ? ""
+                      : "You don't have permission to download attachments."
+                  }
+                >
+                  <Box component="span" sx={{ flexShrink: 0 }}>
                     <Button
                       size="small"
                       variant="outlined"
-                      startIcon={<Eye size={14} />}
-                      onClick={() => preview.onPreviewTargetChange(a)}
-                      aria-label={`Preview ${a.filename}`}
-                      sx={{ flexShrink: 0 }}
+                      startIcon={<Download size={14} />}
+                      onClick={() => onDownload?.(a)}
+                      disabled={!onDownload}
+                      aria-label={`Download ${a.filename}`}
                     >
-                      Preview
+                      Download
                     </Button>
-                  )}
-                <Button
-                  size="small"
-                  variant="outlined"
-                  startIcon={<Download size={14} />}
-                  onClick={() => onDownload?.(a)}
-                  aria-label={`Download ${a.filename}`}
-                  sx={{ flexShrink: 0 }}
-                >
-                  Download
-                </Button>
+                  </Box>
+                </Tooltip>
                 {onDelete && (
                   <IconButton
                     size="small"

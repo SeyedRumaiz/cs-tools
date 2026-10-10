@@ -19,6 +19,7 @@ import {
   Ban,
   CalendarCheck,
   CalendarClock,
+  CircleCheckBig,
   CircleX,
   Eye,
   MessageSquareText,
@@ -64,6 +65,7 @@ const ACTION_LABEL: Record<CallRequestAgentAction, string> = {
   reschedule: "Reschedule",
   reject: "Reject",
   sendNotes: "Send call notes",
+  complete: "Mark as completed",
   cancel: "Cancel",
 };
 
@@ -75,6 +77,7 @@ const ACTION_ICON: Record<CallRequestAgentAction, typeof CalendarCheck> = {
   reschedule: CalendarClock,
   reject: CircleX,
   sendNotes: MessageSquareText,
+  complete: CircleCheckBig,
   cancel: Ban,
 };
 
@@ -105,6 +108,12 @@ export interface CallRequestsTableProps {
   /** True when the parent case is closed — existing call requests stay visible
    * but can no longer be updated (scheduled, rejected, etc.). */
   isClosed?: boolean;
+  /** True when the caller can't change call requests (no write access) — the
+   * row actions are shown disabled, since the backend would 403 them. */
+  readOnly?: boolean;
+  /** True while a change to a call request is in flight: every row action is
+   * disabled so a one-click action ("Mark as completed") cannot be sent twice. */
+  busy?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +124,8 @@ export function CallRequestsTable({
   requests,
   onAction,
   isClosed,
+  readOnly,
+  busy,
 }: CallRequestsTableProps): JSX.Element {
   const [detailTarget, setDetailTarget] = useState<BeCallRequestView | null>(null);
 
@@ -305,7 +316,9 @@ export function CallRequestsTable({
                         title={
                           isClosed
                             ? "This case is closed — it's read-only."
-                            : ACTION_LABEL[action]
+                            : readOnly
+                              ? "You don't have permission to change call requests."
+                              : ACTION_LABEL[action]
                         }
                       >
                         <span>
@@ -313,10 +326,14 @@ export function CallRequestsTable({
                             size="small"
                             aria-label={ACTION_LABEL[action]}
                             color={
-                              action === "reject" || action === "cancel" ? "error" : "primary"
+                              action === "reject" || action === "cancel"
+                                ? "error"
+                                : action === "complete"
+                                  ? "success"
+                                  : "primary"
                             }
                             onClick={() => onAction(action, cr)}
-                            disabled={isClosed}
+                            disabled={isClosed || readOnly || busy}
                           >
                             <ActionIcon size={16} />
                           </IconButton>

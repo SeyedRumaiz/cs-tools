@@ -29,7 +29,7 @@ entity-service/
 │   │   ├── interfaces.go        # CaseRepository and CaseService interfaces
 │   │   ├── entity_service.go    # Business logic — pagination, validation
 │   │   ├── event_publisher_service.go # EventPublisherService.Publish — builds the envelope, publishes it, records a failure if Event Hub doesn't ack (wired in via routes.go; called from snCaseService.CreateCase and snIncidentService.CreateIncident)
-│   │   └── sla_clock_service.go # SLAClockService — register/get/mark-tier-reached for a case's SLA clocks
+│   │   └── sla_status_service.go # SLAStatusService — lists currently-active SLA clocks, read live from the "sla" table
 │   ├── repository/
 │   │   ├── entity_repo.go       # SQL queries against the "case" table
 │   │   └── tx.go                # Transaction helper
@@ -44,7 +44,7 @@ entity-service/
 │   │   ├── recovery.go          # Panic recovery → 500
 │   │   └── timeout.go           # Per-request context deadline
 │   └── apierror/errors.go       # Sentinel errors and JSON error responder
-├── migrations/                  # SQL migration files (up/down)
+├── migrations/                  # SQL migration files, one per NNNN_<description>.sql, no separate up/down
 ├── queries/                     # Raw SQL queries (sqlc source)
 ├── deploy/                      # Dockerfile and docker-compose
 ├── sqlc.yaml                    # sqlc code generation config
@@ -117,6 +117,10 @@ HTTP Request
 | DB_SSLMODE  | No       | require   | SSL mode          |
 | SERVER_PORT | No       | 8080      | Main API listener port |
 | HEALTH_PORT | No       | 8081      | Health probe listener port; must differ from `SERVER_PORT`, and must be left at its default in Choreo deployments (see below) |
+| SERVER_READ_TIMEOUT | No | 60s | Main API server read timeout (Go duration, e.g. `60s`); must be > 0 |
+| SERVER_WRITE_TIMEOUT | No | 60s | Main API server write timeout; must be > 0 |
+| REQUEST_TIMEOUT | No | 60s | Per-request context timeout; must be > 0 |
+| UPSTREAM_CLIENT_TIMEOUT | No | 60s | Data-source HTTP client timeout; must be > 0 |
 
 > `.env` file is loaded automatically if present. Absent `.env` is silently ignored; a malformed one causes a fatal startup error.
 
@@ -189,26 +193,71 @@ rather than async.
 | `EVENT_HUB_CONNECTION_STRING` | The namespace's Shared Access Policy connection string — must be namespace-scoped (no `EntityPath`), not scoped to a single Event Hub (required once `EVENT_HUB_BROKER` is set) |
 | `EVENT_HUB_TOPIC` | Event Hub (Kafka topic) name, e.g. `case-events` — must match `csm-notification-service`'s own `EVENT_HUB_TOPIC` (required once `EVENT_HUB_BROKER` is set) |
 | `EVENT_PUBLISHING_ENABLED` | Set to `true` to actually publish. Defaults to `false` — safe by default even with Event Hub fully configured (optional) |
+| `AUTH_ISSUER` / `AUTH_JWKS_URL` | Asgardeo issuer and JWKS URL for validating the `x-user-id-token` user ID token -- always on, there is no flag to disable it. Required; the JWKS must load at startup or the process exits. A present-but-invalid `x-user-id-token` is a 401 on every route. `x-jwt-assertion` (the client-credentials assertion) is decoded only, never verified against these -- see entity-service's `CLAUDE.md` ("Token validation and caller-scoped access") for why |
+| `AUTH_USER_TOKEN_AUDIENCES` | Comma-separated client ids an ID token's `aud` must contain to count as a user token; required |
+| `AUTH_CLOCK_SKEW` | Leeway for `exp` (default `30s`) |
+| `M2M_CLIENT_IDS` | Comma-separated Asgardeo application client ids for pure machine-to-machine callers (no human in the loop), trusted with unconditional full access to every project and case (checked against a client-credentials `x-jwt-assertion` token), regardless of any `x-user-id-token` the same request also carries. A service that calls the scoped endpoints directly with only a client-credentials token gets a 401 unless it is listed (optional) |
+| `CSM_PORTAL_BACKEND_CLIENT_ID` / `CSM_PORTAL_USER_DOMAIN` | The CSM portal backend's client id, unrestricted only if the forwarded `x-user-id-token`'s email also ends in this domain (e.g. `wso2.com`); otherwise refused (403). Must be set together or not at all (optional) |
+| `CUSTOMER_PORTAL_BACKEND_CLIENT_ID` | The customer portal backend's client id. Checked first and always resolved purely from the forwarded `x-user-id-token` -- never unconditionally trusted, structurally preventing this id from ever gaining unrestricted access even if misconfigured elsewhere (optional) |
+| `CUSTOMER_ROLES` | Comma-separated ServiceNow role names whose presence on a case comment's author marks it a customer reply — see "Customer reply state transition" below. No default; unset means that path never fires (optional) |
 
-### SLA clocks
+### User cache (Redis)
 
-`sla_clocks` (migration `000011`) durably tracks per-case SLA timers — `caseId`/`clockType`,
-`startedAt`/`dueAt`, and up to three tier-crossing timestamps (`reached50At`/`reached75At`/`reached100At`).
-Has no ServiceNow equivalent — always backed by Postgres regardless of `DATA_SOURCE`, same as
-`event_publish_failures`. `clockType` is a caller-defined string, not a fixed enum: which clock types
-exist and what duration each gets is a policy decision made entirely by whatever publishes the
-triggering event — this service only stores the result, it does not compute durations from case
-severity or anything else.
+`GET /users/{id}` and `GET /users/me` can be served from Redis (`internal/cache`), cache-aside:
+a miss reads Postgres and stores the result for `USER_CACHE_TTL`. Every writer of user, contact
+and membership data (`POST /users`, `PATCH /users/me`, the Salesforce Contact and membership
+ingest, and the portal `/projects/{id}/contacts` writes) deletes the affected user's entries after
+its transaction commits, so the TTL is only a backstop. Errors and not-found results are never
+cached.
 
-Consumed by `csm-notification-service`'s SLA timer engine (`internal/slaengine`), which registers a
-clock on `POST /cases/{caseId}/sla-clocks`, reads it back via `GET /cases/{caseId}/sla-clocks/{clockType}`
-to check `pausedOn` before firing a tier, and records a crossed tier idempotently via
-`PATCH /cases/{caseId}/sla-clocks/{clockType}/tiers/{tier}` with `{"status": "reached"}`.
+The cache is optional and fails open: with no Redis configured, or Redis unreachable, every read
+goes to Postgres as before (a Redis outage is logged, never returned to the caller). It is wired
+only when there is a database.
+
+| Variable | Description |
+|---|---|
+| `REDIS_URL` | `rediss://:<access-key>@<host>:<port>` for a managed, TLS-only Redis (Azure Managed Redis); takes priority over `REDIS_ADDR`. Holds the access key — a secret in Choreo. Must be non-clustered or the "Enterprise" clustering policy, not "OSS Cluster" (optional) |
+| `REDIS_ADDR` / `REDIS_PASSWORD` | Plain, non-TLS `host:port` and password for a local Redis (optional) |
+| `USER_CACHE_TTL` | How long a cached user lives without an invalidation, as a Go duration (default `10m`) |
+
+Keys are namespaced `entity:v1:user:*`; emails appear in keys only as a SHA-256 hash.
+
+### SLA status
+
+`GET /sla-status` reads SLA state live from the `sla` table (migration `000052`), which
+ServiceNow's own SLA engine populates via sync — real `businessElapsedPercent`/`hasBreached`/
+`stage` per `(work_item, sla_policy)`. Has no ServiceNow equivalent of its own — always backed
+by Postgres regardless of `DATA_SOURCE`, same as `event_publish_failures`. `clockType` is
+`response`/`workaround`/`resolution`, lower-cased from `sla_policy.target`.
+
+Returns every currently-active clock across every case-like work item in one paginated list
+(default limit `500`, max `2000` — much higher than this service's other paginated endpoints,
+since the one real caller is `csm-notification-service` polling periodically, not a UI list).
+There is no registration step and nothing for this service to schedule or track in-process any
+more: the synced `sla` row already reflects pauses, completions, and breaches, because
+ServiceNow's own SLA engine reacted to those events on its own side. This replaces an earlier
+`sla_clocks` design (a hand-registered clock per case, using a hardcoded severity->duration
+guess) that existed before the `sla` table did — see `CLAUDE.md`'s "SLA status" section for
+the full history.
+
+`csm-notification-service`'s SLA engine polls `GET /sla-status` periodically and diffs
+`businessElapsedPercent` against what it already alerted on itself (its own Redis state, not
+anything this service tracks), sending a Google Chat card directly on a newly-crossed tier —
+not routed through this service.
+
+### Customer reply state transition
+
+When a customer-visible comment (not a work note) from a user holding one of the `CUSTOMER_ROLES`
+roles (looked up via `SNUserService.SearchUsers`, filtered by the comment author's email) arrives
+while the case is `Awaiting Info`/`Solution Proposed`, `sn_case_service.go`'s
+`applyCustomerReplyStateTransition` moves it back to `Waiting on WSO2` — a customer reply means
+it's WSO2's turn to act again. Implemented as a plain in-process call to this service's own
+`UpdateCase`, not a separate ServiceNow PATCH — so it gets `case.status_changed` publishing for
+free, with no duplicated logic.
 
 ### Scheduled task runs
 
-`scheduled_task_run` (migration `000013` — the one intentionally singular table name in this
-schema) is durable claim/retry state for `operations/csm-scheduled-tasks`, a single Choreo
+`scheduled_task_run` (migration `000045`) is durable claim/retry state for `operations/csm-scheduled-tasks`, a single Choreo
 Scheduled Task that fans out to many independently-scheduled sub-crons on one shared driver
 cadence. Has no ServiceNow equivalent — always backed by Postgres. No stored status column: a row's
 state is always derivable from which timestamp is set (`succeededOn`, `supersededOn`,

@@ -100,7 +100,7 @@ export function generateIncidentReportPdf(
   if (incident.configurationItem?.name) {
     rows.push({ label: "Configuration item", value: incident.configurationItem.name });
   }
-  if (incident.contactType) rows.push({ label: "Contact type", value: incident.contactType });
+  if (incident.contactType) rows.push({ label: "Channel", value: incident.contactType });
   if (incident.impact) rows.push({ label: "Impact", value: incident.impact });
   if (incident.urgency) rows.push({ label: "Urgency", value: incident.urgency });
   rows.push({ label: "Assignment group", value: incident.assignmentGroup?.name || "—" });

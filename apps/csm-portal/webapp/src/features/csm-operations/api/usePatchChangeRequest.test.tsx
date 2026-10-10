@@ -72,7 +72,7 @@ describe("usePatchChangeRequest", () => {
     });
   });
 
-  it("invalidates the CR's detail and the list on success", async () => {
+  it("invalidates the CR's detail, the list, and its approvals on success", async () => {
     patchMock.mockResolvedValue({
       message: "ok",
       changeRequest: { id: "cr-1", state: "assess" },
@@ -89,6 +89,13 @@ describe("usePatchChangeRequest", () => {
     );
     expect(invalidateQueriesMock).toHaveBeenCalledWith(
       expect.objectContaining({ queryKey: ["change-requests"] }),
+    );
+    // Entering Assess can auto-provision approvers server-side (the assigned
+    // team's own members), so the Approvals tab's cache has to be
+    // invalidated too -- otherwise it keeps showing "no approval stages"
+    // until an unrelated full page reload refetches it independently.
+    expect(invalidateQueriesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["change-request-approvals", "cr-1"] }),
     );
   });
 
@@ -118,6 +125,9 @@ describe("usePatchChangeRequest", () => {
     );
     expect(invalidateQueriesMock).toHaveBeenCalledWith(
       expect.objectContaining({ queryKey: ["change-requests"] }),
+    );
+    expect(invalidateQueriesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ queryKey: ["change-request-approvals", "cr-1"] }),
     );
   });
 });

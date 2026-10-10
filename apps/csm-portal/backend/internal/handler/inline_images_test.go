@@ -85,16 +85,22 @@ func TestInlineImageProcessorNoImagesReturnsUnchanged(t *testing.T) {
 
 // TestInlineImageProcessorSingleImage verifies the full happy path for one
 // embedded image: the entity attachment row is created with status
-// "complete", the bytes are written via SFTPGo, and the <img> tag is
-// rewritten to "/<attachmentId>.iix".
+// "pending", the bytes are written via SFTPGo, the row is only then
+// confirmed "complete", and the <img> tag is rewritten to
+// "/<attachmentId>.iix".
 func TestInlineImageProcessorSingleImage(t *testing.T) {
 	t.Parallel()
 	const caseID = "11111111-1111-1111-1111-111111111111"
 	var gotAttachmentBody []byte
+	var confirmedIDs []string
 	entity := &mockEntityCaseClient{
 		createCaseAttachmentFn: func(ctx context.Context, body []byte) ([]byte, error) {
 			gotAttachmentBody = body
-			return []byte(`{"attachment":{"id":"22222222-2222-2222-2222-222222222222","status":"complete"}}`), nil
+			return []byte(`{"attachment":{"id":"22222222-2222-2222-2222-222222222222","status":"pending"}}`), nil
+		},
+		confirmCaseAttachmentFn: func(ctx context.Context, attachmentID string) ([]byte, error) {
+			confirmedIDs = append(confirmedIDs, attachmentID)
+			return []byte(`{"attachment":{"id":"` + attachmentID + `","status":"complete"}}`), nil
 		},
 	}
 	sftpgoMock := &mockSftpgoClient{}
@@ -145,8 +151,11 @@ func TestInlineImageProcessorSingleImage(t *testing.T) {
 	if req.Type != "image/png" {
 		t.Errorf("Type = %q, want image/png", req.Type)
 	}
-	if req.Status != "complete" {
-		t.Errorf("Status = %q, want complete — inline-image attachments are created with their bytes already uploaded", req.Status)
+	if req.Status != "pending" {
+		t.Errorf("Status = %q, want pending — the row must not be durable-complete before its bytes exist", req.Status)
+	}
+	if len(confirmedIDs) != 1 || confirmedIDs[0] != "22222222-2222-2222-2222-222222222222" {
+		t.Errorf("confirmedIDs = %v, want exactly the created attachment confirmed after upload", confirmedIDs)
 	}
 	if !strings.HasPrefix(req.Name, "inline-image-") || !strings.HasSuffix(req.Name, ".png") {
 		t.Errorf("Name = %q, want an inline-image-<ts>-<n>.png synthetic filename", req.Name)
@@ -292,6 +301,103 @@ func TestInlineImageProcessorRollsBackOnSecondImageFailure(t *testing.T) {
 			t.Errorf("deletedIDs[%d] = %q, want %q", i, deletedIDs[i], want)
 		}
 	}
+
+	// The FIRST image's bytes are already in SFTPGo, and the second's upload
+	// may have written a partial object — rollback must attempt to delete
+	// both, not just the metadata rows.
+	if len(sftpgoMock.removeFileCalls) != 2 {
+		t.Fatalf("removeFileCalls = %v, want 2 — rollback must clean up uploaded bytes, not only rows", sftpgoMock.removeFileCalls)
+	}
+	if sftpgoMock.removeFileCalls[0] != sftpgoMock.uploadBytesCalls[0] || sftpgoMock.removeFileCalls[1] != sftpgoMock.uploadBytesCalls[1] {
+		t.Errorf("removeFileCalls = %v, want the storage keys UploadBytes was given: %v", sftpgoMock.removeFileCalls, sftpgoMock.uploadBytesCalls)
+	}
+}
+
+// TestInlineImageProcessorRollsBackOnConfirmFailure verifies the row is
+// created pending and never left durable when its confirm step fails: the
+// whole comment is rejected and both the row and the uploaded bytes are
+// cleaned up.
+func TestInlineImageProcessorRollsBackOnConfirmFailure(t *testing.T) {
+	t.Parallel()
+	var deletedIDs []string
+	entity := &mockEntityCaseClient{
+		createCaseAttachmentFn: nextAttachmentIDFactory(),
+		confirmCaseAttachmentFn: func(ctx context.Context, attachmentID string) ([]byte, error) {
+			return nil, &apierror.Error{StatusCode: http.StatusInternalServerError, Body: "boom"}
+		},
+		deleteCaseAttachmentFn: func(ctx context.Context, attachmentID string) ([]byte, error) {
+			deletedIDs = append(deletedIDs, attachmentID)
+			return []byte(`{"message":"deleted"}`), nil
+		},
+	}
+	sftpgoMock := &mockSftpgoClient{}
+	p := NewInlineImageProcessor(entity, sftpgoMock)
+
+	html := dataURIImg("png", tinyPNGBase64(16))
+
+	_, ierr := p.Process(context.Background(), "agent@example.com", "raw-jwt", "case-1", "", html)
+	if ierr == nil {
+		t.Fatal("Process returned no error, want the confirm failure to reject the whole comment")
+	}
+	if len(deletedIDs) != 1 {
+		t.Errorf("deletedIDs = %v, want the unconfirmed row deleted", deletedIDs)
+	}
+	if len(sftpgoMock.removeFileCalls) != 1 {
+		t.Errorf("removeFileCalls = %v, want the uploaded bytes deleted", sftpgoMock.removeFileCalls)
+	}
+}
+
+// TestInlineImageProcessorRollbackSurvivesCancelledContext verifies rollback
+// runs on a context detached from the request's cancellation: even when the
+// parent context is already cancelled by the time the failure surfaces
+// (caller gone, deadline hit), the row deletions and byte cleanups must still
+// be attempted, on a NON-cancelled context.
+func TestInlineImageProcessorRollbackSurvivesCancelledContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var deleteCtxErrs []error
+	var deletedIDs []string
+	entity := &mockEntityCaseClient{
+		createCaseAttachmentFn: nextAttachmentIDFactory(),
+		deleteCaseAttachmentFn: func(ctx context.Context, attachmentID string) ([]byte, error) {
+			deleteCtxErrs = append(deleteCtxErrs, ctx.Err())
+			deletedIDs = append(deletedIDs, attachmentID)
+			return []byte(`{"message":"deleted"}`), nil
+		},
+	}
+	sftpgoMock := &mockSftpgoClient{
+		uploadBytesFn: func(ctx context.Context, shareID, storageKey string, data []byte, contentType string) error {
+			// Simulate the request being torn down mid-upload: cancel the
+			// parent context, then fail the upload.
+			cancel()
+			return context.Canceled
+		},
+	}
+	p := NewInlineImageProcessor(entity, sftpgoMock)
+
+	html := dataURIImg("png", tinyPNGBase64(16))
+
+	_, ierr := p.Process(ctx, "agent@example.com", "raw-jwt", "case-1", "", html)
+	if ierr == nil {
+		t.Fatal("Process returned no error, want the upload failure to reject the whole comment")
+	}
+	if len(deletedIDs) != 1 {
+		t.Fatalf("deletedIDs = %v, want the created row deleted despite the cancelled parent context", deletedIDs)
+	}
+	for i, err := range deleteCtxErrs {
+		if err != nil {
+			t.Errorf("DeleteCaseAttachment call %d ran on a cancelled context (%v); rollback must use a detached context", i, err)
+		}
+	}
+	if len(sftpgoMock.removeFileCalls) != 1 {
+		t.Fatalf("removeFileCalls = %v, want the possibly-partial upload cleaned up", sftpgoMock.removeFileCalls)
+	}
+	for i, err := range sftpgoMock.removeFileCtxErrs {
+		if err != nil {
+			t.Errorf("RemoveFile call %d ran on a cancelled context (%v); rollback must use a detached context", i, err)
+		}
+	}
 }
 
 // TestInlineImageProcessorRollsBackOnEntityCreateFailure verifies rollback
@@ -351,13 +457,13 @@ func TestCreateCaseCommentInlineImagesDisabledByDefault(t *testing.T) {
 			return []byte(`{}`), nil
 		},
 	}
-	h := NewCaseHandler(entity) // no WithInlineImageProcessor call
+	h := NewCaseHandler(entity).WithAccessGuard(viewerAccessGuard) // no WithInlineImageProcessor call
 
 	b64 := tinyPNGBase64(16)
 	content := dataURIImg("png", b64)
 	reqBody := `{"type":"comment","content":` + jsonString(content) + `}`
 
-	req := withUser(httptest.NewRequest(http.MethodPost, "/cases/"+caseID+"/comments", strings.NewReader(reqBody)))
+	req := withCsEngineerUser(httptest.NewRequest(http.MethodPost, "/cases/"+caseID+"/comments", strings.NewReader(reqBody)))
 	req.SetPathValue("id", caseID)
 	w := httptest.NewRecorder()
 
@@ -391,12 +497,12 @@ func TestCreateCaseCommentExtractsInlineImageWhenEnabled(t *testing.T) {
 		},
 	}
 	sftpgoMock := &mockSftpgoClient{}
-	h := NewCaseHandler(entity).WithInlineImageProcessor(NewInlineImageProcessor(entity, sftpgoMock))
+	h := NewCaseHandler(entity).WithInlineImageProcessor(NewInlineImageProcessor(entity, sftpgoMock)).WithAccessGuard(viewerAccessGuard)
 
 	content := dataURIImg("png", tinyPNGBase64(16))
 	reqBody := `{"type":"comment","content":` + jsonString(content) + `}`
 
-	req := withUser(httptest.NewRequest(http.MethodPost, "/cases/"+caseID+"/comments", strings.NewReader(reqBody)))
+	req := withCsEngineerUser(httptest.NewRequest(http.MethodPost, "/cases/"+caseID+"/comments", strings.NewReader(reqBody)))
 	req.SetPathValue("id", caseID)
 	req.Header.Set(jwtAssertionHeader, "raw-jwt")
 	w := httptest.NewRecorder()
@@ -435,13 +541,13 @@ func TestCreateCaseCommentInlineImageFailureRejectsComment(t *testing.T) {
 		},
 	}
 	sftpgoMock := &mockSftpgoClient{}
-	h := NewCaseHandler(entity).WithInlineImageProcessor(NewInlineImageProcessor(entity, sftpgoMock))
+	h := NewCaseHandler(entity).WithInlineImageProcessor(NewInlineImageProcessor(entity, sftpgoMock)).WithAccessGuard(viewerAccessGuard)
 
 	// An unsupported subtype forces InlineImageProcessor to reject.
 	content := dataURIImg("bmp", tinyPNGBase64(16))
 	reqBody := `{"type":"comment","content":` + jsonString(content) + `}`
 
-	req := withUser(httptest.NewRequest(http.MethodPost, "/cases/"+caseID+"/comments", strings.NewReader(reqBody)))
+	req := withCsEngineerUser(httptest.NewRequest(http.MethodPost, "/cases/"+caseID+"/comments", strings.NewReader(reqBody)))
 	req.SetPathValue("id", caseID)
 	req.Header.Set(jwtAssertionHeader, "raw-jwt")
 	w := httptest.NewRecorder()

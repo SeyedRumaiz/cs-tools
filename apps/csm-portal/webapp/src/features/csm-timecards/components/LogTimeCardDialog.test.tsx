@@ -243,6 +243,41 @@ describe("LogTimeCardDialog — create mode", () => {
     expect(screen.getAllByTestId("approver-candidate")).toHaveLength(1);
   });
 
+  it("excludes the signed-in user from the recently-selected approvers list", () => {
+    mockedUseRecentApprovers.mockReturnValue({
+      data: [
+        { id: "me-1", name: "Jane Self" },
+        { id: "lead-1", name: "Priya Lead" },
+      ],
+    } as unknown as ReturnType<typeof useRecentApprovers>);
+    // The signed-in user (useIdTokenClaims mock: "engineer@example.test")
+    // still comes back from the eligibility re-check — a past card could
+    // have recorded them as their own approver before this rule existed.
+    setSearchUsersData({
+      eligible: [
+        { id: "me-1", name: "Jane Self", userName: "jane", email: "engineer@example.test" },
+        { id: "lead-1", name: "Priya Lead", userName: "priya.lead", email: "priya.lead@example.test" },
+      ],
+    });
+
+    render(
+      <LogTimeCardDialog
+        caseId="case-1"
+        caseNumber="CS0000001"
+        caseSeverity="S3"
+        projectId="proj-1"
+        projectName="Acme"
+        isSubmitting={false}
+        onClose={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Priya Lead")).toBeInTheDocument();
+    expect(screen.queryByText("Jane Self")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("approver-candidate")).toHaveLength(1);
+  });
+
   it("falls back to the ordinary empty-search prompt when there is no recent history", () => {
     mockedUseRecentApprovers.mockReturnValueOnce({
       data: [],

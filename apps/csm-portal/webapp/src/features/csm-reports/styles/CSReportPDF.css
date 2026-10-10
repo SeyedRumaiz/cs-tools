@@ -1,0 +1,306 @@
+/* Copyright (c) 2025, WSO2 LLC. (http://www.wso2.com). All Rights Reserved.
+ *
+ * This software is the property of WSO2 LLC. and its suppliers, if any.
+ * Dissemination of any information or reproduction of any material contained
+ * herein in any form is strictly forbidden, unless permitted by WSO2 expressly.
+ * You may not alter or remove any copyright or other notice from copies of this content. */
+
+.page-break {
+    page-break-before: always;
+    page-break-after: avoid;
+    page-break-inside: avoid;
+    margin-right: 20px;
+    margin-bottom: 20px;
+    margin-left: 20px;
+    padding-top: 30px;
+    padding-right: 15px;
+    padding-bottom: 15px;
+    padding-left: 15px;
+    font-family:  sans-serif;
+  }
+
+.styled-text {
+    margin-right: 20px;
+    margin-bottom: 20px;
+    margin-left: 20px;
+    padding-top: 30px;
+    padding-right: 15px;
+    padding-bottom: 15px;
+    padding-left: 15px;
+    font-family:  sans-serif;
+  }
+
+.front-page {
+    display: flex;
+    flex-direction: column;
+    height: 147.9mm;
+    padding: 20px;
+    background-color: #212a32;
+    margin: 0;
+    box-sizing: border-box;
+    page-break-after: always;
+    font-family:  sans-serif;
+  }
+
+.front-page-logo {
+    max-width: 10%;
+    height: auto;
+    margin-top: 100px;
+    margin-bottom: 30px;
+    margin-left: 50px;
+  }
+
+.front-page .header-title {
+    font-size: 30px;
+    font-weight: bold;
+    margin-bottom: 5px;
+    color: white;
+    margin-left: 50px;
+  }
+
+.front-page .end-date {
+    font-size: 18px;
+    margin-bottom: 20px;
+    color: white;
+    margin-left: 50px;
+  }
+
+.front-page p {
+    font-size: 24px;
+    font-weight: bold;
+    color: #ffc808;
+    margin-bottom: 90px;
+    margin-left: 50px;
+  }
+
+.front-page .section-divider {
+    border-top: 2px solid #ff7300;
+    margin-bottom: 3px;
+  }  
+
+.front-page .current-date {
+    font-size: 14px;
+    color: white;
+    margin-left: 50px;
+  }
+
+.agenda-page {
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    margin: 0;
+    box-sizing: border-box;
+    font-family:  sans-serif;
+  }
+
+.agenda-page h1 {
+    font-size: 28px;
+    font-weight: 600;
+    margin-top: 40px;
+    margin-bottom: 60px;
+    margin-left: 50px;
+  }
+
+.agenda-page p {
+    font-size: 18px;
+    margin-bottom: 20px;
+    margin-left: 50px;
+  }
+
+.agenda-page .agenda-item {
+    position: relative;
+    padding-left: 20px;
+  }
+
+.agenda-page .agenda-item::before {
+    content: "• "; 
+    font-size: 14pt;
+    color: orange;
+    position: absolute;
+    left: 0;
+    top: 0;
+  }
+
+.sub-topic-page {
+    display: flex;
+    flex-direction: column;
+    height: 147.9mm;
+    padding: 20px;
+    background-color: #38434d;
+    margin: 0;
+    box-sizing: border-box;
+    page-break-after: always;
+    font-family:  sans-serif;
+    margin-top: -65px;
+  }  
+
+.records-page{
+    display: flex;
+    flex-direction: column;
+    height: 147.9mm;
+    padding: 20px;
+    background-color: #38434d;
+    margin: 0;
+    box-sizing: border-box;
+    page-break-after: always;
+    font-family:  sans-serif;
+    margin-top: -65px;
+  }
+
+.sub-topic-page h1 {
+    font-size: 30px;
+    font-weight: 600;
+    margin-top: 270px;
+    margin-bottom: 20px;
+    color: white;
+    margin-left: 50px;
+  }
+
+.records-page h1 {
+    font-size: 30px;
+    font-weight: 600;
+    margin-top: 270px;
+    margin-bottom: 20px;
+    color: white;
+    margin-left: 50px;
+  }
+
+.sub-topic-page .section-divider {
+    border-top: 2px solid #ff7300;
+  }  
+  
+.records-page .section-divider {
+    border-top: 2px solid #ff7300;
+  }
+
+.charts-container {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    column-gap: 10px;  
+    row-gap: 5px;
+    height: 30vh;   
+    margin-top: 40px;
+  }
+
+.charts-container img {
+    width: 90mm; 
+    height: auto;
+    display: block;
+    margin: 0 auto;
+  }
+
+.trend-chart-container {
+    margin-top: 40px;
+  }
+
+.trend-chart-container img {
+    width: 190mm; 
+    height: auto;
+    display: block;
+    margin: 0 auto;
+    text-align: center;
+  }
+
+.deployment-image-section img {
+    width: auto; 
+    height: 143mm;
+    display: block;
+    margin: 0 auto;
+  }
+
+.extra-notes-section img {
+    width: auto; 
+    height: 143mm;
+    display: block;
+    margin: 0 auto;
+  }
+
+.thank-page  {
+    display: flex;
+    flex-direction: column;
+    height: 147.9mm;
+    padding: 20px;
+    background-color: #212a32;
+    margin: 0;
+    margin-top: -65px;
+    box-sizing: border-box;
+    font-family:  sans-serif;
+  }
+
+.thank-page h1 {
+    font-size: 44px;
+    font-weight: bold;
+    margin-top: 230px;
+    margin-bottom: 50px;
+    color: white;
+    text-align: center;
+  }
+
+.thank-page .section-divider {
+    border-top: 2px solid #ff7300;
+  }  
+
+.engagements-content {
+    margin-right: 20px;
+    margin-bottom: 20px;
+    margin-left: 20px;
+    padding-top: 30px;
+    padding-right: 15px;
+    padding-bottom: 15px;
+    padding-left: 15px;
+    font-family:  sans-serif;
+  }
+
+.subscription-content {
+    margin-right: 20px;
+    margin-bottom: 20px;
+    margin-left: 20px;
+    padding-top: 30px;
+    padding-right: 15px;
+    padding-bottom: 15px;
+    padding-left: 15px;
+    font-family:  sans-serif;
+  }
+
+.sla-table-page {
+    width: 100%;
+    margin: 20px auto;
+    padding: 20px;
+    background-color: #ffffff;
+    border-radius: 8px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+    text-align: center;
+    font-family: sans-serif;
+  }
+
+.sla-table {
+    width: 100%;
+    background-color: white;
+    font-family:  sans-serif;
+    overflow: hidden;
+    text-align: center;
+  }
+
+.sla-table thead tr {
+    color: white;
+  }
+
+.sla-table thead th {
+    padding: 10px; 
+    border: 1px solid #ddd; 
+    background-color:#455A66;
+  }
+
+.sla-table tbody td {
+    padding: 5px; 
+    border: 1px solid #ddd;   
+  }
+
+.sla-title {
+    font-size: 22px; 
+    font-weight: bold;
+    color: #ff7300;
+    text-align: left; 
+    margin-bottom: 10px;
+    margin-left: 20px; 
+  }

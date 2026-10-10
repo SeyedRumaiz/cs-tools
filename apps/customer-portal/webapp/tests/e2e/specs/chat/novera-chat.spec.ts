@@ -53,22 +53,16 @@ import {
 } from "../../utils/selectors";
 import { expectSuccess } from "../../utils/caseFlows";
 import { conversationSearchWith } from "../../utils/listSearch";
-import { setNoveraViaApi } from "../../utils/noveraFlows";
+import {
+  NOVERA_REPLY_SETTLE_MS,
+  setNoveraViaApi,
+} from "../../utils/noveraFlows";
 import { idPattern, projectPathPattern } from "../../utils/ids";
 
 withSession(test);
 
-/**
- * Settling time after submitting the issue, before anything else is done.
- *
- * A deliberate fixed wait, which the rest of this suite avoids. The conversation
- * id landing proves the record exists, but the exchange behind it is still in
- * flight — the assistant is mid-reply ("Thinking…") and the messages persist
- * asynchronously, which is why a freshly created conversation lists as "0
- * messages". There is no rendered signal for that settling, so acting straight
- * away — navigating to the history, or clicking Create Case — races it.
- */
-const SUBMIT_SETTLE_MS = 50_000;
+/** Settling time after submitting an issue — see noveraFlows for why. */
+const SUBMIT_SETTLE_MS = NOVERA_REPLY_SETTLE_MS;
 
 test.describe("Novera Chat", () => {
   // Enabling the assistant, a shell load, Get Help, and the chat's own start

@@ -1,0 +1,26 @@
+-- Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+--
+-- WSO2 LLC. licenses this file to you under the Apache License,
+-- Version 2.0 (the "License"); you may not use this file except
+-- in compliance with the License.
+-- You may obtain a copy of the License at
+--
+-- http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing,
+-- software distributed under the License is distributed on an
+-- "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+-- KIND, either express or implied.  See the License for the
+-- specific language governing permissions and limitations
+-- under the License.
+
+-- account.deleted_on marks an account whose Salesforce record was deleted
+-- (decision D7 in docs/customer-onboarding/SALESFORCE_SYNC_PLAN.md). The
+-- Account ingest used to borrow deactivation_date for this, but that column
+-- is Salesforce's Deactivation_Date_PB__c, the date the account's last
+-- contract ends, and the two meanings collided. The row is kept rather than
+-- deleted: Salesforce merges delete the losing account while its projects,
+-- cases and contacts still point at it. A later CREATED, UPDATED or RESTORED
+-- event for the same Salesforce id clears the column again. NULL means live,
+-- which is every row the ServiceNow sync loaded.
+ALTER TABLE account ADD COLUMN IF NOT EXISTS deleted_on TIMESTAMPTZ;

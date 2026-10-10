@@ -84,6 +84,7 @@ func upstreamErrors(fallback string) []upstreamErrorCase {
 		{"apierror 403", &apierror.Error{StatusCode: http.StatusForbidden}, http.StatusForbidden, ErrMsgForbidden},
 		{"apierror 404", &apierror.Error{StatusCode: http.StatusNotFound}, http.StatusNotFound, ErrMsgNotFound},
 		{"apierror 400", &apierror.Error{StatusCode: http.StatusBadRequest}, http.StatusBadRequest, ErrMsgBadRequest},
+		{"apierror 400 with entity-service message", &apierror.Error{StatusCode: http.StatusBadRequest, Body: `{"code":400,"message":"sortBy: \"name\" is not a valid sort field; use endDate"}`}, http.StatusBadRequest, `sortBy: "name" is not a valid sort field; use endDate`},
 		{"apierror 409", &apierror.Error{StatusCode: http.StatusConflict, Body: "conflict upstream message"}, http.StatusConflict, fallback},
 		{"apierror 422", &apierror.Error{StatusCode: http.StatusUnprocessableEntity, Body: "invalid state"}, http.StatusUnprocessableEntity, fallback},
 		{"apierror 502", &apierror.Error{StatusCode: http.StatusBadGateway}, http.StatusServiceUnavailable, fallback},
@@ -165,6 +166,8 @@ func (m *mockEntityProjectClient) UpdateProject(ctx context.Context, id string, 
 type mockEntityCaseClient struct {
 	patchCaseFn         func(ctx context.Context, id string, body []byte) ([]byte, error)
 	createCaseCommentFn func(ctx context.Context, caseID string, body []byte) ([]byte, error)
+	searchCasesFn       func(ctx context.Context, body []byte) ([]byte, error)
+	addCaseTagFn        func(ctx context.Context, caseID string, body []byte) ([]byte, error)
 }
 
 func (m *mockEntityCaseClient) PatchCase(ctx context.Context, id string, body []byte) ([]byte, error) {
@@ -177,6 +180,20 @@ func (m *mockEntityCaseClient) PatchCase(ctx context.Context, id string, body []
 func (m *mockEntityCaseClient) CreateCaseComment(ctx context.Context, caseID string, body []byte) ([]byte, error) {
 	if m.createCaseCommentFn != nil {
 		return m.createCaseCommentFn(ctx, caseID, body)
+	}
+	return []byte(`{}`), nil
+}
+
+func (m *mockEntityCaseClient) SearchCases(ctx context.Context, body []byte) ([]byte, error) {
+	if m.searchCasesFn != nil {
+		return m.searchCasesFn(ctx, body)
+	}
+	return []byte(`{}`), nil
+}
+
+func (m *mockEntityCaseClient) AddCaseTag(ctx context.Context, caseID string, body []byte) ([]byte, error) {
+	if m.addCaseTagFn != nil {
+		return m.addCaseTagFn(ctx, caseID, body)
 	}
 	return []byte(`{}`), nil
 }
@@ -254,6 +271,7 @@ func (m *mockEntityVulnerabilityClient) SyncProductVulnerabilities(ctx context.C
 type mockEntityIncidentClient struct {
 	createIncidentFn  func(ctx context.Context, body []byte) ([]byte, error)
 	searchIncidentsFn func(ctx context.Context, body []byte) ([]byte, error)
+	updateIncidentFn  func(ctx context.Context, id string, body []byte) ([]byte, error)
 }
 
 func (m *mockEntityIncidentClient) CreateIncident(ctx context.Context, body []byte) ([]byte, error) {
@@ -266,6 +284,26 @@ func (m *mockEntityIncidentClient) CreateIncident(ctx context.Context, body []by
 func (m *mockEntityIncidentClient) SearchIncidents(ctx context.Context, body []byte) ([]byte, error) {
 	if m.searchIncidentsFn != nil {
 		return m.searchIncidentsFn(ctx, body)
+	}
+	return []byte(`{}`), nil
+}
+
+func (m *mockEntityIncidentClient) UpdateIncident(ctx context.Context, id string, body []byte) ([]byte, error) {
+	if m.updateIncidentFn != nil {
+		return m.updateIncidentFn(ctx, id, body)
+	}
+	return []byte(`{}`), nil
+}
+
+// ----- mock entity IT-service client -----
+
+type mockEntityITServiceClient struct {
+	searchITServicesFn func(ctx context.Context, body []byte) ([]byte, error)
+}
+
+func (m *mockEntityITServiceClient) SearchITServices(ctx context.Context, body []byte) ([]byte, error) {
+	if m.searchITServicesFn != nil {
+		return m.searchITServicesFn(ctx, body)
 	}
 	return []byte(`{}`), nil
 }

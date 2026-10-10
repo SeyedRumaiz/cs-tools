@@ -99,6 +99,23 @@ func normalizeProductClass(s string) string {
 	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), " ", "_")
 }
 
+// postgresProductClasses are entity-service's own Postgres-backed product
+// classes (domain.ProductClass in entity-service/internal/domain/entity.go,
+// validated by product_service.go's validProductClass) — "software"/
+// "service", a real product category, unrelated to ServiceNow's
+// product_model/software_model/service_model row-granularity distinction
+// (see defaultSNProductClass's own doc comment in entity-service's
+// sn_product_service.go: product_model means "one row per distinct
+// product", as opposed to one row per product *version*). The Postgres
+// products table already stores one row per distinct product regardless of
+// software/service (product_service.go's own doc comment says so), so
+// every Postgres-sourced product is already "product_model"-shaped no
+// matter which of these two classes it carries.
+var postgresProductClasses = map[string]bool{
+	"software": true,
+	"service":  true,
+}
+
 // FilterProductsByClass keeps only products whose Class matches want, compared
 // through normalizeProductClass so the frontend's enum spelling and
 // ServiceNow's display label resolve to the same value. Applied after
@@ -109,22 +126,35 @@ func normalizeProductClass(s string) string {
 // before this backend ever saw (or could exclude) an off-class item — a
 // page can come back with fewer than Limit on-class items even when more
 // exist on a later page. A product with no Class at all (nil) never
-// matches, so it's excluded rather than kept as "unknown". On the Postgres
-// data source, entity-service's Class vocabulary is only "software"/
-// "service" (see domain.ProductClass in entity-service/internal/domain/
-// entity.go) — the frontend's own class value ("product_model") only ever
-// matches something on the ServiceNow data source, whose Class field is a
-// free-form passthrough label; requesting this endpoint against a
-// Postgres-mode deployment will therefore always return zero products, the
-// same "ServiceNow data source only" limitation documented elsewhere in
-// this backend.
+// matches, so it's excluded rather than kept as "unknown".
+//
+// A Postgres-sourced product's Class ("software"/"service") never literally
+// equals the frontend's "product_model" — the only value it ever sends (see
+// PRODUCT_CLASS in the webapp's productConstants.ts) — because those are two
+// different axes: ServiceNow's product_model/software_model/service_model is
+// row-granularity, Postgres's software/service is a real category. Without
+// the postgresProductClasses fallback below, GET /products?class=product_model
+// always returned zero products on the Postgres data source, since plain
+// normalized equality could never match. A Postgres product is always
+// product-level (see postgresProductClasses' own doc comment), so a
+// "product_model" request matches any product whose Class is a known
+// Postgres class, on top of the existing literal/ServiceNow-label match.
 func FilterProductsByClass(r SearchProductsResponse, want string) SearchProductsResponse {
 	if want == "" {
 		return r
 	}
+	normalizedWant := normalizeProductClass(want)
 	filtered := make([]ProductSummary, 0, len(r.Products))
 	for _, p := range r.Products {
-		if p.Class != nil && normalizeProductClass(*p.Class) == normalizeProductClass(want) {
+		if p.Class == nil {
+			continue
+		}
+		normalizedClass := normalizeProductClass(*p.Class)
+		if normalizedClass == normalizedWant {
+			filtered = append(filtered, p)
+			continue
+		}
+		if normalizedWant == "product_model" && postgresProductClasses[normalizedClass] {
 			filtered = append(filtered, p)
 		}
 	}

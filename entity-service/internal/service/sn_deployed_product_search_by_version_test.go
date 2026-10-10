@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
@@ -416,11 +417,6 @@ func TestSNDeployedProductService_SearchProjectsByProductVersion_DeploymentEnume
 	}
 }
 
-// TestSNDeployedProductService_SearchProjectsByProductVersion_DeployedProductEnumerationErrorsRatherThanTruncate
-// mirrors the test above for the per-chunk deployed-products loop: an
-// upstream that always claims hasMore: true for a single deployment's
-// deployed-products page must fail loudly once the page bound is exceeded,
-// not return an incomplete/wrong match set.
 // TestSNDeployedProductService_SearchProjectsByProductVersion_IntersectsWithEligibleProjects
 // verifies the core requirement behind the mandatory exclusion this endpoint
 // always applies: the real EOL-announcement audience is the intersection of
@@ -473,6 +469,64 @@ func TestSNDeployedProductService_SearchProjectsByProductVersion_IntersectsWithE
 	}
 }
 
+// TestSNDeployedProductService_SearchProjectsByProductVersion_ExcludesContractEndedProjects
+// covers the real bug behind this: a project whose subscription contract has
+// simply expired (EndDate in the past) is treated as inaccessible by the
+// customer portal itself (isProjectSuspended in
+// apps/customer-portal/webapp/src/utils/permission.ts), yet often has no
+// WSO2 Closure State set at all — so the ClosureState-only exclusion this
+// file used to rely on let it straight through. Neither fake project below
+// has closureState set to Restricted/Suspended, and the fake ProjectService
+// returns both regardless of request filters (it has no notion of end-date
+// exclusion — matching the real ServiceNow search, which has no such
+// server-side filter either) — so fetchEligibleProjectIDs itself must be the
+// one excluding the expired one.
+func TestSNDeployedProductService_SearchProjectsByProductVersion_ExcludesContractEndedProjects(t *testing.T) {
+	depActive, depExpired := sysid32('1'), sysid32('2')
+	projActive := domain.EntityRef{ID: "proj-active-uuid", Name: "Active Project"}
+	projExpired := domain.EntityRef{ID: "proj-expired-uuid", Name: "Expired Project"}
+
+	deploymentSvc := &fakeDeploymentService{deployments: []domain.DeploymentView{
+		{ID: sysidToUUID(depActive), Project: projActive},
+		{ID: sysidToUUID(depExpired), Project: projExpired},
+	}}
+
+	pastEndDate := time.Now().AddDate(-1, 0, 0)
+	projectSvc := &fakeProjectService{projects: []domain.ProjectView{
+		{ID: projActive.ID, Name: projActive.Name},
+		{ID: projExpired.ID, Name: projExpired.Name, EndDate: &pastEndDate},
+	}}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/deployed-products/search", func(w http.ResponseWriter, r *http.Request) {
+		items := []map[string]any{
+			deployedProductFixture(sysid32('a'), depActive, testPBVProductSysid, testPBVVersionSysid),
+			deployedProductFixture(sysid32('b'), depExpired, testPBVProductSysid, testPBVVersionSysid),
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"deployedProducts": items, "totalRecords": len(items), "offset": 0, "limit": 50,
+		})
+	})
+
+	svc := NewServiceNowDeployedProductService(newTestSNClient(t, mux), deploymentSvc, projectSvc)
+
+	resp, err := svc.SearchProjectsByProductVersion(contextWithUserIDToken("token"), domain.SearchProjectsByProductVersionRequest{
+		ProductID:        testPBVProductUUID,
+		ProductVersionID: testPBVVersionUUID,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Total != 1 || len(resp.Projects) != 1 || resp.Projects[0].ID != projActive.ID {
+		t.Fatalf("expected only the active-contract project to survive, got %+v", resp.Projects)
+	}
+}
+
+// TestSNDeployedProductService_SearchProjectsByProductVersion_DeployedProductEnumerationErrorsRatherThanTruncate
+// mirrors the test above for the per-chunk deployed-products loop: an
+// upstream that always claims hasMore: true for a single deployment's
+// deployed-products page must fail loudly once the page bound is exceeded,
+// not return an incomplete/wrong match set.
 func TestSNDeployedProductService_SearchProjectsByProductVersion_DeployedProductEnumerationErrorsRatherThanTruncate(t *testing.T) {
 	dep := sysid32('1')
 	deploymentSvc := &fakeDeploymentService{deployments: []domain.DeploymentView{

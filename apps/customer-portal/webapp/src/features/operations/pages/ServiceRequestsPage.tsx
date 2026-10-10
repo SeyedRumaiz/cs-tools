@@ -35,6 +35,7 @@ import useGetProjectDetails from "@api/useGetProjectDetails";
 import useGetProjectFeatures from "@api/useGetProjectFeatures";
 import useGetProjectFilters from "@api/useGetProjectFilters";
 import useGetProjectCases from "@api/useGetProjectCases";
+import useGetProjectContacts from "@features/settings/api/useGetProjectContacts";
 import { usePostProjectDeploymentsSearchInfinite } from "@api/usePostProjectDeploymentsSearch";
 import {
   hasListSearchOrFilters,
@@ -141,6 +142,10 @@ export default function ServiceRequestsPage(): JSX.Element {
   const deploymentsList =
     deploymentsQuery.data?.pages.flatMap((p) => p.deployments ?? []) ?? [];
 
+  const { data: contactsData, isLoading: isContactsLoading } =
+    useGetProjectContacts(projectId || "");
+  const contactsList = contactsData ?? [];
+
   const outstandingStatusIds = useMemo(() => {
     if (actionRequired) {
       if (!filterMetadata) return undefined;
@@ -171,6 +176,15 @@ export default function ServiceRequestsPage(): JSX.Element {
       ),
     [filters, searchTerm, sortField, sortOrder, createdByMe, outstandingStatusIds],
   );
+
+  // On My Requests (createdByMe), the Created By filter is hidden, so drop any
+  // persisted createdBy value to keep it out of the case search request --
+  // same reasoning as AllCasesPage's identical effect.
+  useEffect(() => {
+    if (createdByMe && filters.createdBy?.length) {
+      setFilters((prev) => ({ ...prev, createdBy: undefined }));
+    }
+  }, [createdByMe, filters.createdBy, setFilters]);
 
   const {
     data,
@@ -252,7 +266,6 @@ export default function ServiceRequestsPage(): JSX.Element {
 
   const handleClearFilters = () => {
     setFilters({});
-    setSearchTerm("");
     setPage(1);
   };
 
@@ -272,20 +285,24 @@ export default function ServiceRequestsPage(): JSX.Element {
   };
 
   useEffect(() => {
-    if (!projectDetailsReady) {
+    // permissions.hasDeployments defaults to false (restrictivePermissions())
+    // while projectFeatures is still loading, even after project details
+    // themselves are ready -- clearing on that transient state would drop a
+    // perfectly valid persisted selection before the real answer arrives.
+    if (!projectDetailsReady || projectFeatures === undefined) {
       return;
     }
     if (
-      projectDetailsReady &&
       !permissions.hasDeployments &&
-      filters.deploymentId
+      filters.deploymentIds?.length
     ) {
-      setFilters((prev) => ({ ...prev, deploymentId: undefined }));
+      setFilters((prev) => ({ ...prev, deploymentIds: undefined }));
     }
   }, [
     projectDetailsReady,
+    projectFeatures,
     permissions.hasDeployments,
-    filters.deploymentId,
+    filters.deploymentIds,
     setFilters,
   ]);
 
@@ -426,6 +443,9 @@ export default function ServiceRequestsPage(): JSX.Element {
           hideSeverityFilter
           hideCategoryFilter
           hideDeploymentFilter={!permissions.hasDeployments}
+          contacts={contactsList}
+          isContactsLoading={isContactsLoading}
+          hideCreatedByFilter={createdByMe}
           isProjectContextLoading={isProjectContextLoading}
         />
       )}

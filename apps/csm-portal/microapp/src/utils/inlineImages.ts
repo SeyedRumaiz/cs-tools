@@ -24,15 +24,44 @@
 const IMG_TAG_SRC = /<img([^>]*?)\s+src\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))([^>]*)>/gi;
 
 /**
+ * A bare attachment-id `src`: an optional single leading slash, then either a
+ * canonical hyphenated UUID (`8-4-4-4-12`) or 32 hex characters, optionally
+ * followed by `.iix`, and nothing else (no query string, no extra path
+ * segments, no scheme, no `//` prefix). Content migrated from the legacy data
+ * source carries inline images in this shape (`<img src="/<uuid>">`, with the
+ * `.iix` suffix dropped), so it is treated as an attachment reference exactly
+ * like the `.iix` form. Kept deliberately exact so ordinary image URLs are
+ * never mistaken for attachment references.
+ */
+const BARE_ATTACHMENT_SRC =
+  /^\/?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-f0-9]{32})(?:\.iix)?$/i;
+
+/**
+ * Whether an inline `<img>` `src` is an attachment reference that must be
+ * resolved through the backend: either a `.iix`-suffixed reference or a bare
+ * attachment id as found in migrated content (see {@link BARE_ATTACHMENT_SRC}).
+ */
+export function isInlineImageRefSrc(src: string): boolean {
+  return src.includes(".iix") || BARE_ATTACHMENT_SRC.test(src.trim());
+}
+
+/**
  * Extracts the backing attachment id from an inline `<img>` `src` value. The
  * backing data source embeds inline images as `.iix`-suffixed references
  * (e.g. `.../<attachmentId>.iix`); this pulls the id out regardless of
- * whether it appears as a full path or a bare token.
+ * whether it appears as a full path or a bare token. Migrated content may
+ * instead carry a bare hyphenated UUID (`/<uuid>`); that is normalized to the
+ * same 32-character lowercase form so it dedupes with (and shares a query key
+ * with) the `.iix` form of the same attachment.
  */
 export function extractInlineImageRefId(src: string): string {
   const s = src.trim();
   const fromPath = s.match(/\/([a-f0-9]{32})\.iix(?:\?|#|$)/i);
   if (fromPath) return fromPath[1];
+  const bare = s.match(BARE_ATTACHMENT_SRC);
+  if (bare && bare[1].includes("-")) {
+    return bare[1].replace(/-/g, "").toLowerCase();
+  }
   const tail =
     s
       .replace(/\.iix$/i, "")
@@ -64,14 +93,17 @@ export function sysidToUuid(id: string): string {
 // URL the WebView can't load).
 const MAX_INLINE_IMAGES = 20;
 
-/** Extracts every attachment id referenced by a `.iix` `<img>` src within an HTML string. */
+/**
+ * Extracts every attachment id referenced by a `.iix` or bare-id `<img>` src
+ * (see {@link isInlineImageRefSrc}) within an HTML string.
+ */
 export function extractIixAttachmentIds(html: string): string[] {
   const ids = new Set<string>();
   let match;
   IMG_TAG_SRC.lastIndex = 0;
   while (ids.size < MAX_INLINE_IMAGES && (match = IMG_TAG_SRC.exec(html)) !== null) {
     const src = match[2] ?? match[3] ?? match[4] ?? "";
-    if (src.includes(".iix")) {
+    if (isInlineImageRefSrc(src)) {
       const id = extractInlineImageRefId(src);
       if (id) ids.add(id);
     }
@@ -80,14 +112,14 @@ export function extractIixAttachmentIds(html: string): string[] {
 }
 
 /**
- * Replaces every `.iix` `<img>` src in `html` with its resolved data URL from
- * `dataUrls`. A `.iix` reference with no matching entry is stripped (rather
+ * Replaces every `.iix` or bare-id (migrated content) `<img>` src in `html` with its resolved
+ * data URL from `dataUrls`. A reference with no matching entry is stripped (rather
  * than left pointing at an auth-gated URL the browser cannot fetch).
  */
 export function replaceInlineImageSrcs(html: string, dataUrls: Map<string, string>): string {
   return html.replace(IMG_TAG_SRC, (fullMatch, before, doubleSrc, singleSrc, bareSrc, after) => {
     const src = (doubleSrc ?? singleSrc ?? bareSrc ?? "") as string;
-    if (!src.includes(".iix")) return fullMatch;
+    if (!isInlineImageRefSrc(src)) return fullMatch;
     const refId = extractInlineImageRefId(src);
     const dataUrl = dataUrls.get(refId);
     const quote = doubleSrc !== undefined ? '"' : singleSrc !== undefined ? "'" : '"';

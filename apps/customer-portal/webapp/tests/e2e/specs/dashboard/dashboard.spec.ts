@@ -43,6 +43,10 @@ import {
   caseSearchWithoutSeverity,
   myCasesSearchResponse,
 } from "../../utils/listSearch";
+import {
+  RECORD_ID_PATTERN,
+  projectPathPattern,
+} from "../../utils/ids";
 
 withSession(test);
 
@@ -174,11 +178,7 @@ test.describe("Dashboard", () => {
           page.getByText(DASHBOARD.casesTable.subtitle, { exact: true }),
         ).toBeVisible();
 
-        const firstRow = dashboard.casesTableRows().first();
-        await expect(
-          firstRow,
-          "the table should list at least one outstanding case to open",
-        ).toBeVisible();
+        const firstRow = await dashboard.waitForCasesTable();
 
         // Read the case number off the row before clicking, so the detail page
         // can be checked against the row that was actually clicked rather than
@@ -194,8 +194,9 @@ test.describe("Dashboard", () => {
         // A case sysid is a 32-character hex string; anchoring rules out landing
         // on the list route instead of a case.
         await expect(page).toHaveURL(
-          new RegExp(
-            `/projects/${project.id}/support/cases/[0-9a-f]{32}$`,
+          projectPathPattern(
+            project.id,
+            `support/cases/${RECORD_ID_PATTERN}$`,
           ),
         );
 
@@ -251,10 +252,26 @@ test.describe("Dashboard", () => {
           new RegExp(`/projects/${project.id}/${DASHBOARD.pathSegment}$`),
         );
 
-        // Every remaining row is the signed-in user's. Asserted as "one distinct
-        // creator" rather than against a hardcoded address, so it holds for
-        // whichever account the captured session belongs to.
-        await expect(dashboard.casesTableRows().first()).toBeVisible();
+        // Every remaining row is the signed-in user's. Tolerant of an empty
+        // result: an account that raised no cases on this project sees "No
+        // outstanding cases." here, which is the filter working, not failing —
+        // so requiring rows would fail on correct behaviour.
+        const rowCount = await dashboard.waitForCasesTableSettled();
+
+        if (rowCount === 0) {
+          await expect(
+            page.getByText(DASHBOARD.casesTable.emptyMessage),
+            "an empty My Cases view should say so rather than hang",
+          ).toBeVisible();
+
+          console.log(
+            `Dashboard (${projectType}): my cases is empty — this account ` +
+              "raised no cases on this project, so the per-row creator check " +
+              "has nothing to assert. The filter itself is proven by the " +
+              "createdByMe request above.",
+          );
+          return;
+        }
 
         // Counted, not named: the creators are real email addresses, and a test
         // report is no place to put them. The distinct count is what carries the
@@ -297,7 +314,7 @@ test.describe("Dashboard", () => {
         // while the first search is still in flight, so an immediate count reads
         // 0 — which would satisfy both bounds below and make this test pass
         // without ever comparing two loaded pages.
-        await expect(dashboard.casesTableRows().first()).toBeVisible();
+        await dashboard.waitForCasesTable();
 
         const rowsBefore = await dashboard.casesTableRows().count();
         expect(
@@ -321,9 +338,22 @@ test.describe("Dashboard", () => {
         // A larger page cannot show fewer rows, and must not exceed the size
         // asked for. Bounds rather than an exact count, because how many rows
         // exist is environment data.
+        //
+        // Polled, not counted once: the response arriving is not the table
+        // having re-rendered. React clears the rows while rebuilding at the new
+        // page size, so a single count taken the moment the request resolves
+        // can read 0 — which is what made this fail intermittently, and only
+        // inside a full run where the timing shifted.
+        await expect
+          .poll(() => dashboard.casesTableRows().count(), {
+            timeout: 60_000,
+            message:
+              "a larger page size should not show fewer rows than the smaller one",
+          })
+          .toBeGreaterThanOrEqual(rowsBefore);
+
         const rowsAfter = await dashboard.casesTableRows().count();
         expect(rowsAfter).toBeLessThanOrEqual(10);
-        expect(rowsAfter).toBeGreaterThanOrEqual(rowsBefore);
 
         console.log(
           `Dashboard (${projectType}): page size 5 → 10, rows ${rowsBefore} → ${rowsAfter}`,
@@ -346,7 +376,7 @@ test.describe("Dashboard", () => {
         // Wait for the first page to load before reading the controls: the
         // pagination renders while the search is still in flight, when next is
         // disabled simply because the count is not known yet.
-        await expect(dashboard.casesTableRows().first()).toBeVisible();
+        await dashboard.waitForCasesTable();
         await expect(dashboard.displayedRows()).toBeVisible();
         expect(await dashboard.displayedFromRow()).toBe(1);
 
@@ -404,7 +434,7 @@ test.describe("Dashboard", () => {
 
         // Wait for the unfiltered table first, so the filtered result below is a
         // change from a known state rather than from a still-loading one.
-        await expect(dashboard.casesTableRows().first()).toBeVisible();
+        await dashboard.waitForCasesTable();
 
         const severity = DASHBOARD.casesTable.filters.severity;
 

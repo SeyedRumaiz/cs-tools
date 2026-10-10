@@ -18,7 +18,10 @@ package service
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
@@ -30,7 +33,11 @@ import (
 // before ever reaching the repository, not merely that the repository
 // ignores it.
 type stubDeployedProductRepo struct {
-	searchDeployedProducts func(ctx context.Context, req domain.SearchDeployedProductsRequest) ([]domain.DeployedProductView, int, error)
+	searchDeployedProducts              func(ctx context.Context, req domain.SearchDeployedProductsRequest) ([]domain.DeployedProductView, int, error)
+	searchProjectsByProductVersion      func(ctx context.Context, req domain.SearchProjectsByProductVersionRequest, excludeClosureStates []string, excludeSubscriptionTypes []domain.SubscriptionType) ([]domain.EntityRef, int, error)
+	createDeployedProductFromServiceNow func(ctx context.Context, req domain.CreateDeployedProductRequest, id, number, createdBy string, createdOn time.Time) (domain.CreatedDeployedProduct, error)
+	updateDeployedProductFields         func(ctx context.Context, req domain.UpdateDeployedProductRequest, updatedBy string) (domain.UpdatedDeployedProduct, error)
+	getDeployedProductCategory          func(ctx context.Context, id string) (*string, error)
 }
 
 func (s *stubDeployedProductRepo) SearchDeployedProducts(ctx context.Context, req domain.SearchDeployedProductsRequest) ([]domain.DeployedProductView, int, error) {
@@ -40,16 +47,358 @@ func (s *stubDeployedProductRepo) SearchDeployedProducts(ctx context.Context, re
 	panic("SearchDeployedProducts called unexpectedly: the productCategories rejection should have short-circuited before reaching the repository")
 }
 
-func TestDeployedProductService_SearchDeployedProducts_RejectsProductCategories(t *testing.T) {
+func (s *stubDeployedProductRepo) SearchDeployedProductMetrics(ctx context.Context, id, deploymentID, startDate, endDate string) (domain.DeployedProductMetricsResponse, error) {
+	panic("SearchDeployedProductMetrics not stubbed")
+}
+
+func (s *stubDeployedProductRepo) SearchDeployedProductUsageCounts(ctx context.Context, id, deploymentID, startDate, endDate string) (domain.DeployedProductUsageCountsResponse, error) {
+	panic("SearchDeployedProductUsageCounts not stubbed")
+}
+
+func (s *stubDeployedProductRepo) SearchProjectsByProductVersion(ctx context.Context, req domain.SearchProjectsByProductVersionRequest, excludeClosureStates []string, excludeSubscriptionTypes []domain.SubscriptionType) ([]domain.EntityRef, int, error) {
+	if s.searchProjectsByProductVersion != nil {
+		return s.searchProjectsByProductVersion(ctx, req, excludeClosureStates, excludeSubscriptionTypes)
+	}
+	panic("SearchProjectsByProductVersion called unexpectedly")
+}
+
+func (s *stubDeployedProductRepo) CreateDeployedProductFromServiceNow(ctx context.Context, req domain.CreateDeployedProductRequest, id, number, createdBy string, createdOn time.Time) (domain.CreatedDeployedProduct, error) {
+	if s.createDeployedProductFromServiceNow == nil {
+		panic("stubDeployedProductRepo: CreateDeployedProductFromServiceNow not set")
+	}
+	return s.createDeployedProductFromServiceNow(ctx, req, id, number, createdBy, createdOn)
+}
+
+func (s *stubDeployedProductRepo) UpdateDeployedProductFields(ctx context.Context, req domain.UpdateDeployedProductRequest, updatedBy string) (domain.UpdatedDeployedProduct, error) {
+	if s.updateDeployedProductFields == nil {
+		panic("stubDeployedProductRepo: UpdateDeployedProductFields not set")
+	}
+	return s.updateDeployedProductFields(ctx, req, updatedBy)
+}
+
+func (s *stubDeployedProductRepo) GetDeployedProductCategory(ctx context.Context, id string) (*string, error) {
+	if s.getDeployedProductCategory == nil {
+		panic("stubDeployedProductRepo: GetDeployedProductCategory not set")
+	}
+	return s.getDeployedProductCategory(ctx, id)
+}
+
+// stubMirrorDeployedProductService implements both the full
+// DeployedProductService interface (so it satisfies deployedProductService's
+// snMirror field type) and the narrow deployedProductSNCreator interface
+// createDeployedProductSNFirst actually type-asserts against -- mirroring
+// stubMirrorDeploymentService's shape in deployment_service_test.go.
+type stubMirrorDeployedProductService struct {
+	createDeployedProductSNFirstDetailsFn func(context.Context, domain.CreateDeployedProductRequest) (id, number, createdBy string, createdOn time.Time, err error)
+	updateDeployedProduct                 func(context.Context, domain.UpdateDeployedProductRequest) (domain.UpdateDeployedProductResponse, error)
+}
+
+func (m *stubMirrorDeployedProductService) SearchDeployedProducts(context.Context, domain.SearchDeployedProductsRequest) (domain.SearchDeployedProductsResponse, error) {
+	panic("stubMirrorDeployedProductService: SearchDeployedProducts not exercised by these tests")
+}
+
+func (m *stubMirrorDeployedProductService) SearchProjectsByProductVersion(context.Context, domain.SearchProjectsByProductVersionRequest) (domain.SearchProjectsByProductVersionResponse, error) {
+	panic("stubMirrorDeployedProductService: SearchProjectsByProductVersion not exercised by these tests")
+}
+
+func (m *stubMirrorDeployedProductService) CreateDeployedProduct(context.Context, domain.CreateDeployedProductRequest) (domain.CreateDeployedProductResponse, error) {
+	panic("stubMirrorDeployedProductService: CreateDeployedProduct not exercised by these tests -- createDeployedProductSNFirst calls createDeployedProductSNFirstDetails instead")
+}
+
+func (m *stubMirrorDeployedProductService) UpdateDeployedProduct(ctx context.Context, req domain.UpdateDeployedProductRequest) (domain.UpdateDeployedProductResponse, error) {
+	if m.updateDeployedProduct == nil {
+		panic("stubMirrorDeployedProductService: UpdateDeployedProduct not set")
+	}
+	return m.updateDeployedProduct(ctx, req)
+}
+
+func (m *stubMirrorDeployedProductService) SearchDeployedProductMetrics(context.Context, string, domain.DeployedProductMetricsRequest) (domain.DeployedProductMetricsResponse, error) {
+	panic("stubMirrorDeployedProductService: SearchDeployedProductMetrics not exercised by these tests")
+}
+
+func (m *stubMirrorDeployedProductService) SearchDeployedProductUsageCounts(context.Context, string, domain.DeployedProductUsageCountsRequest) (domain.DeployedProductUsageCountsResponse, error) {
+	panic("stubMirrorDeployedProductService: SearchDeployedProductUsageCounts not exercised by these tests")
+}
+
+func (m *stubMirrorDeployedProductService) createDeployedProductSNFirstDetails(ctx context.Context, req domain.CreateDeployedProductRequest) (id, number, createdBy string, createdOn time.Time, err error) {
+	if m.createDeployedProductSNFirstDetailsFn == nil {
+		panic("stubMirrorDeployedProductService: createDeployedProductSNFirstDetailsFn not set")
+	}
+	return m.createDeployedProductSNFirstDetailsFn(ctx, req)
+}
+
+func validCreateDeployedProductRequest() domain.CreateDeployedProductRequest {
+	return domain.CreateDeployedProductRequest{
+		ProjectID:    testDeploymentUUID,
+		DeploymentID: testDeployedProdID,
+		ProductID:    testDeploymentUUID,
+		VersionID:    testDeployedProdID,
+	}
+}
+
+// A plain Postgres data source (no SN mirror wired at all) must keep
+// rejecting CreateDeployedProduct/UpdateDeployedProduct -- same "not
+// supported without dual-write" contract as deployment/incident.
+func TestDeployedProductService_NotSupportedOnPlainPostgres(t *testing.T) {
 	svc := NewDeployedProductService(&stubDeployedProductRepo{})
+
+	if _, err := svc.CreateDeployedProduct(context.Background(), validCreateDeployedProductRequest()); err == nil {
+		t.Error("CreateDeployedProduct: expected an error on the plain Postgres data source")
+	}
+	if _, err := svc.UpdateDeployedProduct(context.Background(), domain.UpdateDeployedProductRequest{ID: testDeploymentUUID, Active: boolPtr(false)}); err == nil {
+		t.Error("UpdateDeployedProduct: expected an error on the plain Postgres data source")
+	}
+}
+
+// If ServiceNow never accepts the deployed product, nothing must be written
+// to Postgres at all -- stubDeployedProductRepo panics if
+// CreateDeployedProductFromServiceNow is called, which is exactly the
+// assertion.
+func TestDeployedProductService_CreateDeployedProduct_SNFailureLeavesPostgresUntouched(t *testing.T) {
+	var mu sync.Mutex
+	attempts := 0
+	mirror := &stubMirrorDeployedProductService{
+		createDeployedProductSNFirstDetailsFn: func(context.Context, domain.CreateDeployedProductRequest) (string, string, string, time.Time, error) {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			return "", "", "", time.Time{}, errors.New("sn downstream unreachable")
+		},
+	}
+	repo := &stubDeployedProductRepo{}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	svc := NewDeployedProductServiceWithSNWriteback(repo, dispatcher, mirror)
+
+	_, err := svc.CreateDeployedProduct(context.Background(), validCreateDeployedProductRequest())
+	if err == nil {
+		t.Fatal("expected an error when ServiceNow never accepts the deployed product")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 1 {
+		t.Errorf("expected exactly 1 SN attempt (no internal retry), got %d", attempts)
+	}
+}
+
+// On ServiceNow success, the Postgres insert must use EXACTLY the
+// id/number/createdBy/createdOn ServiceNow returned -- not anything
+// generated locally -- so both systems agree on identity from the moment
+// the Postgres row exists.
+func TestDeployedProductService_CreateDeployedProduct_SNSuccessCreatesPostgresRowWithMatchingIdentity(t *testing.T) {
+	const (
+		snID        = "44444444-4444-4444-4444-444444444444"
+		snNumber    = "DP000099001"
+		snCreatedBy = "jane.doe@example.com"
+	)
+	createdOn := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	mirror := &stubMirrorDeployedProductService{
+		createDeployedProductSNFirstDetailsFn: func(context.Context, domain.CreateDeployedProductRequest) (string, string, string, time.Time, error) {
+			return snID, snNumber, snCreatedBy, createdOn, nil
+		},
+	}
+
+	var mu sync.Mutex
+	var gotID, gotNumber, gotCreatedBy string
+	var gotCreatedOn time.Time
+	repo := &stubDeployedProductRepo{
+		createDeployedProductFromServiceNow: func(_ context.Context, req domain.CreateDeployedProductRequest, id, number, createdBy string, createdOn time.Time) (domain.CreatedDeployedProduct, error) {
+			mu.Lock()
+			gotID, gotNumber, gotCreatedBy, gotCreatedOn = id, number, createdBy, createdOn
+			mu.Unlock()
+			return domain.CreatedDeployedProduct{ID: id, CreatedBy: createdBy, CreatedOn: createdOn}, nil
+		},
+	}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	svc := NewDeployedProductServiceWithSNWriteback(repo, dispatcher, mirror)
+
+	resp, err := svc.CreateDeployedProduct(context.Background(), validCreateDeployedProductRequest())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotID != snID || gotNumber != snNumber || gotCreatedBy != snCreatedBy || !gotCreatedOn.Equal(createdOn) {
+		t.Errorf("CreateDeployedProductFromServiceNow got (%q, %q, %q, %v), want (%q, %q, %q, %v)",
+			gotID, gotNumber, gotCreatedBy, gotCreatedOn, snID, snNumber, snCreatedBy, createdOn)
+	}
+	if resp.DeployedProduct.ID != snID {
+		t.Errorf("response DeployedProduct.ID = %q, want %q", resp.DeployedProduct.ID, snID)
+	}
+}
+
+// UpdateDeployedProduct writes Postgres first and dispatches the ServiceNow
+// mirror asynchronously afterward -- the mirror call must still happen, just
+// not block the response.
+func TestDeployedProductService_UpdateDeployedProduct_PostgresFirstThenAsyncMirror(t *testing.T) {
+	cores := 8
+	req := domain.UpdateDeployedProductRequest{ID: testDeploymentUUID, Cores: &cores}
+
+	called := make(chan struct{})
+	var mu sync.Mutex
+	var gotReq domain.UpdateDeployedProductRequest
+	mirror := &stubMirrorDeployedProductService{
+		updateDeployedProduct: func(_ context.Context, r domain.UpdateDeployedProductRequest) (domain.UpdateDeployedProductResponse, error) {
+			mu.Lock()
+			gotReq = r
+			mu.Unlock()
+			close(called)
+			return domain.UpdateDeployedProductResponse{}, nil
+		},
+	}
+	repo := &stubDeployedProductRepo{
+		updateDeployedProductFields: func(_ context.Context, r domain.UpdateDeployedProductRequest, updatedBy string) (domain.UpdatedDeployedProduct, error) {
+			return domain.UpdatedDeployedProduct{ID: r.ID, UpdatedBy: updatedBy}, nil
+		},
+	}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	svc := NewDeployedProductServiceWithSNWriteback(repo, dispatcher, mirror)
+
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	if _, err := svc.UpdateDeployedProduct(ctx, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("mirror.UpdateDeployedProduct was never called")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotReq.ID != req.ID || gotReq.Cores == nil || *gotReq.Cores != cores {
+		t.Errorf("mirror got %+v, want ID=%q Cores=%d", gotReq, req.ID, cores)
+	}
+}
+
+// A failed async mirror write must not fail the update itself -- Postgres
+// already committed, and the caller already has a 200 by the time the
+// mirror even runs.
+func TestDeployedProductService_UpdateDeployedProduct_MirrorFailureDoesNotFailTheUpdate(t *testing.T) {
+	cores := 8
+	req := domain.UpdateDeployedProductRequest{ID: testDeploymentUUID, Cores: &cores}
+
+	called := make(chan struct{})
+	mirror := &stubMirrorDeployedProductService{
+		updateDeployedProduct: func(context.Context, domain.UpdateDeployedProductRequest) (domain.UpdateDeployedProductResponse, error) {
+			close(called)
+			return domain.UpdateDeployedProductResponse{}, errors.New("sn downstream unreachable")
+		},
+	}
+	repo := &stubDeployedProductRepo{
+		updateDeployedProductFields: func(_ context.Context, r domain.UpdateDeployedProductRequest, updatedBy string) (domain.UpdatedDeployedProduct, error) {
+			return domain.UpdatedDeployedProduct{ID: r.ID, UpdatedBy: updatedBy}, nil
+		},
+	}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	svc := NewDeployedProductServiceWithSNWriteback(repo, dispatcher, mirror)
+
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	if _, err := svc.UpdateDeployedProduct(ctx, req); err != nil {
+		t.Fatalf("unexpected error from UpdateDeployedProduct despite Postgres succeeding: %v", err)
+	}
+
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("mirror.UpdateDeployedProduct was never called")
+	}
+}
+
+// TestDeployedProductService_UpdateDeployedProduct_RejectsInvalidRequest proves the
+// dual-write path calls the same validateUpdateDeployedProductRequest checks
+// the ServiceNow-only path always enforced, rather than writing an
+// otherwise-rejected request straight to Postgres.
+func TestDeployedProductService_UpdateDeployedProduct_RejectsInvalidRequest(t *testing.T) {
+	mirror := &stubMirrorDeployedProductService{}
+	repo := &stubDeployedProductRepo{}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	svc := NewDeployedProductServiceWithSNWriteback(repo, dispatcher, mirror)
+
+	// Neither a detail field nor Active is set.
+	_, err := svc.UpdateDeployedProduct(context.Background(), domain.UpdateDeployedProductRequest{ID: testDeploymentUUID})
+	var ve *apierror.ValidationError
+	if !asValidationError(err, &ve) {
+		t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+	}
+}
+
+// TestDeployedProductService_UpdateDeployedProduct_RejectsInvalidCategory proves
+// an unrecognized category value is rejected with a ValidationError before
+// ever reaching the repository, rather than surfacing as a raw Postgres
+// enum-cast error.
+func TestDeployedProductService_UpdateDeployedProduct_RejectsInvalidCategory(t *testing.T) {
+	mirror := &stubMirrorDeployedProductService{}
+	repo := &stubDeployedProductRepo{}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	svc := NewDeployedProductServiceWithSNWriteback(repo, dispatcher, mirror)
+
+	bogus := "not-a-real-category"
+	_, err := svc.UpdateDeployedProduct(context.Background(), domain.UpdateDeployedProductRequest{ID: testDeploymentUUID, Category: &bogus})
+	var ve *apierror.ValidationError
+	if !asValidationError(err, &ve) {
+		t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+	}
+}
+
+// TestDeployedProductService_UpdateDeployedProduct_CategoryAloneIsSufficient
+// proves a request setting only Category (no cores/tps/description/updates)
+// satisfies the "at least one field" check and reaches the repository --
+// this is the whole point of the fix: a caller categorizing an old,
+// otherwise-unchanged deployed product shouldn't have to touch an unrelated
+// field just to satisfy this validation.
+func TestDeployedProductService_UpdateDeployedProduct_CategoryAloneIsSufficient(t *testing.T) {
+	mirror := &stubMirrorDeployedProductService{
+		updateDeployedProduct: func(context.Context, domain.UpdateDeployedProductRequest) (domain.UpdateDeployedProductResponse, error) {
+			return domain.UpdateDeployedProductResponse{}, nil
+		},
+	}
+	var gotCategory *string
+	repo := &stubDeployedProductRepo{
+		updateDeployedProductFields: func(ctx context.Context, req domain.UpdateDeployedProductRequest, updatedBy string) (domain.UpdatedDeployedProduct, error) {
+			gotCategory = req.Category
+			return domain.UpdatedDeployedProduct{ID: req.ID}, nil
+		},
+	}
+	dispatcher := NewSNWritebackDispatcher(&recordingSNWritebackFailures{})
+	svc := NewDeployedProductServiceWithSNWriteback(repo, dispatcher, mirror)
+
+	ms := "ms"
+	ctx := contextWithUserIDToken(fakeJWTWithEmail(t, "jane.doe@example.com"))
+	if _, err := svc.UpdateDeployedProduct(ctx, domain.UpdateDeployedProductRequest{ID: testDeploymentUUID, Category: &ms}); err != nil {
+		t.Fatalf("UpdateDeployedProduct: %v", err)
+	}
+	if gotCategory == nil || *gotCategory != "ms" {
+		t.Fatalf("expected Category %q to reach the repository, got %v", "ms", gotCategory)
+	}
+}
+
+// TestDeployedProductService_SearchDeployedProducts_ForwardsProductCategories
+// guards against a regression CodeRabbit caught on PR #2189: once
+// SearchDeployedProducts stopped delegating to ServiceNow under dual-write
+// (see that method's own doc comment), ProductCategories had nowhere to go
+// but the Postgres repository -- the category predicate is implemented
+// there (deployed_product_repo.go), so the service must forward the filter
+// rather than reject it.
+func TestDeployedProductService_SearchDeployedProducts_ForwardsProductCategories(t *testing.T) {
+	var gotCategories []string
+	svc := NewDeployedProductService(&stubDeployedProductRepo{
+		searchDeployedProducts: func(ctx context.Context, req domain.SearchDeployedProductsRequest) ([]domain.DeployedProductView, int, error) {
+			gotCategories = req.ProductCategories
+			return nil, 0, nil
+		},
+	})
 
 	_, err := svc.SearchDeployedProducts(context.Background(), domain.SearchDeployedProductsRequest{
 		ProductCategories: []string{"pdp"},
 	})
-
-	var ve *apierror.ValidationError
-	if !asValidationError(err, &ve) {
-		t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(gotCategories) != 1 || gotCategories[0] != "pdp" {
+		t.Fatalf("expected ProductCategories [\"pdp\"] to reach the repository, got %v", gotCategories)
 	}
 }
 
@@ -71,19 +420,69 @@ func TestDeployedProductService_SearchDeployedProducts_NoProductCategoriesReache
 	}
 }
 
-// TestDeployedProductService_SearchProjectsByProductVersion_RejectedOnPostgres
-// guards the PostgreSQL data source's rejection of the EOL/product-version
-// reverse query, which it has no deployment/deployed-product model rich
-// enough to resolve. The repository is never consulted, so a nil repo is
-// safe here.
-func TestDeployedProductService_SearchProjectsByProductVersion_RejectedOnPostgres(t *testing.T) {
-	svc := NewDeployedProductService(nil)
+func TestDeployedProductService_SearchProjectsByProductVersion_RejectsInvalidProductID(t *testing.T) {
+	svc := NewDeployedProductService(&stubDeployedProductRepo{})
+
+	_, err := svc.SearchProjectsByProductVersion(context.Background(), domain.SearchProjectsByProductVersionRequest{
+		ProductID:        "not-a-uuid",
+		ProductVersionID: "22222222-2222-2222-2222-222222222222",
+	})
+	var ve *apierror.ValidationError
+	if !asValidationError(err, &ve) {
+		t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+	}
+}
+
+func TestDeployedProductService_SearchProjectsByProductVersion_RejectsInvalidProductVersionID(t *testing.T) {
+	svc := NewDeployedProductService(&stubDeployedProductRepo{})
 
 	_, err := svc.SearchProjectsByProductVersion(context.Background(), domain.SearchProjectsByProductVersionRequest{
 		ProductID:        "11111111-1111-1111-1111-111111111111",
+		ProductVersionID: "not-a-uuid",
+	})
+	var ve *apierror.ValidationError
+	if !asValidationError(err, &ve) {
+		t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+	}
+}
+
+// TestDeployedProductService_SearchProjectsByProductVersion_AppliesMandatoryExclusions
+// proves the service passes the SAME package-level mandatory exclusion
+// policy the ServiceNow implementation uses (mandatoryExcludeClosureStates/
+// mandatoryExcludeSubscriptionTypes) through to the repository, rather than
+// leaving it to the caller or silently dropping it -- the whole point of
+// this being a fixed policy, not a request field.
+func TestDeployedProductService_SearchProjectsByProductVersion_AppliesMandatoryExclusions(t *testing.T) {
+	var gotClosureStates []string
+	var gotSubscriptionTypes []domain.SubscriptionType
+	var gotReq domain.SearchProjectsByProductVersionRequest
+
+	svc := NewDeployedProductService(&stubDeployedProductRepo{
+		searchProjectsByProductVersion: func(ctx context.Context, req domain.SearchProjectsByProductVersionRequest, excludeClosureStates []string, excludeSubscriptionTypes []domain.SubscriptionType) ([]domain.EntityRef, int, error) {
+			gotReq = req
+			gotClosureStates = excludeClosureStates
+			gotSubscriptionTypes = excludeSubscriptionTypes
+			return []domain.EntityRef{{ID: "p1", Name: "Project One"}}, 1, nil
+		},
+	})
+
+	resp, err := svc.SearchProjectsByProductVersion(context.Background(), domain.SearchProjectsByProductVersionRequest{
+		ProductID:        "11111111-1111-1111-1111-111111111111",
 		ProductVersionID: "22222222-2222-2222-2222-222222222222",
 	})
-	if _, ok := err.(*apierror.ValidationError); !ok {
-		t.Fatalf("expected *apierror.ValidationError, got %T: %v", err, err)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(resp.Projects) != 1 || resp.Projects[0].ID != "p1" {
+		t.Fatalf("expected the repository's project to pass through, got %+v", resp.Projects)
+	}
+	if resp.Total != 1 || resp.Limit != gotReq.Pagination.Limit || resp.Offset != gotReq.Pagination.Offset {
+		t.Fatalf("expected pagination fields to echo the normalized request, got %+v (req pagination %+v)", resp, gotReq.Pagination)
+	}
+	if len(gotClosureStates) != len(mandatoryExcludeClosureStates) {
+		t.Fatalf("expected mandatoryExcludeClosureStates to be passed through, got %v", gotClosureStates)
+	}
+	if len(gotSubscriptionTypes) != len(mandatoryExcludeSubscriptionTypes) {
+		t.Fatalf("expected mandatoryExcludeSubscriptionTypes to be passed through, got %v", gotSubscriptionTypes)
 	}
 }

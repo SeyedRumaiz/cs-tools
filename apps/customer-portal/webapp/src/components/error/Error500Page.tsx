@@ -20,6 +20,7 @@ import illustration from "@assets/error/error-500.svg";
 
 interface Error500PageProps {
   message?: string;
+  error?: unknown;
 }
 
 /**
@@ -29,7 +30,7 @@ interface Error500PageProps {
  * @param {Error500PageProps} props - Optional message from the server or fallback copy.
  * @returns {JSX.Element} Server error illustration and copy.
  */
-export default function Error500Page({ message }: Error500PageProps): JSX.Element {
+export default function Error500Page({ message, error }: Error500PageProps): JSX.Element {
   return (
     <ErrorPage
       illustration={illustration}
@@ -38,6 +39,7 @@ export default function Error500Page({ message }: Error500PageProps): JSX.Elemen
         message?.trim() ||
         "Something went wrong on our side. Please try again in a few moments."
       }
+      error={error}
     />
   );
 }

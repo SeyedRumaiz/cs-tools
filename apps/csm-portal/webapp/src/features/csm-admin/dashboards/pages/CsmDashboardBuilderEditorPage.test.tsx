@@ -388,4 +388,157 @@ describe("CsmDashboardBuilderEditorPage", () => {
     await waitFor(() => expect(screen.queryByText("My Patches")).not.toBeInTheDocument());
     await waitFor(() => expect(getDashboardDraft("team-dash")?.widgets).toHaveLength(0));
   });
+  describe("Discard local draft", () => {
+    const deployed = {
+      id: "agents_pilot",
+      displayName: "Engineer overview",
+      isDefault: true,
+      isTeamBased: false,
+      widgets: [],
+    };
+
+    // Same routes as `renderEditor` plus a stand-in list page, so navigation
+    // after a discard is observable.
+    function renderEditorWithList(initialPath: string) {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      return render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={[initialPath]}>
+            <Routes>
+              <Route path="/admin/dashboards" element={<div>Dashboard list page</div>} />
+              <Route path="/admin/dashboards/new" element={<CsmDashboardBuilderEditorPage />} />
+              <Route path="/admin/dashboards/:draftId" element={<CsmDashboardBuilderEditorPage />} />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+    }
+
+    async function openDiscardDialog() {
+      const button = await waitFor(() => screen.getByRole("button", { name: "Discard local draft" }));
+      fireEvent.click(button);
+      await waitFor(() => expect(screen.getByText("Discard local draft?")).toBeInTheDocument());
+    }
+
+    it("opens a confirm dialog, and Cancel keeps the draft and stays on the page", async () => {
+      getMock.mockResolvedValue(deployed);
+      renderEditorWithList("/admin/dashboards/agents_pilot");
+      await waitFor(() => expect(getDashboardDraft("agents_pilot")).toBeDefined());
+
+      await openDiscardDialog();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+      await waitFor(() => expect(screen.queryByText("Discard local draft?")).not.toBeInTheDocument());
+      expect(getDashboardDraft("agents_pilot")).toBeDefined();
+      expect(screen.getByLabelText("Dashboard display name")).toBeInTheDocument();
+      expect(screen.queryByText("Dashboard list page")).not.toBeInTheDocument();
+    });
+
+    const sourcedDraft = {
+      id: "agents_pilot",
+      sourceDashboardId: "agents_pilot",
+      displayName: "Engineer overview",
+      isDefault: true,
+      isTeamBased: false,
+      widgets: [],
+      emptySections: [],
+    };
+
+    it("promises a deployed reset only once the lookup confirms the dashboard exists", async () => {
+      getMock.mockResolvedValue(deployed);
+      renderEditorWithList("/admin/dashboards/agents_pilot");
+      await waitFor(() => expect(getDashboardDraft("agents_pilot")).toBeDefined());
+      await waitFor(() => expect(screen.getByLabelText("Dashboard display name")).toBeInTheDocument());
+
+      await openDiscardDialog();
+      expect(screen.getByText(/"Engineer overview"/)).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByText(/reset to the deployed version/i)).toBeInTheDocument());
+    });
+
+    it("does not promise a reset while the deployed lookup is still pending, and keeps Discard enabled", async () => {
+      saveDashboardDraft(sourcedDraft);
+      getMock.mockReturnValue(new Promise(() => {}));
+      renderEditorWithList("/admin/dashboards/agents_pilot");
+
+      await openDiscardDialog();
+      expect(screen.getByText(/still being checked/i)).toBeInTheDocument();
+      expect(screen.getByText(/cannot be undone/i)).toBeInTheDocument();
+      expect(screen.queryByText(/reset to the deployed version/i)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Discard" })).toBeEnabled();
+    });
+
+    it("says it could not check when the deployed lookup failed, despite a sourceDashboardId", async () => {
+      saveDashboardDraft(sourcedDraft);
+      getMock.mockRejectedValue(new Error("network error"));
+      renderEditorWithList("/admin/dashboards/agents_pilot");
+      await waitFor(() => expect(screen.getByText(/couldn't check/i)).toBeInTheDocument());
+
+      await openDiscardDialog();
+      expect(screen.getByText(/could not check whether a deployed version exists/i)).toBeInTheDocument();
+      expect(screen.queryByText(/reset to the deployed version/i)).not.toBeInTheDocument();
+    });
+
+    it("says the draft is the only copy when the source dashboard is no longer deployed", async () => {
+      saveDashboardDraft(sourcedDraft);
+      getMock.mockResolvedValue(null);
+      renderEditorWithList("/admin/dashboards/agents_pilot");
+      await waitFor(() => expect(screen.getByText(/not yet deployed|never been deployed|differs/i)).toBeInTheDocument());
+
+      await openDiscardDialog();
+      expect(screen.getByText(/deletes it entirely/i)).toBeInTheDocument();
+      expect(screen.queryByText(/reset to the deployed version/i)).not.toBeInTheDocument();
+    });
+
+    it("shows the delete-entirely copy for a never-deployed dashboard", async () => {
+      getMock.mockResolvedValue(null);
+      renderEditorWithList("/admin/dashboards/new");
+      await waitFor(() => expect(screen.getByLabelText("Dashboard display name")).toBeInTheDocument());
+
+      await openDiscardDialog();
+      expect(screen.getByText(/deletes it entirely/i)).toBeInTheDocument();
+    });
+
+    it("Discard deletes the draft, goes to the list, and the still-pending autosave does not resurrect it", async () => {
+      getMock.mockResolvedValue(deployed);
+      renderEditorWithList("/admin/dashboards/agents_pilot");
+      await waitFor(() => expect(screen.getByLabelText("Dashboard display name")).toHaveValue("Engineer overview"));
+
+      // An edit inside the 300ms debounce window: its save timer is armed
+      // and the unmount flush would write it if discarding did not stop both.
+      fireEvent.change(screen.getByLabelText("Dashboard display name"), {
+        target: { value: "Edited then discarded" },
+      });
+      await openDiscardDialog();
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+
+      await waitFor(() => expect(screen.getByText("Dashboard list page")).toBeInTheDocument());
+      expect(getDashboardDraft("agents_pilot")).toBeUndefined();
+
+      // Past the debounce window: the timer must not have re-saved it either.
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(getDashboardDraft("agents_pilot")).toBeUndefined();
+      expect(localStorage.getItem("csm.dashboardBuilder.drafts.v1") ?? "").not.toContain(
+        "Edited then discarded",
+      );
+    });
+
+    it("re-opening a discarded deployed dashboard re-seeds from the deployed version", async () => {
+      getMock.mockResolvedValue(deployed);
+      const first = renderEditorWithList("/admin/dashboards/agents_pilot");
+      await waitFor(() => expect(screen.getByLabelText("Dashboard display name")).toHaveValue("Engineer overview"));
+      fireEvent.change(screen.getByLabelText("Dashboard display name"), {
+        target: { value: "Edited then discarded" },
+      });
+      await openDiscardDialog();
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+      await waitFor(() => expect(screen.getByText("Dashboard list page")).toBeInTheDocument());
+      first.unmount();
+
+      renderEditorWithList("/admin/dashboards/agents_pilot");
+      await waitFor(() =>
+        expect(screen.getByLabelText("Dashboard display name")).toHaveValue("Engineer overview"),
+      );
+      expect(getDashboardDraft("agents_pilot")?.displayName).toBe("Engineer overview");
+    });
+  });
 });

@@ -27,6 +27,10 @@ vi.mock("@api/useGetProjectFilters", () => ({
         { id: "3", label: "Closed" },
         { id: "1003", label: "Waiting On WSO2" },
       ],
+      resolutionCodes: [
+        { id: "SOLVED_WORKAROUND_PROVIDED", label: "Solved Workaround Provided" },
+      ],
+      causes: [{ id: "PRODUCT_BUG", label: "Product Bug" }],
     },
   }),
 }));
@@ -53,6 +57,15 @@ vi.mock("@context/error-banner/ErrorBannerContext", () => ({
   useErrorBanner: () => ({ showError: showErrorMock }),
 }));
 
+// Defaults to an internal caller (isExternalUser: false) so existing tests
+// that don't care about the resolution-fields dialog keep working —
+// individual tests override this via mockReturnValueOnce where it matters.
+const useCustomerPermissionsMock = vi.fn(() => ({ isExternalUser: false }));
+
+vi.mock("@hooks/useCustomerPermissions", () => ({
+  useCustomerPermissions: () => useCustomerPermissionsMock(),
+}));
+
 function renderActionRow(
   props: Partial<Parameters<typeof CaseDetailsActionRow>[0]> = {},
 ) {
@@ -76,11 +89,39 @@ describe("CaseDetailsActionRow", () => {
     postCommentMutateMock.mockReset();
     showSuccessMock.mockReset();
     showErrorMock.mockReset();
+    useCustomerPermissionsMock.mockReset();
+    useCustomerPermissionsMock.mockReturnValue({ isExternalUser: false });
   });
 
   it("should render Close action for open status when case can be patched", () => {
     renderActionRow({ statusLabel: "Open" });
     expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+  });
+
+  // Regression tests for a real, reported correction: resolutionCode/cause/
+  // closeNotes are WSO2's own internal case-resolution taxonomy, so only an
+  // internal (WSO2 staff) caller closing a case should be asked for them —
+  // an external (customer/partner) caller must never see these fields.
+  it("shows resolution fields in the close confirmation for an internal caller", () => {
+    useCustomerPermissionsMock.mockReturnValue({ isExternalUser: false });
+    renderActionRow({ statusLabel: "Open" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    expect(screen.getByLabelText(/Resolution Code/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Cause/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Close notes")).toBeInTheDocument();
+  });
+
+  it("does not show resolution fields in the close confirmation for an external caller", () => {
+    useCustomerPermissionsMock.mockReturnValue({ isExternalUser: true });
+    renderActionRow({ statusLabel: "Open" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    expect(screen.queryByLabelText(/Resolution Code/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Cause/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Close notes")).not.toBeInTheDocument();
   });
 
   it("should render solution actions for solution proposed status", () => {

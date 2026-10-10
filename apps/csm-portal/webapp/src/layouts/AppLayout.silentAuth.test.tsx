@@ -82,7 +82,7 @@ vi.mock("@components/announcement-banner/HtmlAnnouncementBanner", () => ({
   default: () => null,
 }));
 vi.mock("@components/mobile-app-banner/MobileAppBanner", () => ({ default: () => null }));
-vi.mock("@components/top-banner/TopBanner", () => ({ default: () => null }));
+vi.mock("@components/top-banner/TopBanners", () => ({ default: () => null }));
 vi.mock("@components/header/Header", () => ({ default: () => <div data-testid="header" /> }));
 vi.mock("@components/side-nav-bar/CsmSideBar", () => ({ default: () => null }));
 

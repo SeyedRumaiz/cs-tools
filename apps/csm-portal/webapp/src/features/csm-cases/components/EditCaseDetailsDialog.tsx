@@ -59,6 +59,13 @@ export interface EditCaseDetailsDialogProps {
   isSaving: boolean;
   onClose: () => void;
   /**
+   * Called once every changed field has saved, in place of leaving the dialog
+   * open on an all-green result list. Not called on a partial failure: the
+   * per-field results stay on screen so the failed field can be corrected and
+   * retried.
+   */
+  onAllSaved?: () => void;
+  /**
    * Submits every changed field as its own sequential `PATCH /cases/{id}`
    * call (the backend accepts exactly one field per call — see
    * `BeCaseUpdatePayload`) and resolves with a per-field result once all
@@ -98,6 +105,7 @@ export default function EditCaseDetailsDialog({
   currentDeployedProductId,
   isSaving,
   onClose,
+  onAllSaved,
   onSubmit,
 }: EditCaseDetailsDialogProps): JSX.Element {
   const [subject, setSubject] = useState(currentSubject);
@@ -149,7 +157,10 @@ export default function EditCaseDetailsDialog({
   const handleSubmit = (): void => {
     if (!hasChanges) return;
     setResults(null);
-    void onSubmit(changes).then(setResults);
+    void onSubmit(changes).then((r) => {
+      setResults(r);
+      if (r.length > 0 && r.every((x) => x.ok)) onAllSaved?.();
+    });
   };
 
   return (

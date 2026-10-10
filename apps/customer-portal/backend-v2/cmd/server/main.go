@@ -56,12 +56,19 @@ func main() {
 	oauth2ClientSecret := os.Getenv("OAUTH2_CLIENT_SECRET")
 	oauth2TokenURL := optionalURL("OAUTH2_TOKEN_URL", "http", "https")
 
+	timeouts, err := loadTimeouts(os.Getenv)
+	if err != nil {
+		slog.Error("invalid timeout configuration", "err", err)
+		os.Exit(1)
+	}
+
 	entityCfg := entity.Config{
 		BaseURL:      mustURL("ENTITY_SERVICE_BASE_URL", "http", "https"),
 		TokenURL:     oauth2TokenURL,
 		ClientID:     oauth2ClientID,
 		ClientSecret: oauth2ClientSecret,
 		Scopes:       splitComma(os.Getenv("ENTITY_SERVICE_SCOPES")),
+		Timeout:      timeouts.entity,
 	}
 	entityClient := entity.NewClient(entityCfg)
 
@@ -173,7 +180,25 @@ func main() {
 	// tokens the exact same way.
 	// authMiddleware := middleware.AuthWithValidator(tokenValidator)
 
-	userHandler := handler.NewUserHandler(entityClient, scimClient)
+	// CSM_MIGRATION_* flags belong to the ServiceNow-to-CSM cutover: opt-in,
+	// off unless the value is exactly "true", and off means the portal
+	// behaves exactly as it does today.
+	csmMigrationFirstAccess := !strings.EqualFold(strings.TrimSpace(os.Getenv("CSM_MIGRATION_FIRST_ACCESS_ENABLED")), "false")
+	if csmMigrationFirstAccess {
+		slog.Info("CSM_MIGRATION_FIRST_ACCESS_ENABLED=true; an invited user's first profile load will complete their onboarding")
+	}
+
+	// Project contacts. On, the contact list and the admin check read the CSM
+	// database, and invite / role change / deactivate / resend go to
+	// entity-service, which updates Postgres and Salesforce in one
+	// transaction. Off, all of it goes to the pre-cutover onboarding service
+	// exactly as before, so this flag is the whole rollback.
+	csmMigrationPortalContacts := !strings.EqualFold(strings.TrimSpace(os.Getenv("CSM_MIGRATION_PORTAL_CONTACTS_ENABLED")), "false")
+	if csmMigrationPortalContacts {
+		slog.Info("CSM_MIGRATION_PORTAL_CONTACTS_ENABLED=true; project contacts are read from the CSM database and written through the entity service")
+	}
+
+	userHandler := handler.NewUserHandler(entityClient, scimClient, csmMigrationFirstAccess)
 	projectHandler := handler.NewProjectHandler(entityClient)
 	projectStatsHandler := handler.NewProjectStatsHandler(entityClient)
 	caseHandler := handler.NewCaseHandler(entityClient)
@@ -193,7 +218,8 @@ func main() {
 	globalHandler := handler.NewGlobalHandler(entityClient)
 	instanceHandler := handler.NewInstanceHandler(entityClient)
 	registryHandler := handler.NewRegistryHandler(entityClient, registryClient, adminRole)
-	contactHandler := handler.NewContactHandler(entityClient, userManagementClient)
+	contactHandler := handler.NewContactHandler(entityClient, userManagementClient, entityClient, csmMigrationPortalContacts)
+	roleResolver := middleware.NewCachedRoleResolver(entityClient, 5*time.Minute)
 
 	// Live-engineer-chat escalation feature (Novera chat "Talk to a live
 	// engineer" button). This backend owns case creation (it has the
@@ -218,73 +244,77 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// GET/PATCH /users/me are only served by entity-service when it runs
-	// with DATA_SOURCE=servicenow — see internal/entity/users.go.
 	mux.HandleFunc("GET /users/me", userHandler.GetMe)
 	mux.HandleFunc("PATCH /users/me", userHandler.PatchMe)
 
 	mux.HandleFunc("POST /projects/search", projectHandler.SearchProjects)
 	mux.HandleFunc("GET /projects/{id}", projectHandler.GetProject)
-	mux.HandleFunc("PATCH /projects/{id}", projectHandler.PatchProject)
+	mux.Handle("PATCH /projects/{id}", middleware.RequirePermission(roleResolver, middleware.ModuleProjects, middleware.ActionUpdate)(http.HandlerFunc(projectHandler.PatchProject)))
 	mux.HandleFunc("GET /projects/{id}/filters", projectStatsHandler.GetProjectFilters)
 	mux.HandleFunc("GET /projects/{id}/features", projectStatsHandler.GetProjectFeatures)
 	mux.HandleFunc("GET /projects/{id}/stats", projectStatsHandler.GetProjectDashboardStats)
 	mux.HandleFunc("GET /projects/{id}/stats/cases", projectStatsHandler.GetProjectCaseStats)
 	mux.HandleFunc("GET /projects/{id}/stats/conversations", projectStatsHandler.GetProjectConversationStats)
 	mux.HandleFunc("GET /projects/{id}/stats/support", projectStatsHandler.GetProjectSupportStats)
-	mux.HandleFunc("GET /projects/{id}/stats/time-cards", projectStatsHandler.GetProjectTimeCardStats)
-	mux.HandleFunc("GET /projects/{id}/stats/change-requests", projectStatsHandler.GetProjectChangeRequestStats)
+	mux.Handle("GET /projects/{id}/stats/time-cards", middleware.RequirePermission(roleResolver, middleware.ModuleTimeCards, middleware.ActionRead)(http.HandlerFunc(projectStatsHandler.GetProjectTimeCardStats)))
+	mux.Handle("GET /projects/{id}/stats/change-requests", middleware.RequirePermission(roleResolver, middleware.ModuleChangeRequests, middleware.ActionRead)(http.HandlerFunc(projectStatsHandler.GetProjectChangeRequestStats)))
 	mux.HandleFunc("GET /projects/{id}/stats/usage", projectStatsHandler.GetProjectUsageStats)
-	mux.HandleFunc("POST /projects/{id}/cases/time-cards/search", projectStatsHandler.SearchProjectCaseTimeCards)
+	mux.Handle("POST /projects/{id}/cases/time-cards/search", middleware.RequirePermission(roleResolver, middleware.ModuleTimeCards, middleware.ActionRead)(http.HandlerFunc(projectStatsHandler.SearchProjectCaseTimeCards)))
 	mux.HandleFunc("POST /projects/{id}/instances/search", instanceHandler.SearchProjectInstances)
 	mux.HandleFunc("POST /projects/{id}/instances/metrics/search", instanceHandler.SearchProjectInstanceMetrics)
 	mux.HandleFunc("POST /projects/{id}/instances/usages/search", instanceHandler.SearchProjectInstanceUsage)
 	mux.HandleFunc("POST /projects/{id}/instances/stats/metrics/search", instanceHandler.SearchProjectInstanceMetricsStats)
 	mux.HandleFunc("POST /projects/{id}/instances/stats/usages/search", instanceHandler.SearchProjectInstanceUsageStats)
-	mux.HandleFunc("POST /projects/{id}/registry-tokens", registryHandler.CreateRegistryToken)
-	mux.HandleFunc("POST /projects/{id}/registry-tokens/search", registryHandler.SearchRegistryTokens)
-	mux.HandleFunc("GET /projects/{id}/integration-users", registryHandler.GetProjectIntegrationUsers)
+	mux.Handle("POST /projects/{id}/registry-tokens", middleware.RequirePermission(roleResolver, middleware.ModuleDeploymentResources, middleware.ActionCreate)(http.HandlerFunc(registryHandler.CreateRegistryToken)))
+	mux.Handle("POST /projects/{id}/registry-tokens/search", middleware.RequirePermission(roleResolver, middleware.ModuleDeploymentResources, middleware.ActionRead)(http.HandlerFunc(registryHandler.SearchRegistryTokens)))
+	mux.Handle("GET /projects/{id}/integration-users", middleware.RequirePermission(roleResolver, middleware.ModuleDeploymentResources, middleware.ActionRead)(http.HandlerFunc(registryHandler.GetProjectIntegrationUsers)))
 	mux.HandleFunc("GET /projects/{id}/contacts", contactHandler.GetProjectContacts)
-	mux.HandleFunc("POST /projects/{id}/contacts", contactHandler.CreateProjectContact)
-	mux.HandleFunc("DELETE /projects/{id}/contacts/{email}", contactHandler.RemoveProjectContact)
-	mux.HandleFunc("PATCH /projects/{id}/contacts/{email}", contactHandler.UpdateProjectContactRole)
-	mux.HandleFunc("POST /projects/{id}/contacts/validate", contactHandler.ValidateProjectContact)
-	mux.HandleFunc("DELETE /registry-tokens/{id}", registryHandler.DeleteRegistryToken)
-	mux.HandleFunc("POST /registry-tokens/{id}/regenerate", registryHandler.RegenerateRegistryToken)
+	mux.Handle("POST /projects/{id}/contacts", middleware.RequireRoles(roleResolver, middleware.RoleAdmin, middleware.RoleCustomerAdmin, middleware.RolePartnerAdmin)(http.HandlerFunc(contactHandler.CreateProjectContact)))
+	mux.Handle("DELETE /projects/{id}/contacts/{email}", middleware.RequireRoles(roleResolver, middleware.RoleAdmin, middleware.RoleCustomerAdmin, middleware.RolePartnerAdmin)(http.HandlerFunc(contactHandler.RemoveProjectContact)))
+	mux.Handle("PATCH /projects/{id}/contacts/{email}", middleware.RequireRoles(roleResolver, middleware.RoleAdmin, middleware.RoleCustomerAdmin, middleware.RolePartnerAdmin)(http.HandlerFunc(contactHandler.UpdateProjectContactRole)))
+	mux.Handle("POST /projects/{id}/contacts/{email}/resend-invitation", middleware.RequireRoles(roleResolver, middleware.RoleAdmin, middleware.RoleCustomerAdmin, middleware.RolePartnerAdmin)(http.HandlerFunc(contactHandler.ResendProjectContactInvitation)))
+	mux.Handle("POST /projects/{id}/contacts/validate", middleware.RequireRoles(roleResolver, middleware.RoleAdmin, middleware.RoleCustomerAdmin, middleware.RolePartnerAdmin)(http.HandlerFunc(contactHandler.ValidateProjectContact)))
+	mux.Handle("DELETE /registry-tokens/{id}", middleware.RequirePermission(roleResolver, middleware.ModuleDeploymentResources, middleware.ActionDelete)(http.HandlerFunc(registryHandler.DeleteRegistryToken)))
+	// Regeneration is an update, not a delete: the token resource survives and
+	// only its secret changes (RegenerateToken returns a TokenCreationResponse).
+	// It was gated on ActionDelete, which tied it to deletion access; that makes
+	// no difference while DeploymentResources grants the same roles for every
+	// action, but would enforce the wrong check the moment they are split.
+	mux.Handle("POST /registry-tokens/{id}/regenerate", middleware.RequirePermission(roleResolver, middleware.ModuleDeploymentResources, middleware.ActionUpdate)(http.HandlerFunc(registryHandler.RegenerateRegistryToken)))
 
-	mux.HandleFunc("POST /projects/{id}/cases/search", caseHandler.SearchCases)
-	mux.HandleFunc("GET /cases/{id}", caseHandler.GetCase)
-	mux.HandleFunc("POST /cases", caseHandler.CreateCase)
-	mux.HandleFunc("PATCH /cases/{id}", caseHandler.PatchCase)
-	mux.HandleFunc("POST /cases/{id}/comments", caseHandler.CreateCaseComment)
-	mux.HandleFunc("POST /cases/{id}/activities/search", caseHandler.SearchCaseActivities)
-	mux.HandleFunc("GET /cases/{id}/attachments", caseHandler.SearchCaseAttachments)
-	mux.HandleFunc("POST /cases/{id}/attachments", caseHandler.CreateCaseAttachment)
-	mux.HandleFunc("GET /cases/{id}/feedback", caseHandler.GetCaseFeedback)
-	mux.HandleFunc("POST /cases/{id}/feedback", caseHandler.SubmitCaseFeedback)
-	mux.HandleFunc("PATCH /cases/{caseId}/attachments/{attachmentId}", caseHandler.PatchCaseAttachment)
-	mux.HandleFunc("POST /cases/{caseId}/escalations", caseHandler.CreateCaseEscalation)
-	mux.HandleFunc("POST /cases/{caseId}/escalations/search", caseHandler.SearchCaseEscalations)
+	mux.Handle("POST /projects/{id}/cases/search", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionRead)(http.HandlerFunc(caseHandler.SearchCases)))
+	mux.Handle("GET /cases/{id}", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionRead)(http.HandlerFunc(caseHandler.GetCase)))
+	mux.Handle("POST /cases", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionCreate)(http.HandlerFunc(caseHandler.CreateCase)))
+	mux.Handle("PATCH /cases/{id}", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionUpdate)(http.HandlerFunc(caseHandler.PatchCase)))
+	mux.Handle("POST /cases/{id}/comments", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionCreate)(http.HandlerFunc(caseHandler.CreateCaseComment)))
+	mux.Handle("POST /cases/{id}/activities/search", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionRead)(http.HandlerFunc(caseHandler.SearchCaseActivities)))
+	mux.Handle("GET /cases/{id}/attachments", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionRead)(http.HandlerFunc(caseHandler.SearchCaseAttachments)))
+	mux.Handle("POST /cases/{id}/attachments", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionCreate)(http.HandlerFunc(caseHandler.CreateCaseAttachment)))
+	mux.Handle("GET /cases/{id}/feedback", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionRead)(http.HandlerFunc(caseHandler.GetCaseFeedback)))
+	mux.Handle("POST /cases/{id}/feedback", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionCreate)(http.HandlerFunc(caseHandler.SubmitCaseFeedback)))
+	mux.Handle("PATCH /cases/{caseId}/attachments/{attachmentId}", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionUpdate)(http.HandlerFunc(caseHandler.PatchCaseAttachment)))
+	mux.Handle("POST /cases/{caseId}/escalations", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionCreate)(http.HandlerFunc(caseHandler.CreateCaseEscalation)))
+	mux.Handle("POST /cases/{caseId}/escalations/search", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionRead)(http.HandlerFunc(caseHandler.SearchCaseEscalations)))
 
-	mux.HandleFunc("POST /projects/{id}/deployments/search", deploymentHandler.SearchDeployments)
+	mux.Handle("POST /projects/{id}/deployments/search", middleware.RequirePermission(roleResolver, middleware.ModuleDeployments, middleware.ActionRead)(http.HandlerFunc(deploymentHandler.SearchDeployments)))
 	// POST /projects/{id}/deployments only succeeds against entity-service's
 	// ServiceNow data source — see internal/entity/deployments.go.
-	mux.HandleFunc("POST /projects/{id}/deployments", deploymentHandler.CreateDeployment)
-	mux.HandleFunc("PATCH /projects/{projectId}/deployments/{id}", deploymentHandler.PatchDeployment)
-	mux.HandleFunc("GET /deployments/{deploymentId}/attachments", deploymentHandler.SearchDeploymentAttachments)
-	mux.HandleFunc("POST /deployments/{deploymentId}/attachments", deploymentHandler.CreateDeploymentAttachment)
-	mux.HandleFunc("PATCH /deployments/{deploymentId}/attachments/{attachmentId}", deploymentHandler.PatchDeploymentAttachment)
+	mux.Handle("POST /projects/{id}/deployments", middleware.RequirePermission(roleResolver, middleware.ModuleDeployments, middleware.ActionCreate)(http.HandlerFunc(deploymentHandler.CreateDeployment)))
+	mux.Handle("PATCH /projects/{projectId}/deployments/{id}", middleware.RequirePermission(roleResolver, middleware.ModuleDeployments, middleware.ActionUpdate)(http.HandlerFunc(deploymentHandler.PatchDeployment)))
+	mux.Handle("GET /deployments/{deploymentId}/attachments", middleware.RequirePermission(roleResolver, middleware.ModuleDeployments, middleware.ActionRead)(http.HandlerFunc(deploymentHandler.SearchDeploymentAttachments)))
+	mux.Handle("POST /deployments/{deploymentId}/attachments", middleware.RequirePermission(roleResolver, middleware.ModuleDeployments, middleware.ActionCreate)(http.HandlerFunc(deploymentHandler.CreateDeploymentAttachment)))
+	mux.Handle("PATCH /deployments/{deploymentId}/attachments/{attachmentId}", middleware.RequirePermission(roleResolver, middleware.ModuleDeployments, middleware.ActionUpdate)(http.HandlerFunc(deploymentHandler.PatchDeploymentAttachment)))
 	mux.HandleFunc("POST /deployments/{id}/instances/search", instanceHandler.SearchDeploymentInstances)
 	mux.HandleFunc("POST /deployments/{id}/instances/metrics/search", instanceHandler.SearchDeploymentInstanceMetrics)
 	mux.HandleFunc("POST /deployments/{id}/instances/usages/search", instanceHandler.SearchDeploymentInstanceUsage)
 	mux.HandleFunc("POST /deployments/{id}/instances/stats/metrics/search", instanceHandler.SearchDeploymentInstanceMetricsStats)
 	mux.HandleFunc("POST /deployments/{id}/instances/stats/usages/search", instanceHandler.SearchDeploymentInstanceUsageStats)
 
-	mux.HandleFunc("POST /deployments/{deploymentId}/products/search", deployedProductHandler.SearchDeployedProducts)
+	mux.Handle("POST /deployments/{deploymentId}/products/search", middleware.RequirePermission(roleResolver, middleware.ModuleDeploymentProducts, middleware.ActionRead)(http.HandlerFunc(deployedProductHandler.SearchDeployedProducts)))
 	// POST/PATCH .../products only succeed against entity-service's
 	// ServiceNow data source — see internal/entity/deployed_products.go.
-	mux.HandleFunc("POST /deployments/{deploymentId}/products", deployedProductHandler.CreateDeployedProduct)
-	mux.HandleFunc("PATCH /deployments/{deploymentId}/products/{id}", deployedProductHandler.PatchDeployedProduct)
+	mux.Handle("POST /deployments/{deploymentId}/products", middleware.RequirePermission(roleResolver, middleware.ModuleDeploymentProducts, middleware.ActionCreate)(http.HandlerFunc(deployedProductHandler.CreateDeployedProduct)))
+	mux.Handle("PATCH /deployments/{deploymentId}/products/{id}", middleware.RequirePermission(roleResolver, middleware.ModuleDeploymentProducts, middleware.ActionUpdate)(http.HandlerFunc(deployedProductHandler.PatchDeployedProduct)))
 	// POST /deployments/{deploymentId}/products/{productId}/metrics/search and
 	// POST /deployments/products/{id}/instances/metrics/search cannot both be
 	// registered as literal patterns: net/http.ServeMux (Go 1.22+) rejects
@@ -310,20 +340,18 @@ func main() {
 	mux.HandleFunc("GET /products", productHandler.GetProducts)
 	mux.HandleFunc("POST /products/{id}/versions/search", productHandler.SearchProductVersions)
 
-	// entity-service only supports change requests and call requests on its
-	// ServiceNow data source — see internal/entity/change_requests.go and
-	// internal/entity/call_requests.go.
-	mux.HandleFunc("POST /change-requests", changeRequestHandler.CreateChangeRequest)
-	mux.HandleFunc("POST /projects/{id}/change-requests/search", changeRequestHandler.SearchChangeRequests)
-	mux.HandleFunc("GET /change-requests/{id}", changeRequestHandler.GetChangeRequest)
-	mux.HandleFunc("PATCH /change-requests/{id}", changeRequestHandler.PatchChangeRequest)
-	mux.HandleFunc("GET /change-requests/{id}/approvals", changeRequestHandler.GetChangeRequestApprovals)
-	mux.HandleFunc("POST /change-requests/{id}/approvals/decision", changeRequestHandler.DecideChangeRequestApproval)
+	registerChangeRequestRoutes(mux, roleResolver, changeRequestHandler)
 
-	mux.HandleFunc("POST /cases/{caseId}/call-requests", callRequestHandler.CreateCallRequest)
-	mux.HandleFunc("POST /cases/{caseId}/call-requests/search", callRequestHandler.SearchCallRequests)
-	mux.HandleFunc("PATCH /cases/{caseId}/call-requests/{id}", callRequestHandler.PatchCallRequest)
+	mux.Handle("POST /cases/{caseId}/call-requests", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionCreate)(http.HandlerFunc(callRequestHandler.CreateCallRequest)))
+	mux.Handle("POST /cases/{caseId}/call-requests/search", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionRead)(http.HandlerFunc(callRequestHandler.SearchCallRequests)))
+	mux.Handle("PATCH /cases/{caseId}/call-requests/{id}", middleware.RequirePermission(roleResolver, middleware.ModuleCases, middleware.ActionUpdate)(http.HandlerFunc(callRequestHandler.PatchCallRequest)))
 
+	// Security Center is governed by the project's own feature flags, not by
+	// RBAC. The security_admin module had exactly one holder, super_admin,
+	// which no data source emits, so gating these on it closed Security Center
+	// to every user. Restored to the pre-RBAC registration. Who should hold
+	// Security Admin is a product decision; until it has one, there is no
+	// persona to gate on.
 	mux.HandleFunc("POST /products/vulnerabilities/search", productVulnerabilityHandler.SearchProductVulnerabilities)
 	mux.HandleFunc("GET /products/vulnerabilities/{id}", productVulnerabilityHandler.GetProductVulnerability)
 	mux.HandleFunc("GET /products/vulnerabilities/meta", globalHandler.GetVulnerabilityMeta)
@@ -336,7 +364,7 @@ func main() {
 
 	// entity-service only supports time cards on its ServiceNow data source —
 	// see internal/entity/time_cards.go.
-	mux.HandleFunc("POST /projects/{id}/time-cards/search", timeCardHandler.SearchTimeCards)
+	mux.Handle("POST /projects/{id}/time-cards/search", middleware.RequirePermission(roleResolver, middleware.ModuleTimeCards, middleware.ActionRead)(http.HandlerFunc(timeCardHandler.SearchTimeCards)))
 
 	// AI chat feature: case classification and KB recommendations call the
 	// upstream AI chat agent directly; conversation search/messages/summary
@@ -388,9 +416,15 @@ func main() {
 			),
 		),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// Read/WriteTimeout default to 60s because create-case carries inline
+		// base64 attachments (up to ~15 MiB) relayed through two hops. The
+		// values are operator-configurable and not ordered by the code;
+		// keeping the entity client timeout shorter than the server write
+		// timeout lets the handler return a clean error before the server
+		// gives up.
+		ReadTimeout:  timeouts.read,
+		WriteTimeout: timeouts.write,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	// Established before the WebSocket listener binds, so that listener's setup
@@ -502,6 +536,30 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("Customer Portal Backend (v2) stopped")
+}
+
+// registerChangeRequestRoutes registers the change-request routes, with the
+// permission each one needs. A function of its own (rather than inline in main)
+// so the route-to-permission wiring is exercised by tests -- see
+// TestChangeRequestRouteGating in main_rbac_test.go.
+func registerChangeRequestRoutes(mux *http.ServeMux, roleResolver middleware.RoleResolver, h *handler.ChangeRequestHandler) {
+	// entity-service only supports change requests and call requests on its
+	// ServiceNow data source — see internal/entity/change_requests.go and
+	// internal/entity/call_requests.go.
+	mux.Handle("POST /change-requests", middleware.RequirePermission(roleResolver, middleware.ModuleChangeRequests, middleware.ActionCreate)(http.HandlerFunc(h.CreateChangeRequest)))
+	mux.Handle("POST /projects/{id}/change-requests/search", middleware.RequirePermission(roleResolver, middleware.ModuleChangeRequests, middleware.ActionRead)(http.HandlerFunc(h.SearchChangeRequests)))
+	mux.Handle("GET /change-requests/{id}", middleware.RequirePermission(roleResolver, middleware.ModuleChangeRequests, middleware.ActionRead)(http.HandlerFunc(h.GetChangeRequest)))
+	// PATCH serves two levels of access: ActionUpdate (WSO2-side roles) may send
+	// the whole customer-safe field set, ActionDecide alone (customer and partner
+	// roles) only the customer's own answer or a proposed implementation time --
+	// see handler.PatchChangeRequest. Update is listed first so a caller who holds
+	// both is served at the broader level.
+	mux.Handle("PATCH /change-requests/{id}", middleware.RequirePermissionOneOf(roleResolver, middleware.ModuleChangeRequests, middleware.ActionUpdate, middleware.ActionDecide)(http.HandlerFunc(h.PatchChangeRequest)))
+	mux.Handle("GET /change-requests/{id}/approvals", middleware.RequirePermission(roleResolver, middleware.ModuleChangeRequests, middleware.ActionRead)(http.HandlerFunc(h.GetChangeRequestApprovals)))
+	// The decision route takes ActionDecide, not ActionUpdate: a customer contact
+	// answers the Customer Approval / Customer Review they were asked here, and
+	// entity-service accepts a decision only on the caller's own pending approval.
+	mux.Handle("POST /change-requests/{id}/approvals/decision", middleware.RequirePermission(roleResolver, middleware.ModuleChangeRequests, middleware.ActionDecide)(http.HandlerFunc(h.DecideChangeRequestApproval)))
 }
 
 // dispatchDeploymentsProductsMetricsSearch resolves the two distinct routes

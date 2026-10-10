@@ -23,6 +23,7 @@ import type {
   ProjectDeploymentOption,
 } from "@features/support/types/caseCreationOptions";
 import { ChatSender } from "@features/support/types/conversations";
+import { stripThinkingBlocks } from "@features/support/utils/chat";
 
 export type {
   DeploymentOption,
@@ -366,6 +367,32 @@ export function getBaseProductOptions(
 }
 
 /**
+ * Filters deployment products down to the categories a project's service-request
+ * entitlement allows. This is the client-side backstop for the server-side
+ * `productCategories` filter: the server deliberately includes an uncategorized
+ * deployed product (NULL `category`) in its own results, since most real rows
+ * are uncategorized and most SR-creation flows have no category restriction at
+ * all. A flow that genuinely restricts to a category list must exclude those
+ * NULLs itself, or they would always be offered regardless of category.
+ *
+ * @param {DeploymentProductItem[]} items - Deployment products to filter.
+ * @param {string[] | undefined} allowedCategories - Allowed category values, or
+ *   undefined/empty to skip filtering (every item passes through unchanged).
+ * @returns {DeploymentProductItem[]} Items whose category is in allowedCategories,
+ *   or every item when allowedCategories is empty/undefined.
+ */
+export function filterDeploymentProductsByCategory(
+  items: DeploymentProductItem[],
+  allowedCategories: string[] | undefined,
+): DeploymentProductItem[] {
+  if (!allowedCategories || allowedCategories.length === 0) return items;
+  return items.filter(
+    (item) =>
+      item.category != null && allowedCategories.includes(item.category),
+  );
+}
+
+/**
  * Formats chat messages for the case classification API.
  *
  * @param {Array<{ text: string; sender: string }>} messages - Chat messages with text and sender.
@@ -376,9 +403,12 @@ export function formatChatHistoryForClassification(
 ): string {
   return messages
     .map((m) => {
-      const text = (m.text || "").trim().slice(-150);
+      const isUser = m.sender === ChatSender.USER;
+      // The classifier should see the answer, not the model's reasoning.
+      const visible = isUser ? m.text || "" : stripThinkingBlocks(m.text || "");
+      const text = visible.trim().slice(-150);
       if (!text) return "";
-      const role = m.sender === ChatSender.USER ? "User" : "Assistant";
+      const role = isUser ? "User" : "Assistant";
       return `${role}: ${text}`;
     })
     .filter((line) => line.length > 0)

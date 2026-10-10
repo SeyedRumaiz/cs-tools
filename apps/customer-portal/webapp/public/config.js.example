@@ -150,7 +150,7 @@ window.config = {
   //   To remove one   → delete its object, or set  enabled: false.
   //   No code changes are required — only this file needs updating.
   //
-  //   Each object supports four fields:
+  //   Each object supports four fields, plus two optional ones (startsAt, expiresAt):
   //
   //   enabled {boolean}
   //     true  – banner is rendered on every page.
@@ -181,12 +181,32 @@ window.config = {
   //       automatically when closeable is true.
   //     • Recommended height: 3rem (48 px).
   //
+  //   startsAt {string}  (optional)
+  //     ISO 8601 timestamp WITH a UTC offset, e.g. "2026-10-08T09:00:00+05:30"
+  //     or "2026-10-08T03:30:00Z". The banner is not rendered before that
+  //     instant and appears from then on (still subject to enabled / closeable /
+  //     dismissal). A page that is already open shows it live when the time
+  //     arrives, no reload needed. Omit it to show the banner immediately.
+  //     An unparseable value is ignored (no start gate) and a warning is
+  //     logged. If startsAt is at or after expiresAt the banner never shows
+  //     (a warning is logged).
+  //
+  //   expiresAt {string}  (optional)
+  //     ISO 8601 timestamp WITH a UTC offset, e.g. "2026-10-10T18:00:00+05:30"
+  //     or "2026-10-10T12:30:00Z". From that instant on the banner is not
+  //     rendered, regardless of enabled / closeable / dismissal. A page that
+  //     is already open hides it live when the time passes, no reload needed.
+  //     Omit it for a banner that never expires. An unparseable value is
+  //     ignored (the banner stays visible) and a warning is logged.
+  //
   CUSTOMER_PORTAL_TOP_BANNERS: [
     // Banner 1 — non-dismissable event/promotion banner
     {
       enabled: false,
       closeable: false,
       storageKey: "event_banner_2026_v1",
+      startsAt: "2026-10-08T09:00:00+05:30", // optional: show only from this time
+      expiresAt: "2026-10-10T18:00:00+05:30", // optional: auto-hide after this time
       html: '<div style="background-color:#000;height:3rem"><a href="https://example.com" target="_blank"><img style="object-fit:cover;height:100%;width:100%" src="https://cdn.example.com/event-banner.png" role="presentation"></a></div>',
     },
     // Banner 2 — dismissable announcement banner (close button injected automatically)
@@ -281,4 +301,21 @@ window.config = {
   //   false – reverts to the legacy behavior: a disabled dropdown with no
   //           alert or CTA, and the form is never blocked on empty options.
   CUSTOMER_PORTAL_ALLOW_DEPLOYMENT_SETUP_DURING_CASE_CREATION: true,
+
+  // ── Case-activity live stream (SSE) ─────────────────────────────────────────
+  //
+  // CUSTOMER_PORTAL_STREAM_BASE_URL  (optional)
+  //   Base URL of customer-portal-activity-stream-service — its own Choreo
+  //   component, NOT a path under CUSTOMER_PORTAL_BACKEND_BASE_URL. When the
+  //   case detail page is open, the portal holds an SSE connection here and
+  //   refreshes the case's comments/details as soon as either changes,
+  //   instead of waiting out their staleTime. Leave unset if that service
+  //   isn't deployed — the stream then simply never starts.
+  // CUSTOMER_PORTAL_STREAM_BASE_URL: "<your-stream-base-url>",
+  //
+  // CUSTOMER_PORTAL_STREAM_ENABLED  (optional — default: false)
+  //   Master on/off switch for the stream, independent of whether
+  //   CUSTOMER_PORTAL_STREAM_BASE_URL is set. Must be the literal `true` to
+  //   turn it on, so omitting this key always leaves the feature off.
+  CUSTOMER_PORTAL_STREAM_ENABLED: false,
 };

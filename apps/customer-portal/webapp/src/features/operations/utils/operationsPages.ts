@@ -75,16 +75,28 @@ export function formatOperationsOverviewChangeRequestsSubtitle(
   return `Latest ${limit} change requests`;
 }
 
-/** Labels excluded from customer-facing "allowed" states (internal pre-approval workflow). */
-const EXCLUDED_ALLOWED_CR_STATE_LABELS = new Set<string>([
+/**
+ * State filter ids from the filters response, as numbers. An id that is not a
+ * number (a raw enum a vocabulary does not know) is dropped: JSON turns NaN into
+ * null, which the API reads as state 0, a different state, so it must never be
+ * sent in a state filter.
+ */
+function toStateIds(states: MetadataItem[]): number[] {
+  return states.map((s) => Number(s.id)).filter((id) => Number.isFinite(id));
+}
+
+/**
+ * Labels of CR states excluded from the "outstanding" view.
+ *
+ * Mirrors entity-service's own customer-facing crOutstandingStates
+ * (crOutstandingStatesFor, project_stats_service.go): NEW and ASSESS are
+ * pre-approval states that haven't reached the customer yet, so they are
+ * not outstanding; ROLLBACK is WSO2 engineering work in progress and IS
+ * outstanding (not excluded), matching that same source of truth.
+ */
+const EXCLUDED_OUTSTANDING_CR_STATE_LABELS = new Set<string>([
   ChangeRequestStates.NEW,
   ChangeRequestStates.ASSESS,
-  ChangeRequestStates.AUTHORIZE,
-]);
-
-/** Labels of CR states excluded from the "outstanding" view. */
-const EXCLUDED_OUTSTANDING_CR_STATE_LABELS = new Set<string>([
-  ChangeRequestStates.ROLLBACK,
   ChangeRequestStates.CLOSED,
   ChangeRequestStates.CANCELED,
 ]);
@@ -106,8 +118,21 @@ const CLOSED_CR_STATE_LABELS = new Set<string>([
 ]);
 
 /**
- * Derives all customer-visible CR state IDs from the project filters response by excluding
- * internal pre-approval workflow states (New, Assess, Authorize).
+ * Derives the CR state IDs the state filter offers, which is every state the
+ * project filters response carries.
+ *
+ * This used to drop New, Assess and Authorize here, as the three internal
+ * pre-approval states. It must not: which change requests a customer may see is
+ * decided by the server, per customer (a change request is visible once it was
+ * designated to them, in whatever state it is in, and a hidden one is never
+ * returned), so a state is never hidden by the page. A change request the
+ * customer proposed a new time for before a proposal waited in Customer Approval
+ * was sent back to Authorize and stays on their list there, and the filter has
+ * to be able to name it. The filters response itself offers only states a
+ * customer's change request can be in (the API leaves out New and Assess, and on
+ * the previous system's data source Authorize too), so what is sent is what the server
+ * may return; the server holds the same line for a request that names or omits a
+ * state differently.
  *
  * @param changeRequestStates - `changeRequestStates` array from `useGetProjectFilters`.
  * @returns Array of numeric state IDs, or `undefined` if metadata is not yet loaded.
@@ -116,9 +141,7 @@ export function resolveAllowedCrStateIds(
   changeRequestStates: MetadataItem[] | undefined,
 ): number[] | undefined {
   if (!changeRequestStates) return undefined;
-  return changeRequestStates
-    .filter((s) => !EXCLUDED_ALLOWED_CR_STATE_LABELS.has(s.label))
-    .map((s) => Number(s.id));
+  return toStateIds(changeRequestStates);
 }
 
 /**
@@ -132,9 +155,9 @@ export function resolveOutstandingCrStateIds(
   changeRequestStates: MetadataItem[] | undefined,
 ): number[] | undefined {
   if (!changeRequestStates) return undefined;
-  return changeRequestStates
-    .filter((s) => !EXCLUDED_OUTSTANDING_CR_STATE_LABELS.has(s.label))
-    .map((s) => Number(s.id));
+  return toStateIds(
+    changeRequestStates.filter((s) => !EXCLUDED_OUTSTANDING_CR_STATE_LABELS.has(s.label)),
+  );
 }
 
 /**
@@ -147,9 +170,9 @@ export function resolveActionRequiredCrStateIds(
   changeRequestStates: MetadataItem[] | undefined,
 ): number[] | undefined {
   if (!changeRequestStates) return undefined;
-  return changeRequestStates
-    .filter((s) => ACTION_REQUIRED_CR_STATE_LABELS.has(s.label))
-    .map((s) => Number(s.id));
+  return toStateIds(
+    changeRequestStates.filter((s) => ACTION_REQUIRED_CR_STATE_LABELS.has(s.label)),
+  );
 }
 
 /**
@@ -162,9 +185,9 @@ export function resolveScheduledCrStateIds(
   changeRequestStates: MetadataItem[] | undefined,
 ): number[] | undefined {
   if (!changeRequestStates) return undefined;
-  return changeRequestStates
-    .filter((s) => SCHEDULED_CR_STATE_LABELS.has(s.label))
-    .map((s) => Number(s.id));
+  return toStateIds(
+    changeRequestStates.filter((s) => SCHEDULED_CR_STATE_LABELS.has(s.label)),
+  );
 }
 
 /**
@@ -177,9 +200,9 @@ export function resolveClosedCrStateIds(
   changeRequestStates: MetadataItem[] | undefined,
 ): number[] | undefined {
   if (!changeRequestStates) return undefined;
-  return changeRequestStates
-    .filter((s) => CLOSED_CR_STATE_LABELS.has(s.label))
-    .map((s) => Number(s.id));
+  return toStateIds(
+    changeRequestStates.filter((s) => CLOSED_CR_STATE_LABELS.has(s.label)),
+  );
 }
 
 /**
@@ -314,6 +337,7 @@ export function buildServiceRequestsPageCaseSearchRequest(
         : undefined,
       searchQuery: searchTerm.trim() || undefined,
       createdByMe: createdByMe || undefined,
+      createdBy: filters.createdBy as string[] | undefined,
       startCreatedDate: filters.startCreatedDate,
       endCreatedDate: filters.endCreatedDate,
       startUpdatedDate: filters.startUpdatedDate,

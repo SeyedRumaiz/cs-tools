@@ -96,7 +96,6 @@ func TestMapCaseDetails_TrimsFieldsWithNoConsumer(t *testing.T) {
 		FixEta:                &now,
 		ResolutionNotes:       strPtr("Some internal resolution notes"),
 		LinkedServiceRequests: []entity.LinkedServiceRequestRef{{ID: "lsr-1", Number: "SR1001", Name: "Service Req"}},
-		Tags:                  []entity.Tag{{Label: "tag-1", Color: strPtr("#ff0000")}},
 		AssignedEngineer:      &entity.AssignedEngineerRef{ID: "eng-1", Name: "Engineer", Email: strPtr("engineer@example.com")},
 	}))
 	if err != nil {
@@ -107,13 +106,54 @@ func TestMapCaseDetails_TrimsFieldsWithNoConsumer(t *testing.T) {
 		t.Fatalf("result is not valid JSON: %v", err)
 	}
 
+	// tags used to be on this denylist too, purely because nothing mapped it
+	// yet, not because it's internal — a tag (e.g. "Security Announcement",
+	// attached to every case a security announcement creates) is written
+	// specifically to be customer-visible. See TestMapCaseDetails_ExposesTags.
 	for _, k := range []string{
 		"acknowledgedBy", "engagementPaymentType", "bestCaseFixEta", "mostLikelyFixEta", "worstCaseFixEta",
-		"workState", "resolutionCode", "cause", "fixEta", "linkedServiceRequests", "tags", "resolutionNotes", "engineerEmail",
+		"workState", "resolutionCode", "cause", "fixEta", "linkedServiceRequests", "resolutionNotes", "engineerEmail",
 	} {
 		if _, present := got[k]; present {
 			t.Errorf("%q leaked into the customer-facing case response", k)
 		}
+	}
+}
+
+// TestMapCaseDetails_ExposesTags confirms a case's tags (e.g. the mandatory
+// "Security Announcement" label a security announcement's cases carry) reach
+// the customer-facing response — see this file's own TrimsFieldsWithNoConsumer
+// test, which used to (accidentally) exclude "tags" for lack of a mapping,
+// not because it's internal.
+func TestMapCaseDetails_ExposesTags(t *testing.T) {
+	got := MapCaseDetails(entity.CaseView{
+		Tags: []entity.Tag{{ID: "tag-1", Label: "Security Announcement", Color: strPtr("#ff0000")}},
+	})
+	if len(got.Tags) != 1 || got.Tags[0].Label != "Security Announcement" {
+		t.Fatalf("expected the case's own tags to be exposed, got %+v", got.Tags)
+	}
+}
+
+// TestMapCaseDetails_ExposesWatchListLocked is the regression test for the
+// "4 mandatory account stakeholders can never be removed" feature: the
+// frontend needs entity-service's own WatchListUser.Locked flag to disable
+// the remove control for those specific watchers, and it must not be lost
+// in the entity -> dto mapping.
+func TestMapCaseDetails_ExposesWatchListLocked(t *testing.T) {
+	got := MapCaseDetails(entity.CaseView{
+		WatchList: []entity.WatchListUser{
+			{ID: "stakeholder-1", Email: "csm@example.com", Locked: true},
+			{ID: "customer-pick-1", Email: "jane.doe@example.com", Locked: false},
+		},
+	})
+	if len(got.WatchList) != 2 {
+		t.Fatalf("expected 2 watchers, got %d", len(got.WatchList))
+	}
+	if !got.WatchList[0].Locked {
+		t.Errorf("expected the account stakeholder watcher to be Locked, got %+v", got.WatchList[0])
+	}
+	if got.WatchList[1].Locked {
+		t.Errorf("expected the customer-picked watcher to NOT be Locked, got %+v", got.WatchList[1])
 	}
 }
 
@@ -136,3 +176,47 @@ func TestMapCaseDetails_OmitsAbsentFields(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestMapCaseDetails_MapsLinkedChangeRequestsWithNumber(t *testing.T) {
+	subject := "Test Change Request Subject"
+	cv := entity.CaseView{
+		LinkedChangeRequests: []entity.LinkedChangeRequestRef{
+			{
+				ID:     "cr-uuid-1",
+				Number: "CHG0039181",
+				Name:   &subject,
+			},
+			{
+				ID:     "cr-uuid-2",
+				Number: "CHG0039182",
+				Name:   nil,
+			},
+		},
+	}
+	details := MapCaseDetails(cv)
+	if len(details.ChangeRequests) != 2 {
+		t.Fatalf("expected 2 change requests, got %d", len(details.ChangeRequests))
+	}
+
+	cr1 := details.ChangeRequests[0]
+	if cr1.ID != "cr-uuid-1" {
+		t.Errorf("expected ID 'cr-uuid-1', got %q", cr1.ID)
+	}
+	if cr1.Label != subject {
+		t.Errorf("expected Label %q, got %q", subject, cr1.Label)
+	}
+	if cr1.Number != "CHG0039181" {
+		t.Errorf("expected Number 'CHG0039181', got %q", cr1.Number)
+	}
+
+	cr2 := details.ChangeRequests[1]
+	if cr2.ID != "cr-uuid-2" {
+		t.Errorf("expected ID 'cr-uuid-2', got %q", cr2.ID)
+	}
+	if cr2.Label != "CHG0039182" {
+		t.Errorf("expected Label to fall back to number 'CHG0039182', got %q", cr2.Label)
+	}
+	if cr2.Number != "CHG0039182" {
+		t.Errorf("expected Number 'CHG0039182', got %q", cr2.Number)
+	}
+}

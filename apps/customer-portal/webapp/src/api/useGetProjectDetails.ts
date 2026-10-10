@@ -18,6 +18,7 @@ import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { useAsgardeo } from "@asgardeo/react";
 import { useAuthApiClient } from "@/hooks/useAuthApiClient";
 import { ApiError } from "@utils/ApiError";
+import { CORRELATION_ID_HEADER, newCorrelationId } from "@utils/correlationId";
 import { useLogger } from "@hooks/useLogger";
 import { ApiQueryKeys } from "@constants/apiConstants";
 import type { ProjectDetails } from "@features/project-hub/types/projects";
@@ -49,8 +50,10 @@ export default function useGetProjectDetails(
 
         const requestUrl = `${baseUrl}/projects/${projectId}`;
 
+        const correlationId = newCorrelationId();
         const response = await authFetch(requestUrl, {
           method: "GET",
+          headers: { [CORRELATION_ID_HEADER]: correlationId },
         });
 
         logger.debug(
@@ -72,6 +75,7 @@ export default function useGetProjectDetails(
             response.statusText,
             apiMessage ??
               `Error fetching project details: ${response.statusText}`,
+            response.headers.get(CORRELATION_ID_HEADER) ?? correlationId,
           );
         }
 

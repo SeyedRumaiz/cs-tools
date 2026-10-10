@@ -30,13 +30,77 @@ import "encoding/json"
 type Type string
 
 const (
+	// CASE OR INCIDENT? Two different entities. A case is POST /cases and
+	// domain.CaseView; an incident is POST /incidents and
+	// domain.IncidentView. Their event families are separate for that
+	// reason, and a comment on one is not a comment on the other.
+	//
+	// "SRE incident" is not a third thing: sre-alert-ingestion-service turns
+	// a vendor alert into a platform incident through the same
+	// POST /incidents, so it produces exactly what the incident.* events
+	// describe.
 	TypeCaseCreated      Type = "case.created"
 	TypeCommentAdded     Type = "case.comment_added"
 	TypeStatusChanged    Type = "case.status_changed"
 	TypeCaseAssigned     Type = "case.assigned"
 	TypeCaseAcknowledged Type = "case.acknowledged"
 	TypeSeverityChanged  Type = "case.severity_changed"
-	TypeIncidentCreated  Type = "incident.created"
+	// TypeWorkaroundProvided is published whenever a case's
+	// WorkaroundProvided field is set to true via PATCH — see
+	// WorkaroundProvidedPayload's own doc comment for why this exists at
+	// all.
+	TypeWorkaroundProvided Type = "case.workaround_provided"
+	TypeIncidentCreated    Type = "incident.created"
+	// TypeIncidentAcknowledged / TypeIncidentPriorityElevated drive the
+	// incident call-escalation ladder in csm-notification-service. The ladder
+	// starts on incident.created (or a priority elevation) and keeps calling
+	// until one of two things happens, per the escalation specification:
+	// the incident moves out of NEW ("update the ticket status to Work In
+	// Progress to stop further notifications"), or — for an elevation — a
+	// public comment is added. incident.acknowledged is the stop signal for
+	// the first of those.
+	TypeIncidentAcknowledged     Type = "incident.acknowledged"
+	TypeIncidentPriorityElevated Type = "incident.priority_elevated"
+	// TypeIncidentCommentAdded is the second way a call escalation stops.
+	// Section 3.0 gives two acknowledgement gestures, one per trigger: a newly
+	// reported incident is acknowledged by moving it to Work In Progress
+	// (TypeIncidentAcknowledged), while a PRIORITY ELEVATION is acknowledged
+	// by adding a public comment — which is what section 10.0's own voice
+	// message instructs an elevation's recipient to do. Without this event an
+	// elevation's ladder had no stop signal at all: the incident has normally
+	// already left NEW by the time its priority is raised, so
+	// TypeIncidentAcknowledged can never fire again for it.
+	TypeIncidentCommentAdded Type = "incident.comment_added"
+	// TypeIncidentAssigned is published when an engineer is set as an
+	// incident's assignee. It is how the SRE escalation ladder stops: the SRE
+	// flow's acknowledgement is "assignee set on incident". The CRE ladder
+	// ignores it.
+	TypeIncidentAssigned Type = "incident.assigned"
+	// TypeProjectContactInvited is Postgres-data-source-only. Published by
+	// the Salesforce membership ingest (salesforceEventService) after a
+	// Project_Contact__c in state INVITED / RE-INVITED has been written to the
+	// database. csm-notification-service consumes it to create the Asgardeo
+	// identity (via scim-operations-service) and send the invitation email —
+	// see ProjectContactInvitedPayload. Keyed by the Salesforce membership Id.
+	TypeProjectContactInvited Type = "project_contact.invited"
+	// TypeSLAClockRegister belongs to csm-notification-service's own
+	// internal/slaengine, not its internal/dispatch — see
+	// SLAClockRegisterPayload's own doc comment. Published once, from
+	// sn_case_service.go's publishCaseCreated; unlike every payload above,
+	// there is no separate "tier reached"/breach event type here —
+	// csm-notification-service's slaengine owns that half of the mechanism
+	// entirely (it also sends the Google Chat breach alert directly,
+	// without a second event round-trip through this topic).
+	TypeSLAClockRegister Type = "sla.clock.register"
+	// TypeKBArticlePublished is published when a KB article transitions
+	// to the published state, for csm-notification-service's Flow 2
+	// (embedding -> Pinecone) to consume on its own dedicated handling,
+	// same reasoning as TypeSLAClockRegister above -- not an email/Chat
+	// trigger, so no Recipients field.
+	TypeKBArticlePublished Type = "kb.article_published"
+	// TypeProjectContactRegistered is published when a membership moves into
+	// REGISTERED; csm-notification-service sends the Welcome email.
+	TypeProjectContactRegistered Type = "project_contact.registered"
 )
 
 // Envelope is the wire shape of every record on the case-events topic.
@@ -85,6 +149,65 @@ type CommentAddedPayload struct {
 	// distinct email layout for it.
 	IsInternalNote bool     `json:"isInternalNote,omitempty"`
 	Recipients     []string `json:"recipients"`
+	// AuthorEmail is the comment author's own resolved email -- already
+	// available at publish time (the same author lookup that resolves Name
+	// above), added so csm-notification-service can classify the author as
+	// internal/external (the same role-then-domain classification
+	// internal/recipientlinks already applies to a *recipient's* email) to
+	// decide whether to run frustration detection on this comment. Empty
+	// when the author couldn't be resolved -- csm-notification-service skips
+	// the check rather than guessing.
+	AuthorEmail string `json:"authorEmail,omitempty"`
+	// Product is the case's deployed product's display name (e.g. "WSO2 API
+	// Manager"), the same value CaseCreatedPayload.Product carries -- purely
+	// display, shown on a frustration-detection Chat alert's card, if one is
+	// sent.
+	Product string `json:"product,omitempty"`
+	// Team/IsEvaluationAccount/ProjectOnboardingStatus let
+	// csm-notification-service route a frustration-detection Chat alert
+	// through chataudience.Resolve the same way an SLA breach alert is
+	// routed -- team-based, with the Evaluation/Onboarding/Americas/weekend
+	// overlays -- rather than always the fixed Incident Monitor audience.
+	// Team is the case's account's CRE team display name (e.g. "Castor"),
+	// the same value CaseCreatedPayload.Team carries. IsEvaluationAccount/
+	// ProjectOnboardingStatus are Postgres-only facts (see
+	// CaseRepository.ProjectOnboardingInfo) and are the zero value on a pure
+	// ServiceNow deployment with no Postgres pool configured -- Resolve
+	// treats that the same as "not an evaluation account, no onboarding
+	// status," not an error.
+	Team                    string `json:"team,omitempty"`
+	IsEvaluationAccount     bool   `json:"isEvaluationAccount,omitempty"`
+	ProjectOnboardingStatus string `json:"projectOnboardingStatus,omitempty"`
+	// IsSupportEngineerResponse is true when this comment is a public
+	// comment (req.Type == domain.CommentTypeComment) authored by a user
+	// holding CSEngineerRole -- entity-service's own "support engineer"
+	// vocabulary, the same one the CSM-native SLA engine already uses to
+	// complete a case's response clock (see case_service.go's
+	// isSupportEngineerAuthor / sn_case_service.go's
+	// isSupportEngineerAuthorSN). Lets csm-notification-service's own SLA
+	// tracking complete a case's response clock the moment a qualifying
+	// reply lands, without needing any identity/role resolution of its
+	// own -- the signal entity-service is uniquely positioned to compute,
+	// since it owns the role data. False whenever this can't be confirmed
+	// (CSEngineerRole unset, the author's email doesn't resolve, or the
+	// role lookup fails) -- never guessed. Deliberately no omitempty: false
+	// is a meaningful, confirmed answer here ("checked, not a support
+	// engineer"), not an absent value -- omitempty would make it
+	// indistinguishable from an older publisher that never sent this field
+	// at all, which csm-notification-service's own slaEngine needs to tell
+	// apart from a real negative.
+	IsSupportEngineerResponse bool `json:"isSupportEngineerResponse"`
+}
+
+// KBArticlePublishedPayload is the Payload shape for
+// TypeKBArticlePublished. KnowledgeArticleID mirrors Envelope's own
+// EntityID (validated to match, same pattern as CaseID on every other
+// payload here) -- kept as an explicit field anyway rather than relying
+// on EntityID alone, matching how every other payload in this file does
+// it, since a consumer decoding just the payload (without inspecting the
+// envelope) still gets a complete, self-describing record.
+type KBArticlePublishedPayload struct {
+	KnowledgeArticleID string `json:"knowledgeArticleId"`
 }
 
 // StatusChangedPayload is the Payload shape for TypeStatusChanged — mirrors
@@ -146,6 +269,30 @@ type CaseAcknowledgedPayload struct {
 	AcknowledgerName string `json:"acknowledgerName"`
 }
 
+// WorkaroundProvidedPayload is the Payload shape for
+// TypeWorkaroundProvided — mirrors csm-notification-service's own
+// WorkaroundProvidedPayload. WorkaroundProvided (on UpdateCaseRequest) is
+// the one genuine "a workaround was provided" signal anywhere in the
+// domain model, and entity-service's own Postgres-side SLAEngineService
+// already completes its own workaround clock when it's set to true (see
+// SLAEngineService.CompleteWorkaroundClock's own doc comment) — but that's
+// a different tracker in a different process from
+// csm-notification-service's Redis-based SLA engine (see that repo's own
+// CLAUDE.md, "SLA breach-alerting engine"), and nothing published this
+// signal to it at all before this event existed: unlike response (a
+// qualifying public comment, already carried by case.comment_added's own
+// IsSupportEngineerResponse) and resolution (a status change to Closed,
+// already carried by case.status_changed), a workaround being provided had
+// no event of its own, so that service's own workaround clock could still
+// fire a breach alert well after a workaround had genuinely been provided.
+// No Recipients/email reaction and no Chat alert — this is a pure tracking
+// signal, not a notification. false (a recall) is deliberately never
+// published either, mirroring CompleteWorkaroundClock's own "no uncomplete
+// operation" posture.
+type WorkaroundProvidedPayload struct {
+	CaseID string `json:"caseId"`
+}
+
 // SeverityChangedPayload is the Payload shape for TypeSeverityChanged —
 // mirrors csm-notification-service's own SeverityChangedPayload, same
 // reasoning as CommentAddedPayload above. Unlike CaseAcknowledgedPayload,
@@ -200,11 +347,11 @@ type CaseCreatedPayload struct {
 	// dispatch.Dispatcher falls back to DEFAULT_CHAT_PRODUCT, same as before
 	// this field was populated.
 	Product string `json:"product,omitempty"`
-	// Team is the case's account's CRE team display name (e.g. "Team Nova")
+	// Team is the case's account's CRE team display name (e.g. "Castor")
 	// — cv.AccountDetails.CreTeam.Name, "" when the case has no account or
-	// the account has no CRE team assigned. A purely-display value in
-	// csm-notification-service's Chat cards, same as Product; unlike
-	// Product, it plays no role in routing. Depends on ServiceNow's
+	// the account has no CRE team assigned. Displayed in
+	// csm-notification-service's Chat cards — purely a display value there,
+	// no routing role (unlike Product). Depends on ServiceNow's
 	// case-embedded account object actually carrying creTeam/sreTeam — see
 	// caseTeamName's own doc comment for the current caveat around that.
 	Team        string   `json:"team,omitempty"`
@@ -230,4 +377,197 @@ type CaseCreatedPayload struct {
 type IncidentCreatedPayload struct {
 	Title            string `json:"title"`
 	ShortDescription string `json:"shortDescription"`
+	// ContactType is how the incident was raised, as the incident view spells
+	// it: AZURE, SITE_247 or SENTINEL when a monitoring source raised it,
+	// EMAIL, PHONE, SELF_SERVICE and so on when a person did. The SRE ladder
+	// reads it: a monitoring-raised incident climbs the SRE ladder whatever
+	// team it is assigned to, or when it is assigned to none. Optional.
+	ContactType string `json:"contactType,omitempty"`
+
+	// The remaining fields feed csm-notification-service's call-escalation
+	// ladder (its internal/paging), which needs the priority that keys
+	// the timing table plus the routing attributes that select recipients.
+	// Every one is optional on the wire: publishIncidentCreated resolves them
+	// from a post-create read of the incident, and that read is best-effort —
+	// when it fails, this event is published with Title/ShortDescription
+	// alone, exactly as it was before these fields existed, and the ladder
+	// simply does not start. Keep in sync with csm-notification-service's own
+	// IncidentCreatedPayload by hand, same as every payload above.
+	//
+	// Note this struct has no Product or CallTo, unlike the consumer's
+	// version: this service has no product-to-Chat-space mapping and no
+	// on-call paging system of its own, so it has never supplied either and
+	// the consumer substitutes its own configured defaults.
+	Number   string `json:"number,omitempty"`
+	Priority string `json:"priority,omitempty"`
+	Account  string `json:"account,omitempty"`
+	Team     string `json:"team,omitempty"`
+	// ABTEligible is a POINTER so an absent value stays absent on the wire.
+	// It splits the consumer's rule table in half — the ABT rows against the
+	// sub-team ones — so "not told" is a different situation from "told no",
+	// and it is the situation today: this service has no product-to-BU
+	// mapping and never sets it. Sending false would claim an answer nobody
+	// gave. Keep in sync with csm-notification-service's own payload.
+	ABTEligible *bool `json:"abtEligible,omitempty"`
+	// ReportedAt is when the incident was opened, RFC3339. Every call in the
+	// ladder is an offset from this rather than from consume time, so a
+	// backlogged consumer cannot shift the whole ladder later than the
+	// escalation specification intends — the same reasoning
+	// SLAClockRegisterPayload.CaseCreatedAt applies to an SLA clock.
+	ReportedAt string `json:"reportedAt,omitempty"`
+}
+
+// IncidentCommentAddedPayload is the Payload shape for
+// TypeIncidentCommentAdded — published by CreateComment when a comment lands
+// on an incident.
+//
+// IsPublic is the whole point of the event. Section 3.0's acknowledgement
+// gesture for a priority elevation is a PUBLIC comment; a work note is an
+// internal jotting and must not stop anyone's pager. The consumer decides what
+// to do with each, rather than this service publishing only the public ones —
+// keeping the event a statement of fact, the same way every payload here does.
+//
+// KNOWN GAP: this carries no author. Incidents have no customer-portal surface
+// in this platform (csm-notification-service's recipientlinks builds only a
+// CSM /operations/incidents link for them), so a public comment on one is
+// written by internal staff in practice and the distinction does not yet
+// matter. If incidents ever become customer-visible, an author must be added
+// and checked before a comment is allowed to cancel an escalation — otherwise
+// a customer's own comment would silence the page meant to get their incident
+// attended to. Resolving one needs a follow-up comment search (see
+// snCaseService.resolveCommentAuthor), so it is flagged here rather than
+// built speculatively.
+type IncidentCommentAddedPayload struct {
+	// CommentID is the created comment, for traceability in the escalation
+	// execution summary.
+	CommentID string `json:"commentId"`
+	// IsPublic is false for a work note.
+	IsPublic bool `json:"isPublic"`
+}
+
+// ProjectContactInvitedPayload is the payload of TypeProjectContactInvited:
+// everything csm-notification-service needs to provision the invited person
+// and address the invitation, so it never has to re-read Salesforce. Roles
+// are the raw Salesforce Project_Role__c values (e.g. "Admin",
+// "Portal user"). IsIntegrationUser=true means: record the identity and email
+// steps as SKIPPED — integration users never sign in and get no email. Type is
+// the Salesforce Contact_Type__c ("OWN CONTACT" / "PARTNER CONTACT" /
+// "RELATED CONTACT"). Mirror any change here in csm-notification-service's
+// own copy of this struct.
+type ProjectContactInvitedPayload struct {
+	MembershipSfID    string   `json:"membershipSfId"`
+	ContactSfID       string   `json:"contactSfId"`
+	Email             string   `json:"email"`
+	GivenName         string   `json:"givenName"`
+	FamilyName        string   `json:"familyName"`
+	ProjectName       string   `json:"projectName"`
+	ProjectKey        string   `json:"projectKey"`
+	Roles             []string `json:"roles"`
+	IsIntegrationUser bool     `json:"isIntegrationUser"`
+	Type              string   `json:"type"`
+	// EventModifiedOn is the Salesforce LastModifiedDate of the membership
+	// version this event describes, RFC 3339 UTC. The consumer stamps its
+	// onboarding-step writes with it so a delayed older invitation cannot
+	// overwrite a newer one's outcome (the step upsert only applies writes
+	// whose eventModifiedOn is not older than the stored one). Empty only
+	// when Salesforce returned no parseable date.
+	EventModifiedOn string `json:"eventModifiedOn,omitempty"`
+	// Resend marks a deliberate re-send of an invitation that was already
+	// sent once (POST /projects/{id}/contacts/{email}/resend-invitation).
+	// csm-notification-service refuses to send a second invitation for a
+	// membership it has already recorded an EMAIL step for -- that guard is
+	// what stops a duplicate Salesforce event turning into a duplicate
+	// email -- and this field is the one thing that tells it a second send
+	// is what was actually asked for. Omitted on every ordinary invitation,
+	// so the wire shape is unchanged for them. Mirror any change here in
+	// csm-notification-service's own copy of this struct.
+	Resend bool `json:"isResend,omitempty"`
+}
+
+// ProjectContactRegisteredPayload is the payload of TypeProjectContactRegistered.
+// csm-notification-service decodes it strictly: keep both copies identical.
+type ProjectContactRegisteredPayload struct {
+	MembershipSfID    string `json:"membershipSfId"`
+	ContactSfID       string `json:"contactSfId"`
+	Email             string `json:"email"`
+	GivenName         string `json:"givenName"`
+	FamilyName        string `json:"familyName"`
+	ProjectName       string `json:"projectName"`
+	ProjectKey        string `json:"projectKey"`
+	IsIntegrationUser bool   `json:"isIntegrationUser,omitempty"`
+	EventModifiedOn   string `json:"eventModifiedOn,omitempty"`
+}
+
+// IncidentAssignedPayload is TypeIncidentAssigned's payload, mirrored by
+// hand in csm-notification-service's events package.
+type IncidentAssignedPayload struct {
+	// AssigneeID is the engineer now assigned.
+	AssigneeID string `json:"assigneeId"`
+	// AssigneeName is for the escalation's execution summary; omitted when
+	// ServiceNow returned no display name.
+	AssigneeName string `json:"assigneeName,omitempty"`
+	// AssignedOn is when the assignee was set, RFC3339 UTC. Case Paging's
+	// Special Ops (SME) page compares an alert's changedOn against it, so an
+	// assignment handled before the alert it answers still answers it.
+	// csm-notification-service decodes strictly: deploy the version that
+	// knows the field first.
+	AssignedOn string `json:"assignedOn,omitempty"`
+}
+
+// IncidentAcknowledgedPayload is the Payload shape for
+// TypeIncidentAcknowledged — the signal that cancels a running call
+// escalation. Published by UpdateIncident when an incident genuinely leaves
+// the NEW state, never on a no-op re-PATCH (same guard reasoning as
+// publishSeverityChanged).
+//
+// Carries no Recipients: nothing is sent to anyone on acknowledgement, it
+// only stops what is already running. NewState is included so the consumer
+// can distinguish "picked up" (IN_PROGRESS) from a terminal state
+// (RESOLVED/CLOSED/CANCELLED), both of which cancel the ladder but mean
+// different things in the execution summary.
+type IncidentAcknowledgedPayload struct {
+	// PreviousState is the state the incident left, e.g. "NEW".
+	PreviousState string `json:"previousState"`
+	// NewState is the state it moved to, e.g. "IN_PROGRESS".
+	NewState string `json:"newState"`
+}
+
+// Deliberately no acknowledger identity: UpdateIncidentRequest carries no
+// actor, and this service has no way to resolve who performed an update —
+// the same reason CaseAssignedPayload stopped claiming to carry an assigner.
+// A consumer that needs it must get it from the incident's own activity feed.
+
+// IncidentPriorityElevatedPayload is the Payload shape for
+// TypeIncidentPriorityElevated — the second trigger that starts a call
+// escalation, alongside incident.created.
+//
+// Published only when the priority genuinely increases in urgency; a
+// downgrade or a no-op re-PATCH publishes nothing. The escalation ladder's
+// timings are keyed by the NEW priority, so that is what a consumer schedules
+// against.
+type IncidentPriorityElevatedPayload struct {
+	// OldPriority is the priority before the change, e.g. "MODERATE".
+	OldPriority string `json:"oldPriority"`
+	// NewPriority is the priority after the change, e.g. "HIGH" — this is
+	// what the escalation timings are keyed by, after the consumer maps a
+	// domain priority onto the specification's own P0-P4 scale.
+	NewPriority string `json:"newPriority"`
+	// Title is the incident subject, carried for display only — the escalation
+	// voice message is built from priority, account, case id and team, not
+	// from this. Optional on purpose: it comes from a nilable ServiceNow
+	// field, and an elevation must never be lost because the subject was
+	// empty. Consumers treat an empty title the way they treat an absent
+	// product, not as a malformed event.
+	Title string `json:"title,omitempty"`
+
+	// The remaining fields mirror IncidentCreatedPayload's own escalation
+	// inputs and are optional for the same reason. Unlike the created event,
+	// these come from the post-PATCH incident this service already holds, so
+	// no extra read is needed to populate them.
+	Number      string `json:"number,omitempty"`
+	Account     string `json:"account,omitempty"`
+	Team        string `json:"team,omitempty"`
+	ABTEligible *bool  `json:"abtEligible,omitempty"`
+	// ElevatedAt is when the priority actually changed, RFC3339.
+	ElevatedAt string `json:"elevatedAt,omitempty"`
 }

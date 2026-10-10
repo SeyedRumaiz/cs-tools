@@ -1,0 +1,8 @@
+# Secrets and local files never go into the build context.
+.env
+.env.*
+!.env.example
+config.toml
+OPEN_ISSUES.md
+/sre-alert-ingestion-service
+PLAN.md

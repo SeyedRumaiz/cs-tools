@@ -45,6 +45,7 @@ import DashboardWidgetTile from "@features/csm-dashboard/components/DashboardWid
 import { useWidgetData } from "@features/csm-dashboard/api/useWidgetData";
 import { useCurrentUser } from "@context/current-user/CurrentUserContext";
 import WidgetFilterConditionEditor from "@features/csm-admin/dashboards/components/WidgetFilterConditionEditor";
+import { toPreviewWidget } from "@features/csm-admin/dashboards/utils/expandQueryPresets";
 import { newWidgetId } from "@features/csm-admin/dashboards/utils/dashboardDraftsStorage";
 import { discoverAttributePaths } from "@features/csm-admin/dashboards/utils/discoverAttributePaths";
 import {
@@ -282,11 +283,18 @@ export default function WidgetEditorDialog({
   // matching args means a matching TanStack Query cache key, so this never
   // costs a second real network request; it just reads the one the Preview
   // tile is already making (or about to make).
+  // The draft keeps authored `{preset}` references and no implied `type`
+  // filter, both of which only the backend's dashboard load adds; build a
+  // resolved copy here so Preview sends what the live view sends. `onSave` still gets the unexpanded `buildWidget()` result.
+  const previewWidget = useMemo(
+    () => (previewSnapshot ? toPreviewWidget(previewSnapshot, presets) : undefined),
+    [previewSnapshot, presets],
+  );
   const columnPathSampleEnabled = previewSnapshot?.shape === "list";
   const { data: columnPathSampleData } = useWidgetData({
     widgetId: previewSnapshot?.widgetId ?? widgetId,
     resourceType: previewSnapshot?.resourceType ?? resourceType,
-    filters: previewSnapshot?.query ?? {},
+    filters: previewWidget?.query ?? {},
     shape: previewSnapshot?.shape ?? shape,
     listLimit: previewSnapshot?.listLimit,
     enabled: columnPathSampleEnabled,
@@ -690,9 +698,9 @@ export default function WidgetEditorDialog({
                 description={previewSnapshot.description}
                 resourceType={previewSnapshot.resourceType}
                 shape={previewSnapshot.shape}
-                filters={previewSnapshot.query ?? {}}
+                filters={previewWidget?.query ?? {}}
                 listLimit={previewSnapshot.listLimit}
-                slices={previewSnapshot.slices}
+                slices={previewWidget?.slices}
                 groupBy={previewSnapshot.groupBy}
                 columns={previewSnapshot.columns}
                 sortBy={previewSnapshot.sortBy}

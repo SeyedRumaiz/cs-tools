@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -72,6 +73,29 @@ const publishCaseAcknowledgedTimeout = 5 * time.Second
 // needs.
 const publishSeverityChangedTimeout = 5 * time.Second
 
+// publishWorkaroundProvidedTimeout bounds publishWorkaroundProvidedEvent's
+// own publish call — see publishStatusChangedTimeout's doc comment for why.
+// No GetCaseByID enrichment is needed: the payload carries only the case id.
+const publishWorkaroundProvidedTimeout = 5 * time.Second
+
+// applyResponseSLATimeout bounds registerCaseSLAClocks'/
+// applyResponseSLAOnComment's own GetCaseByID/author resolution
+// (SearchCaseComments) + role lookup (SearchUsers) + SLAEngineService calls
+// — same reasoning as publishCaseCreatedTimeout, though these aren't
+// publishes at all (see SLAEngineService's own doc comment for why they're
+// independent of s.publisher/Event Hub entirely).
+const applyResponseSLATimeout = 5 * time.Second
+
+// applyCaseStateSLATimeout bounds registerCaseSLAClocks'/
+// applyCaseStateSLAEffects' own GetCaseByID/SLAEngineService calls — same
+// reasoning as applyResponseSLATimeout.
+const applyCaseStateSLATimeout = 5 * time.Second
+
+// applyCustomerReplyTimeout bounds applyCustomerReplyStateTransition's own
+// GetCaseByID + author resolution + role lookup + UpdateCase calls — same
+// reasoning as applyResponseSLATimeout.
+const applyCustomerReplyTimeout = 5 * time.Second
+
 // watchListEmails extracts the non-empty emails from a case's watch list —
 // Recipients for every case.* event this file publishes is the case's
 // WatchList emails only (an explicit, deliberate decision — this service
@@ -85,6 +109,29 @@ func watchListUserEmails(watchList []domain.WatchListUser) []string {
 		}
 	}
 	return recipients
+}
+
+// resolveCaseDefaultWatcherEmails resolves cv's account's four default-
+// watcher stakeholder emails fresh, for every case.* publisher below to
+// union into its own WatchList-derived recipients — see
+// CaseRepository.AccountDefaultWatcherEmails' own doc comment for why these
+// are resolved at publish time rather than read from a persisted watch list.
+// cv.ProjectDetails nil (a case with no linked project) or resolve itself
+// failing both return an empty slice rather than failing the whole publish:
+// the case's own WatchList recipients (if any) must still go out — a
+// default-watcher lookup hiccup is exactly that, a hiccup, not a reason to
+// notify no one. logContext names the caller for its own error log line
+// (e.g. "create case", "update case").
+func resolveCaseDefaultWatcherEmails(ctx context.Context, resolve func(context.Context, string) ([]string, error), cv domain.CaseView, logContext string) []string {
+	if resolve == nil || cv.ProjectDetails == nil {
+		return nil
+	}
+	emails, err := resolve(ctx, cv.ProjectDetails.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, logContext+": resolving account default watchers failed", "error", err)
+		return nil
+	}
+	return emails
 }
 
 // caseProductName returns cv's deployed product's display name (e.g. "WSO2
@@ -520,9 +567,9 @@ var caseGroupByFieldValues = map[string][]string{
 }
 
 type snCaseFilters struct {
-	CaseTypes          []string `json:"caseTypes"`
-	SearchQuery        string   `json:"searchQuery,omitempty"`
-	ProjectIDs         []string `json:"projectIds,omitempty"`
+	CaseTypes   []string `json:"caseTypes"`
+	SearchQuery string   `json:"searchQuery,omitempty"`
+	ProjectIDs  []string `json:"projectIds,omitempty"`
 	// ExcludeProjectIDs is the inverse of ProjectIDs: cases whose project is
 	// none of these. See domain.ParsedCaseFilters.ExcludeProjectIDs.
 	ExcludeProjectIDs  []string `json:"excludeProjectIds,omitempty"`
@@ -814,13 +861,45 @@ type snCaseService struct {
 	// config.Config.EventHubBroker) — every call site must check before
 	// using it. See publishCaseCreated.
 	publisher EventPublisherService
+	userSvc   SNUserService
+	// customerRoles backs applyCustomerReplyStateTransition — see that
+	// function's own doc comment and config.Config.CustomerRoles'. May be
+	// empty (unconfigured), treated the same "can't confirm authorship,
+	// skip" way csEngineerRole == "" is.
+	customerRoles []string
+	// csEngineerRole backs applyResponseSLAOnComment — see that
+	// function's own doc comment and config.Config.CSEngineerRole's.
+	// May be empty (unconfigured), treated as "can't confirm authorship,
+	// skip" rather than an error.
+	csEngineerRole string
+	// slaEngine is nil when this service is running with no database
+	// configured (see config.Config.HasDatabase/routes.go's own comment on
+	// its construction) — every call site must check before using it, same
+	// as publisher. Backs publishCaseCreated's registration step (via
+	// registerCaseSLAClocks), applyResponseSLAOnComment, and
+	// applyCaseStateSLAEffects. See internal/service/sla_engine_service.go.
+	slaEngine SLAEngineService
+	// srCatalog derives a service request's subject and description from its
+	// catalog answers when the caller sent none (fillServiceRequestText). nil
+	// unless wired via WithServiceRequestCatalog.
+	srCatalog srCatalogReader
 }
 
 // NewSNCaseService constructs a CaseService that delegates SearchCases to the
 // Choreo API and all write/read-by-id operations to pgFallback. publisher may
-// be nil (see snCaseService.publisher's doc comment).
-func NewServiceNowCaseService(client *integrationservice.Client, pgFallback CaseService, publisher EventPublisherService) CaseService {
-	return &snCaseService{client: client, pgFallback: pgFallback, publisher: publisher}
+// be nil (see snCaseService.publisher's doc comment). slaEngine may also be
+// nil (see snCaseService.slaEngine's doc comment); csEngineerRole may be
+// "" (unconfigured).
+func NewServiceNowCaseService(client *integrationservice.Client, pgFallback CaseService, publisher EventPublisherService, userSvc SNUserService, customerRoles []string, csEngineerRole string, slaEngine SLAEngineService) CaseService {
+	return &snCaseService{
+		client:         client,
+		pgFallback:     pgFallback,
+		publisher:      publisher,
+		userSvc:        userSvc,
+		customerRoles:  customerRoles,
+		csEngineerRole: csEngineerRole,
+		slaEngine:      slaEngine,
+	}
 }
 
 // snIssueTypeID maps domain CaseIssueType to the ServiceNow issue-type choice-list value.
@@ -908,6 +987,10 @@ func (s *snCaseService) CreateCase(ctx context.Context, req domain.CreateCaseReq
 		DeployedProductID: uuidToSysid(req.DeployedProductID),
 	}
 
+	if req.Type == "service_request" && s.srCatalog != nil {
+		fillServiceRequestText(ctx, s.srCatalog, &req)
+	}
+
 	switch req.Type {
 	case "case":
 		payload.Title = req.Subject
@@ -921,6 +1004,8 @@ func (s *snCaseService) CreateCase(ctx context.Context, req domain.CreateCaseReq
 		if err := validateUUIDs("catalogItemId", []string{req.CatalogItemID}); err != nil {
 			return domain.CreateCaseResponse{}, err
 		}
+		payload.Title = req.Subject
+		payload.Description = req.Description
 		payload.CatalogID = uuidToSysid(req.CatalogID)
 		payload.CatalogItemID = uuidToSysid(req.CatalogItemID)
 		if len(req.Variables) > 0 {
@@ -1008,51 +1093,223 @@ func (s *snCaseService) CreateCase(ctx context.Context, req domain.CreateCaseReq
 		},
 	}
 	s.publishCaseCreated(ctx, req, resp.Case.ID)
+	// SLA-clock registration is scoped to req.Type == "case" only (plain
+	// support cases) -- service_request/engagement/security_report_analysis/
+	// announcement have no sla_policy naming convention this engine's
+	// resolver understands (see sla_policy_resolver.go's own doc comment on
+	// scope), and are out of scope for this change. Runs after
+	// publishCaseCreated, sharing its own s.slaEngine==nil guard implicitly
+	// (RegisterCaseClocks is itself a no-op-safe best-effort call), and
+	// deliberately does its own GetCaseByID fetch rather than reusing
+	// publishCaseCreated's internal one (which isn't exposed to this call
+	// site) -- same "independent re-fetch" pattern every other best-effort
+	// hook in this file already uses (applyResponseSLAOnComment,
+	// applyCustomerReplyStateTransition).
+	if req.Type == "case" {
+		s.registerCaseSLAClocks(ctx, resp.Case.ID)
+	}
 	return resp, nil
 }
 
-// publishCaseCreated best-effort publishes a case.created event for a newly
-// created case. It re-fetches the case via GetCaseByID rather than building
-// the payload from snCreateCaseResponse/req alone: the create response
-// carries only a handful of fields (see snCreateCaseResponse), while
-// GetCaseByID's own SN response already resolves the reporter's display name,
-// the project's name, and each watcher's email — exactly what
-// events.CaseCreatedPayload needs and req/snCreateCaseResponse don't have.
+// registerCaseSLAClocks best-effort registers the CSM-native SLA engine's
+// clocks for a newly created case — a thin wrapper around
+// registerCaseSLAClocksEvent using this service's own slaEngine/GetCaseByID
+// (see that function's own doc comment for the shared logic and why it's
+// factored out).
+func (s *snCaseService) registerCaseSLAClocks(ctx context.Context, caseID string) {
+	registerCaseSLAClocksEvent(ctx, s.slaEngine, s.GetCaseByID, caseID)
+}
+
+// registerCaseSLAClocksEvent is registerCaseSLAClocks's actual body,
+// factored out to a package-level function so caseService.createCaseSNFirst
+// (the dual-write pilot) can call it too, AFTER its own Postgres insert
+// succeeds — same reasoning publishCaseCreatedEvent's
+// own doc comment gives for the publish call, and for the identical
+// underlying problem: registering a clock here inserts into "sla", whose
+// work_item_id has a hard foreign key against work_item(id) (migration
+// 0048). Calling this any earlier — as it used to, unconditionally inside
+// snCaseService.CreateCase, reached via snCaseMirrorSvc.CreateCase in
+// dual-write mode BEFORE createCaseSNFirst's own Postgres insert — fails
+// with a foreign-key violation (SQLSTATE 23503) every time, since that
+// mode's own Postgres work_item row doesn't exist yet at that point. This
+// was a real, live-observed bug: every dual-write case creation logged
+// "sla engine: register clock failed" and registered no clocks at all,
+// silently (best-effort, logged only — never surfaced to the caller or
+// retried), which meant no SLA breach alert ever fired for any dual-write
+// case. Fixed by disabling snCaseMirrorSvc's own automatic registration
+// (routes.go now constructs it with a nil slaEngine, mirroring its
+// existing nil publisher) and having createCaseSNFirst call this function
+// itself once its own insert has succeeded — the exact same fix shape
+// publishCaseCreatedEvent already established for the publish call.
 //
-// Recipients is the case's WatchList emails only (per explicit decision —
-// this service has no other notion of "who should be emailed" for a case).
-// A case created with no watchers is a real, expected state (watchers are
-// often added after creation), not an error — publishing is silently skipped
-// rather than sending a payload csm-notification-service's events.Validate
-// would reject anyway for an empty recipients list.
+// getCaseByID is the caller's own GetCaseByID method value (ServiceNow-backed
+// for snCaseService, Postgres-backed for caseService) — re-fetches rather
+// than trusting the create response for severity/projectID, same
+// "independent re-fetch" pattern every other best-effort hook in this file
+// uses. Skips entirely when slaEngine is nil (no database configured) or
+// when the re-fetch fails; both are logged, neither fails case creation.
+func registerCaseSLAClocksEvent(ctx context.Context, slaEngine SLAEngineService, getCaseByID func(context.Context, string) (domain.CaseView, error), caseID string) {
+	if slaEngine == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, applyCaseStateSLATimeout)
+	defer cancel()
+
+	cv, err := getCaseByID(ctx, caseID)
+	if err != nil {
+		slog.ErrorContext(ctx, "create case: sla clock registration not evaluated, get case failed", "caseId", caseID)
+		return
+	}
+	projectID := ""
+	if cv.ProjectDetails != nil {
+		projectID = cv.ProjectDetails.ID
+	}
+	slaEngine.RegisterCaseClocks(ctx, caseID, cv.Severity, projectID)
+}
+
+// publishCaseCreated best-effort publishes a case.created event for a newly
+// created case. See publishCaseCreatedEvent's own doc comment for the full
+// reasoning — this is now a thin wrapper around it, same shape as
+// snIncidentService.publishIncidentCreated/publishIncidentCreatedEvent.
+func (s *snCaseService) publishCaseCreated(ctx context.Context, req domain.CreateCaseRequest, caseID string) {
+	publishCaseCreatedEvent(ctx, s.publisher, s.GetCaseByID, s.ProjectContactEmailsByRole, s.AccountDefaultWatcherEmails, req, caseID)
+}
+
+// publishCaseCreatedEvent is publishCaseCreated's actual body, factored out
+// to a package-level function so caseService.createCaseSNFirst
+// (DATA_SOURCE=postgres-servicenow-dual-write) can call it too, AFTER its
+// own Postgres insert succeeds — same reasoning
+// publishIncidentCreatedEvent's own doc comment gives for incident: calling
+// it only after that insert succeeds means a consumer never receives
+// case.created for a case the Postgres-backed read API (the only one live
+// in this mode) cannot yet, or ever, return. getCaseByID is the caller's
+// own GetCaseByID method value (ServiceNow-backed for snCaseService,
+// Postgres-backed for caseService) — this function is data-source-agnostic
+// beyond that.
+//
+// It re-fetches the case via getCaseByID rather than building the payload
+// from the create response/req alone: a create response carries only a
+// handful of fields, while GetCaseByID already resolves the reporter's
+// display name, the project's name, and each watcher's email — exactly
+// what events.CaseCreatedPayload needs and req/the create response don't
+// have.
+//
+// resolveProjectContactEmailsByRole is the caller's own
+// ProjectContactEmailsByRole method value, used only for req.Type ==
+// "announcement" (see below).
+//
+// Only type=="case" requires a severity to publish at all: a case with no
+// severity has no priority to report (CaseCreatedPayload.Priority has no
+// omitempty -- a consumer always expects a real value, and "" is not a real
+// priority, just derefSeverity's zero value standing in for "unset"), and
+// severity is a "case"-only field (case_service.go) that the other four
+// types never have. Those four types (engagement/service_request/
+// security_report_analysis/announcement) publish regardless of severity —
+// see "Recipients" below for how each resolves an audience with no
+// watch-list-based severity concept to gate on.
+//
+// Recipients depends on req.Type:
+//   - "case"/"engagement"/"service_request"/"security_report_analysis": the
+//     case's own WatchList emails (per explicit decision — this service has
+//     no other notion of "who should be emailed" for these types), unioned
+//     with the account's four default-watcher stakeholders resolved fresh via
+//     resolveAccountDefaultWatcherEmails — see CaseRepository.
+//     AccountDefaultWatcherEmails' own doc comment for why these are never
+//     persisted into WatchList/work_item_watcher at all (so a later
+//     stakeholder reassignment is reflected on the very next notification).
+//   - "announcement": every project_contact holding the SECURITY_CONTACT
+//     project role (req.IsSecurityAnnouncement true) or PORTAL_USER (false),
+//     via resolveProjectContactEmailsByRole — bypassing the watch-list
+//     mechanism entirely, since a project contact often has no matching
+//     "user" row to add as a work_item_watcher (work_item_watcher.user_id is
+//     NOT NULL). Falls back to the case's own WatchList emails (still unioned
+//     with the account's default watchers) when no contact holds the
+//     requested role for that project — a project with no security contacts
+//     must still notify someone for a security announcement, not silently
+//     notify no one.
+//
+// A case created with no recipients either way is a real, expected state
+// (watchers/contacts are often added or invited after creation), not an
+// error — publishing is silently skipped rather than sending a payload
+// csm-notification-service's events.Validate would reject anyway for an
+// empty recipients list. On the Postgres data source this is the common case
+// for a case moments old: nothing has had a chance to add a watcher yet,
+// same as a freshly-created ServiceNow case before anyone does.
 //
 // Runs synchronously (not detached/async like apps/csm-portal/backend's own
 // publishAsync) so no goroutine-draining hook is needed on this service's
 // shutdown path — publishCaseCreatedTimeout bounds the added latency instead.
-// Any failure (enrichment or publish) is logged and does not fail CreateCase
-// itself: the case already exists in ServiceNow by this point, and a
-// notification-side hiccup must not be reported to the caller as a failed
-// case creation.
-func (s *snCaseService) publishCaseCreated(ctx context.Context, req domain.CreateCaseRequest, caseID string) {
-	if s.publisher == nil {
+// Any failure (enrichment or publish) is logged and does not fail case
+// creation itself: the case already exists (in ServiceNow, and — for the
+// dual-write path — in Postgres too) by this point, and a notification-side
+// hiccup must not be reported to the caller as a failed case creation.
+// publisher may be nil (e.g. the dual-write mirror instance is constructed
+// with publisher=nil specifically so its own CreateCase never
+// double-publishes — see routes.go's case DataSource wiring).
+func publishCaseCreatedEvent(
+	ctx context.Context,
+	publisher EventPublisherService,
+	getCaseByID func(context.Context, string) (domain.CaseView, error),
+	resolveProjectContactEmailsByRole func(context.Context, string, string) ([]string, error),
+	resolveAccountDefaultWatcherEmails func(context.Context, string) ([]string, error),
+	req domain.CreateCaseRequest,
+	caseID string,
+) {
+	if publisher == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishCaseCreatedTimeout)
 	defer cancel()
 
-	cv, err := s.GetCaseByID(ctx, caseID)
+	cv, err := getCaseByID(ctx, caseID)
 	if err != nil {
 		// Not logging err itself: it can carry a raw ServiceNow response
 		// (potentially including response-body content), and this service's
 		// own convention is to log only ids and sanitised summaries (see
 		// CLAUDE.md's Security section).
-		slog.ErrorContext(ctx, "sn create case: enrich case for case.created publish failed", "caseId", caseID)
+		slog.ErrorContext(ctx, "create case: enrich case for case.created publish failed", "caseId", caseID)
 		return
 	}
 
-	recipients := watchListUserEmails(cv.WatchList)
+	// A case with no project (on the Postgres data source, a service request
+	// raised from a GitHub issue) has no projectId, which every case.* payload
+	// requires -- csm-notification-service rejects the event (validate.go)
+	// and it would only be retried into the dead-letter topic.
+	if cv.ProjectDetails == nil {
+		slog.InfoContext(ctx, "create case: case.created not published, case has no project", "caseId", caseID)
+		return
+	}
+
+	if req.Type == "case" && cv.Severity == nil {
+		slog.InfoContext(ctx, "create case: case.created not published, case has no severity", "caseId", caseID)
+		return
+	}
+
+	defaultWatchers := resolveCaseDefaultWatcherEmails(ctx, resolveAccountDefaultWatcherEmails, cv, "create case")
+
+	var recipients []string
+	if req.Type == "announcement" {
+		role := "PORTAL_USER"
+		if req.IsSecurityAnnouncement {
+			role = "SECURITY_CONTACT"
+		}
+		recipients, err = resolveProjectContactEmailsByRole(ctx, req.ProjectID, role)
+		if err != nil {
+			slog.ErrorContext(ctx, "create case: resolving announcement recipients failed", "caseId", caseID, "error", err)
+			return
+		}
+		if len(recipients) == 0 {
+			// No project contact holds the requested role -- fall back to
+			// the case's own WatchList (plus the account's default watchers,
+			// unioned below) rather than notifying no one.
+			recipients = watchListUserEmails(cv.WatchList)
+		}
+	} else {
+		recipients = watchListUserEmails(cv.WatchList)
+	}
+	recipients = mergeUnique(recipients, defaultWatchers)
 	if len(recipients) == 0 {
-		slog.InfoContext(ctx, "sn create case: case.created not published, case has no watchers to email", "caseId", caseID)
+		slog.InfoContext(ctx, "create case: case.created not published, case has no watchers to email", "caseId", caseID)
 		return
 	}
 
@@ -1071,7 +1328,7 @@ func (s *snCaseService) publishCaseCreated(ctx context.Context, req domain.Creat
 		WSO2CaseID:   cv.InternalID,
 		CaseTitle:    cv.Subject,
 		CaseType:     strings.ToUpper(req.Type),
-		Priority:     strings.ToUpper(string(cv.Severity)),
+		Priority:     strings.ToUpper(string(derefSeverity(cv.Severity))),
 		Product:      product,
 		Team:         caseTeamName(cv),
 		CreatedAt:    cv.CreatedOn.Format(time.RFC3339),
@@ -1079,49 +1336,55 @@ func (s *snCaseService) publishCaseCreated(ctx context.Context, req domain.Creat
 		Recipients:   recipients,
 	})
 	if err != nil {
-		slog.ErrorContext(ctx, "sn create case: encode case.created payload failed", "caseId", caseID, "error", err)
+		slog.ErrorContext(ctx, "create case: encode case.created payload failed", "caseId", caseID, "error", err)
 		return
 	}
-	if err := s.publisher.Publish(ctx, events.TypeCaseCreated, caseID, payload); err != nil {
-		// Not logging err itself — see publishIncidentCreated's matching log
-		// line for why (same reasoning: a raw Event Hub client error, and
+	if err := publisher.Publish(ctx, events.TypeCaseCreated, caseID, payload); err != nil {
+		// Not logging err itself — see publishIncidentCreatedEvent's matching
+		// log line for why (same reasoning: a raw Event Hub client error, and
 		// the full error is already durably recorded in
 		// event_publish_failures by Publish itself).
-		slog.ErrorContext(ctx, "sn create case: publish case.created failed", "caseId", caseID)
+		slog.ErrorContext(ctx, "create case: publish case.created failed", "caseId", caseID)
+		return
 	}
+	slog.InfoContext(ctx, "create case: case.created published", "caseId", caseID)
 }
 
-// resolveCommentAuthorNameSearchLimit bounds resolveCommentAuthorName's
-// lookup — the new comment is essentially certain to be within this many
-// of the case's most recent comments regardless of SearchCaseComments' own
-// sort order (undocumented, not controllable by this service), since it
-// was just created moments before this call runs.
-const resolveCommentAuthorNameSearchLimit = 20
+// resolveCommentAuthorSearchLimit bounds resolveCommentAuthor's lookup —
+// the new comment is essentially certain to be within this many of the
+// case's most recent comments regardless of SearchCaseComments' own sort
+// order (undocumented, not controllable by this service), since it was
+// just created moments before this call runs.
+const resolveCommentAuthorSearchLimit = 20
 
-// resolveCommentAuthorName looks up commentID's author display name via
+// resolveCommentAuthor looks up commentID's resolved author (name, email,
+// and — when ServiceNow's comment record carried one — id) via
 // SearchCaseComments — see publishCommentAdded's doc comment for why this
-// re-fetch is needed at all. Returns "" if the comment isn't found in the
-// first resolveCommentAuthorNameSearchLimit results, or if the search
-// itself fails; either way the caller logs and skips publishing rather
-// than sending an event with a fabricated or missing author name.
-func (s *snCaseService) resolveCommentAuthorName(ctx context.Context, caseID, commentID string) string {
-	pagination := domain.Pagination{Limit: resolveCommentAuthorNameSearchLimit}
+// re-fetch is needed at all. Returns nil if the comment isn't found in the
+// first resolveCommentAuthorSearchLimit results, or if the search itself
+// fails; either way the caller logs and skips its own reaction rather than
+// proceeding with a fabricated or missing author. Used by both
+// publishCommentAdded (author display name, for the comment-added email)
+// and applyResponseSLAOnComment (author email, to look up their
+// ServiceNow role).
+func (s *snCaseService) resolveCommentAuthor(ctx context.Context, caseID, commentID string) *domain.UserReference {
+	pagination := domain.Pagination{Limit: resolveCommentAuthorSearchLimit}
 	if err := normalizePagination(&pagination); err != nil {
-		return ""
+		return nil
 	}
 	resp, err := s.SearchCaseComments(ctx, domain.SearchCaseCommentsRequest{
 		CaseID:     caseID,
 		Pagination: pagination,
 	})
 	if err != nil {
-		return ""
+		return nil
 	}
 	for _, c := range resp.Comments {
 		if c.ID == commentID && c.CreatedBy != nil {
-			return c.CreatedBy.Name
+			return c.CreatedBy
 		}
 	}
-	return ""
+	return nil
 }
 
 // publishCommentAdded best-effort publishes a case.comment_added event
@@ -1147,11 +1410,23 @@ func (s *snCaseService) resolveCommentAuthorName(ctx context.Context, caseID, co
 // resolveCommentAuthorName's own doc comment for when that happens.
 //
 // Runs synchronously, bounded by publishCommentAddedTimeout — see
-// publishCaseCreated's own doc comment for why (same reasoning).
+// publishCaseCreated's own doc comment for why (same reasoning). Now a thin
+// wrapper around publishCommentAddedEvent — see that function's own doc
+// comment for why. Author resolution stays here (not in the shared
+// function) since it's genuinely data-source-specific: ServiceNow's create
+// -comment response carries only a raw, unresolved CreatedBy string, so
+// resolveCommentAuthor re-fetches via SearchCaseComments; the Postgres data
+// source already has the resolved actor in hand at the CreateCaseComment
+// call site (see caseService.CreateCaseComment) and needs no re-fetch at
+// all.
 func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.CreateCaseCommentRequest, commentID string) {
 	if s.publisher == nil {
 		return
 	}
+	// One timeout for the whole helper — enrichment and the author lookup
+	// both count against it, not just the eventual Publish call — so this
+	// can never run longer than publishCommentAddedTimeout regardless of how
+	// slow ServiceNow is, matching this function's own documented bound.
 	ctx, cancel := context.WithTimeout(ctx, publishCommentAddedTimeout)
 	defer cancel()
 
@@ -1160,8 +1435,8 @@ func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.Crea
 		slog.ErrorContext(ctx, "sn create comment: enrich case for case.comment_added publish failed", "caseId", req.CaseID)
 		return
 	}
-
-	recipients := watchListUserEmails(cv.WatchList)
+	defaultWatchers := resolveCaseDefaultWatcherEmails(ctx, s.AccountDefaultWatcherEmails, cv, "sn create comment")
+	recipients := mergeUnique(watchListUserEmails(cv.WatchList), defaultWatchers)
 	if req.Type == domain.CommentTypeWorkNote {
 		recipients = filterWso2Emails(recipients)
 	}
@@ -1170,32 +1445,297 @@ func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.Crea
 		return
 	}
 
-	authorName := s.resolveCommentAuthorName(ctx, req.CaseID, commentID)
-	if authorName == "" {
+	// Recipients are checked above, before this SearchCaseComments round
+	// trip, so a comment with nobody to notify never pays for it.
+	author := s.resolveCommentAuthor(ctx, req.CaseID, commentID)
+	if author == nil || author.Name == "" {
 		slog.InfoContext(ctx, "sn create comment: case.comment_added not published, could not resolve comment author's display name", "caseId", req.CaseID)
 		return
 	}
+	isSupportEngineerResponse := req.Type == domain.CommentTypeComment && s.isSupportEngineerAuthorSN(ctx, req.CaseID, author.Email)
+	publishCommentAddedEvent(ctx, s.publisher, s.AccountDefaultWatcherEmails, s.ProjectOnboardingInfo, cv, req, commentID, author.Name, author.Email, isSupportEngineerResponse)
+}
 
-	payload, err := json.Marshal(events.CommentAddedPayload{
-		Name:           authorName,
-		ProjectID:      cv.ProjectDetails.ID,
-		CaseID:         req.CaseID,
-		CaseNumber:     cv.Number,
-		WSO2CaseID:     cv.InternalID,
-		CaseTitle:      cv.Subject,
-		CaseComment:    req.Content,
-		CommentID:      commentID,
-		IsInternalNote: req.Type == domain.CommentTypeWorkNote,
-		Recipients:     recipients,
-	})
-	if err != nil {
-		slog.ErrorContext(ctx, "sn create comment: encode case.comment_added payload failed", "caseId", req.CaseID, "error", err)
+// publishCommentAddedEvent is publishCommentAdded's actual body, factored
+// out to a package-level function so caseService.CreateCaseComment can call
+// it too — same "follow the write, not DATA_SOURCE" reasoning as
+// publishCaseCreatedEvent's own doc comment. authorName is the comment
+// author's already-resolved display name — see publishCommentAdded's own
+// doc comment for why resolving it stays with each caller rather than
+// living here. cv is the case, already fetched by the caller — same
+// pre-fetched-CaseView shape as publishStatusChangedEvent/
+// publishSeverityChangedEvent's own "before" parameter, rather than a lazy
+// getCaseByID callback: every caller now needs the fetched case before this
+// function even runs (to decide whether there are recipients worth an
+// author lookup for — see publishCommentAdded's own doc comment), so a
+// callback here would only risk double-fetching. isSupportEngineerResponse
+// is likewise resolved by each caller (isSupportEngineerAuthorSN here,
+// caseService.isSupportEngineerAuthor on the Postgres side) rather than
+// looked up here, since "is this author a support engineer" is answered via
+// a different mechanism on each data source.
+func publishCommentAddedEvent(ctx context.Context, publisher EventPublisherService, resolveAccountDefaultWatcherEmails func(context.Context, string) ([]string, error), resolveProjectOnboardingInfo func(context.Context, string) (string, bool, error), cv domain.CaseView, req domain.CreateCaseCommentRequest, commentID, authorName, authorEmail string, isSupportEngineerResponse bool) {
+	if publisher == nil {
 		return
 	}
-	if err := s.publisher.Publish(ctx, events.TypeCommentAdded, req.CaseID, payload); err != nil {
-		// Not logging err itself — see publishCaseCreated's matching log
-		// line for why.
-		slog.ErrorContext(ctx, "sn create comment: publish case.comment_added failed", "caseId", req.CaseID)
+	ctx, cancel := context.WithTimeout(ctx, publishCommentAddedTimeout)
+	defer cancel()
+
+	// A case with no project (on the Postgres data source, a service request
+	// raised from a GitHub issue) has no projectId, which every case.* payload
+	// requires -- csm-notification-service rejects the event (validate.go)
+	// and it would only be retried into the dead-letter topic.
+	if cv.ProjectDetails == nil {
+		slog.InfoContext(ctx, "create comment: case.comment_added not published, case has no project", "caseId", req.CaseID)
+		return
+	}
+
+	defaultWatchers := resolveCaseDefaultWatcherEmails(ctx, resolveAccountDefaultWatcherEmails, cv, "create comment")
+	recipients := mergeUnique(watchListUserEmails(cv.WatchList), defaultWatchers)
+	if req.Type == domain.CommentTypeWorkNote {
+		recipients = filterWso2Emails(recipients)
+	}
+	if len(recipients) == 0 {
+		slog.InfoContext(ctx, "create comment: case.comment_added not published, case has no watchers to email", "caseId", req.CaseID)
+		return
+	}
+
+	// Best-effort, same posture as resolveCaseDefaultWatcherEmails just
+	// above: a lookup failure must not block the email reaction this
+	// function primarily exists for -- the Chat alert this enriches is
+	// itself a secondary, best-effort reaction on the consuming side (see
+	// csm-notification-service's own checkFrustration).
+	var onboardingStatus string
+	var isEvaluationAccount bool
+	if resolveProjectOnboardingInfo != nil && cv.ProjectDetails != nil {
+		var err error
+		onboardingStatus, isEvaluationAccount, err = resolveProjectOnboardingInfo(ctx, cv.ProjectDetails.ID)
+		if err != nil {
+			slog.WarnContext(ctx, "create comment: resolve project onboarding info for case.comment_added failed", "caseId", req.CaseID, "error", err)
+		}
+	}
+
+	payload, err := json.Marshal(events.CommentAddedPayload{
+		Name:                      authorName,
+		ProjectID:                 cv.ProjectDetails.ID,
+		CaseID:                    req.CaseID,
+		CaseNumber:                cv.Number,
+		WSO2CaseID:                cv.InternalID,
+		CaseTitle:                 cv.Subject,
+		CaseComment:               req.Content,
+		CommentID:                 commentID,
+		IsInternalNote:            req.Type == domain.CommentTypeWorkNote,
+		Recipients:                recipients,
+		AuthorEmail:               authorEmail,
+		Product:                   caseProductName(cv),
+		Team:                      caseTeamName(cv),
+		IsEvaluationAccount:       isEvaluationAccount,
+		ProjectOnboardingStatus:   onboardingStatus,
+		IsSupportEngineerResponse: isSupportEngineerResponse,
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "create comment: encode case.comment_added payload failed", "caseId", req.CaseID, "error", err)
+		return
+	}
+	if err := publisher.Publish(ctx, events.TypeCommentAdded, req.CaseID, payload); err != nil {
+		// Not logging err itself — see publishCaseCreatedEvent's matching
+		// log line for why.
+		slog.ErrorContext(ctx, "create comment: publish case.comment_added failed", "caseId", req.CaseID)
+		return
+	}
+	slog.InfoContext(ctx, "create comment: case.comment_added published", "caseId", req.CaseID)
+}
+
+// applyCustomerReplyStateTransition moves a case back to Waiting on WSO2
+// when a customer replies while it's Awaiting Info or Solution Proposed —
+// WSO2 was waiting on the customer, and a reply means it's WSO2's turn to
+// act again. A pure in-process call to s.UpdateCase (not a raw ServiceNow
+// PATCH of its own), so it gets publishStatusChanged/applyCaseStateSLAEffects
+// for free — in particular, applyCaseStateSLAEffects' own "any state other
+// than Awaiting Info/Solution Proposed/Closed resumes both Workaround and
+// Resolution" default case is exactly the right side effect here, with no
+// duplicated logic. Calling UpdateCase with a State equal to the case's
+// current one (a race with some other concurrent state change) is a
+// harmless no-op there — see UpdateCase's own pre-PATCH equality check.
+//
+// KNOWN GAP: the read here (this function's own GetCaseByID) and the write
+// (the UpdateCase call below, which does its own separate GetCaseByID
+// purely to decide whether to publish case.status_changed — see that
+// function's own pre-PATCH block) are not atomic. If the case is moved to
+// some OTHER state (e.g. Closed) in the window between this function's read
+// and UpdateCase's PATCH, this still unconditionally sends
+// State: WaitingOnWSO2 — silently reopening a case that was just closed,
+// and resuming SLA clocks applyCaseStateSLAEffects had just paused for
+// Closed. This is not unique to this function: every UpdateCase caller that
+// sets State/Severity/AssigneeEmail (publishStatusChanged/
+// publishSeverityChanged/publishCaseAssigned's own pre-PATCH guards) has the
+// identical read-then-PATCH race window, since ServiceNow is this service's
+// sole source of truth (no local row/version to condition on) and
+// s.client.Patch has no optimistic-concurrency mechanism (no ETag/version/
+// sys_mod_count precondition) to send even if this function wanted one.
+// Closing this needs the underlying Choreo/ServiceNow integration to expose
+// a conditional update — a real, cross-team dependency, not a quick fix
+// here, so it's flagged rather than worked around with a partial guard that
+// wouldn't close the actual window anyway.
+//
+// Requires its own GetCaseByID call: nothing in CreateCaseComment's own flow
+// surfaces the case's current state today (publishCommentAdded fetches one
+// for its own, separate purpose, but never returns or shares it, and is
+// itself skipped when s.publisher is nil — not something this can rely on).
+//
+// applyResponseSLAOnComment marks the case's CSM-native "response" SLA
+// clock complete (via SLAEngineService.CompleteResponseClock, idempotently
+// — a clock already ACHIEVED/BREACHED/etc. is simply not touched again,
+// see repository.SLAEngineRepository.CompleteClock's own doc comment) when
+// the new comment is a customer-visible reply (req.Type ==
+// domain.CommentTypeComment — work notes and system activity entries don't
+// count as a response) from a user holding s.csEngineerRole.
+//
+// This is a pure in-process DB operation, deliberately NOT gated on
+// s.publisher — unlike every publishXxx function in this file, it never
+// touches Event Hub at all, so a deployment without Event Hub configured
+// must not lose SLA tracking as a side effect. It IS gated on s.slaEngine
+// being non-nil (no database configured — see snCaseService.slaEngine's
+// own doc comment).
+//
+// entity-service has no auth/identity layer of its own (the
+// x-user-id-token it forwards is opaque), so "is this comment's author a
+// support engineer" can't be answered from anything in this request — it's
+// answered by resolving the comment's author (resolveCommentAuthor, the
+// same lookup publishCommentAdded already needs for its own display name)
+// and checking their ServiceNow role via s.userSvc.SearchUsers, filtered
+// by the author's email. s.csEngineerRole being "" (unconfigured — see
+// config.Config.CSEngineerRole's own doc comment) means this can
+// never be confirmed, so this skips entirely rather than guessing.
+func (s *snCaseService) applyResponseSLAOnComment(ctx context.Context, req domain.CreateCaseCommentRequest, commentID string) {
+	if req.Type != domain.CommentTypeComment || s.csEngineerRole == "" || s.slaEngine == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, applyResponseSLATimeout)
+	defer cancel()
+
+	author := s.resolveCommentAuthor(ctx, req.CaseID, commentID)
+	if author == nil || author.Email == "" {
+		slog.InfoContext(ctx, "sn create comment: response SLA not evaluated, could not resolve comment author's email", "caseId", req.CaseID)
+		return
+	}
+	if !s.isSupportEngineerAuthorSN(ctx, req.CaseID, author.Email) {
+		return
+	}
+
+	s.slaEngine.CompleteResponseClock(ctx, req.CaseID)
+}
+
+// isSupportEngineerAuthorSN resolves whether authorEmail belongs to a user
+// holding s.csEngineerRole, via s.userSvc.SearchUsers — shared by
+// applyResponseSLAOnComment (the CSM-native SLA engine's own response-clock
+// completion, above) and publishCommentAdded's own
+// IsSupportEngineerResponse flag on the published case.comment_added event.
+// s.csEngineerRole being "" (unconfigured), an empty authorEmail, or a
+// failed role lookup all answer false — can't confirm, not an error.
+func (s *snCaseService) isSupportEngineerAuthorSN(ctx context.Context, caseID, authorEmail string) bool {
+	if s.csEngineerRole == "" || authorEmail == "" {
+		return false
+	}
+	usersResp, err := s.userSvc.SearchUsers(ctx, domain.SearchUsersRequest{
+		Pagination: domain.Pagination{Limit: 1},
+		Filters:    domain.SearchUsersFilters{Emails: []string{authorEmail}},
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "sn create comment: support-engineer role lookup failed", "caseId", caseID)
+		return false
+	}
+	for _, u := range usersResp.Users {
+		if slices.Contains(u.Roles, s.csEngineerRole) {
+			return true
+		}
+	}
+	return false
+}
+
+// applyCaseStateSLAEffects best-effort applies the CSM-native SLA engine's
+// state-transition effects (see SLAEngineService.ApplyCaseStateEffects'
+// own doc comment for the exact per-state behavior) after UpdateCase
+// changes a case's state. A pure in-process DB operation, deliberately
+// independent of s.publisher — see this method's own call site in
+// UpdateCase for why. Skipped entirely when s.slaEngine is nil (no
+// database configured — see snCaseService.slaEngine's own doc comment);
+// that guard lives at the call site, not here, matching every other
+// nil-publisher guard in this file.
+func (s *snCaseService) applyCaseStateSLAEffects(ctx context.Context, caseID string, state domain.CaseState) {
+	ctx, cancel := context.WithTimeout(ctx, applyCaseStateSLATimeout)
+	defer cancel()
+	s.slaEngine.ApplyCaseStateEffects(ctx, caseID, state)
+}
+
+// reviseCaseSLAClocks best-effort cancels the CSM-native SLA engine's
+// existing clocks and registers an entirely fresh set for an EXISTING
+// case's new severity (see SLAEngineService.ReviseCaseClocks' own doc
+// comment for the exact cancel-then-register-from-zero behavior this
+// triggers). A pure in-process DB operation, deliberately independent of
+// s.publisher --
+// see this method's own call site in UpdateCase for why. Skipped entirely
+// when s.slaEngine is nil (no database configured -- see
+// snCaseService.slaEngine's own doc comment); that guard lives at the call
+// site, not here, matching applyCaseStateSLAEffects.
+func (s *snCaseService) reviseCaseSLAClocks(ctx context.Context, caseID string, severity *domain.CaseSeverity, projectID string) {
+	ctx, cancel := context.WithTimeout(ctx, applyCaseStateSLATimeout)
+	defer cancel()
+	s.slaEngine.ReviseCaseClocks(ctx, caseID, severity, projectID)
+}
+
+// Same role-lookup mechanism as applyResponseSLAOnComment (this service has
+// no auth/identity layer of its own, so "is this comment's author a
+// customer" is answered by resolving the author and checking their
+// ServiceNow role via s.userSvc.SearchUsers), but against a configurable
+// LIST of roles (s.customerRoles, config.Config.CustomerRoles) rather than
+// a single one — an organisation can have more than one customer-facing
+// role. Skips entirely, rather than guessing, when s.customerRoles is empty
+// (unconfigured — see config.Config.CustomerRoles' own doc comment).
+func (s *snCaseService) applyCustomerReplyStateTransition(ctx context.Context, req domain.CreateCaseCommentRequest, commentID string) {
+	if req.Type != domain.CommentTypeComment || len(s.customerRoles) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, applyCustomerReplyTimeout)
+	defer cancel()
+
+	cv, err := s.GetCaseByID(ctx, req.CaseID)
+	if err != nil {
+		slog.ErrorContext(ctx, "sn create comment: customer reply state transition not evaluated, get case failed", "caseId", req.CaseID)
+		return
+	}
+	if derefState(cv.State) != domain.CaseStateAwaitingInfo && derefState(cv.State) != domain.CaseStateSolutionProposed {
+		return
+	}
+
+	author := s.resolveCommentAuthor(ctx, req.CaseID, commentID)
+	if author == nil || author.Email == "" {
+		slog.InfoContext(ctx, "sn create comment: customer reply state transition not evaluated, could not resolve comment author's email", "caseId", req.CaseID)
+		return
+	}
+
+	usersResp, err := s.userSvc.SearchUsers(ctx, domain.SearchUsersRequest{
+		Pagination: domain.Pagination{Limit: 1},
+		Filters:    domain.SearchUsersFilters{Emails: []string{author.Email}},
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "sn create comment: customer reply state transition not evaluated, user role lookup failed", "caseId", req.CaseID)
+		return
+	}
+
+	isCustomer := false
+	for _, u := range usersResp.Users {
+		if slices.ContainsFunc(u.Roles, func(r string) bool { return slices.Contains(s.customerRoles, r) }) {
+			isCustomer = true
+			break
+		}
+	}
+	if !isCustomer {
+		return
+	}
+
+	waitingOnWSO2 := domain.CaseStateWaitingOnWSO2
+	if _, err := s.UpdateCase(ctx, domain.UpdateCaseRequest{ID: req.CaseID, State: &waitingOnWSO2}); err != nil {
+		slog.ErrorContext(ctx, "sn create comment: move case to waiting on wso2 after customer reply failed", "caseId", req.CaseID)
 	}
 }
 
@@ -1216,22 +1756,77 @@ func (s *snCaseService) publishCommentAdded(ctx context.Context, req domain.Crea
 // GetCaseByID call after the PATCH: neither value depends on the update
 // that just happened.
 //
-// Recipients is the case's WatchList emails only — see publishCaseCreated's
-// own doc comment for why, and why an empty list silently skips
-// publishing.
+// Recipients is the case's WatchList emails, unioned with the account's
+// default-watcher stakeholders resolved fresh (see publishCaseCreatedEvent's
+// own doc comment for why those are never persisted into WatchList) — see
+// publishCaseCreated's own doc comment for why, and why an empty list
+// silently skips publishing.
 //
 // Runs synchronously, bounded by publishStatusChangedTimeout — see
-// publishCaseCreated's own doc comment for why (same reasoning).
+// publishCaseCreated's own doc comment for why (same reasoning). Now a thin
+// wrapper around publishStatusChangedEvent — see that function's own doc
+// comment for why.
 func (s *snCaseService) publishStatusChanged(ctx context.Context, caseID, newStatus string, before domain.CaseView) {
-	if s.publisher == nil || newStatus == "" {
+	publishStatusChangedEvent(ctx, s.publisher, s.AccountDefaultWatcherEmails, caseID, newStatus, before)
+}
+
+// caseStateDisplayLabel maps domain.CaseState to ServiceNow's own display
+// label for that state — the exact inverse of snCaseLikeStateLabels' own
+// lowercase-label-to-enum direction (case_state_enum's REOPENED quirk
+// aside, which has no bearing here: this only needs the forward, always
+// -unambiguous direction). Used by publishStatusChangedEvent so
+// caseService.UpdateCase's own case.status_changed notifications read
+// identically to snCaseService's — a consumer must not be able to tell
+// which data source produced a given notification from its wording alone
+// (see publishCaseCreatedEvent's own doc comment for the same "shouldn't
+// depend on DATA_SOURCE" principle).
+var caseStateDisplayLabel = map[domain.CaseState]string{
+	domain.CaseStateOpen:             "Open",
+	domain.CaseStateWorkInProgress:   "Work In Progress",
+	domain.CaseStateWaitingOnWSO2:    "Waiting on WSO2",
+	domain.CaseStateAwaitingInfo:     "Awaiting Info",
+	domain.CaseStateReopened:         "Reopened",
+	domain.CaseStateSolutionProposed: "Solution Proposed",
+	domain.CaseStateClosed:           "Closed",
+}
+
+// publishStatusChangedEvent is publishStatusChanged's actual body, factored
+// out to a package-level function so caseService.UpdateCase
+// (DATA_SOURCE=postgres-servicenow-dual-write, and any future data source
+// that writes state through the same repository) can call it too, the same
+// reasoning publishCaseCreatedEvent's own doc comment gives: event
+// publishing should follow "did Postgres actually record this change",
+// never a DATA_SOURCE check, so a future data-source change doesn't
+// silently stop notifications from firing. newStatus is a display label —
+// ServiceNow's own raw state label for snCaseService's callers (e.g. "Work
+// In Progress"), or caseStateDisplayLabel's lookup for caseService's own
+// domain.CaseState value — never a bare enum/domain string, so
+// csm-notification-service's rendered "Status changed to <newStatus>"
+// reads the same regardless of which data source produced it. before is
+// the case as fetched immediately before the update was applied — the
+// caller has already used it (or the equivalent pre-update value) to
+// confirm the state is actually transitioning, not a caller re-PATCHing
+// the current value.
+func publishStatusChangedEvent(ctx context.Context, publisher EventPublisherService, resolveAccountDefaultWatcherEmails func(context.Context, string) ([]string, error), caseID, newStatus string, before domain.CaseView) {
+	if publisher == nil || newStatus == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishStatusChangedTimeout)
 	defer cancel()
 
-	recipients := watchListUserEmails(before.WatchList)
+	// A case with no project (on the Postgres data source, a service request
+	// raised from a GitHub issue) has no projectId, which every case.* payload
+	// requires -- csm-notification-service rejects the event (validate.go)
+	// and it would only be retried into the dead-letter topic.
+	if before.ProjectDetails == nil {
+		slog.InfoContext(ctx, "update case: case.status_changed not published, case has no project", "caseId", caseID)
+		return
+	}
+
+	defaultWatchers := resolveCaseDefaultWatcherEmails(ctx, resolveAccountDefaultWatcherEmails, before, "update case")
+	recipients := mergeUnique(watchListUserEmails(before.WatchList), defaultWatchers)
 	if len(recipients) == 0 {
-		slog.InfoContext(ctx, "sn update case: case.status_changed not published, case has no watchers to email", "caseId", caseID)
+		slog.InfoContext(ctx, "update case: case.status_changed not published, case has no watchers to email", "caseId", caseID)
 		return
 	}
 
@@ -1245,14 +1840,16 @@ func (s *snCaseService) publishStatusChanged(ctx context.Context, caseID, newSta
 		Recipients: recipients,
 	})
 	if err != nil {
-		slog.ErrorContext(ctx, "sn update case: encode case.status_changed payload failed", "caseId", caseID, "error", err)
+		slog.ErrorContext(ctx, "update case: encode case.status_changed payload failed", "caseId", caseID, "error", err)
 		return
 	}
-	if err := s.publisher.Publish(ctx, events.TypeStatusChanged, caseID, payload); err != nil {
-		// Not logging err itself — see publishCaseCreated's matching log
-		// line for why.
-		slog.ErrorContext(ctx, "sn update case: publish case.status_changed failed", "caseId", caseID)
+	if err := publisher.Publish(ctx, events.TypeStatusChanged, caseID, payload); err != nil {
+		// Not logging err itself — see publishCaseCreatedEvent's matching
+		// log line for why.
+		slog.ErrorContext(ctx, "update case: publish case.status_changed failed", "caseId", caseID)
+		return
 	}
+	slog.InfoContext(ctx, "update case: case.status_changed published", "caseId", caseID)
 }
 
 // publishSeverityChanged best-effort publishes a case.severity_changed
@@ -1280,22 +1877,44 @@ func (s *snCaseService) publishStatusChanged(ctx context.Context, caseID, newSta
 // notify by design).
 //
 // Runs synchronously, bounded by publishSeverityChangedTimeout — see
-// publishCaseCreated's own doc comment for why (same reasoning).
+// publishCaseCreated's own doc comment for why (same reasoning). Now a thin
+// wrapper around publishSeverityChangedEvent — see that function's own doc
+// comment for why.
 func (s *snCaseService) publishSeverityChanged(ctx context.Context, caseID, oldSeverity, newSeverity string, before domain.CaseView) {
-	if s.publisher == nil || newSeverity == "" {
+	publishSeverityChangedEvent(ctx, s.publisher, s.AccountDefaultWatcherEmails, caseID, oldSeverity, newSeverity, before)
+}
+
+// publishSeverityChangedEvent is publishSeverityChanged's actual body,
+// factored out to a package-level function so caseService.UpdateCase can
+// call it too — same "follow the write, not DATA_SOURCE" reasoning as
+// publishStatusChangedEvent's own doc comment. oldSeverity/newSeverity are
+// plain severity strings (either case; upper-cased here) — the caller has
+// already confirmed they actually differ, not a caller re-PATCHing the
+// case's current severity.
+func publishSeverityChangedEvent(ctx context.Context, publisher EventPublisherService, resolveAccountDefaultWatcherEmails func(context.Context, string) ([]string, error), caseID, oldSeverity, newSeverity string, before domain.CaseView) {
+	if publisher == nil || newSeverity == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishSeverityChangedTimeout)
 	defer cancel()
 
-	recipients := watchListUserEmails(before.WatchList)
+	defaultWatchers := resolveCaseDefaultWatcherEmails(ctx, resolveAccountDefaultWatcherEmails, before, "update case")
+	recipients := mergeUnique(watchListUserEmails(before.WatchList), defaultWatchers)
 	if len(recipients) == 0 {
-		slog.InfoContext(ctx, "sn update case: case.severity_changed not published, case has no watchers to email", "caseId", caseID)
+		slog.InfoContext(ctx, "update case: case.severity_changed not published, case has no watchers to email", "caseId", caseID)
 		return
 	}
 
+	// before.ProjectDetails is nilable on the Postgres data source (this
+	// function serves both, called directly from caseService.UpdateCase
+	// too) — see publishCaseAssigned's own comment.
+	projectID := ""
+	if before.ProjectDetails != nil {
+		projectID = before.ProjectDetails.ID
+	}
+
 	payload, err := json.Marshal(events.SeverityChangedPayload{
-		ProjectID:   before.ProjectDetails.ID,
+		ProjectID:   projectID,
 		CaseID:      caseID,
 		CaseNumber:  before.Number,
 		WSO2CaseID:  before.InternalID,
@@ -1307,14 +1926,45 @@ func (s *snCaseService) publishSeverityChanged(ctx context.Context, caseID, oldS
 		Recipients:  recipients,
 	})
 	if err != nil {
-		slog.ErrorContext(ctx, "sn update case: encode case.severity_changed payload failed", "caseId", caseID, "error", err)
+		slog.ErrorContext(ctx, "update case: encode case.severity_changed payload failed", "caseId", caseID, "error", err)
 		return
 	}
-	if err := s.publisher.Publish(ctx, events.TypeSeverityChanged, caseID, payload); err != nil {
-		// Not logging err itself — see publishCaseCreated's matching log
-		// line for why.
-		slog.ErrorContext(ctx, "sn update case: publish case.severity_changed failed", "caseId", caseID)
+	if err := publisher.Publish(ctx, events.TypeSeverityChanged, caseID, payload); err != nil {
+		// Not logging err itself — see publishCaseCreatedEvent's matching
+		// log line for why.
+		slog.ErrorContext(ctx, "update case: publish case.severity_changed failed", "caseId", caseID)
+		return
 	}
+	slog.InfoContext(ctx, "update case: case.severity_changed published", "caseId", caseID)
+}
+
+// publishWorkaroundProvidedEvent publishes case.workaround_provided — see
+// events.WorkaroundProvidedPayload's own doc comment for why this exists.
+// Factored out to a package-level function, same "follow the write, not
+// DATA_SOURCE" reasoning as publishSeverityChangedEvent's own doc comment,
+// so both caseService.updateCaseFields and snCaseService.UpdateCase can
+// call it without duplicating it. The payload carries only the case id —
+// there's no recipient audience and no display enrichment to resolve for a
+// pure tracking signal, so this needs no CaseView at all.
+func publishWorkaroundProvidedEvent(ctx context.Context, publisher EventPublisherService, caseID string) {
+	if publisher == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, publishWorkaroundProvidedTimeout)
+	defer cancel()
+
+	payload, err := json.Marshal(events.WorkaroundProvidedPayload{CaseID: caseID})
+	if err != nil {
+		slog.ErrorContext(ctx, "update case: encode case.workaround_provided payload failed", "caseId", caseID, "error", err)
+		return
+	}
+	if err := publisher.Publish(ctx, events.TypeWorkaroundProvided, caseID, payload); err != nil {
+		// Not logging err itself — see publishCaseCreatedEvent's matching
+		// log line for why.
+		slog.ErrorContext(ctx, "update case: publish case.workaround_provided failed", "caseId", caseID)
+		return
+	}
+	slog.InfoContext(ctx, "update case: case.workaround_provided published", "caseId", caseID)
 }
 
 // publishCaseAssigned best-effort publishes a case.assigned event after
@@ -1346,7 +1996,8 @@ func (s *snCaseService) publishCaseAssigned(ctx context.Context, caseID, assigne
 	ctx, cancel := context.WithTimeout(ctx, publishCaseAssignedTimeout)
 	defer cancel()
 
-	recipients := watchListUserEmails(before.WatchList)
+	defaultWatchers := resolveCaseDefaultWatcherEmails(ctx, s.AccountDefaultWatcherEmails, before, "sn update case")
+	recipients := mergeUnique(watchListUserEmails(before.WatchList), defaultWatchers)
 	if len(recipients) == 0 {
 		slog.InfoContext(ctx, "sn update case: case.assigned not published, case has no watchers to email", "caseId", caseID)
 		return
@@ -1370,7 +2021,9 @@ func (s *snCaseService) publishCaseAssigned(ctx context.Context, caseID, assigne
 		// Not logging err itself — see publishCaseCreated's matching log
 		// line for why.
 		slog.ErrorContext(ctx, "sn update case: publish case.assigned failed", "caseId", caseID)
+		return
 	}
+	slog.InfoContext(ctx, "sn update case: case.assigned published", "caseId", caseID)
 }
 
 // publishCaseAcknowledged best-effort publishes a case.acknowledged event
@@ -1408,7 +2061,7 @@ func (s *snCaseService) publishCaseAcknowledged(ctx context.Context, caseID, ack
 		CaseID:           caseID,
 		CaseNumber:       cv.Number,
 		WSO2CaseID:       cv.InternalID,
-		Severity:         strings.ToUpper(string(cv.Severity)),
+		Severity:         strings.ToUpper(string(derefSeverity(cv.Severity))),
 		Product:          product,
 		Team:             caseTeamName(cv),
 		AcknowledgerName: acknowledgerName,
@@ -1421,7 +2074,55 @@ func (s *snCaseService) publishCaseAcknowledged(ctx context.Context, caseID, ack
 		// Not logging err itself — see publishCaseCreated's matching log
 		// line for why.
 		slog.ErrorContext(ctx, "sn update case: publish case.acknowledged failed", "caseId", caseID)
+		return
 	}
+	slog.InfoContext(ctx, "sn update case: case.acknowledged published", "caseId", caseID)
+}
+
+// ProjectContactEmailsByRole implements CaseService. project_contact/
+// project_role are Postgres-only concepts (populated by the Salesforce
+// membership ingest, independent of DATA_SOURCE) with no ServiceNow
+// equivalent, so this delegates to pgFallback when one is configured; a pure
+// ServiceNow deployment with no Postgres pool at all (pgFallback nil) has
+// nothing to query and returns an empty slice, no error -- same "can't
+// resolve, fall back" posture as every other Postgres-only gap in this
+// service.
+func (s *snCaseService) ProjectContactEmailsByRole(ctx context.Context, projectID, role string) ([]string, error) {
+	if s.pgFallback == nil {
+		return nil, nil
+	}
+	return s.pgFallback.ProjectContactEmailsByRole(ctx, projectID, role)
+}
+
+// ProjectOnboardingInfo implements CaseService. account/project are
+// Postgres-only concepts, same reasoning as ProjectContactEmailsByRole just
+// above — delegates to pgFallback when configured, empty/no-error otherwise.
+func (s *snCaseService) ProjectOnboardingInfo(ctx context.Context, projectID string) (string, bool, error) {
+	if s.pgFallback == nil {
+		return "", false, nil
+	}
+	return s.pgFallback.ProjectOnboardingInfo(ctx, projectID)
+}
+
+// AccountDefaultWatcherEmails implements CaseService. account/project are
+// Postgres-only concepts, same reasoning as ProjectContactEmailsByRole just
+// above — delegates to pgFallback when configured, empty/no-error otherwise.
+func (s *snCaseService) AccountDefaultWatcherEmails(ctx context.Context, projectID string) ([]string, error) {
+	if s.pgFallback == nil {
+		return nil, nil
+	}
+	return s.pgFallback.AccountDefaultWatcherEmails(ctx, projectID)
+}
+
+// GetCaseEtaSharedOn implements CaseService. eta_shared_on is a
+// Postgres-only column (see domain.CaseView.EtaSharedOn's own doc
+// comment) -- same pgFallback delegation as AccountDefaultWatcherEmails
+// just above, for the same reason.
+func (s *snCaseService) GetCaseEtaSharedOn(ctx context.Context, caseID string) (*time.Time, error) {
+	if s.pgFallback == nil {
+		return nil, nil
+	}
+	return s.pgFallback.GetCaseEtaSharedOn(ctx, caseID)
 }
 
 func (s *snCaseService) GetCaseByID(ctx context.Context, id string) (domain.CaseView, error) {
@@ -1453,6 +2154,25 @@ func (s *snCaseService) GetCaseByID(ctx context.Context, id string) (domain.Case
 	if err != nil {
 		return domain.CaseView{}, fmt.Errorf("sn get case %q: %w", c.ID, err)
 	}
+	// snCaseStateLabelToEnum(nil) falls back to CaseStateOpen (a fallback
+	// for the required-field contract this used to be) rather than
+	// erroring, so that alone can't distinguish "genuinely open" from "no
+	// state reported at all" -- check c.State itself instead. Severity/
+	// IssueType have no equivalent error path (an unrecognized label
+	// silently maps to ""), so a mapped-empty result is treated the same
+	// as absent input: nil, not a pointer to "".
+	var statePtr *domain.CaseState
+	if c.State != nil {
+		statePtr = &state
+	}
+	var severityPtr *domain.CaseSeverity
+	if sev := snSeverityToSeverity(c.Severity); sev != "" {
+		severityPtr = &sev
+	}
+	var issueTypePtr *domain.CaseIssueType
+	if it := snIssueTypeToEnum(c.IssueType); it != "" {
+		issueTypePtr = &it
+	}
 
 	cv := domain.CaseView{
 		ID:              sysidToUUID(c.ID),
@@ -1463,9 +2183,9 @@ func (s *snCaseService) GetCaseByID(ctx context.Context, id string) (domain.Case
 		EscalationLevel: snEscalationLevelToDomain(c.EscalationLevel),
 		IsEscalated:     c.IsEscalated,
 		Description:     c.Description,
-		Severity:        snSeverityToSeverity(c.Severity),
-		IssueType:       snIssueTypeToEnum(c.IssueType),
-		State:           state,
+		Severity:        severityPtr,
+		IssueType:       issueTypePtr,
+		State:           statePtr,
 		WorkState:       snWorkStateLabelToEnum(c.WorkState),
 		Type:            snCaseTypeToDomain(c.CaseType),
 		EngagementType:  snLabelStr(c.EngagementType),
@@ -1474,7 +2194,7 @@ func (s *snCaseService) GetCaseByID(ctx context.Context, id string) (domain.Case
 		// The case read carries no id for the creator, only the email and full
 		// name, so the canonical reference is emitted with a null id.
 		CreatedBy:      domain.NewUserReference("", c.CreatedBy, c.CreatedByFullName),
-		ProjectDetails: domain.EntityRef{ID: sysidToUUID(c.Project.ID), Name: c.Project.Name},
+		ProjectDetails: &domain.EntityRef{ID: sysidToUUID(c.Project.ID), Name: c.Project.Name},
 	}
 
 	if depID := sysidToUUID(c.Deployment.ID); depID != "" {
@@ -1683,6 +2403,16 @@ func (s *snCaseService) GetCaseByID(ctx context.Context, id string) (domain.Case
 		cv.Tags = tags
 	}
 
+	// EtaSharedOn has no ServiceNow equivalent at all (see its own doc
+	// comment) -- merged in from Postgres, best-effort, same "log and
+	// leave nil" posture as the tags lookup just above: a lookup hiccup
+	// must not fail the whole case read.
+	if etaSharedOn, err := s.GetCaseEtaSharedOn(ctx, id); err != nil {
+		slog.WarnContext(ctx, "sn get case: eta shared on lookup failed", "caseId", id, "error", err)
+	} else {
+		cv.EtaSharedOn = etaSharedOn
+	}
+
 	return cv, nil
 }
 
@@ -1705,6 +2435,23 @@ type snCreateCommentResponse struct {
 		CreatedOn string `json:"createdOn"`
 		CreatedBy string `json:"createdBy"`
 	} `json:"comment"`
+}
+
+// CreateCaseCommentAs implements CaseService. Mirrors AddCaseTagAs's own
+// SN-mode counterpart exactly: unlike the Postgres data source,
+// snCaseService's CreateCaseComment never hard-requires a token locally --
+// it just forwards whatever x-user-id-token is on ctx (possibly empty) to
+// ServiceNow -- so there is nothing this caller-supplied actorEmail needs to
+// override; this is a plain passthrough, kept only so this type still
+// satisfies CaseService.
+func (s *snCaseService) CreateCaseCommentAs(ctx context.Context, req domain.CreateCaseCommentRequest, _ string) (domain.CreateCaseCommentResponse, error) {
+	return s.CreateCaseComment(ctx, req)
+}
+
+// CreateInternalCaseComment implements CaseService. ServiceNow applies its own
+// rules to who may write what, so this is the same call as CreateCaseComment.
+func (s *snCaseService) CreateInternalCaseComment(ctx context.Context, req domain.CreateCaseCommentRequest) (domain.CreateCaseCommentResponse, error) {
+	return s.CreateCaseComment(ctx, req)
 }
 
 func (s *snCaseService) CreateCaseComment(ctx context.Context, req domain.CreateCaseCommentRequest) (domain.CreateCaseCommentResponse, error) {
@@ -1753,7 +2500,72 @@ func (s *snCaseService) CreateCaseComment(ctx context.Context, req domain.Create
 		},
 	}
 	s.publishCommentAdded(ctx, req, result.Comment.ID)
+	s.applyResponseSLAOnComment(ctx, req, result.Comment.ID)
+	s.applyCustomerReplyStateTransition(ctx, req, result.Comment.ID)
 	return result, nil
+}
+
+// CreateBareCaseComment posts a case comment's content to ServiceNow via the
+// exact same "/comments" endpoint CreateCaseComment uses, but with NONE of
+// that method's side effects: no publishCommentAdded, no
+// applyCustomerReplyStateTransition. Those are separate, sequential Go-side
+// calls CreateCaseComment happens to make after its own POST succeeds --
+// not anything intrinsic to the "/comments" endpoint itself -- so calling
+// only the POST, as this does, genuinely has no side effects on either
+// side.
+//
+// This exists purely for DATA_SOURCE=postgres-servicenow-dual-write's async
+// comment mirror (see caseService.CreateCaseComment's own doc comment):
+// Postgres already IS authoritative for the comment and has already decided
+// the real outcome (including any state effects a future Postgres-native
+// implementation might add -- see that method's doc comment for the
+// feature-parity gap this deliberately does not build); this call's only
+// job is making sure ServiceNow's copy of the comment text exists too.
+//
+// Do not call this from CreateCaseComment itself -- that method's full
+// side-effect behavior is deliberate and unchanged for live
+// DATA_SOURCE=servicenow traffic.
+func (s *snCaseService) CreateBareCaseComment(ctx context.Context, caseID string, commentType domain.CommentType, content string) (domain.CaseCommentDetail, error) {
+	if !validCommentType[commentType] {
+		return domain.CaseCommentDetail{}, &apierror.ValidationError{Msg: "type contains invalid value: " + string(commentType)}
+	}
+	if content == "" {
+		return domain.CaseCommentDetail{}, &apierror.ValidationError{Msg: "content is required"}
+	}
+	if commentType == domain.CommentTypeActivity {
+		return domain.CaseCommentDetail{}, &apierror.ValidationError{Msg: "type 'activity' is not supported for ServiceNow"}
+	}
+
+	token := middleware.UserIDTokenFromContext(ctx)
+	snType := snCommentTypeMap[commentType]
+
+	payload := snCreateCommentPayload{
+		ReferenceID:   uuidToSysid(caseID),
+		ReferenceType: "case",
+		Type:          snType,
+		Content:       content,
+	}
+
+	raw, err := s.client.Post(ctx, "/comments", token, payload)
+	if err != nil {
+		return domain.CaseCommentDetail{}, err
+	}
+
+	var snResp snCreateCommentResponse
+	if err := json.Unmarshal(raw, &snResp); err != nil {
+		return domain.CaseCommentDetail{}, fmt.Errorf("sn create bare case comment: parse response: %w", err)
+	}
+
+	createdOn, err := parseSNDateTime(ctx, "sn create bare case comment", "createdOn", snResp.Comment.CreatedOn)
+	if err != nil {
+		return domain.CaseCommentDetail{}, fmt.Errorf("sn create bare case comment: parse createdOn %q: %w", snResp.Comment.CreatedOn, err)
+	}
+
+	return domain.CaseCommentDetail{
+		ID:        sysidToUUID(snResp.Comment.ID),
+		CreatedOn: createdOn,
+		CreatedBy: snResp.Comment.CreatedBy,
+	}, nil
 }
 
 type snCommentFilters struct {
@@ -1936,7 +2748,16 @@ type snUpdateCasePayload struct {
 	// Acknowledge claims the case for the calling engineer, first-write-wins. Only
 	// true is ever sent -- there is no unacknowledge -- and the backing service keeps
 	// it mutually exclusive with every other field in this payload.
-	Acknowledge    *bool   `json:"acknowledge,omitempty"`
+	Acknowledge *bool `json:"acknowledge,omitempty"`
+	// MarkFixIssued, when true, tells ServiceNow to record that a fix has been
+	// issued for the case -- the mirror-only counterpart to
+	// caseService.updateCaseMarkFixIssued's Postgres write. Only true is ever
+	// sent, first-write-wins, same shape as Acknowledge above. Sent only via
+	// patchCaseFields (DATA_SOURCE=postgres-servicenow-dual-write's async
+	// mirror) -- snCaseService.UpdateCase itself rejects markFixIssued
+	// outright, since plain DATA_SOURCE=servicenow has no Postgres fix_issued
+	// column to be the source of truth for.
+	MarkFixIssued  *bool   `json:"markFixIssued,omitempty"`
 	ResolutionCode *int    `json:"resolutionCode,omitempty"`
 	Cause          *string `json:"cause,omitempty"`
 	CloseNotes     *string `json:"closeNotes,omitempty"`
@@ -1945,18 +2766,30 @@ type snUpdateCasePayload struct {
 	// as an exactly-one-field option -- fully wired.
 	ParentID *string `json:"parentId,omitempty"`
 	// RelatedCaseID writes the looser, non-hierarchical u_related_case cross-link.
-	// A matching field on the backing service's case-update payload and its validation
-	// exists, but is not yet available in the backing service.
+	// Confirmed live against the existing case-update resource -- same
+	// single-field PATCH pathway as ParentID above -- including the async
+	// postgres-servicenow-dual-write mirror (patchCaseFieldsBundle).
 	RelatedCaseID *string `json:"relatedCaseId,omitempty"`
 	// AutocloseHoldUntil places the case on hold in ServiceNow's staged auto-closure
 	// sequence, internally setting u_autoclosure_step = ON_HOLD and
-	// u_autoclosure_state_time = this date together. A matching field on the backing
-	// service's case-update payload exists, but is not yet available in the backing
-	// service.
+	// u_autoclosure_state_time = this date together. Date only (YYYY-MM-DD): the
+	// integration service constrains it to that shape.
 	AutocloseHoldUntil *string `json:"autocloseHoldUntil,omitempty"`
-	// Title/Description/DeploymentID/DeployedProductID as PATCH-time fields (previously
-	// the backing service's case-update payload only supported these at create time, via
-	// the case-create payload) -- not yet available in the backing service.
+	// Title/DeploymentID/DeployedProductID as PATCH-time fields (previously the backing
+	// service's case-update payload only supported these at create time, via the
+	// case-create payload). Confirmed live against the existing case-update resource --
+	// same single-field PATCH pathway as AutocloseHoldUntil above -- including the async
+	// postgres-servicenow-dual-write mirror (patchCaseFieldsBundle). DeploymentID/
+	// DeployedProductID are reference fields (u_enviroment / install_base), validated by
+	// ServiceNow against u_cmdb_ci_wso2_software_deployment / sn_install_base_item -- an
+	// unresolvable id 404s.
+	//
+	// Description is the one exception: PATCH-time writes to it are blocked by an active
+	// deny-ACL on sn_customerservice_case.description enforced via GlideRecordSecure
+	// (case *creation* writes it through a plain GlideRecord, which does not enforce field
+	// ACLs). Fixing that needs a ServiceNow-side ACL change -- shared-layer, out of scope
+	// here -- so Description is deliberately never populated by patchCaseFieldsBundle; see
+	// that method's own doc comment.
 	Title             *string `json:"title,omitempty"`
 	Description       *string `json:"description,omitempty"`
 	DeploymentID      *string `json:"deploymentId,omitempty"`
@@ -2126,6 +2959,18 @@ type snUpdateCaseResponse struct {
 func (s *snCaseService) UpdateCase(ctx context.Context, req domain.UpdateCaseRequest) (domain.UpdateCaseResponse, error) {
 	if err := validateUUIDs("id", []string{req.ID}); err != nil {
 		return domain.UpdateCaseResponse{}, err
+	}
+
+	// MarkFixIssued is a Postgres-only field: it stamps work_item.fix_issued_on
+	// (a pre-existing base-schema column, also csm-sync-service's mapping
+	// target for ServiceNow's u_fix_issued), with no ServiceNow-native
+	// equivalent to be the source of truth for under plain
+	// DATA_SOURCE=servicenow. It is never silently accepted or
+	// dropped here -- see patchCaseFields for the one path that DOES send it
+	// to ServiceNow, as a best-effort async mirror of the Postgres write, only
+	// under DATA_SOURCE=postgres-servicenow-dual-write.
+	if req.MarkFixIssued != nil {
+		return domain.UpdateCaseResponse{}, &apierror.ValidationError{Msg: "markFixIssued is only supported for the Postgres data source"}
 	}
 
 	hasResolutionFields := req.ResolutionCode != nil || req.Cause != nil || req.CloseNotes != nil
@@ -2516,7 +3361,7 @@ func (s *snCaseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReq
 		switch {
 		case err != nil:
 			slog.ErrorContext(ctx, "sn update case: enrich case for case.status_changed publish failed", "caseId", req.ID)
-		case cv.State == *req.State:
+		case derefState(cv.State) == *req.State:
 			slog.InfoContext(ctx, "sn update case: case.status_changed not published, state is unchanged", "caseId", req.ID)
 		default:
 			caseBeforeUpdate = cv
@@ -2527,23 +3372,55 @@ func (s *snCaseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReq
 	// Same reasoning as the state-change block above, applied to severity
 	// instead: a caller re-PATCHing the case's current severity (a no-op as
 	// far as ServiceNow is concerned) must not send every watcher a false
-	// "severity changed" notification. req.State and req.Severity are
+	// "severity changed" notification, nor spuriously revise SLA clock
+	// policies that didn't actually change. req.State and req.Severity are
 	// mutually exclusive per request (see exclusiveCount above), so this and
 	// the block above never both fire for the same call.
+	//
+	// Gated on (s.publisher != nil || s.slaEngine != nil), NOT s.publisher
+	// alone: this same "did severity genuinely change" detection now also
+	// feeds reviseCaseSLAClocks below, and SLAEngineService's own doc
+	// comment is explicit that SLA tracking must never be gated on Event
+	// Hub/publisher being configured -- a deployment with s.slaEngine set
+	// but s.publisher nil (Event Hub simply not enabled -- see
+	// cfg.EventPublishingEnabled's own "safe by default kill switch" doc
+	// comment in routes.go) must still get its clocks revised. severityChanged
+	// itself carries no publisher-configured assumption; the actual publish
+	// call below still checks s.publisher != nil on its own.
 	var caseBeforeSeverity domain.CaseView
-	publishSeverityChange := false
-	if req.Severity != nil && s.publisher != nil {
-		enrichCtx, cancel := context.WithTimeout(ctx, publishSeverityChangedTimeout)
-		cv, err := s.GetCaseByID(enrichCtx, req.ID)
-		cancel()
+	severityChanged := false
+	if req.Severity != nil && (s.publisher != nil || s.slaEngine != nil) {
+		// Bounded retry (2 attempts total, each on its own fresh timeout,
+		// with a short pause between): a single transient failure here
+		// (e.g. a DB blip) would otherwise silently skip reviseCaseSLAClocks
+		// below even though the PATCH itself goes on to succeed, leaving
+		// the case's SLA clocks on its old severity with nothing to
+		// reconcile them later. This narrows, but does not eliminate, that
+		// gap -- a sustained outage still falls through to the same
+		// accepted best-effort logging. Each attempt gets half of the
+		// original single-attempt budget so the worst case (both attempts
+		// failing) doesn't double the latency this blocking call already
+		// added to the PATCH response.
+		var cv domain.CaseView
+		var err error
+		for attempt := 1; attempt <= 2; attempt++ {
+			enrichCtx, cancel := context.WithTimeout(ctx, publishSeverityChangedTimeout/2)
+			cv, err = s.GetCaseByID(enrichCtx, req.ID)
+			cancel()
+			if err == nil || attempt == 2 {
+				break
+			}
+			slog.WarnContext(ctx, "sn update case: enrich case for case.severity_changed effects failed, retrying once", "caseId", req.ID, "err", err)
+			time.Sleep(200 * time.Millisecond)
+		}
 		switch {
 		case err != nil:
-			slog.ErrorContext(ctx, "sn update case: enrich case for case.severity_changed publish failed", "caseId", req.ID)
-		case cv.Severity == *req.Severity:
-			slog.InfoContext(ctx, "sn update case: case.severity_changed not published, severity is unchanged", "caseId", req.ID)
+			slog.ErrorContext(ctx, "sn update case: enrich case for case.severity_changed effects failed after retry", "caseId", req.ID)
+		case derefSeverity(cv.Severity) == *req.Severity:
+			slog.InfoContext(ctx, "sn update case: case.severity_changed effects skipped, severity is unchanged", "caseId", req.ID)
 		default:
 			caseBeforeSeverity = cv
-			publishSeverityChange = true
+			severityChanged = true
 		}
 	}
 
@@ -2614,11 +3491,12 @@ func (s *snCaseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReq
 	if snResp.Case.State != nil {
 		state, err := snCaseStateLabelToEnum(snResp.Case.State)
 		if err == nil {
-			resp.Case.State = state
+			resp.Case.State = &state
 		}
 	}
 	if snResp.Case.Severity != nil {
-		resp.Case.Severity = snSeverityToSeverity(snResp.Case.Severity)
+		severity := snSeverityToSeverity(snResp.Case.Severity)
+		resp.Case.Severity = &severity
 	}
 	if snResp.Case.Type != nil {
 		if t := snCaseTypeToDomain(snResp.Case.Type); t != nil {
@@ -2699,6 +3577,70 @@ func (s *snCaseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReq
 	if publishStatusChange && snResp.Case.State != nil {
 		s.publishStatusChanged(ctx, req.ID, snResp.Case.State.Label, caseBeforeUpdate)
 	}
+	// Deliberately independent of publishStatusChange (which is also gated
+	// on s.publisher != nil) — see SLAEngineService.ApplyCaseStateEffects'
+	// own doc comment for why pause/resume/completion must not depend on
+	// Event Hub being configured. req.State != nil alone (not the
+	// no-op-detecting publishStatusChange flag) is enough: every effect
+	// ApplyCaseStateEffects applies is idempotent, so a caller re-PATCHing
+	// the case's own current state just redundantly re-applies the same
+	// effect harmlessly.
+	//
+	// Guards on resp.Case.State (the converted domain state), not
+	// snResp.Case.State (the raw SN label) -- snCaseStateLabelToEnum can
+	// fail on an unrecognised label, leaving resp.Case.State nil while
+	// snResp.Case.State is still non-nil; guarding on the raw field would
+	// then pass derefState(resp.Case.State)'s zero value ("") through to
+	// ApplyCaseStateSLAEffects' default branch, which resumes both clocks
+	// for a case whose real new state was never actually established.
+	if s.slaEngine != nil && req.State != nil && resp.Case.State != nil {
+		s.applyCaseStateSLAEffects(ctx, req.ID, derefState(resp.Case.State))
+	}
+	// Deliberately independent of s.publisher, same reasoning as the state
+	// effects call just above. WorkaroundProvided is the one genuine
+	// "workaround was provided" signal anywhere in the domain model --
+	// applyCaseStateSLAEffects only ever pauses/resumes this clock, never
+	// completes it. false (a recall) is deliberately not handled the
+	// opposite way -- see SLAEngineService.CompleteWorkaroundClock's own
+	// doc comment.
+	if s.slaEngine != nil && req.WorkaroundProvided != nil && *req.WorkaroundProvided {
+		s.slaEngine.CompleteWorkaroundClock(ctx, req.ID)
+	}
+	// Deliberately independent of s.slaEngine above and of s.publisher's
+	// usual EVENT_PUBLISHING_ENABLED gate (publishWorkaroundProvidedEvent
+	// checks s.publisher itself) -- this is the signal
+	// csm-notification-service's own Redis-based SLA engine needs to
+	// complete ITS OWN workaround clock; see
+	// events.WorkaroundProvidedPayload's own doc comment for why nothing
+	// published this before.
+	if req.WorkaroundProvided != nil && *req.WorkaroundProvided {
+		publishWorkaroundProvidedEvent(ctx, s.publisher, req.ID)
+	}
+	// Independent of the WorkaroundProvided check above, same "no Event Hub
+	// dependency" reasoning -- a caller can set workaroundProvided and
+	// addPublicComment together (CompleteWorkaroundClock would then simply
+	// be redundant for that one clock, see CompleteFixEtaSharedClocks' own
+	// doc comment).
+	//
+	// Checked via GetCaseEtaSharedOn, not req.AddPublicComment directly:
+	// eta_shared_on (work_item.eta_shared_on) is the actual record of a
+	// shared fix ETA, and it has no guaranteed connection to this specific
+	// PATCH -- it has no ServiceNow equivalent field at all (see
+	// domain.CaseView.EtaSharedOn's own doc comment), so nothing about
+	// *when* ServiceNow's own "Share Fix ETA" action actually lands in
+	// Postgres is guaranteed to line up with this request's own
+	// AddPublicComment flag. Checking the persisted fact on every UpdateCase
+	// call instead (cheap, idempotent, same CompleteClock safety net as
+	// every other completion path) means a case's clocks still get
+	// completed the next time anything about it changes, even if this
+	// specific PATCH wasn't the one that shared the ETA.
+	if s.slaEngine != nil {
+		if etaSharedOn, err := s.GetCaseEtaSharedOn(ctx, req.ID); err != nil {
+			slog.WarnContext(ctx, "sn update case: eta shared on lookup failed", "caseId", req.ID, "error", err)
+		} else if etaSharedOn != nil {
+			s.slaEngine.CompleteFixEtaSharedClocks(ctx, req.ID)
+		}
+	}
 	if publishCaseAssign {
 		assigneeName := assigneeEmail
 		if snResp.Case.AssignedTo != nil && snResp.Case.AssignedTo.Name != "" {
@@ -2714,18 +3656,345 @@ func (s *snCaseService) UpdateCase(ctx context.Context, req domain.UpdateCaseReq
 		s.publishCaseAcknowledged(ctx, req.ID, resp.Case.AcknowledgedBy.Name)
 	}
 	// resp.Case.Severity != caseBeforeSeverity.Severity is a second guard on
-	// top of publishSeverityChange itself: that flag only confirms the
-	// PATCH *request* asked for a different severity than the pre-PATCH
+	// top of severityChanged itself: that flag only confirms the PATCH
+	// *request* asked for a different severity than the pre-PATCH
 	// GetCaseByID observed — it says nothing about what the PATCH response
 	// actually echoes back. If ServiceNow's response reports the
-	// pre-update severity (e.g. a stale echo), publishing anyway would
-	// send a false case.severity_changed event with identical old/new
+	// pre-update severity (e.g. a stale echo), acting on it anyway would
+	// fire a false case.severity_changed event, or revise SLA clocks to a
+	// policy the case was never actually moved to, with identical old/new
 	// values.
-	if publishSeverityChange && resp.Case.Severity != "" && resp.Case.Severity != caseBeforeSeverity.Severity {
-		s.publishSeverityChanged(ctx, req.ID, string(caseBeforeSeverity.Severity), string(resp.Case.Severity), caseBeforeSeverity)
+	severityGenuinelyChanged := severityChanged && resp.Case.Severity != nil && derefSeverity(resp.Case.Severity) != derefSeverity(caseBeforeSeverity.Severity)
+	if severityGenuinelyChanged && s.publisher != nil {
+		s.publishSeverityChanged(ctx, req.ID, string(derefSeverity(caseBeforeSeverity.Severity)), string(derefSeverity(resp.Case.Severity)), caseBeforeSeverity)
+	}
+	// Deliberately a separate guard from the publish above (s.slaEngine != nil,
+	// not s.publisher != nil) -- see severityChanged's own doc comment above
+	// for why revising SLA clocks must not depend on Event Hub being
+	// configured. projectID mirrors registerCaseSLAClocks' own
+	// cv.ProjectDetails-derived lookup, sourced from caseBeforeSeverity (the
+	// same pre-PATCH GetCaseByID this block already fetched) since UpdateCase
+	// has no other project id in scope for an existing case.
+	if severityGenuinelyChanged && s.slaEngine != nil {
+		projectID := ""
+		if caseBeforeSeverity.ProjectDetails != nil {
+			projectID = caseBeforeSeverity.ProjectDetails.ID
+		}
+		s.reviseCaseSLAClocks(ctx, req.ID, resp.Case.Severity, projectID)
+		// reviseCaseSLAClocks' own replacement clocks always start
+		// IN_PROGRESS, with no awareness of the case's current state -- a
+		// case already paused (Awaiting Info/Solution Proposed) at the
+		// moment its severity changes would otherwise get fresh
+		// workaround/resolution clocks that immediately start counting
+		// down unpaused, producing a false breach later. Re-applying
+		// applyCaseStateSLAEffects against the case's already-known
+		// current state (State is mutually exclusive with Severity on one
+		// request, so caseBeforeSeverity's State here is unaffected by
+		// this update) re-pauses them to match reality; a harmless no-op
+		// when the case isn't currently paused.
+		if caseBeforeSeverity.State != nil {
+			s.applyCaseStateSLAEffects(ctx, req.ID, *caseBeforeSeverity.State)
+		}
 	}
 
 	return resp, nil
+}
+
+// patchCaseFields performs a bare ServiceNow PATCH for exactly the fields
+// given (state/severity/workState/markFixIssued, whichever are non-nil),
+// with NONE of UpdateCase's enrichment reads, no-op detection, or event
+// publishing: no GetCaseByID, no publishStatusChanged/publishSeverityChanged.
+//
+// This exists purely for DATA_SOURCE=postgres-servicenow-dual-write's async
+// mirror (see caseService.UpdateCase's own doc comment): Postgres has
+// already decided the real outcome by the time this runs, so re-running
+// ServiceNow's own no-op-detection/event logic would be redundant at best --
+// and for State/Severity specifically, would require the very GetCaseByID
+// read this mode must never perform, which is exactly why State/Severity
+// couldn't join the mirror before this method existed.
+//
+// Do not call this from UpdateCase itself -- that method's read-before-write
+// behavior is deliberate and unchanged for live DATA_SOURCE=servicenow
+// traffic. At most one of state/severity/workState/markFixIssued is expected
+// non-nil at a time -- this method does not enforce that itself, the caller
+// already has.
+func (s *snCaseService) patchCaseFields(ctx context.Context, caseID string, state *domain.CaseState, severity *domain.CaseSeverity, workState *domain.CaseWorkState, markFixIssued *bool, resolution *caseResolutionFields) (domain.UpdatedCase, error) {
+	payload := snUpdateCasePayload{}
+	if resolution != nil {
+		if resolution.Code != nil {
+			key, ok := snResolutionCodeKey[*resolution.Code]
+			if !ok {
+				return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "resolutionCode contains invalid value: " + string(*resolution.Code)}
+			}
+			payload.ResolutionCode = &key
+		}
+		if resolution.Cause != nil {
+			key, ok := snCauseKey[*resolution.Cause]
+			if !ok {
+				return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "cause contains invalid value: " + string(*resolution.Cause)}
+			}
+			val := strconv.Itoa(key)
+			payload.Cause = &val
+		}
+		payload.CloseNotes = resolution.CloseNotes
+	}
+	if state != nil {
+		if !validCaseState[*state] {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "state contains invalid value: " + string(*state)}
+		}
+		id, ok := snStateIDMap[*state]
+		if !ok {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "state " + string(*state) + " is not supported by ServiceNow"}
+		}
+		payload.StateKey = &id
+	}
+	if severity != nil {
+		if !validCaseSeverity[*severity] {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "severity contains invalid value: " + string(*severity)}
+		}
+		id, ok := snSeverityIDMap[*severity]
+		if !ok {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "severity " + string(*severity) + " is not supported by ServiceNow"}
+		}
+		payload.SeverityKey = &id
+	}
+	if workState != nil {
+		if !validCaseWorkState[*workState] {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "workState contains invalid value: " + string(*workState)}
+		}
+		id, ok := snWorkStateIDMap[*workState]
+		if !ok {
+			return domain.UpdatedCase{}, &apierror.ValidationError{Msg: "workState " + string(*workState) + " is not supported by ServiceNow"}
+		}
+		payload.WorkStateKey = &id
+	}
+	if markFixIssued != nil {
+		payload.MarkFixIssued = markFixIssued
+	}
+
+	token := middleware.UserIDTokenFromContext(ctx)
+	raw, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, payload)
+	if err != nil {
+		return domain.UpdatedCase{}, err
+	}
+
+	var snResp snUpdateCaseResponse
+	if err := json.Unmarshal(raw, &snResp); err != nil {
+		return domain.UpdatedCase{}, fmt.Errorf("sn patch case fields: parse response: %w", err)
+	}
+
+	updatedOn, err := parseSNDateTime(ctx, "sn patch case fields", "updatedOn", snResp.Case.UpdatedOn)
+	if err != nil {
+		return domain.UpdatedCase{}, fmt.Errorf("sn patch case fields: parse updatedOn %q: %w", snResp.Case.UpdatedOn, err)
+	}
+
+	result := domain.UpdatedCase{ID: sysidToUUID(snResp.Case.ID), UpdatedOn: updatedOn, UpdatedBy: snResp.Case.UpdatedBy}
+	if snResp.Case.State != nil {
+		if st, err := snCaseStateLabelToEnum(snResp.Case.State); err == nil {
+			result.State = &st
+		}
+	}
+	if snResp.Case.Severity != nil {
+		sev := snSeverityToSeverity(snResp.Case.Severity)
+		result.Severity = &sev
+	}
+	result.WorkState = snWorkStateLabelToEnum(snResp.Case.WorkState)
+	if snResp.Case.BestCaseFixEta != nil && *snResp.Case.BestCaseFixEta != "" {
+		result.BestCaseFixEta = snResp.Case.BestCaseFixEta
+	}
+	if snResp.Case.MostLikelyFixEta != nil && *snResp.Case.MostLikelyFixEta != "" {
+		result.MostLikelyFixEta = snResp.Case.MostLikelyFixEta
+	}
+	if snResp.Case.WorstCaseFixEta != nil && *snResp.Case.WorstCaseFixEta != "" {
+		result.WorstCaseFixEta = snResp.Case.WorstCaseFixEta
+	}
+	return result, nil
+}
+
+// patchCaseWatchList performs a bare ServiceNow PATCH replacing the case's
+// watch list wholesale, with NONE of UpdateCase's enrichment reads, no-op
+// detection, or event publishing -- same reasoning as patchCaseFields's own
+// doc comment, extended to WatchList for DATA_SOURCE=postgres-servicenow-dual-write's
+// async WatchList mirror (see caseService.updateCaseWatchList's own doc
+// comment). userIDs is forwarded to watchListEmails exactly as UpdateCase's
+// own WatchList branch does (platform UUIDs resolved to emails, emails
+// forwarded as-is) -- an explicitly empty, non-nil slice still clears the
+// watch list rather than being skipped, matching UpdateCase's own behavior.
+func (s *snCaseService) patchCaseWatchList(ctx context.Context, caseID string, userIDs []string) (domain.UpdatedCase, error) {
+	token := middleware.UserIDTokenFromContext(ctx)
+
+	emails, err := watchListEmails(ctx, s.client, token, "watchList", userIDs)
+	if err != nil {
+		return domain.UpdatedCase{}, err
+	}
+
+	payload := snUpdateCasePayload{WatchList: &emails}
+	raw, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, payload)
+	if err != nil {
+		return domain.UpdatedCase{}, err
+	}
+
+	var snResp snUpdateCaseResponse
+	if err := json.Unmarshal(raw, &snResp); err != nil {
+		return domain.UpdatedCase{}, fmt.Errorf("sn patch case watch list: parse response: %w", err)
+	}
+
+	updatedOn, err := parseSNDateTime(ctx, "sn patch case watch list", "updatedOn", snResp.Case.UpdatedOn)
+	if err != nil {
+		return domain.UpdatedCase{}, fmt.Errorf("sn patch case watch list: parse updatedOn %q: %w", snResp.Case.UpdatedOn, err)
+	}
+
+	result := domain.UpdatedCase{ID: sysidToUUID(snResp.Case.ID), UpdatedOn: updatedOn, UpdatedBy: snResp.Case.UpdatedBy}
+	if len(snResp.Case.WatchList) > 0 {
+		wl := make([]domain.WatchListUser, 0, len(snResp.Case.WatchList))
+		for _, u := range snResp.Case.WatchList {
+			wl = append(wl, domain.WatchListUser{
+				ID:       sysidToUUID(u.ID),
+				UserName: u.UserName,
+				Name:     u.Name,
+				Email:    u.Email,
+				User:     domain.NewUserReference("", u.Email, u.Name),
+			})
+		}
+		result.WatchList = wl
+	}
+	return result, nil
+}
+
+// patchCaseAssignee performs a bare ServiceNow PATCH setting assigneeEmail,
+// with none of UpdateCase's enrichment reads, no-op detection, or event
+// publishing -- same reasoning as patchCaseFields's own doc comment, extended
+// to AssigneeEmail for DATA_SOURCE=postgres-servicenow-dual-write's async
+// assignee mirror (see caseService.updateCaseAssignee's own doc comment).
+// assigneeEmail is nil to clear the assignee (sent to ServiceNow as an
+// explicit JSON null) and non-nil to set it -- a bare empty string can't
+// carry that distinction, since it collides with a genuinely empty value.
+// The response is discarded -- the dispatcher only needs to know whether the
+// write succeeded.
+func (s *snCaseService) patchCaseAssignee(ctx context.Context, caseID string, assigneeEmail *string) error {
+	var raw json.RawMessage
+	if assigneeEmail == nil {
+		raw = json.RawMessage("null")
+	} else {
+		quoted, err := json.Marshal(*assigneeEmail)
+		if err != nil {
+			return fmt.Errorf("sn patch case assignee: encode assigneeEmail: %w", err)
+		}
+		raw = json.RawMessage(quoted)
+	}
+	token := middleware.UserIDTokenFromContext(ctx)
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, snUpdateCasePayload{AssigneeEmail: raw})
+	return err
+}
+
+// parseAssigneeEmail interprets a json.RawMessage assigneeEmail field. Call only when
+// the field is known to be present (len(raw) > 0). Returns isClear=true for an explicit
+// null (no email value); otherwise unmarshals the raw JSON into email and returns it.
+func parseAssigneeEmail(raw json.RawMessage) (isClear bool, email string, err error) {
+	if string(raw) == "null" {
+		return true, "", nil
+	}
+	if err := json.Unmarshal(raw, &email); err != nil {
+		return false, "", err
+	}
+	return false, email, nil
+}
+
+// patchCaseAcknowledge performs a bare ServiceNow PATCH setting acknowledge,
+// with none of UpdateCase's enrichment reads, no-op detection, or event
+// publishing -- same reasoning as patchCaseFields's own doc comment, extended
+// to Acknowledge for DATA_SOURCE=postgres-servicenow-dual-write's async
+// acknowledge mirror (see caseService.acknowledgeCase's own doc comment).
+// ServiceNow's own first-write-wins handling makes this safe to call even if
+// ServiceNow's copy was somehow already acknowledged by someone else.
+func (s *snCaseService) patchCaseAcknowledge(ctx context.Context, caseID string) error {
+	token := middleware.UserIDTokenFromContext(ctx)
+	acknowledge := true
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, snUpdateCasePayload{Acknowledge: &acknowledge})
+	return err
+}
+
+// patchCaseParent performs a bare ServiceNow PATCH setting parentId, with
+// none of UpdateCase's enrichment reads, no-op detection, or event
+// publishing -- same reasoning as patchCaseFields's own doc comment,
+// extended to ParentID for DATA_SOURCE=postgres-servicenow-dual-write's
+// async parent mirror (see caseService.updateCaseParent's own doc comment).
+// parentID is a platform UUID, converted to ServiceNow's sysid before
+// dispatch (outbound rule, see this file's own conventions doc).
+func (s *snCaseService) patchCaseParent(ctx context.Context, caseID, parentID string) error {
+	token := middleware.UserIDTokenFromContext(ctx)
+	sysid := uuidToSysid(parentID)
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, snUpdateCasePayload{ParentID: &sysid})
+	return err
+}
+
+// patchCaseFieldsBundle performs a bare ServiceNow PATCH covering the part
+// of UpdateCase's combinable "plain field" bundle the backing service
+// actually implements today -- Subject/DeploymentID/DeployedProductID/
+// RelatedCaseID/AutocloseHoldUntil/BestCaseFixEta/MostLikelyFixEta/
+// WorstCaseFixEta/WorkaroundProvided -- with none of UpdateCase's enrichment reads, no-op
+// detection, or event publishing -- same reasoning as patchCaseFields's own
+// doc comment, extended to this bundle for
+// DATA_SOURCE=postgres-servicenow-dual-write's async mirror (see
+// caseService.updateCaseFields's own doc comment).
+//
+// DeploymentID/DeployedProductID/RelatedCaseID are platform UUIDs, converted
+// to ServiceNow sysids before dispatch (outbound rule, see this file's own
+// conventions doc) without re-validating UUID shape here -- the synchronous
+// Postgres write in caseService.updateCaseFields already validated it before
+// this mirror was ever dispatched. ServiceNow validates each sysid as a
+// reference (u_enviroment / install_base / u_related_case respectively) and
+// 404s on one that doesn't resolve; that 404 surfaces as an ordinary mirror
+// failure through the caller's snWriteback.Dispatch wrapper (WARN log +
+// sn_writeback_failures row), same as any other mirror error -- the Postgres
+// write already succeeded and returned by the time this fires.
+//
+// Description is deliberately never sent here, even though
+// CaseRepository.UpdateCaseFields happily writes it to Postgres: unlike
+// every other field in this bundle, ServiceNow enforces a deny-ACL on
+// sn_customerservice_case.description at update time (case *creation* writes
+// it through a plain, non-ACL-enforcing GlideRecord, but update goes through
+// GlideRecordSecure, which does enforce it) -- sending it would be silently
+// dropped by that ACL, leaving ServiceNow's copy no better off than not
+// mirroring it at all. Returns nil without a PATCH call when req sets none
+// of the nine supported fields, rather than sending an empty no-op request.
+func (s *snCaseService) patchCaseFieldsBundle(ctx context.Context, caseID string, req domain.UpdateCaseRequest) error {
+	if req.Subject == nil && req.DeploymentID == nil && req.DeployedProductID == nil && req.RelatedCaseID == nil &&
+		req.AutocloseHoldUntil == nil &&
+		req.BestCaseFixEta == nil && req.MostLikelyFixEta == nil && req.WorstCaseFixEta == nil && req.WorkaroundProvided == nil {
+		return nil
+	}
+	token := middleware.UserIDTokenFromContext(ctx)
+	payload := snUpdateCasePayload{
+		Title:              req.Subject,
+		BestCaseFixEta:     req.BestCaseFixEta,
+		MostLikelyFixEta:   req.MostLikelyFixEta,
+		WorstCaseFixEta:    req.WorstCaseFixEta,
+		WorkaroundProvided: req.WorkaroundProvided,
+	}
+	if req.DeploymentID != nil {
+		sysid := uuidToSysid(*req.DeploymentID)
+		payload.DeploymentID = &sysid
+	}
+	if req.DeployedProductID != nil {
+		sysid := uuidToSysid(*req.DeployedProductID)
+		payload.DeployedProductID = &sysid
+	}
+	if req.RelatedCaseID != nil {
+		sysid := uuidToSysid(*req.RelatedCaseID)
+		payload.RelatedCaseID = &sysid
+	}
+	// The hold is what ServiceNow's own auto-closure flow reads (it sets
+	// u_autoclosure_step = ON_HOLD and u_autoclosure_state_time together), so
+	// unlike the display-only fields it is the one write here that decides
+	// whether the case is actually closed. Same date-only wire format as
+	// UpdateCase's own AutocloseHoldUntil handling.
+	if req.AutocloseHoldUntil != nil {
+		holdUntil := formatSNDateOnly(req.AutocloseHoldUntil)
+		payload.AutocloseHoldUntil = &holdUntil
+	}
+	_, err := s.client.Patch(ctx, "/cases/"+uuidToSysid(caseID), token, payload)
+	return err
 }
 
 type snCreateAttachmentPayload struct {
@@ -3152,6 +4421,10 @@ func (s *snCaseService) GetAttachmentByID(ctx context.Context, id string) (domai
 		return domain.AttachmentDetails{}, fmt.Errorf("sn get attachment: parse createdOn %q: %w", snResp.CreatedOn, err)
 	}
 
+	// ReferenceType is left nil (serialized as JSON null): the upstream
+	// attachment-details response carries no reference type (see
+	// snAttachmentDetails), and there is no way to derive one from the id
+	// alone. Callers must fail closed on it.
 	return domain.AttachmentDetails{
 		ID:          sysidToUUID(snResp.ID),
 		ReferenceID: sysidToUUID(snResp.ReferenceID),
@@ -3166,19 +4439,6 @@ func (s *snCaseService) GetAttachmentByID(ctx context.Context, id string) (domai
 		Content:     &snResp.Content,
 		Status:      domain.AttachmentStatusComplete,
 	}, nil
-}
-
-// parseAssigneeEmail interprets a json.RawMessage assigneeEmail field. Call only when
-// the field is known to be present (len(raw) > 0). Returns isClear=true for an explicit
-// null (no email value); otherwise unmarshals the raw JSON into email and returns it.
-func parseAssigneeEmail(raw json.RawMessage) (isClear bool, email string, err error) {
-	if string(raw) == "null" {
-		return true, "", nil
-	}
-	if err := json.Unmarshal(raw, &email); err != nil {
-		return false, "", err
-	}
-	return false, email, nil
 }
 
 // validateAttachmentUpdate mirrors the Ballerina reference's
@@ -3777,9 +5037,9 @@ func (s *snCaseService) SearchCases(ctx context.Context, req domain.SearchCasesR
 		workStateLabel := snWorkStateLabelStr(c.WorkState)
 		engagementTypeLabel := snLabelStr(c.EngagementType)
 
-		stateLabel := ""
+		var stateLabel *string
 		if c.State != nil {
-			stateLabel = c.State.Label
+			stateLabel = &c.State.Label
 		}
 		caseTypeDomain := ""
 		if t := snCaseTypeToDomain(c.CaseType); t != nil {
@@ -3808,7 +5068,7 @@ func (s *snCaseService) SearchCases(ctx context.Context, req domain.SearchCasesR
 			EngagementType: engagementTypeLabel,
 			WorkState:      workStateLabel,
 			Type:           caseTypeDomain,
-			Project:        domain.EntityRef{ID: sysidToUUID(c.Project.ID), Name: c.Project.Name},
+			Project:        &domain.EntityRef{ID: sysidToUUID(c.Project.ID), Name: c.Project.Name},
 			ProjectKey:     c.Project.Key,
 			// BestCaseFixEta/MostLikelyFixEta/WorstCaseFixEta are already date-only
 			// "YYYY-MM-DD" strings on both sides, so no parsing/reformatting is
@@ -4138,6 +5398,122 @@ func snCaseStateLabelToEnum(state *snCaseState) (domain.CaseState, error) {
 	return "", fmt.Errorf("unknown case state %q from ServiceNow", state.Label)
 }
 
+// snAnnouncementStateMap maps ServiceNow's raw state label (as returned on
+// its create-case response for an announcement-typed case -- see
+// TestSNCaseService_CreateCase_Announcement's fixture, which returns
+// {"label": "Open"} for a fresh announcement, the same label case uses)
+// to announcement_state_enum's own literal values. Deliberately its own map
+// rather than reusing snCaseStateMap: announcement_state_enum only has two
+// values (OPEN/CLOSE, migration 0024) and spells the closed one CLOSE, not
+// CLOSED -- the same kind of label/enum spelling mismatch already handled
+// for case (CANCELLED->CANCELED) and incident (SITE_247->SITE_24_7), so this
+// is resolved by an explicit table instead of assumed to line up.
+var snAnnouncementStateMap = map[string]string{
+	"open":   "OPEN",
+	"closed": "CLOSE",
+}
+
+// snAnnouncementStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created announcement into announcement_state_enum's
+// literal value, for CreateCaseFromServiceNow's announcement branch. Returns
+// an error rather than defaulting to "OPEN" for anything unrecognized: a
+// fresh announcement landing in neither OPEN nor CLOSE means ServiceNow
+// returned a label this integration doesn't understand yet, which should
+// fail loudly rather than silently mis-record the state.
+func snAnnouncementStateToEnum(label string) (string, error) {
+	if v, ok := snAnnouncementStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown announcement state %q from ServiceNow", label)
+}
+
+// snCaseLikeStateLabels is the SN raw-label vocabulary this integration
+// understands for every case-like work_item type (case/service_request/
+// engagement/security_report_analysis) whose own state enum -- migrations
+// 000018 (case_state_enum) and 000019 (service_request_state_enum,
+// engagement_state_enum, security_report_analysis_state_enum) -- is spelled
+// identically: WORK_IN_PROGRESS, AWAITING_INFO, SOLUTION_PROPOSED, CLOSED,
+// OPEN, WAITING_ON_WSO2, REOPENED. ServiceNow's create-case response carries
+// state as the same generic {label} shape regardless of case type (see
+// CreateCase's shared stateLabel extraction above), so the raw label set
+// SN can return is the same set snCaseStateMap already documents for "case".
+// Deliberately its own map per type rather than one shared map, per this
+// change's own design brief -- but the source of truth is identical to
+// snCaseStateMap by construction: keep any future addition/edit to one in
+// sync with the others (announcement is the one exception -- its state enum
+// only has OPEN/CLOSE, see snAnnouncementStateMap).
+//
+// Unlike snCaseStateMap, "reopened" maps to its own literal (REOPENED) here
+// rather than to WAITING_ON_WSO2 -- snCaseStateMap's mapping of "reopened" to
+// WaitingOnWSO2 looks like a pre-existing bug in the case path, not
+// intentional behavior worth propagating into these three new maps.
+var snCaseLikeStateLabels = map[string]string{
+	"open":              "OPEN",
+	"work in progress":  "WORK_IN_PROGRESS",
+	"waiting on wso2":   "WAITING_ON_WSO2",
+	"awaiting info":     "AWAITING_INFO",
+	"reopened":          "REOPENED",
+	"solution proposed": "SOLUTION_PROPOSED",
+	"closed":            "CLOSED",
+}
+
+// snServiceRequestStateMap maps ServiceNow's raw state label (as returned on
+// its create-case response for a service_request-typed case) to
+// service_request_state_enum's own literal values (migration 0024) --
+// see snCaseLikeStateLabels's own doc comment for why this table is
+// identical to that one.
+var snServiceRequestStateMap = snCaseLikeStateLabels
+
+// snServiceRequestStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created service_request into service_request_state_enum's
+// literal value, for CreateCaseFromServiceNow's service_request branch.
+// Returns an error rather than defaulting to "OPEN" for anything unrecognized
+// -- same fail-closed discipline as snAnnouncementStateToEnum/
+// snCaseStateLabelToEnum.
+func snServiceRequestStateToEnum(label string) (string, error) {
+	if v, ok := snServiceRequestStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown service_request state %q from ServiceNow", label)
+}
+
+// snEngagementStateMap maps ServiceNow's raw state label to
+// engagement_state_enum's own literal values (migration 0024) -- see
+// snCaseLikeStateLabels's own doc comment for why this table is identical to
+// that one.
+var snEngagementStateMap = snCaseLikeStateLabels
+
+// snEngagementStateToEnum converts ServiceNow's raw create-response state
+// label for a newly created engagement into engagement_state_enum's literal
+// value, for CreateCaseFromServiceNow's engagement branch. Returns an error
+// rather than defaulting to "OPEN" for anything unrecognized -- same
+// fail-closed discipline as snAnnouncementStateToEnum/snCaseStateLabelToEnum.
+func snEngagementStateToEnum(label string) (string, error) {
+	if v, ok := snEngagementStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown engagement state %q from ServiceNow", label)
+}
+
+// snSecurityReportAnalysisStateMap maps ServiceNow's raw state label to
+// security_report_analysis_state_enum's own literal values (migration
+// 000019) -- see snCaseLikeStateLabels's own doc comment for why this table
+// is identical to that one.
+var snSecurityReportAnalysisStateMap = snCaseLikeStateLabels
+
+// snSecurityReportAnalysisStateToEnum converts ServiceNow's raw
+// create-response state label for a newly created security_report_analysis
+// into security_report_analysis_state_enum's literal value, for
+// CreateCaseFromServiceNow's security_report_analysis branch. Returns an
+// error rather than defaulting to "OPEN" for anything unrecognized -- same
+// fail-closed discipline as snAnnouncementStateToEnum/snCaseStateLabelToEnum.
+func snSecurityReportAnalysisStateToEnum(label string) (string, error) {
+	if v, ok := snSecurityReportAnalysisStateMap[strings.ToLower(label)]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("unknown security_report_analysis state %q from ServiceNow", label)
+}
+
 // snSeverityLabel extracts the priority word from SN severity labels like
 // "Low (P4)", "2 - High", "3 - Moderate" → "low", "high", "medium".
 var snSeverityLabelMap = map[string]domain.CaseSeverity{
@@ -4208,6 +5584,16 @@ type snAddTagResponse struct {
 }
 
 // AddCaseTag attaches a free-text label to the case identified by caseID.
+// AddCaseTagAs implements CaseService. Unlike the Postgres data source,
+// snCaseService's AddCaseTag never hard-requires a token locally -- it just
+// forwards whatever x-user-id-token is on ctx (possibly empty) to ServiceNow
+// -- so there is nothing this caller-supplied actorEmail needs to override;
+// this is a plain passthrough, kept only so this type still satisfies
+// CaseService.
+func (s *snCaseService) AddCaseTagAs(ctx context.Context, caseID, label, _ string) (domain.Tag, error) {
+	return s.AddCaseTag(ctx, caseID, label)
+}
+
 func (s *snCaseService) AddCaseTag(ctx context.Context, caseID, label string) (domain.Tag, error) {
 	if err := validateUUIDs("id", []string{caseID}); err != nil {
 		return domain.Tag{}, err

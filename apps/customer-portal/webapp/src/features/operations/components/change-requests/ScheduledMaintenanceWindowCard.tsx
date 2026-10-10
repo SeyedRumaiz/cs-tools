@@ -21,7 +21,24 @@ import type { ScheduledMaintenanceWindowCardProps } from "@features/operations/t
 import {
   formatChangeRequestDisplayDate,
   formatChangeRequestDuration,
+  getCustomerProposal,
+  isProposalAccepted,
+  isProposalPending,
 } from "@features/operations/utils/changeRequests";
+import {
+  formatPlannedLength,
+  getChangeRequestWindow,
+} from "@features/operations/utils/changeRequestSchedule";
+import { ChangeRequestStates } from "@features/operations/constants/operationsConstants";
+import { resolveChangeRequestCanonicalState } from "@features/operations/utils/changeRequestUi";
+
+/** States in which the window is a plan, not yet a scheduled maintenance window. */
+const UNSCHEDULED_STATES: readonly string[] = [
+  ChangeRequestStates.NEW,
+  ChangeRequestStates.ASSESS,
+  ChangeRequestStates.AUTHORIZE,
+  ChangeRequestStates.CUSTOMER_APPROVAL,
+];
 
 
 /**
@@ -36,19 +53,34 @@ export default function ScheduledMaintenanceWindowCard({
 }: ScheduledMaintenanceWindowCardProps): JSX.Element {
   const durationText = useMemo(() => {
     const duration = (changeRequest as { duration?: string | number | null })
-      .duration;
-    if (duration == null) return "Not available";
-    if (typeof duration === "number") {
-      return formatChangeRequestDuration(duration);
+      ?.duration;
+    if (duration != null) {
+      if (typeof duration === "number") {
+        return formatChangeRequestDuration(duration);
+      }
+      const durationTextValue = String(duration).trim();
+      if (durationTextValue.length > 0) {
+        const mins = parseInt(durationTextValue, 10);
+        if (!Number.isNaN(mins) && /^\d+(\.\d+)?$/.test(durationTextValue)) {
+          return formatChangeRequestDuration(mins);
+        }
+        return durationTextValue;
+      }
     }
-    const durationTextValue = String(duration).trim();
-    if (durationTextValue.length === 0) return "Not available";
-    const mins = parseInt(durationTextValue, 10);
-    if (!Number.isNaN(mins) && /^\d+(\.\d+)?$/.test(durationTextValue)) {
-      return formatChangeRequestDuration(mins);
+
+    if (changeRequest) {
+      const window = getChangeRequestWindow(changeRequest);
+      if (window.durationMs != null) {
+        return formatPlannedLength(window.durationMs);
+      }
     }
-    return durationTextValue;
+
+    return "Not available";
   }, [changeRequest]);
+
+  const proposal = getCustomerProposal(changeRequest);
+  const proposalPending = proposal != null && isProposalPending(changeRequest);
+  const proposalAccepted = proposal != null && isProposalAccepted(changeRequest);
 
   return (
     <Paper
@@ -63,7 +95,11 @@ export default function ScheduledMaintenanceWindowCard({
         <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.5 }}>
           <Calendar size={20} color={colors.grey[600]} aria-hidden />
           <Typography variant="h6" color="text.primary">
-            Scheduled Maintenance Window
+            {UNSCHEDULED_STATES.includes(
+              resolveChangeRequestCanonicalState(changeRequest?.state) ?? "",
+            )
+              ? "Planned Maintenance Window"
+              : "Scheduled Maintenance Window"}
           </Typography>
         </Box>
       </Box>
@@ -86,6 +122,17 @@ export default function ScheduledMaintenanceWindowCard({
                 {formatChangeRequestDisplayDate(changeRequest?.startDate)}
               </Typography>
             </Box>
+            {proposalPending && (
+              <Typography
+                id="cr-window-proposed-start"
+                variant="caption"
+                color="text.secondary"
+                display="block"
+                sx={{ mt: 0.5 }}
+              >
+                {`Proposed start: ${formatChangeRequestDisplayDate(proposal.startDate)} (waiting for WSO2)`}
+              </Typography>
+            )}
           </Box>
 
           <Box>
@@ -111,6 +158,17 @@ export default function ScheduledMaintenanceWindowCard({
             {durationText}
           </Typography>
         </Box>
+
+        {proposalAccepted && (
+          <Typography
+            id="cr-window-proposal-accepted"
+            variant="body2"
+            color="text.secondary"
+            sx={{ mt: 2 }}
+          >
+            {`WSO2 accepted the proposed start, ${formatChangeRequestDisplayDate(proposal.startDate)}.`}
+          </Typography>
+        )}
       </Box>
     </Paper>
   );

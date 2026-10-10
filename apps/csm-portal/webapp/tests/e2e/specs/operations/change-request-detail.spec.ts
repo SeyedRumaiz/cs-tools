@@ -15,7 +15,7 @@
 // under the License.
 
 //
-// Change request detail (request approval, approve/reject). Unlike
+// Change request detail (Request Approval, approve/reject). Unlike
 // change-request-creation.spec.ts (which only ever submits once, tagged, and
 // asserts nothing beyond "it landed on its own detail page"), these specs
 // need a live CR to advance through approval — but there's still no
@@ -28,15 +28,23 @@
 // test self-skips rather than failing whenever the button isn't there or the
 // call is rejected (same rule as the documented timecard-approval 403).
 //
-// "request approval" below self-skips on any non-2xx from the underlying
-// `PATCH /change-requests/:id`, rather than failing or blindly retrying.
-// Confirmed live (2026-07-26) a single-field `{requestApproval:true}` body
-// always 500s ("Failed to update change request.") against the real
-// backend — a standing backend/API-contract issue on this endpoint, not
-// fixable from FE-only test code. (The Edit dialog's former
-// `{isCustomerApproved,isCustomerReviewed}` write path always 400s the same
-// way; that coverage was removed along with the toggle itself — see
-// EditChangeRequestDialog.tsx's doc comment for why the toggle was pulled.)
+// New -> Assess is sent by the "Request Approval" button as a plain, direct
+// `{state: "assess"}` PATCH, like every other forward transition in this bar
+// (it used to be labeled "Move to Assess"; there is no "Schedule" button at
+// all -- CAB approval moves the CR to Scheduled by itself). Confirmed live
+// (2026-07-26) the OLD single-field `{requestApproval:true}` body always
+// 500s ("Failed to update change request.") against the real backend — a
+// standing backend/API-contract issue on that specific payload shape, not
+// fixable from FE-only test code. Whether the NEW `{state: "assess"}` payload
+// clears that 500 against the real backend hasn't been re-verified here (this
+// change was made and reviewed without a live run against DEV-SN), so
+// "Request Approval" below still self-skips on any non-2xx rather than
+// asserting success outright — if it turns out to reliably succeed now, this
+// self-skip can be tightened into a real assertion in a follow-up. (The Edit
+// dialog's former `{isCustomerApproved,isCustomerReviewed}` write path always
+// 400s the same way; that coverage was removed along with the toggle itself —
+// see EditChangeRequestDialog.tsx's doc comment for why the toggle was
+// pulled.)
 //
 
 import { test, expect, withRole } from "../../fixtures/test";
@@ -65,7 +73,7 @@ async function provisionChangeRequest(
   return { id: match[1], subject };
 }
 
-test.describe("change request detail — request approval", () => {
+test.describe("change request detail — Request Approval", () => {
   test("transitions the approval section to a requested/pending state", async ({ page }) => {
     test.setTimeout(60_000);
 
@@ -76,15 +84,16 @@ test.describe("change request detail — request approval", () => {
     const detail = new ChangeRequestDetailPage(page);
     await detail.goto(id);
 
-    const requestButton = detail.requestApprovalButton();
+    const requestApprovalButton = detail.requestApprovalButton();
     test.skip(
-      !(await requestButton.isVisible().catch(() => false)),
-      "Request approval isn't available for a freshly-created CR in this state",
+      !(await requestApprovalButton.isVisible().catch(() => false)),
+      "Request Approval isn't available for a freshly-created CR in this state",
     );
 
-    // See the file-level note above: the real backend's PATCH endpoint
-    // rejects this transition outright (500), not something a retry can
-    // paper over — self-skip rather than fail on a non-2xx.
+    // See the file-level note above: the OLD `{requestApproval:true}` payload
+    // 500'd outright against the real backend; whether the NEW plain
+    // `{state:"assess"}` payload does too hasn't been re-verified here —
+    // self-skip rather than fail on a non-2xx either way.
     const response = await Promise.all([
       page
         .waitForResponse((r) => new RegExp(`/change-requests/${id}$`).test(r.url()) && r.request().method() === "PATCH", {
@@ -96,15 +105,15 @@ test.describe("change request detail — request approval", () => {
 
     test.skip(
       !!response && !response.ok(),
-      `backend rejected the request-approval PATCH (${response?.status()}) — standing backend issue, not a bug in this spec`,
+      `backend rejected the Request Approval PATCH (${response?.status()}) — standing backend issue, not a bug in this spec`,
     );
 
-    // Once approval has been requested, "Request approval" is no longer the
+    // Once the CR has moved to Assess, "Request Approval" is no longer the
     // available action (the CR has moved past that legal-next-state) — its
     // disappearance is the detail page's own signal that the transition
     // happened, without this spec needing to know the approvals widget's
     // internal wording for "pending".
-    await expect(requestButton).toBeHidden({ timeout: 15_000 });
+    await expect(requestApprovalButton).toBeHidden({ timeout: 15_000 });
   });
 });
 
@@ -119,14 +128,14 @@ test.describe("change request detail — approve/reject", () => {
     const detail = new ChangeRequestDetailPage(page);
     await detail.goto(id);
 
-    const requestButton = detail.requestApprovalButton();
-    if (await requestButton.isVisible().catch(() => false)) {
+    const requestApprovalButton = detail.requestApprovalButton();
+    if (await requestApprovalButton.isVisible().catch(() => false)) {
       // See the file-level note above: the underlying PATCH may 500
       // outright (a standing backend issue, not timing) — tolerate that
       // here and fall through to the "no approve button" self-skip below,
       // since this test's own job is approve/reject, not the transition.
       await detail.requestApproval();
-      await expect(requestButton).toBeHidden({ timeout: 15_000 }).catch(() => undefined);
+      await expect(requestApprovalButton).toBeHidden({ timeout: 15_000 }).catch(() => undefined);
     }
 
     // Approve/Reject buttons live inside collapsed accordion stages and only

@@ -18,6 +18,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,4 +96,130 @@ func TestSearchGroups(t *testing.T) {
 			})
 		}
 	})
+}
+
+const testGroupID = "22222222-2222-4222-8222-222222222222"
+
+func TestGetGroup(t *testing.T) {
+	newReq := func(id string) *http.Request {
+		r := withUser(httptest.NewRequest(http.MethodGet, "/groups/"+id, nil))
+		r.SetPathValue("id", id)
+		return r
+	}
+
+	t.Run("requires authenticated user", func(t *testing.T) {
+		h := NewGroupHandler(&mockEntityGroupClient{})
+		r := httptest.NewRequest(http.MethodGet, "/groups/"+testGroupID, nil)
+		r.SetPathValue("id", testGroupID)
+		w := httptest.NewRecorder()
+		h.GetGroup(w, r)
+		assertStatus(t, w, http.StatusUnauthorized)
+		assertErrorMessage(t, w, ErrMsgUnauthorized)
+		assertContentType(t, w, "application/json")
+	})
+
+	t.Run("rejects a malformed or empty id without calling upstream", func(t *testing.T) {
+		for _, id := range []string{"not-a-uuid", "", "22222222222242228222222222222222", testGroupID + "/members"} {
+			client := &mockEntityGroupClient{getGroupFn: func(context.Context, string) ([]byte, error) {
+				t.Errorf("upstream called for id %q", id)
+				return nil, nil
+			}}
+			h := NewGroupHandler(client)
+			w := httptest.NewRecorder()
+			h.GetGroup(w, newReq(id))
+			assertStatus(t, w, http.StatusBadRequest)
+			assertErrorMessage(t, w, ErrMsgInvalidUUID)
+			assertContentType(t, w, "application/json")
+		}
+	})
+
+	t.Run("forwards the id to upstream and returns the group with its members", func(t *testing.T) {
+		var gotID string
+		client := &mockEntityGroupClient{
+			getGroupFn: func(_ context.Context, id string) ([]byte, error) {
+				gotID = id
+				return []byte(`{"id":"` + testGroupID + `","name":"CAB Approval","description":"Change Advisory Board","email":"cab@example.com","manager":{"id":"33333333-3333-4333-8333-333333333333","name":"Mia Manager"},"members":[{"id":"44444444-4444-4444-8444-444444444444","name":"Alice","email":"alice@example.com","userType":"INTERNAL","role":"lead"}],"total":1}`), nil
+			},
+		}
+		h := NewGroupHandler(client)
+		w := httptest.NewRecorder()
+		h.GetGroup(w, newReq(testGroupID))
+
+		assertStatus(t, w, http.StatusOK)
+		assertContentType(t, w, "application/json")
+		if gotID != testGroupID {
+			t.Errorf("upstream received id %q, want %q", gotID, testGroupID)
+		}
+		resp := decodeJSON[map[string]any](t, w)
+		if resp["name"] != "CAB Approval" || resp["total"].(float64) != 1 {
+			t.Errorf("response = %v", resp)
+		}
+		members, ok := resp["members"].([]any)
+		if !ok || len(members) != 1 || members[0].(map[string]any)["role"] != "lead" {
+			t.Errorf("members = %v, want one lead member", resp["members"])
+		}
+	})
+
+	t.Run("a group with no members is a 200 with an empty list, not an error", func(t *testing.T) {
+		h := NewGroupHandler(&mockEntityGroupClient{})
+		w := httptest.NewRecorder()
+		h.GetGroup(w, newReq(testGroupID))
+		assertStatus(t, w, http.StatusOK)
+		resp := decodeJSON[map[string]any](t, w)
+		if members, ok := resp["members"].([]any); !ok || len(members) != 0 {
+			t.Errorf("members = %v, want []", resp["members"])
+		}
+	})
+
+	t.Run("upstream errors are mapped correctly (404 unknown group, 403 non-internal caller)", func(t *testing.T) {
+		for _, tc := range upstreamErrorsGeneric("Failed to retrieve group.") {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				client := &mockEntityGroupClient{
+					getGroupFn: func(context.Context, string) ([]byte, error) { return nil, tc.err },
+				}
+				h := NewGroupHandler(client)
+				w := httptest.NewRecorder()
+				h.GetGroup(w, newReq(testGroupID))
+				assertStatus(t, w, tc.wantCode)
+				assertErrorMessage(t, w, tc.wantMsg)
+				assertContentType(t, w, "application/json")
+			})
+		}
+	})
+}
+
+// The approvals response is passed through untouched, so the new
+// `assignmentGroup` reaches the webapp: an {id, name} object for an internal
+// stage and null for a customer stage (whose approvers are the project's
+// registered contacts, not a group).
+func TestGetChangeRequestApprovals_PassesAssignmentGroupThrough(t *testing.T) {
+	const upstream = `{"approvals":[` +
+		`{"stage":"Peer Approval","approverType":"STATIC_GROUP","approverName":"Example Corp ABT","status":"PENDING","assignmentGroup":{"id":"` + testGroupID + `","name":"Example Corp ABT"},"approvers":[]},` +
+		`{"stage":"Customer Approval","approverType":"STATIC_GROUP","approverName":"Customer Group","status":"PENDING","assignmentGroup":null,"approvers":[]}]}`
+	client := &mockEntityChangeRequestClient{
+		getChangeRequestApprovalsFn: func(context.Context, string) ([]byte, error) { return []byte(upstream), nil },
+	}
+	h := NewChangeRequestHandler(client)
+	r := withUser(httptest.NewRequest(http.MethodGet, "/change-requests/"+testCRID+"/approvals", nil))
+	r.SetPathValue("id", testCRID)
+	w := httptest.NewRecorder()
+	h.GetChangeRequestApprovals(w, r)
+	assertStatus(t, w, http.StatusOK)
+
+	var resp struct {
+		Approvals []map[string]json.RawMessage `json:"approvals"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Approvals) != 2 {
+		t.Fatalf("approvals = %d, want 2", len(resp.Approvals))
+	}
+	if got := string(resp.Approvals[0]["assignmentGroup"]); got != `{"id":"`+testGroupID+`","name":"Example Corp ABT"}` {
+		t.Errorf("internal stage assignmentGroup = %s", got)
+	}
+	if got := string(resp.Approvals[1]["assignmentGroup"]); got != "null" {
+		t.Errorf("customer stage assignmentGroup = %s, want null", got)
+	}
 }

@@ -105,18 +105,24 @@ vi.mock("@context/chat-sessions/ChatSessionsContext", () => ({
 }));
 
 // Mutable so individual tests can simulate a /users/me outcome. Defaults to
-// "loaded fine, no error" — the common case for every pre-existing test in
-// this file, which don't care about CurrentUserContext at all.
-const currentUserState: { isLoading: boolean; isError: boolean; error: Error | null } = {
+// "loaded fine, no error, no user" — the common case for every pre-existing
+// test in this file, which don't care about CurrentUserContext at all.
+const currentUserState: {
+  isLoading: boolean;
+  isError: boolean;
+  error: Error | null;
+  user: { roles: string[] } | undefined;
+} = {
   isLoading: false,
   isError: false,
   error: null,
+  user: undefined,
 };
 
 vi.mock("@context/current-user/CurrentUserContext", () => ({
   CurrentUserProvider: ({ children }: { children: React.ReactNode }) => children,
   useCurrentUser: () => ({
-    user: undefined,
+    user: currentUserState.user,
     isLoading: currentUserState.isLoading,
     isError: currentUserState.isError,
     error: currentUserState.error,
@@ -146,6 +152,7 @@ describe("AuthGuard sign-in fallback (before any successful sign-in)", () => {
     currentUserState.isLoading = false;
     currentUserState.isError = false;
     currentUserState.error = null;
+    currentUserState.user = undefined;
     signInMock.mockResolvedValue(undefined);
   });
 
@@ -206,6 +213,7 @@ describe("AuthGuard after an initial successful sign-in (transient token-clock e
     currentUserState.isLoading = false;
     currentUserState.isError = false;
     currentUserState.error = null;
+    currentUserState.user = undefined;
   });
 
   it("stops rendering ProtectedRoute (and therefore its loader-swap) once signed in, and never re-enters it for a later transient clock expiry", async () => {
@@ -295,6 +303,69 @@ describe("AuthGuard's response to a /users/me failure once signed in", () => {
     currentUserState.isLoading = false;
     currentUserState.isError = false;
     currentUserState.error = null;
+    currentUserState.user = undefined;
+  });
+
+  it("shows the not-authorized page for a signed-in user holding no portal role at all", async () => {
+    currentUserState.user = { roles: [] };
+    let rerender!: ReturnType<typeof renderAuthGuard>["rerender"];
+
+    await act(async () => {
+      ({ rerender } = renderAuthGuard());
+    });
+    await act(async () => {
+      rerender(
+        <MemoryRouter initialEntries={["/some/protected/path"]}>
+          <AuthGuard />
+        </MemoryRouter>,
+      );
+    });
+
+    expect(
+      screen.getByText("You don't have access to this portal yet"),
+    ).toBeInTheDocument();
+  });
+
+  // "viewer" is one of getPortalAccess's own checked roles, so a viewer-only
+  // caller passes this gate with no special case needed.
+  it("does NOT show the not-authorized page for a viewer-only user", async () => {
+    currentUserState.user = { roles: ["viewer"] };
+    let rerender!: ReturnType<typeof renderAuthGuard>["rerender"];
+
+    await act(async () => {
+      ({ rerender } = renderAuthGuard());
+    });
+    await act(async () => {
+      rerender(
+        <MemoryRouter initialEntries={["/some/protected/path"]}>
+          <AuthGuard />
+        </MemoryRouter>,
+      );
+    });
+
+    expect(
+      screen.queryByText("You don't have access to this portal yet"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the not-authorized page for a sales_solutions-only user — it grants nothing on its own", async () => {
+    currentUserState.user = { roles: ["sales_solutions"] };
+    let rerender!: ReturnType<typeof renderAuthGuard>["rerender"];
+
+    await act(async () => {
+      ({ rerender } = renderAuthGuard());
+    });
+    await act(async () => {
+      rerender(
+        <MemoryRouter initialEntries={["/some/protected/path"]}>
+          <AuthGuard />
+        </MemoryRouter>,
+      );
+    });
+
+    expect(
+      screen.getByText("You don't have access to this portal yet"),
+    ).toBeInTheDocument();
   });
 
   it("shows the not-authorized page when /users/me fails with 401 (a token useAuthApiClient's own recovery chain could not fix)", async () => {
@@ -413,6 +484,7 @@ describe("AuthGuard's AppLayout showCaseTabs wiring while auth itself hasn't res
     currentUserState.isLoading = false;
     currentUserState.isError = false;
     currentUserState.error = null;
+    currentUserState.user = undefined;
     signInMock.mockResolvedValue(undefined);
   });
 
@@ -439,6 +511,7 @@ describe("AuthGuard bare mode", () => {
     currentUserState.isLoading = false;
     currentUserState.isError = false;
     currentUserState.error = null;
+    currentUserState.user = undefined;
     signInMock.mockResolvedValue(undefined);
   });
 

@@ -10,24 +10,14 @@ topic below covers one part of the portal in more detail than this page does.
 
 ## The portal at a glance
 
-The sections below appear in the left sidebar in this order:
-
-- **Dashboard**: your landing page: configurable widgets summarizing cases, requests, and
-  other work.
-- **Support**: cases: the core case list, case detail, and comment trail.
-- **Operations**: four tabs: Service requests, Change requests, Incidents, and Problem
-  management.
-- **Engagements**: professional-services work such as migrations, implementations,
-  onboarding, and training.
-- **Security Center**: two tabs: Security reports and Vulnerabilities.
-- **Updates**: product/version update tracking.
-- **Time cards**: engineer time logged against a case, with an approval flow.
-- **Announcements**: portal-wide announcements.
-- **Customers**: two tabs: Accounts and Projects.
-- **Settings**: user management: users, roles, groups, teams, and permissions.
-- **Help**: this section.
-
-Each of these has its own topic further down this page with the specifics.
+The left sidebar is personalized: it only ever lists the sections your account has access to,
+in the same order for everyone. **Dashboard** and **Support** (the core case list and case
+detail) are there for every signed-in user; which of the others also appear — Operations,
+Engagements, Announcements, Security Center, Customers, Knowledge, PLG, Updates, Time cards,
+Team Schedule, Usage Metrics, Customer Health, User Scan, and Settings — depends on your role.
+Whatever you see in your own sidebar is what you have; several of the topics further down this
+page cover one specific section in more detail, and are themselves only listed here when that
+section is one you can open.
 
 ## Jumping to a person's profile
 

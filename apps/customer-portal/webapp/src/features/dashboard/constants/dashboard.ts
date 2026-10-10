@@ -198,12 +198,21 @@ export const SEVERITY_FRIENDLY_LABEL: Record<SeverityLegendKey, string> = {
   [SeverityLegendKey.Low]: "Low",
 };
 
-// Outstanding engagements category chart data.
+// Outstanding engagements category chart data. Must cover all 5 engagement
+// types the backend can return (see backend-v2's caseEngagementTypeDisplayLabels)
+// -- a category missing here isn't just unlabeled, it's silently dropped from
+// both the pie chart and its total (DashboardPage.tsx's outstandingEngagements
+// memo only sums entries that match one of these names).
 export const OUTSTANDING_ENGAGEMENTS_CATEGORY_CHART_DATA = [
   { key: "consultancy", name: "Consultancy", color: colors.green[500] },
   { key: "onboarding", name: "Onboarding", color: colors.blue[500] },
   { key: "migration", name: "Migration", color: colors.orange[500] },
   { key: "follow-up", name: "Follow Up", color: colors.purple[500] },
+  {
+    key: "new-feature-improvement",
+    name: "New Feature Improvement",
+    color: colors.pink[500],
+  },
 ] as const;
 
 // Configuration for Cases Trend Chart (same legend order as Outstanding Engagements).

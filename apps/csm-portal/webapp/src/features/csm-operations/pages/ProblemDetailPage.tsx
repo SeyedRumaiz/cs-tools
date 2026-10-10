@@ -26,7 +26,11 @@ import { usePatchProblem } from "@features/csm-operations/api/usePatchProblem";
 import EditProblemDialog from "@features/csm-operations/components/EditProblemDialog";
 import ProblemActionBar from "@features/csm-operations/components/ProblemActionBar";
 import ProblemFixNotesDialog from "@features/csm-operations/components/ProblemFixNotesDialog";
+import ProblemTransitionRequirementDialog, {
+  type ProblemRequirementTransition,
+} from "@features/csm-operations/components/ProblemTransitionRequirementDialog";
 import { problemStateColor, problemStateLabel } from "@features/csm-operations/utils/problems";
+import { looksLikeHtml, sanitizeDescriptionHtml } from "@utils/sanitizeHtml";
 import type { BeEntityRef, BeProblemRef, BeUpdateProblemPayload } from "@api/backend/types";
 import { useNavTransition } from "@hooks/useNavTransition";
 import { useNormalizedIdParam } from "@hooks/useNormalizedIdParam";
@@ -96,6 +100,35 @@ function ProblemRefItem({
 }
 
 /**
+ * A problem's description: rich-text HTML rendered through the shared
+ * description sanitiser (as the case and time-card views render theirs),
+ * plain text as-is with its line breaks.
+ */
+function ProblemDescription({ text }: { text: string }): JSX.Element {
+  if (!looksLikeHtml(text)) {
+    return (
+      <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
+        {text}
+      </Typography>
+    );
+  }
+  return (
+    <Box
+      sx={{
+        typography: "body2",
+        overflowWrap: "anywhere",
+        "& p:first-of-type": { mt: 0 },
+        "& p:last-child": { mb: 0 },
+        "& ul, & ol": { my: 0.5, pl: 3 },
+        "& a": { color: "primary.main" },
+        "& img": { maxWidth: "100%", height: "auto" },
+      }}
+      dangerouslySetInnerHTML={{ __html: sanitizeDescriptionHtml(text) }}
+    />
+  );
+}
+
+/**
  * Detail for a single problem (`GET /problems/{id}`): its overview fields,
  * linked records, and resolution/fix notes. State transitions (`PATCH
  * /problems/{id} { transition }`) go through `ProblemActionBar` — the live
@@ -125,6 +158,9 @@ export default function ProblemDetailPage(): JSX.Element {
   // `null` otherwise. Every other transition dispatches directly with no
   // intermediate dialog.
   const [fixNotesOpen, setFixNotesOpen] = useState(false);
+  // Set while the dialog collecting a move's required field is open: an
+  // assignee for Assess, fix notes for Resolved.
+  const [requirementFor, setRequirementFor] = useState<ProblemRequirementTransition | null>(null);
 
   const recordView = useRecordRecentView();
   useEffect(() => {
@@ -146,11 +182,42 @@ export default function ProblemDetailPage(): JSX.Element {
    * of responsibility as `IncidentActionBar` +
    * `CsmIncidentDetailPage.onIncidentAction`.
    */
+  const sendPatch = useCallback(
+    (patch: BeUpdateProblemPayload, onSuccess?: () => void) => {
+      if (!id) return;
+      patchProblem.mutate(
+        { id, patch },
+        {
+          onSuccess,
+          onError: (err) => {
+            const msg =
+              err instanceof BackendApiError && err.status < 500 && err.message
+                ? err.message
+                : "Could not update the problem's state. Please try again.";
+            showError(msg, err);
+          },
+        },
+      );
+    },
+    [id, patchProblem, showError],
+  );
+
   const onProblemAction = useCallback(
     (transition: string) => {
       if (!id) return;
       if (transition === "fix") {
         setFixNotesOpen(true);
+        return;
+      }
+      // ServiceNow refuses Assess without an assignee and Resolved without
+      // fix notes; ask for whichever is missing instead of sending a move
+      // that can only fail.
+      if (transition === "assess" && !data?.assignedTo?.id) {
+        setRequirementFor("assess");
+        return;
+      }
+      if (transition === "resolve" && !data?.fixNotes?.trim()) {
+        setRequirementFor("resolve");
         return;
       }
       patchProblem.mutate(
@@ -166,7 +233,7 @@ export default function ProblemDetailPage(): JSX.Element {
         },
       );
     },
-    [id, patchProblem, showError],
+    [id, data, patchProblem, showError],
   );
 
   const onFixNotesSubmit = useCallback(
@@ -344,6 +411,7 @@ export default function ProblemDetailPage(): JSX.Element {
             <Typography variant="body2">{problem.subcategory || "—"}</Typography>
           </MetaCell>
           <MetaCell label="Assigned to"><RefText value={problem.assignedTo} /></MetaCell>
+          <MetaCell label="Assignment group"><RefText value={problem.assignmentGroup} /></MetaCell>
           <MetaCell label="Opened">
             <Typography variant="body2">{formatDateTime(problem.openedOn)}</Typography>
           </MetaCell>
@@ -351,6 +419,14 @@ export default function ProblemDetailPage(): JSX.Element {
             <Typography variant="body2">{formatDateTime(problem.closedOn)}</Typography>
           </MetaCell>
         </Box>
+        {problem.description && (
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+            <Typography variant="body2" color="text.secondary">
+              Description
+            </Typography>
+            <ProblemDescription text={problem.description} />
+          </Box>
+        )}
       </Card>
 
       {hasLinks && (
@@ -488,6 +564,17 @@ export default function ProblemDetailPage(): JSX.Element {
               },
             )
           }
+        />
+      )}
+
+      {requirementFor && (
+        <ProblemTransitionRequirementDialog
+          transition={requirementFor}
+          isSubmitting={patchProblem.isPending}
+          onClose={() => {
+            if (!patchProblem.isPending) setRequirementFor(null);
+          }}
+          onConfirm={(patch) => sendPatch(patch, () => setRequirementFor(null))}
         />
       )}
 

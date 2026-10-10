@@ -45,7 +45,8 @@ export interface IncidentDetail extends IncidentSummary {
   service: EntityRefDto | null;
   serviceOffering: EntityRefDto | null;
   configurationItem: EntityRefDto | null;
-  contactType: string | null;
+  /** "Channel" in the UI — the DTO's `contactType`. */
+  channel: string | null;
   impact: string | null;
   urgency: string | null;
   changeRequest: EntityRefDto | null;
@@ -82,7 +83,7 @@ export function toIncidentDetail(dto: IncidentDetailDto): IncidentDetail {
     service: dto.service ?? null,
     serviceOffering: dto.serviceOffering ?? null,
     configurationItem: dto.configurationItem ?? null,
-    contactType: dto.contactType ?? null,
+    channel: dto.contactType ?? null,
     impact: dto.impact ?? null,
     urgency: dto.urgency ?? null,
     changeRequest: dto.changeRequest ?? null,

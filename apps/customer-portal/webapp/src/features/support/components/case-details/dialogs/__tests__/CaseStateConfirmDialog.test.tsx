@@ -39,4 +39,56 @@ describe("CaseStateConfirmDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
+
+  // Regression test for a real, reported bug: closing a case 400'd with
+  // "resolutionCode, cause, and closeNotes are required when state is
+  // closed or solution_proposed" because nothing in the webapp ever
+  // collected them. Confirms the dialog now gates on all three being
+  // filled, and submits exactly what was selected/typed.
+  it("requires resolutionCode, cause, and closeNotes before confirming, and submits them", () => {
+    const onClose = vi.fn();
+    const onConfirm = vi.fn();
+
+    render(
+      <ThemeProvider theme={createTheme()}>
+        <CaseStateConfirmDialog
+          open
+          actionLabel="Close"
+          isPending={false}
+          onClose={onClose}
+          onConfirm={onConfirm}
+          requiresResolutionFields
+          resolutionCodes={[
+            { id: "SOLVED_WORKAROUND_PROVIDED", label: "Solved Workaround Provided" },
+          ]}
+          causes={[{ id: "PRODUCT_BUG", label: "Product Bug" }]}
+        />
+      </ThemeProvider>,
+    );
+
+    const confirmButton = screen.getByRole("button", { name: "Confirm" });
+    expect(confirmButton).toBeDisabled();
+
+    const comboboxes = screen.getAllByRole("combobox");
+    fireEvent.mouseDown(comboboxes[0]);
+    fireEvent.click(screen.getByRole("option", { name: "Solved Workaround Provided" }));
+
+    fireEvent.mouseDown(comboboxes[1]);
+    fireEvent.click(screen.getByRole("option", { name: "Product Bug" }));
+
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Close notes"), {
+      target: { value: "Fixed via workaround." },
+    });
+
+    expect(confirmButton).not.toBeDisabled();
+
+    fireEvent.click(confirmButton);
+    expect(onConfirm).toHaveBeenCalledWith({
+      resolutionCode: "SOLVED_WORKAROUND_PROVIDED",
+      cause: "PRODUCT_BUG",
+      closeNotes: "Fixed via workaround.",
+    });
+  });
 });

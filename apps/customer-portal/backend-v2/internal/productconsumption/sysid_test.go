@@ -84,7 +84,7 @@ func TestLicenceCallsSendBareSysIDs(t *testing.T) {
 			_, _ = w.Write([]byte(`{"result":{"status":4,"applicationId":"app-1"}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"result":{"license":{}}}`))
+		_, _ = w.Write([]byte(`{"result":{"success":true,"license":{"subscriptionData":{},"signature":"sig"}}}`))
 	}))
 	defer srv.Close()
 

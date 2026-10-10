@@ -1,0 +1,117 @@
+// Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+//
+// WSO2 LLC. licenses this file to you under the Apache License,
+// Version 2.0 (the "License"); you may not use this file except
+// in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package service
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/auth"
+	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
+)
+
+func scheduleCaller(email string) context.Context {
+	return auth.WithIdentity(context.Background(), auth.Identity{Validated: true, UserEmail: email})
+}
+
+// A rota admin reads every family, as everyone does; only their writes are
+// limited to their own family.
+func TestRotaAdminReads_EveryFamily(t *testing.T) {
+	repo := &fakeScheduleRepo{
+		adminFamilies: []string{"SME"},
+		assignments:   []domain.ScheduleAssignment{{TeamKey: "vega"}, {TeamKey: "apollo"}, {TeamKey: "asgardeo"}},
+		catalogue: domain.ScheduleCatalogue{
+			Teams: []domain.ScheduleTeam{{Key: "vega", Family: "CRE"}, {Key: "apollo", Family: "SRE"}, {Key: "asgardeo", Family: "SME"}},
+		},
+	}
+	svc := NewScheduleService(repo, alwaysUnrestrictedAccess{})
+	ctx := scheduleCaller("sme.rota.admin@example.com")
+
+	cat, err := svc.Catalogue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Teams) != 3 {
+		t.Errorf("teams = %+v, want all three families'", cat.Teams)
+	}
+	got, err := svc.SearchAssignments(ctx, domain.SearchScheduleAssignmentsRequest{From: "2026-10-01", To: "2026-10-31", Family: "CRE"})
+	if err != nil {
+		t.Fatalf("an SME rota admin reading CRE: %v", err)
+	}
+	if len(got.Assignments) != 3 {
+		t.Errorf("assignments = %d, want all three", len(got.Assignments))
+	}
+}
+
+func TestAbsenceKinds_ARotaAdminsAreTheirFamilys(t *testing.T) {
+	req := domain.CreateScheduleAbsenceKindRequest{ShortCode: "TR", Label: "Training", Bucket: "ALLOCATION", ColourToken: "INT"}
+
+	t.Run("a rota admin's new kind is their family's", func(t *testing.T) {
+		repo := &fakeScheduleRepo{adminTeams: []string{"asgardeo"}, adminFamilies: []string{"SME"}}
+		if _, err := NewScheduleService(repo, alwaysUnrestrictedAccess{}).CreateAbsenceKind(scheduleCaller("sme.rota.admin@example.com"), req); err != nil {
+			t.Fatal(err)
+		}
+		if repo.gotKindFamily == nil || *repo.gotKindFamily != "SME" {
+			t.Errorf("family = %v, want SME", repo.gotKindFamily)
+		}
+	})
+	t.Run("a lead who is no rota admin adds a shared kind, as before", func(t *testing.T) {
+		repo := &fakeScheduleRepo{leadsTeam: true}
+		if _, err := NewScheduleService(repo, alwaysUnrestrictedAccess{}).CreateAbsenceKind(scheduleCaller("lead@example.com"), req); err != nil {
+			t.Fatal(err)
+		}
+		if repo.gotKindFamily != nil {
+			t.Errorf("family = %q, want none (shared)", *repo.gotKindFamily)
+		}
+	})
+	t.Run("a rota admin cannot add another family's kind", func(t *testing.T) {
+		repo := &fakeScheduleRepo{adminTeams: []string{"asgardeo"}, adminFamilies: []string{"SME"}}
+		other := req
+		other.Family = "CRE"
+		_, err := NewScheduleService(repo, alwaysUnrestrictedAccess{}).CreateAbsenceKind(scheduleCaller("sme.rota.admin@example.com"), other)
+		var forbidden *apierror.ForbiddenError
+		if !errors.As(err, &forbidden) || repo.called {
+			t.Fatalf("want ForbiddenError and no write, got %v", err)
+		}
+	})
+	t.Run("an admin of two families must say which", func(t *testing.T) {
+		repo := &fakeScheduleRepo{adminTeams: []string{"asgardeo", "apollo"}, adminFamilies: []string{"SME", "SRE"}}
+		_, err := NewScheduleService(repo, alwaysUnrestrictedAccess{}).CreateAbsenceKind(scheduleCaller("two@example.com"), req)
+		var invalid *apierror.ValidationError
+		if !errors.As(err, &invalid) || repo.called {
+			t.Fatalf("want ValidationError and no write, got %v", err)
+		}
+	})
+	t.Run("delete passes the admin's families, and nothing for a lead", func(t *testing.T) {
+		repo := &fakeScheduleRepo{adminTeams: []string{"asgardeo"}, adminFamilies: []string{"SME"}}
+		if err := NewScheduleService(repo, alwaysUnrestrictedAccess{}).DeleteAbsenceKind(scheduleCaller("sme.rota.admin@example.com"), "SME_TRAINING"); err != nil {
+			t.Fatal(err)
+		}
+		if len(repo.gotKindAllowed) != 1 || repo.gotKindAllowed[0] != "SME" {
+			t.Errorf("allowed families = %v, want [SME]", repo.gotKindAllowed)
+		}
+		lead := &fakeScheduleRepo{leadsTeam: true}
+		if err := NewScheduleService(lead, alwaysUnrestrictedAccess{}).DeleteAbsenceKind(scheduleCaller("lead@example.com"), "SME_TRAINING"); err != nil {
+			t.Fatal(err)
+		}
+		if lead.gotKindAllowed != nil {
+			t.Errorf("allowed families for a lead = %v, want none (any custom kind)", lead.gotKindAllowed)
+		}
+	})
+}

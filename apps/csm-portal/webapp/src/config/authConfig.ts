@@ -14,6 +14,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+import type { TopBannerItem } from "@config/topBannersConfig";
+
 // Extend window interface to include our config
 declare global {
   interface Window {
@@ -23,6 +25,19 @@ declare global {
       CSM_PORTAL_AUTH_SIGN_IN_REDIRECT_URL: string;
       CSM_PORTAL_AUTH_SIGN_OUT_REDIRECT_URL: string;
       CSM_PORTAL_BACKEND_BASE_URL: string;
+      /**
+       * TEMPORARY / LOCAL DEV ONLY. Real Asgardeo sign-in still happens —
+       * this does not touch authentication — it only bypasses the
+       * post-sign-in *authorization* checks that currently show "You don't
+       * have access to this portal yet" for an account the real staging
+       * backend hasn't provisioned a portal role for yet: AuthGuard's
+       * GET /users/me role check and portalAccess.ts's per-section
+       * capabilities (Operations, Time Cards, Escalate, Download, Write).
+       * Grep for `devBypassAccessCheck` to find every call site. Never set
+       * this in a committed config.js — see @config/devFlags.ts's export
+       * for the full explanation.
+       */
+      CSM_PORTAL_DEV_BYPASS_ACCESS_CHECK?: boolean;
       /**
        * Base URL for the case-activity SSE stream (csm-portal-backend's
        * dedicated :9092 listener, exposed as its own Choreo REST endpoint).
@@ -54,8 +69,17 @@ declare global {
       CSM_PORTAL_MAINTENANCE_BANNER_ACTION_URL?: string;
       CSM_PORTAL_CHATBOT_WEBSOCKET_URL?: string;
       CSM_PORTAL_FLOATING_NOVERA_ENABLED?: boolean;
+      /** Legacy single banner: gates CSM_PORTAL_TOP_BANNER_HTML when it is a string. */
       CSM_PORTAL_TOP_BANNER_ENABLED?: boolean;
-      CSM_PORTAL_TOP_BANNER_HTML?: string;
+      /**
+       * Legacy single banner. A raw HTML string (shown only when
+       * CSM_PORTAL_TOP_BANNER_ENABLED is true; has no start or expiry) or a banner
+       * object (honours its own startsAt and expiresAt).
+       * Prefer CSM_PORTAL_TOP_BANNERS.
+       */
+      CSM_PORTAL_TOP_BANNER_HTML?: string | TopBannerItem;
+      /** Ordered banners rendered above the header. Default: []. */
+      CSM_PORTAL_TOP_BANNERS?: TopBannerItem[];
       CSM_PORTAL_ANNOUNCEMENT_BANNER_VISIBLE?: boolean;
       CSM_PORTAL_ANNOUNCEMENT_BANNER_STORAGE_KEY?: string;
       CSM_PORTAL_ANNOUNCEMENT_BANNER_HTML?: string;
@@ -78,6 +102,14 @@ declare global {
        * defaults to "DCPSUB" when this is unset.
        */
       CSM_PORTAL_ANNOUNCEMENT_TEST_PROJECT_KEY?: string;
+      /**
+       * Customer-onboarding status column on a project's Contacts tab. Only
+       * `true` (or the string `"true"`) turns it on; off is the default and
+       * means the column is not rendered and no request is made. Same flag
+       * name as the backend env var gating the route it calls — see
+       * `onboardingStatusConfig.ts`.
+       */
+      CSM_MIGRATION_ONBOARDING_STATUS_ENABLED?: boolean | string;
     };
   }
 }
@@ -122,3 +154,7 @@ const getAuthConfig = (): AuthConfig => {
 };
 
 export const authConfig = getAuthConfig();
+
+// devBypassAccessCheck (the value for the CSM_PORTAL_DEV_* key declared
+// above) lives in devFlags.ts, not here — see that file's own doc comment
+// for why.

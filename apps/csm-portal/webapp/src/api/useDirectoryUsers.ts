@@ -17,6 +17,7 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { ApiQueryKeys, BE_MAX_PAGE_LIMIT } from "@constants/apiConstants";
 import { useBackendApi } from "@api/backend/client";
+import { INTERNAL_USER_ROLES } from "@features/csm-users/types/csmUsers";
 
 /**
  * Minimal user-directory entry: just what UI affordances like the cases
@@ -46,19 +47,26 @@ function toDirectoryUser(u: RawDirectoryUser): DirectoryUser {
 /**
  * Shared user-directory lookup. Backed by `POST /users/search`
  * (the canonical backend route — there is no `GET /users`). Returns a
- * lightweight {@link DirectoryUser} list.
+ * lightweight {@link DirectoryUser} list of active internal users only:
+ * customer/external users are listed only in user management and customer
+ * contacts, never in an assignee filter.
  */
 export function useDirectoryUsers(): UseQueryResult<DirectoryUser[], Error> {
   const api = useBackendApi();
 
   return useQuery<DirectoryUser[], Error>({
-    queryKey: [ApiQueryKeys.CSM_ADMIN_USERS, "directory"],
+    queryKey: [ApiQueryKeys.CSM_ADMIN_USERS, "directory", "internal"],
     queryFn: async (): Promise<DirectoryUser[]> => {
-      // No filters: fetch the broadest page the BE allows (default is only 10).
-      const res = await api.post<{ pagination: { limit: number } }, unknown>(
-        "/users/search",
-        { pagination: { limit: BE_MAX_PAGE_LIMIT } },
-      );
+      // Broadest page the BE allows (default is only 10), scoped server-side to
+      // active internal staff: this feeds the cases assignee filter, and
+      // customer/external users must never be offered there.
+      const res = await api.post<
+        { filters: { roleIds: string[]; active: boolean }; pagination: { limit: number } },
+        unknown
+      >("/users/search", {
+        filters: { roleIds: INTERNAL_USER_ROLES, active: true },
+        pagination: { limit: BE_MAX_PAGE_LIMIT },
+      });
       const rows: RawDirectoryUser[] = Array.isArray(res)
         ? (res as RawDirectoryUser[])
         : ((res as { users?: RawDirectoryUser[] })?.users ?? []);

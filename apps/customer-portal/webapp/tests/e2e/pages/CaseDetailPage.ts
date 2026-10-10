@@ -25,6 +25,7 @@ import {
   CASE_DETAIL,
   CASE_DETAILS_PANEL,
   CASE_ESCALATION,
+  CASE_KNOWLEDGE_BASE,
 } from "../utils/selectors";
 import { isSuccess } from "../utils/caseFlows";
 
@@ -474,5 +475,56 @@ export class CaseDetailPage {
       this.confirmDeescalationButton().click(),
     ]);
     return response;
+  }
+
+  //
+  // Knowledge Base tab.
+  //
+
+  /**
+   * Switches to the Knowledge Base tab and waits for it to settle.
+   *
+   * Recommendations are fetched when the tab opens, so this waits for one of
+   * the three resting states — articles, "none found", or "needs more content"
+   * — rather than for articles specifically, which would hang on a case that
+   * legitimately has none.
+   */
+  async openKnowledgeBaseTab(): Promise<void> {
+    await this.page
+      .getByRole("tab", { name: CASE_KNOWLEDGE_BASE.tab })
+      .click();
+
+    await expect(async () => {
+      const articles = await this.knowledgeBaseArticles().count();
+      const empty = await this.main()
+        .getByText(CASE_KNOWLEDGE_BASE.emptyMessage)
+        .count();
+      const needsContent = await this.main()
+        .getByText(CASE_KNOWLEDGE_BASE.needsContentMessage, { exact: false })
+        .count();
+      expect(
+        articles + empty + needsContent,
+        "the Knowledge Base tab should reach a resting state",
+      ).toBeGreaterThan(0);
+    }).toPass({ timeout: LOAD_TIMEOUT_MS });
+  }
+
+  /**
+   * The recommended articles.
+   *
+   * Each entry renders its title as the only `subtitle2` in the panel, which is
+   * what distinguishes an article row from the surrounding copy.
+   */
+  knowledgeBaseArticles(): Locator {
+    return this.main().locator(".MuiTypography-subtitle2");
+  }
+
+  /** The live count on the tab label, e.g. 3 for "Knowledge Base (3)". */
+  async knowledgeBaseTabCount(): Promise<number> {
+    const label = await this.page
+      .getByRole("tab", { name: CASE_KNOWLEDGE_BASE.tab })
+      .innerText();
+    const match = label.match(CASE_KNOWLEDGE_BASE.tabCountPattern);
+    return match ? Number(match[1]) : 0;
   }
 }

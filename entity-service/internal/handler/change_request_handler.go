@@ -108,6 +108,21 @@ func (h *ChangeRequestHandler) GetChangeRequest(w http.ResponseWriter, r *http.R
 	_ = json.NewEncoder(w).Encode(result)
 }
 
+// GetChangeRequestLinkOptions handles POST /change-requests/link-options.
+func (h *ChangeRequestHandler) GetChangeRequestLinkOptions(w http.ResponseWriter, r *http.Request) {
+	var req domain.ChangeRequestLinkOptionsRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	resp, err := h.svc.GetChangeRequestLinkOptions(r.Context(), req)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 // GetChangeRequestApprovals handles GET /change-requests/{id}/approvals.
 func (h *ChangeRequestHandler) GetChangeRequestApprovals(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

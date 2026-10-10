@@ -1,4 +1,4 @@
-# Copyright (c) 2026 WSO2 LLC. (https://www.wso2.com).
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
 #
 # WSO2 LLC. licenses this file to you under the Apache License,
 # Version 2.0 (the "License"); you may not use this file except
@@ -13,35 +13,26 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# This Dockerfile creates an image that contains the sre-alert-ingestion-service
-# executable. This service is deployed on AKS (see README.md), outside Choreo,
-# so it needs its own container image regardless of any buildpack.
 
-FROM golang:1.27.1-alpine AS builder
+FROM golang:1.26.0-alpine AS builder
 
-# Set the working directory to /app
 WORKDIR /app
 
-# Copy the Go source file into the container
 COPY . .
 
-# Run unit tests
+# Run unit tests (the integration suite is behind a build tag and needs a local Cassandra).
 RUN go test ./...
 
-# Build the Go program inside the container
 RUN go build -o sre-alert-ingestion-service ./cmd/server
 
-# Use a small Alpine Linux image as the base image for the final container
-FROM alpine:latest
+# Pinned for reproducible builds.
+FROM alpine:3.22
 
-# Set the working directory to /app
 WORKDIR /app
 
-# Copy the executable from the builder container
 COPY --from=builder /app/sre-alert-ingestion-service .
 
-# Create a user with a known UID/GID within range 10000-20000.
-# This is required by Choreo to run the container as a non-root user.
+# Choreo requires a non-root user with a UID/GID in 10000-20000.
 RUN adduser \
     --disabled-password \
     --gecos "" \
@@ -51,8 +42,6 @@ RUN adduser \
     --uid 10014 \
     "choreo"
 
-# Use the above created unprivileged user
 USER 10014
 
-# Set the entrypoint to the executable
 ENTRYPOINT ["./sre-alert-ingestion-service"]

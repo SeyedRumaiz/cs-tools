@@ -32,7 +32,12 @@ import { useSearchGroups } from "@api/useSearchGroups";
 import { useSearchInternalUsersByName } from "@api/useSearchUsersByName";
 import AsyncEntitySelect from "@components/AsyncEntitySelect";
 import { userLabel } from "@features/csm-operations/utils/incidentFormOptions";
-import { formatDateTimeLocal, parseDateTimeLocal } from "@utils/dateTime";
+import {
+  backendUtcToZonedInput,
+  formatDateTimeLocal,
+  parseDateTimeLocal,
+  zonedInputToBackendUtc,
+} from "@utils/dateTime";
 import type { BeGroup, BeProblemDetail, BeUpdateProblemPayload, BeUser } from "@api/backend/types";
 
 const { DateTimePicker, LocalizationProvider } = DatePickers;
@@ -48,17 +53,6 @@ interface EditProblemDialogProps {
   onSave: (patch: BeUpdateProblemPayload) => void;
 }
 
-/** Convert a backend timestamp (`YYYY-MM-DD HH:MM:SS`) to `YYYY-MM-DDTHH:MM`. */
-function toDateTimeLocal(raw?: string | null): string {
-  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(raw?.trim() ?? "");
-  return m ? `${m[1]}T${m[2]}` : "";
-}
-
-/** Convert a `datetime-local` value back to the BE's `YYYY-MM-DD HH:MM:SS`. */
-function toBackendDateTime(local: string): string {
-  return `${local.replace("T", " ")}:00`;
-}
-
 /**
  * Assignment/tracking edit dialog for a problem: `assignedToId`,
  * `assignmentGroupId`, `workaround`, and `targetResolutionDate`. Deliberately
@@ -68,12 +62,10 @@ function toBackendDateTime(local: string): string {
  * (state moves only through `ProblemActionBar`'s modeled forward
  * transitions, never an arbitrary jump here).
  *
- * `assignmentGroupId` and `targetResolutionDate` start blank on every open,
- * not prefilled from `problem` — `GET /problems/{id}` doesn't return either
- * field today (confirmed only via a direct ServiceNow table read-back, not
- * through the Problem-detail response shape; see `BeProblemDetail`'s own
- * scope). Leaving a value in place across dialog opens would risk a false
- * "already set to X" impression the portal can't actually verify.
+ * `assignmentGroupId` starts from the problem's current group, and is sent
+ * only when changed. `targetResolutionDate` starts blank on every open —
+ * `GET /problems/{id}` doesn't return it — so a value left in place would
+ * claim an "already set to X" the portal can't verify.
  */
 export default function EditProblemDialog({
   problem,
@@ -83,25 +75,34 @@ export default function EditProblemDialog({
   onSave,
 }: EditProblemDialogProps): JSX.Element {
   const [assignedToId, setAssignedToId] = useState(problem.assignedTo?.id ?? "");
-  const [assignmentGroupId, setAssignmentGroupId] = useState("");
+  const [assignmentGroupId, setAssignmentGroupId] = useState(problem.assignmentGroup?.id ?? "");
   const [workaround, setWorkaround] = useState(problem.workaround ?? "");
   const [targetResolutionDate, setTargetResolutionDate] = useState("");
 
   const initialAssignedToId = problem.assignedTo?.id ?? "";
+  const initialAssignmentGroupId = problem.assignmentGroup?.id ?? "";
   const initialWorkaround = problem.workaround ?? "";
 
-  const dateValue = useMemo(() => parseDateTimeLocal(toDateTimeLocal(targetResolutionDate)), [
+  const dateValue = useMemo(() => parseDateTimeLocal(backendUtcToZonedInput(targetResolutionDate)), [
     targetResolutionDate,
   ]);
 
   const patch = useMemo(() => {
     const next: BeUpdateProblemPayload = {};
     if (assignedToId !== initialAssignedToId) next.assignedToId = assignedToId || null;
-    if (assignmentGroupId) next.assignmentGroupId = assignmentGroupId;
+    if (assignmentGroupId && assignmentGroupId !== initialAssignmentGroupId) next.assignmentGroupId = assignmentGroupId;
     if (workaround !== initialWorkaround) next.workaround = workaround;
     if (targetResolutionDate) next.targetResolutionDate = targetResolutionDate;
     return next;
-  }, [assignedToId, initialAssignedToId, assignmentGroupId, workaround, initialWorkaround, targetResolutionDate]);
+  }, [
+    assignedToId,
+    initialAssignedToId,
+    assignmentGroupId,
+    initialAssignmentGroupId,
+    workaround,
+    initialWorkaround,
+    targetResolutionDate,
+  ]);
 
   const hasChanges = Object.keys(patch).length > 0;
 
@@ -140,7 +141,7 @@ export default function EditProblemDialog({
                 useSearch={useSearchGroups}
                 getId={(g) => g.id}
                 getLabel={(g) => g.name}
-                helperText="Not shown pre-filled — the portal can't yet read a problem's current assignment group back."
+                knownLabel={problem.assignmentGroup?.name}
               />
             </Box>
           </Box>
@@ -162,7 +163,7 @@ export default function EditProblemDialog({
               onChange={(next) =>
                 setTargetResolutionDate(
                   next instanceof Date && !Number.isNaN(next.getTime())
-                    ? toBackendDateTime(formatDateTimeLocal(next))
+                    ? (zonedInputToBackendUtc(formatDateTimeLocal(next)) ?? "")
                     : "",
                 )
               }
@@ -171,7 +172,7 @@ export default function EditProblemDialog({
                   size: "small",
                   fullWidth: true,
                   helperText:
-                    "Not on the native ServiceNow Problem form — this is a generic due-date column exposed here for internal tracking only. Not shown pre-filled for the same reason as Assignment group.",
+                    "Not on the native ServiceNow Problem form — this is a generic due-date column exposed here for internal tracking only. Not shown pre-filled — the portal can't read it back yet.",
                 },
               }}
             />

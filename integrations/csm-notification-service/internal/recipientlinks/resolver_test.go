@@ -206,3 +206,77 @@ func TestResolveLinks_SearchFails_ReturnsError(t *testing.T) {
 		t.Fatal("expected an error when the entity-service search fails")
 	}
 }
+
+func TestIsCustomer_CustomerRole(t *testing.T) {
+	client := &fakeEntityClient{users: []entity.UserRoleInfo{
+		{Email: "customer@acme.com", Roles: []string{"customer_admin"}},
+	}}
+	r := New(client, testConfig())
+
+	got, err := r.IsCustomer(t.Context(), "customer@acme.com")
+	if err != nil {
+		t.Fatalf("IsCustomer() error = %v", err)
+	}
+	if !got {
+		t.Error("got false, want true for a CustomerRoles match")
+	}
+}
+
+func TestIsCustomer_CSMRole(t *testing.T) {
+	client := &fakeEntityClient{users: []entity.UserRoleInfo{
+		{Email: "agent@wso2.com", Roles: []string{"csm_agent"}},
+	}}
+	r := New(client, testConfig())
+
+	got, err := r.IsCustomer(t.Context(), "agent@wso2.com")
+	if err != nil {
+		t.Fatalf("IsCustomer() error = %v", err)
+	}
+	if got {
+		t.Error("got true, want false for a CSMRoles match")
+	}
+}
+
+func TestIsCustomer_NoRoleMatch_FallsBackToEmailDomain(t *testing.T) {
+	testCases := []struct {
+		name  string
+		email string
+		want  bool
+	}{
+		{"wso2.com falls back to internal", "unroled@wso2.com", false},
+		{"non-wso2.com falls back to external", "unroled@acme.com", true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeEntityClient{} // no matching user found
+			r := New(client, testConfig())
+
+			got, err := r.IsCustomer(t.Context(), tc.email)
+			if err != nil {
+				t.Fatalf("IsCustomer() error = %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("IsCustomer(%q) = %v, want %v", tc.email, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsCustomer_SearchFails_ReturnsError(t *testing.T) {
+	client := &fakeEntityClient{err: context.DeadlineExceeded}
+	r := New(client, testConfig())
+
+	if _, err := r.IsCustomer(t.Context(), "a@b.com"); err == nil {
+		t.Fatal("expected an error when the entity-service search fails")
+	}
+}
+
+// TestServiceRequestLink: an SR opens on the portal's service-request page,
+// not /cases/<id>.
+func TestServiceRequestLink(t *testing.T) {
+	r := New(nil, testConfig())
+	want := "https://csm.example.com/operations/service-requests/sr-1"
+	if got := r.ServiceRequestLink("sr-1"); got != want {
+		t.Errorf("ServiceRequestLink = %q, want %q", got, want)
+	}
+}

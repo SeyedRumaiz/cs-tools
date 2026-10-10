@@ -46,7 +46,14 @@ export const URGENCY_OPTIONS: Array<{ value: BeIncidentUrgency; label: string }>
   { value: "LOW", label: "Low" },
 ];
 
-export const CONTACT_TYPE_OPTIONS: Array<{ value: BeIncidentContactType; label: string }> = [
+/**
+ * "Channel" — how the incident was reported. The values are ServiceNow's
+ * incident `contact_type` choices, which ServiceNow's own incident form also
+ * labels "Channel". Only the label is "Channel": the field is still
+ * `contactType` on the wire (BeCreateIncidentPayload/BeUpdateIncidentPayload/
+ * BeIncidentDetail) and `contact_type` in ServiceNow and Postgres.
+ */
+export const CHANNEL_OPTIONS: Array<{ value: BeIncidentContactType; label: string }> = [
   { value: "SELF_SERVICE", label: "Self-service" },
   { value: "EMAIL", label: "Email" },
   { value: "WALK_IN", label: "Walk-in" },
@@ -100,8 +107,19 @@ export const SUBCATEGORY_OPTIONS_BY_CATEGORY: Record<
   ],
 };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Picker label for a user: full name, else email, else username, else a neutral
+ * placeholder. Never the raw record id: a UUID is not something a person can
+ * recognise, and a directory row that has no name or email is a data problem to
+ * surface as such, not to paper over with an identifier. A name/username that
+ * itself is a UUID (provisioning leaves that behind) is treated as missing. */
 export function userLabel(u: BeUser): string {
-  return [u.firstName, u.lastName].filter(Boolean).join(" ").trim() || u.email || u.id || "";
+  const name = [u.firstName, u.lastName].filter(Boolean).join(" ").trim();
+  if (name && !UUID_RE.test(name)) return name;
+  if (u.email) return u.email;
+  if (u.userName && !UUID_RE.test(u.userName)) return u.userName;
+  return "Unnamed user";
 }
 
 export function itServiceLabel(s: BeItService): string {
