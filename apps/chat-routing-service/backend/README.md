@@ -1,379 +1,295 @@
 # Chat Routing Service
 
-A standalone Go service that decides **which engineer** (if any) picks up a
-live-chat escalation from the customer portal. It sits between
-`csm-portal/backend` — which still owns every WebSocket/SSE connection and
-every case/session HTTP route — and PostgreSQL, where engineer presence and
-the waiting queue are persisted.
+Decides which support engineer picks up a live-chat escalation. Each
+escalation goes to exactly one engineer, the one with the most spare
+capacity, instead of being broadcast to everyone. When every engineer is
+busy, the customer waits in a first-in, first-out queue that drains
+automatically as engineers free up.
 
-Escalations are routed to exactly one engineer — whoever has the most spare
-concurrent-chat capacity and is least busy today — instead of being
-broadcast to everyone. Anyone who arrives while every engineer is at
-capacity waits in a FIFO queue that drains automatically as engineers free
-up. Each engineer has a configurable concurrent-chat capacity
-(`max_concurrent_chats`, default 1, confirmed with the mentor 2026-09-10 —
-see the project's `db-schema-review-2026-09-07-outcomes.md`), so — unlike
-the original single-case version of this service — an engineer isn't
-blocked from picking up a second (or third, ...) chat while an earlier
-customer is slow to respond. A freshly-assigned case is *pending* until the
-engineer explicitly calls `POST /route/accept`; "pending" and "which cases
-an engineer currently holds" are per-case facts (see
-[Data model](#data-model)), not a top-level engineer status — an
-engineer's own `chat_status` (`AVAILABLE`/`BUSY`/`OFFLINE`) is now a plain
-manual toggle, independent of how many cases they're actually holding.
+The service is called only by `csm-portal/backend`, which owns every
+browser connection (SSE to engineers, WebSocket to customers) and relays
+this service's decisions over them. Engineer presence, the waiting queue
+and chat sessions are stored in PostgreSQL, so restarting the service loses
+no routing state.
 
-Engineers are identified throughout this service by their IdP `userid`
-claim, not their email — this service stores no user profile data of its
-own (see [Data model](#data-model)).
+## Contents
+
+- [Quick Start](#quick-start)
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Configuration](#configuration)
+- [Database setup](#database-setup)
+- [Testing](#testing)
+- [Project Structure](#project-structure)
+- [API Endpoints](#api-endpoints)
+- [How routing works](#how-routing-works)
+- [Data model](#data-model)
+- [Known limitations](#known-limitations)
+
+## Quick Start
+
+```bash
+# from apps/chat-routing-service/backend
+cp .env.example .env   # then fill in the values, see Configuration
+go run ./cmd/server
+```
+
+The service listens on port `9096` by default. `GET /health` returns
+`200 OK` once it is up.
+
+## Overview
+
+- **One engineer per escalation.** An escalation is assigned to the
+  available engineer with the fewest active chats; ties go to whoever has
+  accepted the fewest chats today, then to whoever has been available
+  longest.
+- **Concurrent chats.** Each engineer sets how many chats they can hold at
+  once (`max_concurrent_chats`, 1 to 10, default 1).
+- **Queueing.** If nobody has spare capacity, the escalation waits in the
+  queue. The customer is told their position, and the oldest waiting chat
+  is assigned as soon as an engineer frees up.
+- **Accept, decline and timeouts.** A newly assigned chat is *pending*
+  until the engineer accepts it. A decline, or no answer within the pending
+  timeout, passes the chat to the next engineer or puts it back in the
+  queue at its original position.
+- **Presence.** Each engineer chooses `AVAILABLE`, `BUSY` or `OFFLINE`.
+  `BUSY` and `OFFLINE` stop new assignments but never drop chats the
+  engineer already holds.
+
+Engineers are identified by their identity provider's `userid` claim. The
+service stores no user profile data.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph CUST["Customer side"]
-        A["Customer browser<br/>customer-portal webapp<br/>escalate icon under Novera's reply"]
-        C["customer-portal/backend-v2<br/>REST :8080 · WS :8082"]
-    end
+    A["Customer<br/>customer portal, or a product<br/>through console-chat-bridge"]
+    B["Engineer<br/>csm-portal webapp"]
+    D["csm-portal/backend<br/>chat handlers, SSE and WebSocket relay"]
+    F["chat-routing-service<br/>(this service) :9096"]
+    G[("PostgreSQL<br/>schema chat_routing")]
 
-    subgraph ENGS["Engineer side — CSM portal"]
-        B["Engineer browser<br/>csm-portal webapp<br/>presence dropdown · alert notification"]
-    end
-
-    subgraph CSM["csm-portal/backend :8083 — orchestrator"]
-        D["internal/handler/chat.go<br/>Escalate · SetPresence · Decline · Accept · CompleteSession<br/><br/>internal/handler/chat_stream.go<br/>SSE hub: per-engineer key + broadcast fallback"]
-    end
-
-    subgraph ROUTE["chat-routing-service :9096 — this service"]
-        F["internal/router.Router<br/>Escalate · SetPresence · Completed · Decline · Accept · GetPresence"]
-    end
-
-    subgraph PG["Persistence — one Postgres database, two schemas"]
-        G[("schema chat_routing<br/>cs_engineer_status · chat_queue · chat_queue_engineer_assignment")]
-        I[("schema public<br/>cases table")]
-    end
-
-    H["entity-service :8081<br/>case / conversation CRUD — unrelated, unchanged"]
-
-    A -->|"1 · click escalate icon"| C
-    C -->|"2 · relay, internal token"| D
-    D -->|"3 · POST /route/escalate"| F
-    F -->|"4 · least-busy pick, or enqueue"| G
-    F -->|"5 · engineer user ID, or queue position"| D
-    D -->|"6a · SSE to that one engineer"| B
-    D -->|"6b · queued → WS event"| C
-    C -->|"7 · 'you're #N in queue'"| A
-    B -.->|"presence / decline / complete"| D
-    D -.->|"best-effort route calls"| F
-    D --> H
-    H --> I
+    A -->|"escalate / message"| D
+    D -->|"HTTP + X-Routing-Service-Token"| F
+    F --> G
+    F -->|"assigned engineer, or queue position"| D
+    D -->|"SSE alert to that engineer"| B
+    D -->|"queued / assigned events"| A
+    B -->|"presence, accept, decline, complete"| D
 ```
 
-`chat-routing-service` never touches conversation content and never opens a
-socket to a client — every call into it is a synchronous HTTP request from
-`csm-portal/backend`, and its response is relayed back through whichever
-transport `csm-portal/backend` already owns (SSE to engineers, the existing
-WebSocket relay to customers). Case and message content stays entirely in
-`entity-service`'s own database; this service owns exactly three tables of
-its own — see [Data model](#data-model) below.
+Every call into this service is a synchronous HTTP request from
+`csm-portal/backend`. This service never opens a connection to a browser.
 
-## Escalation walkthrough
+## Prerequisites
 
-1. **Customer clicks the escalate icon.** It renders directly under any
-   Novera reply — the greeting, a normal answer, or an error bubble — not
-   only a successfully completed one.
-2. **backend-v2 relays it** to `csm-portal/backend` over its existing
-   internal-token-authenticated call.
-3. **`csm-portal/backend` calls `POST /route/escalate`** on this service.
-4. Inside **one Postgres transaction**, the router picks the least-busy
-   `AVAILABLE` engineer — see [Assignment priority](#assignment-priority) —
-   and either assigns the case to them or, if nobody qualifies, leaves its
-   `chat_queue` row `WAITING_FOR_ENGINEER` and computes its position with a
-   `(created_at, chat_conversation_id)` tuple-comparison `COUNT(*)` — no
-   table lock or stored sequence number needed. A `chat_queue` row is
-   created either way (`ASSIGNED` or `WAITING_FOR_ENGINEER`) and lives until
-   `Router.Accept` removes it — see [Data model](#data-model). Engineer
-   selection still runs `FOR UPDATE` / `FOR UPDATE SKIP LOCKED`, so
-   concurrent requests can never be handed the same engineer.
-5. The result — an engineer's user ID, or `{queued: true, position: N}` —
-   goes back to `csm-portal/backend`.
-6. `csm-portal/backend` relays the outcome: an assignment becomes an SSE
-   push to that **one** engineer's private hub key (not a broadcast); a
-   queue placement becomes a WebSocket event to the customer.
-7. The customer sees a plain bot message — "you're #N in the queue" —
-   appended to the same chat thread.
-
-Presence changes, session completion, and a dismissed alert all follow the
-same shape as steps 3–5, just against `POST /route/presence`,
-`POST /route/completed`, and `POST /route/decline` respectively.
-
-## Assignment priority
-
-`Router.Escalate` picks an engineer in this order, falling through to the
-next tier only when the previous one comes up empty:
-
-| Priority | Rule | Notes |
-|---|---|---|
-| 1 · Spare capacity | Whichever `AVAILABLE` engineer has the **fewest currently-active concurrent chats**, and has spare capacity at all (`active chats < max_concurrent_chats`). | "Active" means an `OPEN` or `ACTIVE` `chat_conversation` row assigned to them with `session_ended_at IS NULL` — see [Data model](#data-model). An engineer already at their own `max_concurrent_chats` is never selected, however idle they otherwise look. |
-| 2 · Least busy | Among engineers tied on active chats, whoever has **accepted the fewest chats today**. | Computed live with `COUNT(*)` over `chat_conversation` for rows where `assignee_id` matches and `updated_at` falls in `[CURRENT_DATE, CURRENT_DATE + 1)` — not a stored counter, so there's no lazy-reset bookkeeping to get wrong; an engineer with zero rows today is simply `0`. This counts chats **accepted** today, not merely assigned — an engineer who's repeatedly assigned-then-declines doesn't look busier than they really are. |
-| 3 · Tie-break | Among engineers still tied, whoever has been `AVAILABLE` the **longest** (`available_since` ascending). | |
-| 4 · Queue | If no engineer is `AVAILABLE` with spare capacity, the case's `chat_queue` row stays `WAITING_FOR_ENGINEER` (FIFO by `created_at`). | Once an engineer frees up a slot, they claim the oldest waiting row directly (see `SetPresence` / `Completed` below); least-busy ranking isn't re-applied to queued cases. |
-
-There is no per-customer stickiness — every escalation is routed purely by
-current availability and load, never by who handled that customer last.
-
-## Presence state machine
-
-Since the 2026-09-10 concurrent-chat-capacity change, `chat_status`
-(`AVAILABLE`/`BUSY`/`OFFLINE`) is a **plain manual toggle**, all three
-values directly requestable via `SetPresence`, and completely decoupled
-from how many cases an engineer is actually holding. `BUSY` is a real
-do-not-disturb — an engineer sets it themselves to stop taking new work
-without dropping any case they already hold; it is never set automatically
-by an assignment the way it used to be in the original single-case version
-of this service.
-
-"Pending" (assigned, not yet accepted) and "which cases an engineer
-currently holds" are **per-case facts**, derived from `chat_conversation`
-(`assignee_id`, `state`, `accepted_at`, `session_ended_at`), not top-level
-engineer state — see [Data model](#data-model). This is what makes holding
-several cases at once representable at all: a single "current case" column
-on the engineer's own row could never express that.
-
-| From | Request | Result |
-|---|---|---|
-| any | `AVAILABLE` | joins (or rejoins) the pool (`available_since` set); then claims cases off the `WAITING_FOR_ENGINEER` queue, oldest first, until either it's empty or this engineer's `max_concurrent_chats` is reached — so more than one case can be delivered from a single presence change (see `PresenceResult.assignedCases`) |
-| any | `BUSY` | leaves the pool (no new assignments) but takes no action on any case already held — a pure do-not-disturb toggle |
-| any | `OFFLINE` | leaves the pool; also takes no action on any case already held — an engineer can be `OFFLINE` while still mid-conversation on cases assigned before they went offline |
-| holding a pending case on `caseId` | `POST /route/accept {userId, caseId}` | sets that one conversation's `state = 'ACTIVE'`, `accepted_at = now()`, **deletes the case's `chat_queue` row**, and records a `CONNECTED` row in `chat_queue_engineer_assignment`. Only this case is affected — any other concurrent case this engineer holds is untouched. A stale accept (already declined/reassigned/accepted, or a different `caseId`) reports `{applied:false}` rather than erroring. |
-| holding a pending case on `caseId`, too long | (no explicit request — a periodic `POST /route/sweep-timeouts` call finds it) | that one case is reassigned to the next engineer with spare capacity, or its `chat_queue` row flips back to `WAITING_FOR_ENGINEER` if nobody qualifies — same outcome shape as a `Decline`, just triggered by elapsed time instead of the engineer's own click; either way a `TIMED_OUT` row is recorded in `chat_queue_engineer_assignment`. **Unlike the original single-case version of this service, the unresponsive engineer's `chat_status` is left completely untouched** — they may well be mid-conversation on a different concurrent case at the same time, and a timeout on one case is no longer a reason to pull them off everything else. |
-
-**On session completion (`POST /route/completed {userId, caseId}`):** that
-one conversation's `session_ended_at` is set. If the engineer is still
-`chat_status = AVAILABLE` and now has spare capacity, the router claims one
-queued case for them the same way `SetPresence`'s own drain does — but at
-most one, since only one slot was just freed (`CompletedResult.
-assignedCase`, singular). `chat_status` itself is never touched by this
-call.
-
-**On decline** (dismissing an alert before accepting): a `REJECTED` row is
-recorded in `chat_queue_engineer_assignment`, that one conversation's
-`assignee_id`/`accepted_at` are cleared, then the case is either handed to
-the next engineer with spare capacity by the same ranking `Escalate` uses
-(excluding the decliner — see [Assignment priority](#assignment-priority)),
-or its `chat_queue` row flips back to `WAITING_FOR_ENGINEER`. Because that
-row is never deleted and re-inserted — only ever updated in place, from
-`Escalate` until `Accept` — it keeps its **original** `created_at`, which is
-what puts it ahead of every case that arrived after it without any separate
-"front of queue" flag. Declining doesn't affect any of the decliner's other
-concurrent cases.
-
-## Data model
-
-In their own `chat_routing` schema, separate from `entity-service`'s flat
-`cases` table:
-
-| Table | Holds | Ordering / lookup |
-|---|---|---|
-| `cs_engineer_status` | `user_id` (PK, the IdP's `userid` claim), `chat_status` (`AVAILABLE`/`BUSY`/`OFFLINE` — a plain manual toggle, see [Presence state machine](#presence-state-machine)), `max_concurrent_chats` (configurable capacity, default `1`, `CHECK` between 1 and 20), `available_since` | `available_since` — oldest-idle-first (assignment-priority tier-3 tie-break) |
-| `chat_conversation` | the LOCAL STAND-IN work-item pairing (see [Integrating from another service](#integrating-from-another-service)) — this is now also the **source of truth for which cases an engineer holds**: `case_id`, `assignee_id` (set at assignment time, not just at Accept), `state` (`OPEN` until `Accept` moves it to `ACTIVE`), `accepted_at`, `session_ended_at`, `case_info` (JSONB) | indexed on `(assignee_id, state)` where `assignee_id IS NOT NULL AND session_ended_at IS NULL` — the "active chats" set every capacity check and the timeout sweep scan |
-| `chat_queue_engineer_assignment` | one append-only row per assignment **outcome**: `case_id` (renamed from `conversation_id` in migration `000022` — it always held case identity, never the Novera conversation's, see that migration's own comment), `engineer_id`, `status` (`CONNECTED`/`REJECTED`/`TIMED_OUT`), `occurred_at` | indexed on `(case_id, occurred_at)` and `(engineer_id, occurred_at)`; a pure audit trail of accept/decline/timeout outcomes — it isn't written at assignment time, so it can't answer "how many chats was this engineer assigned today" (see [Assignment priority](#assignment-priority)) |
-| `chat_queue` | one row **per active (unaccepted) escalation**, from `Escalate` until `Accept` — `chat_conversation_id` (PK), `case_info` (JSONB), `status` (`WAITING_FOR_ENGINEER`/`ASSIGNED`) | `(created_at, chat_conversation_id)` ascending among `WAITING_FOR_ENGINEER` rows — a fresh case sorts by arrival time, and a reassigned/requeued row keeps its *original* `created_at` (see [Presence state machine](#presence-state-machine)) since it's only ever updated in place, never deleted and re-inserted |
-
-**Referential integrity, as of migration `000023`:** every same-schema relationship above is now a real, enforced foreign key —
-`chat_conversation.assignee_id -> cs_engineer_status.user_id` (`ON DELETE SET NULL`), `chat_queue.chat_conversation_id -> chat_conversation.case_id`
-(`ON DELETE RESTRICT`), and `chat_queue_engineer_assignment.case_id -> chat_conversation.case_id` (`ON DELETE RESTRICT`). None of these had a real
-reason to stay convention-only — all three tables have always lived in this same schema, and the actual write order (verified against
-`router.Router`'s `CreateWorkItem`/`Escalate`/`Accept`/`Decline`/`timeoutOne`) always creates the referenced row first. `chat_conversation.case_id` and
-`.entity_case_id` remain convention-only on purpose: they identify rows owned by a different service's own schema (`entity-service`/`customer-portal`),
-and enforcing a cross-schema FK there would couple this service's migrations to theirs — see this project's db-schema-review notes on each service
-keeping its own schema. See `migrations/000023_add_missing_chat_routing_foreign_keys.up.sql` for the per-relationship `ON DELETE` reasoning and the
-pre-migration orphan-check queries.
-
-**An engineer no longer has a single `current_case` column** — as of the
-2026-09-10 concurrent-chat-capacity change, `cs_engineer_status.
-current_case_id`/`current_case`/`accepted_at` were dropped entirely; "which
-cases is this engineer holding right now" is answered by querying
-`chat_conversation` for rows with `assignee_id = <them>`, `state IN
-('OPEN','ACTIVE')`, `session_ended_at IS NULL`, not by a column on the
-engineer's own row. This is also why `chat_conversation.case_info` exists:
-`assignee_id` is now set at *assignment* time (not only at `Accept`), so
-`chat_queue`'s own `case_info` copy — which is deleted the moment `Accept`
-removes that row — is no longer enough on its own to keep showing a
-case's subject/message/customer name for the rest of an already-accepted
-session; `chat_conversation.case_info` is populated once at `CreateWorkItem`
-time and outlives `Accept`.
-
-`case_info` is stored as a JSONB blob (`router.CaseInfo` — `caseId`,
-`conversationId`, `projectId`, `subject`, `customerEmail`, `customerName`,
-`message`) rather than normalized columns, kept for two reasons: this
-service never queries *into* that blob by any field other than `caseId`;
-and `entity-service`'s real case data lives in a separate service, with
-even this feature's own temporary `work_item`/`chat_conversation` stand-in
-tables (see
-[Integrating from another service](#integrating-from-another-service))
-not populated until *after* `Router.Escalate` returns — so a queued or
-freshly-drained customer would otherwise lose their subject/message/
-customer name with nothing to reconstruct it from. Worth revisiting once
-`entity-service`'s real, atomically-created work item ships.
-
-**These tables live in their own `chat_routing` Postgres schema, inside the
-*same database* `entity-service` uses** (not a separate database) — see
-`internal/config.Schema` and every migration file, which schema-qualifies
-its `CREATE`s. `internal/db.NewPool` sets each new connection's
-`search_path` to `chat_routing` via pgxpool's `AfterConnect` hook, so every
-query in `internal/router` can still use plain unqualified table names
-(`cs_engineer_status`, not `chat_routing.cs_engineer_status`) — the schema
-resolution happens once per connection, not once per query. A bare
-`search_path` DSN query parameter doesn't work for this (libpq/pgx's URI
-parser rejects it outright), which is why it's done this way instead of in
-the connection string.
-
-Full schema history and rationale for each change lives in
-[`migrations/`](./migrations) (one pair of `.up`/`.down` files per change,
-each with its own comment) rather than here — an already-applied migration
-is frozen, so a schema change is always a new file, never an edit to an old
-one, even when the old one now reads oddly in isolation (e.g. `000016`
-renaming a column `000014` only just created). For the schema as it looks
-*today*, without replaying that whole history, see
-[`current_schema.sql`](./current_schema.sql): a generated snapshot, not
-read by this service and not applied by `golang-migrate`, regenerated from
-`migrations/` after each change per its own header comment.
-
-## HTTP surface
-
-All routes below `/route/*` require the `X-Routing-Service-Token` header
-(shared secret with `csm-portal/backend`'s `internal/routingclient`).
-`GET /health` is unauthenticated, for local liveness checks only.
-
-| Method | Path | Body / params | Response |
-|---|---|---|---|
-| `POST` | `/route/escalate` | `CaseInfo` fields | `{engineerId}` or `{queued:true, position:N}` |
-| `POST` | `/route/presence` | `{userId, status}` — `status` is `AVAILABLE`/`BUSY`/`OFFLINE`, all directly requestable | `{applied, assignedCases?}` — going `AVAILABLE` can drain more than one queued case at once (see [Presence state machine](#presence-state-machine)), so `assignedCases` is a list |
-| `POST` | `/route/completed` | `{userId, caseId}` | `{ended, assignedCase?}` — ends this one conversation; `assignedCase` (singular) is set if that freed slot was immediately backfilled |
-| `POST` | `/route/decline` | `{userId, caseId}` | `{reassignedTo?, requeued?, assignedCase?}` |
-| `POST` | `/route/accept` | `{userId, caseId}` | `{applied}` — moves this one conversation `OPEN` → `ACTIVE`; `false` if stale (see [Presence state machine](#presence-state-machine)) |
-| `GET` | `/route/presence/{userId}` | — | `{chatStatus, activeChats, maxConcurrentChats, atCapacity, cases: [{...CaseInfo, pending, assignedAt}], pendingTimeoutSeconds}` — `cases` lists every case this engineer currently holds, pending or accepted alike (defaults to `OFFLINE`/capacity 1/no cases for an unseen engineer) |
-| `PATCH` | `/route/capacity` | `{userId, maxConcurrentChats}` (1-10) | `{assignedCases?}` — sets this engineer's own concurrent-chat capacity (see `router.Router.SetMaxConcurrentChats`); creates their row on first contact like every other engineer-identified call. Never disturbs a case already held: lowering the limit below the current active count just stops new work from routing to them until they fall back under it. Raising it while this engineer is `AVAILABLE` immediately drains the waiting queue into the newly-opened capacity, same as going `AVAILABLE` does — `assignedCases` lists whatever was claimed this way (can be more than one) |
-| `GET` | `/route/debug/state` | — | full dump of `cs_engineer_status` (capacity, active/today counts) + `chat_queue`'s waiting rows — verification only |
-| `POST` | `/route/sweep-timeouts` | — | runs two independent sweeps and returns both: `{results: [...], abandoned: [...]}`, polled periodically by `csm-portal/backend`. `results` reassigns/requeues any case whose engineer has been pending past `PENDING_TIMEOUT_SECONDS` (only that one case is affected; the engineer's `chat_status` and any other concurrent case they hold are left untouched, see [Presence state machine](#presence-state-machine)). `abandoned` gives up on any case that sat `WAITING_FOR_ENGINEER` — never assigned to anyone at all — past `QUEUE_ABANDON_SECONDS`, deleting its queue row so it can never later be silently claimed by whichever engineer next goes `AVAILABLE` (see [Configuration](#configuration)) |
-| `GET` | `/health` | — | `200 OK` |
-
-`userId` is the IdP's stable per-account `userid` claim, everywhere it
-appears above.
-
-A storage/database error on any `/route/*` call returns `502` — the real
-error is logged server-side (`slog`) and never sent to the caller.
-
-A full OpenAPI 3.0 description of every route above (request/response
-schemas, which fields are required, which endpoints are the temporary
-stand-in ones) lives in [`openapi.yaml`](./openapi.yaml) alongside this
-file.
-
-## Integrating from another service
-
-**The plain HTTP API above is the primary integration surface** — any
-service, in any language, can call it directly with nothing more than the
-base URL and a copy of `ROUTING_SERVICE_TOKEN`. `apps/chat-routing-service/
-sdk-go` (a thin Go client wrapping these same routes) exists purely as a
-convenience for `csm-portal/backend`, today's only real caller — it carries
-no logic of its own, adds no capability the raw API doesn't already have,
-and is optional. A non-Go consumer, or a Go service that would rather not
-take the dependency, should build straight against `openapi.yaml` and the
-[HTTP surface](#http-surface) table instead.
-
-Two things any new consumer should treat as a real contract, not an
-implementation detail: the `X-Routing-Service-Token` header is a static
-server-to-server secret and must never be constructed in, or proxied out
-to, browser-facing code (see [Configuration](#configuration)); and the
-`/route/workitem`, `/route/comment`, and `/route/debug/*` routes are an
-explicitly temporary stand-in (see this repo's `internal/router/
-workitem.go`) — a new integration should confirm with this service's owner
-before depending on their shape.
+- Go 1.26 or later
+- PostgreSQL. The service uses its own `chat_routing` schema, and can share
+  a database with `entity-service` or have one to itself.
+- [golang-migrate](https://github.com/golang-migrate/migrate) CLI, to apply
+  the migrations
 
 ## Configuration
 
-Loaded from the environment (a `.env` file is read first if present — see
-`.env.example`):
+Settings are read from environment variables. A `.env` file in this
+directory is loaded first if present; see `.env.example`.
 
-| Variable | Meaning |
-|---|---|
-| `ROUTING_SERVICE_PORT` | bare port number, default `9096` |
-| `ROUTING_SERVICE_TOKEN` | shared secret; must match `csm-portal/backend`'s value |
-| `PENDING_TIMEOUT_SECONDS` | how long (seconds) a case can sit assigned-but-unconfirmed before `POST /route/sweep-timeouts` reassigns/requeues it — only that one case is affected, not the engineer's `chat_status` or any other concurrent case they hold; default `90` |
-| `QUEUE_ABANDON_SECONDS` | how long (seconds) a case can sit `WAITING_FOR_ENGINEER` — never assigned to anyone at all, e.g. every engineer was `OFFLINE`/`BUSY`/at capacity when it arrived — before `POST /route/sweep-timeouts` gives up on it; default `1800` (30 minutes, deliberately much longer than `PENDING_TIMEOUT_SECONDS` since this bounds how long a customer should realistically keep waiting with nobody free at all, not one engineer's accept window). Without this, an old queued case could sit forever and later be silently claimed — and consume a slot of — whichever engineer next went `AVAILABLE`, indistinguishable from a fresh escalation on their screen |
-| `DB_HOST`, `DB_PORT`, `DB_NAME` | **point these at the same database `entity-service` uses** — this service's tables live in their own Postgres schema (see [Data model](#data-model)), not a separate database, so there's nothing dedicated to stand up here |
-| `DB_USER`, `DB_PASSWORD` | credentials for that database — reusing `entity-service`'s own user is fine for local dev; a narrower-scoped role needs the grants noted in [Running locally](#running-locally) |
-| `DB_SSLMODE` | default `disable` (local dev) |
+| Variable | Default | Description |
+|---|---|---|
+| `ROUTING_SERVICE_PORT` | `9096` | Port to listen on (a bare number). |
+| `ROUTING_SERVICE_TOKEN` | — | Shared secret sent by `csm-portal/backend` in the `X-Routing-Service-Token` header. Must match that service's `ROUTING_SERVICE_TOKEN`. Generate one with `openssl rand -hex 24`. |
+| `PENDING_TIMEOUT_SECONDS` | `90` | How long an assigned chat can wait for the engineer to accept before it is passed on. |
+| `QUEUE_ABANDON_SECONDS` | `1800` | How long a chat can wait in the queue, never assigned, before it is given up. |
+| `ACCEPTED_SESSION_IDLE_SECONDS` | `1800` | How long an accepted chat can go with no activity before it is ended. |
+| `DB_HOST`, `DB_PORT`, `DB_NAME` | `DB_PORT=5432` | PostgreSQL connection. |
+| `DB_USER`, `DB_PASSWORD` | — | PostgreSQL credentials. |
+| `DB_SSLMODE` | `disable` | PostgreSQL SSL mode. |
 
-Note: "today" for `chat_conversation`'s live chat count is `CURRENT_DATE` as
-the database server sees it — if that server isn't in UTC, the day boundary
-falls at that server's local midnight, not the customer's or engineer's.
+The timeouts are enforced by `POST /route/sweep-timeouts`, which
+`csm-portal/backend` calls periodically.
 
-## Running locally
+`ROUTING_SERVICE_TOKEN` is a server-to-server secret. Never send it to, or
+build it into, browser code.
 
-No `CREATE DATABASE` step — this service reuses `entity-service`'s
-database, which already exists if you've set that service up. Two things
-to get right when applying migrations here for the first time:
+## Database setup
+
+All tables live in the `chat_routing` schema, and each connection's
+`search_path` is set to it, so queries use unqualified table names.
+
+1. If `DB_USER` does not own the database, allow it to create the schema:
+
+   ```bash
+   psql -h localhost -U <admin-user> -d <db-name> \
+     -c "GRANT CREATE ON DATABASE <db-name> TO <db-user>;"
+   ```
+
+2. Apply the migrations. Use a dedicated tracking table so the history
+   doesn't collide with another service's migrations in the same database:
+
+   ```bash
+   migrate -path migrations \
+     -database "postgres://<db-user>:<db-password>@localhost:5432/<db-name>?sslmode=disable&x-migrations-table=chat_routing_schema_migrations" \
+     up
+   ```
+
+Migrations are forward-only once applied: a schema change is always a new
+file, never an edit to an existing one. For the current schema in one
+place, see [`current_schema.sql`](./current_schema.sql), a generated
+snapshot that is not applied by anything.
+
+## Testing
 
 ```bash
-# 1. If DB_USER isn't already an owner/superuser on that database, grant it
-#    just enough to create and use the chat_routing schema (CREATE SCHEMA
-#    itself only needs CREATE privilege on the database, which a plain
-#    CREATEDB-less role won't have by default):
-psql -U <admin-user> -h localhost -d <entity-service-db-name> -c \
-  "GRANT CREATE ON DATABASE <entity-service-db-name> TO <db-user>;"
-
-# 2. Apply migrations with a DISTINCT migrations-tracking table name --
-#    golang-migrate's default "schema_migrations" table would otherwise
-#    collide with entity-service's own migration history in the same
-#    database (both start numbering from 000001):
-migrate -path migrations \
-  -database "postgres://<db-user>:<db-password>@localhost:5432/<entity-service-db-name>?sslmode=disable&x-migrations-table=chat_routing_schema_migrations" \
-  up
-
-# run
-go run ./cmd/server
+# from apps/chat-routing-service/backend
+go test ./...
 ```
 
-`GET /route/debug/state` on a freshly migrated database should show empty
-`engineers`, `available`, and `queue`.
+The router tests run against the database configured by the `DB_*`
+variables and are skipped when it isn't configured. They create their own
+engineers and chats. Engineers already marked `AVAILABLE` in the same
+database can win assignments the tests expect, so point the tests at a
+database with no real engineers in it.
 
-## Resilience & known limitations
+`test-multi-engineer-routing.sh` is a manual end-to-end check against a
+running service. It covers least-busy ranking, tie-breaks and decline
+reassignment, using made-up engineer and case IDs.
 
-- **Routing-service-down fallback:** if this service is unreachable,
-  `csm-portal/backend` falls back to its old broadcast-to-every-connected-
-  engineer SSE key for `Escalate`, so a customer is never silently stranded.
-  Presence/completed/decline calls don't need this — they aren't
-  "a customer needs to reach someone right now" moments — and are
-  best-effort/logged on failure instead.
-- **No timeout or reassignment** if an assigned engineer never accepts the
-  session or goes unreachable — a prototype gap that predates and is
-  unrelated to persistence.
-- **One database, not two.** This service shares `entity-service`'s actual
-  database, isolated at the schema level (`chat_routing` vs `public`)
-  rather than the database level — one less database to create, back up,
-  and reason about, at the cost of the two services' data no longer failing
-  independently of each other (an `entity-service`-database incident, e.g.
-  a bad migration or a restore, now affects this service's state too).
-- **`chat_queue.case_info` duplicates data conceptually owned elsewhere** —
-  see [Data model](#data-model). A known, flagged tradeoff of this
-  feature's temporary persistence, not an oversight; revisit once
-  `entity-service`'s real work-item schema ships.
-- **Single-process is the only tested topology.** Every state transition is
-  a Postgres transaction rather than an in-process mutex, so multiple
-  replicas of this service *should* be safe against the same database, but
-  that hasn't been load-tested.
-- Restarting this service does not lose in-flight routing state — that's
-  the reason it's backed by Postgres rather than an in-memory map.
+## Project Structure
 
-## Related
+```text
+backend/
+├── cmd/server/main.go           # Entry point: config, routes, server
+├── internal/
+│   ├── config/                  # Environment and database settings
+│   ├── db/                      # Connection pool (sets search_path)
+│   ├── handler/routes.go        # HTTP handlers for /route/*
+│   ├── middleware/              # Token auth, request logging, security headers
+│   └── router/                  # Routing logic and all database access
+│       ├── state.go             # Escalate, presence, accept, decline, complete
+│       ├── timeout.go           # Pending, queue and idle-session sweeps
+│       ├── workitem.go          # Chat work items and the message transcript
+│       └── types.go             # Shared request/result types
+├── migrations/                  # golang-migrate files (.up/.down)
+├── current_schema.sql           # Generated snapshot of the current schema
+├── openapi.yaml                 # OpenAPI 3.0 description of the API
+└── test-multi-engineer-routing.sh
+```
 
-- `apps/csm-portal/backend/internal/routingclient` — the (only) caller of
-  this service's HTTP surface.
-- `apps/csm-portal/backend/internal/handler/chat.go` and `chat_stream.go` —
-  where the SSE fan-out and WebSocket relay this service's decisions ride on
-  actually live.
-- `docs/architecture.excalidraw` — a hand-drawn version of an earlier cut of
-  this diagram, kept for whiteboard-style walkthroughs. It predates the
-  least-busy-only assignment logic above, so it still shows plain FIFO
-  assignment and a sticky-routing tier that no longer exists.
+A small Go client for this API lives in
+[`../sdk-go/routingclient`](../sdk-go/routingclient). It is optional: any
+service can call the HTTP API directly using [`openapi.yaml`](./openapi.yaml).
+
+## API Endpoints
+
+Every `/route/*` request needs the `X-Routing-Service-Token` header.
+`GET /health` needs no authentication. Request bodies are JSON, capped at
+64 KiB. A database error returns `502`; the details are logged, not
+returned. `userId` is always the engineer's identity-provider `userid`.
+
+### Routing
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `POST` | `/route/escalate` | Case details | `{engineerId}`, or `{queued: true, position}` |
+| `POST` | `/route/accept` | `{userId, caseId}` | `{applied}` — `false` if the chat was already declined, reassigned or accepted |
+| `POST` | `/route/decline` | `{userId, caseId}` | `{reassignedTo?, requeued?, assignedCase?}` |
+| `POST` | `/route/completed` | `{userId, caseId}` | `{ended, assignedCase?}` — the freed slot may be filled from the queue immediately |
+| `POST` | `/route/end-by-tenant` | `{caseId, tenantSlug}` | `{ended, assignedCase?, assignedEngineerId?}` — ends a chat from the customer's side; `ended` is false if the chat isn't open or belongs to another tenant |
+| `POST` | `/route/convert-to-case` | `{userId, caseId, entityCaseId}` | `{assignedCase?}` — ends the chat and records the support case it became |
+| `POST` | `/route/sweep-timeouts` | — | `{results, abandoned, stale}` — chats passed on after the pending timeout, chats given up from the queue, and idle chats ended |
+
+### Engineers
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `POST` | `/route/presence` | `{userId, status}` with `status` `AVAILABLE`, `BUSY` or `OFFLINE` | `{applied, assignedCases?}` — going `AVAILABLE` can pick up several queued chats at once |
+| `GET` | `/route/presence/{userId}` | — | `{chatStatus, activeChats, maxConcurrentChats, atCapacity, cases, pendingTimeoutSeconds}`. An unknown engineer is reported as `OFFLINE` with capacity 1. |
+| `PATCH` | `/route/capacity` | `{userId, maxConcurrentChats}` (1–10) | `{assignedCases?}` — raising the limit while `AVAILABLE` picks up queued chats straight away. Lowering it never drops a held chat. |
+
+### Chats and messages
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| `POST` | `/route/workitem` | Case details | Creates the chat record for a new escalation |
+| `POST` | `/route/workitem/{caseId}/info` | — | Case details with the message transcript; `404` if unknown |
+| `POST` | `/route/comment` | Message | Adds a message to a chat's transcript |
+| `GET` | `/route/open-chat` | `?customerEmail=&projectId=` | The customer's chat that hasn't ended, if any (used to resume a chat after a page reload) |
+| `GET` | `/route/active-chats` | — | Every accepted chat that hasn't ended, with when its engineer last replied |
+
+### Diagnostics
+
+| Method | Path | Response |
+|---|---|---|
+| `GET` | `/route/debug/state` | Engineers (status, capacity, active and today's counts) and the waiting queue |
+| `GET` | `/route/debug/workitem/{caseId}` | One chat's stored record |
+| `GET` | `/health` | `200 OK` |
+
+Full request and response schemas are in [`openapi.yaml`](./openapi.yaml).
+
+## How routing works
+
+### Choosing an engineer
+
+`POST /route/escalate` runs in a single database transaction and picks the
+first engineer that matches, going down this list:
+
+1. `AVAILABLE` engineers with spare capacity (active chats below their
+   `max_concurrent_chats`), fewest active chats first.
+2. On a tie, the one who has accepted the fewest chats today. This is
+   counted live from the chat records, so declined chats don't count.
+3. On a further tie, the one who has been `AVAILABLE` longest.
+4. If nobody qualifies, the chat is queued and the customer gets their
+   position.
+
+Engineer rows are locked with `FOR UPDATE SKIP LOCKED`, so two concurrent
+escalations can never get the same free slot. There is no "same engineer as
+last time" preference.
+
+"Today" is the database server's `CURRENT_DATE`, so the day boundary
+follows that server's time zone.
+
+### Chat lifecycle
+
+| Event | What happens |
+|---|---|
+| Assigned | The chat is pending for that engineer. |
+| Accepted | The chat becomes active and leaves the queue. Other chats the engineer holds are unaffected. |
+| Declined | The chat goes to the next engineer by the same ranking (never back to the one who declined), or back into the queue at its original position. |
+| Not accepted in time | Same as a decline. The engineer's presence is not changed. |
+| Completed or ended | The engineer's slot is freed. If they are still `AVAILABLE`, the oldest queued chat is assigned to them. |
+| Queued too long | The chat is removed from the queue so it can't be assigned later. |
+| Idle too long | An accepted chat with no activity is ended. |
+
+A queued chat keeps its original arrival time when it is put back, so it
+stays ahead of newer chats without a separate priority flag.
+
+## Data model
+
+| Table | Holds |
+|---|---|
+| `cs_engineer_status` | One row per engineer: `user_id`, `chat_status`, `max_concurrent_chats`, `available_since` |
+| `chat_conversation` | One row per chat: case and conversation IDs, `assignee_id`, `state` (`OPEN`, then `ACTIVE` once accepted), `accepted_at`, `session_ended_at`, and the case details as JSON. This is the source of truth for which chats an engineer holds. |
+| `chat_queue` | One row per chat that hasn't been accepted yet, `WAITING_FOR_ENGINEER` or `ASSIGNED`, ordered by arrival time |
+| `chat_queue_engineer_assignment` | Append-only history of outcomes: `CONNECTED`, `REJECTED` or `TIMED_OUT`, per engineer and case |
+| `work_item`, `comment` | The chat's work item and its message transcript |
+
+Relationships inside the schema are enforced with foreign keys. IDs that
+belong to other services (such as the support case a chat was converted
+into) are stored without foreign keys, so this schema doesn't depend on
+another service's migrations.
+
+## Known limitations
+
+- **Interim message storage.** Chat work items and messages are kept in
+  this service (`internal/router/workitem.go`) until an equivalent in
+  `entity-service` is available. The `/route/workitem`, `/route/comment`
+  and `/route/debug/*` endpoints may change when that happens.
+- **Case details are copied.** Each chat stores its case details as JSON
+  rather than reading them from the service that owns them.
+- **Multiple replicas are untested.** All state changes are database
+  transactions, so several instances should be safe against one database,
+  but this has not been load-tested.
+- **Fallback when unreachable.** If this service is down,
+  `csm-portal/backend` broadcasts new escalations to every connected
+  engineer, so a customer is never stranded.
