@@ -1,8 +1,9 @@
 # chat-routing-service Go SDK
 
-A small, dependency-free Go client for [chat-routing-service](../backend) —
-the in-memory engineer availability/queue service that decides which
-engineer (if any) a live-chat escalation is routed to.
+A small, dependency-free Go client for [chat-routing-service](../backend),
+the service that decides which engineer (if any) a live-chat escalation is
+routed to. It tracks engineer presence, the waiting queue and chat sessions
+in PostgreSQL.
 
 This module is the same client csm-portal/backend uses in production,
 extracted so other internal services can call chat-routing-service without
@@ -40,9 +41,28 @@ result, err := client.Escalate(ctx, routingclient.CaseInfo{
 })
 ```
 
-See `routingclient/client.go`'s doc comments for every method
-(`Escalate`, `SetPresence`, `Completed`, `Decline`, `Accept`, `GetPresence`,
-`CreateWorkItem`, `AddComment`) and their exact request/response shapes.
+## Methods
+
+Each method calls one chat-routing-service endpoint; `routingclient/client.go`'s
+doc comments have the exact request and response shapes.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `Escalate` | `POST /route/escalate` | Assign a new chat to a free engineer, or queue it |
+| `Accept` | `POST /route/accept` | The assigned engineer accepts the chat |
+| `Decline` | `POST /route/decline` | The engineer declines; the chat goes to the next engineer or back to the queue |
+| `Completed` | `POST /route/completed` | The engineer ends the chat; the freed slot may take a queued chat |
+| `EndByTenant` | `POST /route/end-by-tenant` | End a chat from the customer's side, checked against the tenant |
+| `ConvertToCase` | `POST /route/convert-to-case` | End the chat and record the support case it became |
+| `SetPresence` | `POST /route/presence` | Set an engineer's status: `AVAILABLE`, `BUSY` or `OFFLINE` |
+| `GetPresence` | `GET /route/presence/{userId}` | An engineer's status, capacity and the chats they hold |
+| `SetMaxConcurrentChats` | `PATCH /route/capacity` | An engineer's concurrent-chat limit (1-10) |
+| `SweepTimeouts` | `POST /route/sweep-timeouts` | Apply the pending, queue and idle timeouts; called periodically |
+| `CreateWorkItem` | `POST /route/workitem` | Create the chat record for a new escalation |
+| `AddComment` | `POST /route/comment` | Add a message to a chat's transcript |
+| `GetCaseInfo` | `POST /route/workitem/{caseId}/info` | A chat's details and transcript |
+| `FindOpenChat` | `GET /route/open-chat` | A customer's chat that hasn't ended, if any |
+| `ActiveChats` | `GET /route/active-chats` | Every accepted chat that hasn't ended, with when its engineer last replied |
 
 ## Server-to-server only
 
@@ -51,8 +71,7 @@ for backend-to-backend calls. **Never** construct a `Client` in code that
 ships to a browser, and never proxy this token out to one. A frontend that
 needs routing state should call its own backend's own proxy endpoints —
 see `apps/csm-portal/backend/internal/handler/chat.go` for the reference
-implementation (`HandleEscalate`, `HandleSetPresence`, `HandleGetPresence`,
-`HandleDeclineSession`) — and have that backend hold this `Client` and
+implementation — and have that backend hold this `Client` and
 `InternalToken` server-side, exactly as csm-portal/backend already does.
 
 ## Versioning
