@@ -182,6 +182,25 @@ calling `unsubscribe()` — the two are independent: `unsubscribe()` only
 stops *your side* from listening, it does not tell the backend the chat is
 over. See "Unsubscribe lifecycle" below for the ordering that matters.
 
+### `client.getHistory(caseId)`
+
+```ts
+getHistory(caseId: string): Promise<LiveChatHistoryMessage[]>;
+
+interface LiveChatHistoryMessage {
+  role: "customer" | "engineer" | "assistant";
+  content: string;
+  createdAt?: string;
+}
+```
+
+`GET /v1/{tenant}/chats/{caseId}/history`. The chat's transcript so far,
+oldest first: the AI conversation from before the handover, then the
+customer's and engineer's messages. Use it to restore a chat after a page
+reload or a dropped connection; `subscribe` only delivers events from the
+moment it opens. A product that supplies its own `requestTransport` must
+implement its `getJson` for this method.
+
 ### `client.getCurrentChat()`
 
 ```ts

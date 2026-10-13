@@ -1,25 +1,35 @@
 # live-chat-sdk Go SDK
 
-Shared Go plumbing behind the live-engineer-chat feature's service-to-service
-calls — extracted from three independently hand-rolled copies of the same
-code: `customer-portal/backend-v2/internal/csmchat`,
-`console-chat-bridge/backend/internal/csmchat`, and
-`csm-portal/backend/internal/chatnotify` each implemented their own "OAuth2
-client-credentials token, refuse redirects, bound the error body" HTTP
-client, and csm-portal/backend's own `chatEvent` struct was independently
-hand-copied by every receiver of it — with real, observed drift (a field
-csm-portal/backend added that a receiver's own copy silently dropped on
-decode, since `encoding/json` never errors on an unknown field).
+Shared Go code for the live-chat services' calls to each other. Two
+packages:
 
-Two packages:
+- **`pushevents`**: the `ChatEvent` wire shape for live-chat lifecycle
+  events. csm-portal/backend sends these; console-chat-bridge and
+  customer-portal/backend-v2 receive them. Every sender and receiver imports
+  this one definition, so a field added on one side cannot be silently
+  dropped on the other.
+- **`m2mclient`**: an HTTP client for machine-to-machine calls. It fetches
+  and caches an OAuth2 client-credentials token, refuses redirects, and
+  bounds error bodies. csm-portal's `chatnotify`, the bridge's `csmchat` and
+  backend-v2's `csmchat` are built on it.
 
-- **`pushevents`** — the one shared `ChatEvent` wire shape every sender and
-  receiver of a live-chat lifecycle event (`queued`/`engineer_assigned`/
-  `engineer_message`/etc.) now imports, instead of hand-copying.
-- **`m2mclient`** — the shared OAuth2-client-credentials HTTP client
-  plumbing. Each of the three original packages keeps its own typed methods
-  and package identity, now built on `m2mclient.Client` instead of a fourth
-  copy of the same boilerplate.
+## Event types
+
+`pushevents.Type`, the value of `ChatEvent.Type`:
+
+| Type | Sent to | Meaning |
+|---|---|---|
+| `queued` | the customer's product | No engineer is free; the chat is waiting |
+| `engineer_assigned` | the customer's product | An engineer accepted the chat |
+| `engineer_message` | the customer's product | The engineer sent a message |
+| `engineer_status` | the customer's product | The engineer is `away` (tab closed and quiet), `back`, or `busy` (tab open but quiet); see `ChatEvent.Status` |
+| `engineer_disconnected` | the customer's product | The chat ended from the engineer's side; `Reason` is `inactive` when it was ended because the engineer was away too long |
+| `converted_to_case` | the customer's product | The engineer turned the chat into a support case (`EntityCaseID`) |
+| `chat_abandoned` | the customer's product | The chat waited in the queue too long and was given up |
+| `customer_escalation`, `customer_message`, `session_accepted`, `session_closed`, `session_closed_by_customer`, `case_timed_out` | csm-portal's engineers only | Engineer-side updates; never sent to a product |
+
+`PriorMessage` carries the customer's AI conversation from before the
+handover (`role` is `customer` or `assistant`).
 
 ## Install
 
