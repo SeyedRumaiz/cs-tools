@@ -145,6 +145,10 @@ integrations use `/v1`.
   more than 30 seconds, it publishes `chat.assigned_while_away` to the
   `chat-events` topic, and csm-notification-service emails that engineer
   alone with a link to the Chat page. The chat is routed as before.
+  Likewise, when the customer of an accepted chat is told the engineer
+  seems to have stepped away, it publishes `chat.engineer_away_warning`,
+  and the engineer is emailed with the time the chat will end, so they can
+  come back first.
 - **chat-routing-service** tracks presence, gives each chat to the
   least-busy free engineer, queues chats when nobody is free, and passes on
   chats not accepted within 90 seconds.
