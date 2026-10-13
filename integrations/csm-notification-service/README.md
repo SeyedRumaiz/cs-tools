@@ -180,7 +180,7 @@ Required — a record that exhausts the main consumer's retries is published her
 
 ### Live-chat topics
 
-`chat.assigned_while_away` — csm-portal-backend's email request for an engineer who was assigned a live chat while their CSM Portal tab was closed — rides its own topic pair. Opt-in: with `CHAT_EVENT_HUB_TOPIC` unset no chat consumer starts, so a namespace without the topic runs as before. The email goes to that engineer alone, honours `EMAIL_SENDING_ENABLED` and `EMAIL_DEBUG_MODE`, and carries no chat message text.
+`chat.assigned_while_away` (an engineer was assigned a live chat while their CSM Portal tab was closed) and `chat.engineer_away_warning` (the customer on an engineer's accepted chat was told they seem to have stepped away, and the chat will soon be ended) are csm-portal-backend's email requests, and ride their own topic pair. Opt-in: with `CHAT_EVENT_HUB_TOPIC` unset no chat consumer starts, so a namespace without the topic runs as before. Each email goes to that engineer alone, honours `EMAIL_SENDING_ENABLED` and `EMAIL_DEBUG_MODE`, and carries no chat message text.
 
 | Variable | Description |
 |---|---|

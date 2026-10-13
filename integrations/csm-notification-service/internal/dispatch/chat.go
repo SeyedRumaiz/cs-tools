@@ -39,20 +39,9 @@ func (d *Dispatcher) handleChatAssignedWhileAway(ctx context.Context, _ eventbus
 		return fmt.Errorf("dispatch: decode chat.assigned_while_away payload: %w", err)
 	}
 
-	if !d.emailSendingEnabled {
-		slog.InfoContext(ctx, "dispatch: email sending disabled, skipping away-engineer chat email", "caseId", p.CaseID)
+	recipients, intendedFor, ok := d.chatEngineerRecipients(ctx, p.EngineerEmail, p.CaseID, "away-engineer chat email")
+	if !ok {
 		return nil
-	}
-	recipients := []string{p.EngineerEmail}
-	var intendedFor string
-	if d.emailDebugMode {
-		if len(d.emailDebugRecipients) == 0 {
-			slog.WarnContext(ctx, "dispatch: email debug mode on with no debug recipients, skipping away-engineer chat email",
-				"caseId", p.CaseID)
-			return nil
-		}
-		intendedFor = p.EngineerEmail
-		recipients = d.emailDebugRecipients
 	}
 
 	body := notifications.RenderChatAssignedWhileAwayEmail(notifications.ChatAssignedWhileAwayEmailData{
@@ -68,4 +57,53 @@ func (d *Dispatcher) handleChatAssignedWhileAway(ctx context.Context, _ eventbus
 	}
 	slog.InfoContext(ctx, "dispatch: away-engineer chat email sent", "caseId", p.CaseID)
 	return nil
+}
+
+// handleChatEngineerAwayWarning emails the engineer on an accepted live
+// chat whose customer was just told they seem to have stepped away, so they
+// can reply before the chat is ended. Private to that engineer, like
+// handleChatAssignedWhileAway, and the send is again the last step.
+func (d *Dispatcher) handleChatEngineerAwayWarning(ctx context.Context, _ eventbus.Record, raw json.RawMessage) error {
+	var p events.ChatEngineerAwayWarningPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return fmt.Errorf("dispatch: decode chat.engineer_away_warning payload: %w", err)
+	}
+	recipients, intendedFor, ok := d.chatEngineerRecipients(ctx, p.EngineerEmail, p.CaseID, "chat away-warning email")
+	if !ok {
+		return nil
+	}
+
+	body := notifications.RenderChatEngineerAwayWarningEmail(notifications.ChatEngineerAwayWarningEmailData{
+		CustomerName: p.CustomerName,
+		Product:      p.Product,
+		Subject:      p.Subject,
+		LastActiveAt: p.LastActiveAt,
+		EndsAt:       p.EndsAt,
+		ChatLink:     p.ChatLink,
+		IntendedFor:  intendedFor,
+	})
+	if err := d.email.SendEmail(ctx, recipients, nil, nil, nil, notifications.ChatEngineerAwayWarningSubject, body, nil); err != nil {
+		return fmt.Errorf("dispatch: send chat away-warning email for %s: %w", p.CaseID, err)
+	}
+	slog.InfoContext(ctx, "dispatch: chat away-warning email sent", "caseId", p.CaseID)
+	return nil
+}
+
+// chatEngineerRecipients is who a live-chat email to engineerEmail goes to:
+// that engineer, or the debug recipients in debug mode, with intendedFor
+// set to the engineer then. ok is false when nothing should be sent; the
+// reason is logged with what, the email's name.
+func (d *Dispatcher) chatEngineerRecipients(ctx context.Context, engineerEmail, caseID, what string) (recipients []string, intendedFor string, ok bool) {
+	if !d.emailSendingEnabled {
+		slog.InfoContext(ctx, "dispatch: email sending disabled, skipping "+what, "caseId", caseID)
+		return nil, "", false
+	}
+	if !d.emailDebugMode {
+		return []string{engineerEmail}, "", true
+	}
+	if len(d.emailDebugRecipients) == 0 {
+		slog.WarnContext(ctx, "dispatch: email debug mode on with no debug recipients, skipping "+what, "caseId", caseID)
+		return nil, "", false
+	}
+	return d.emailDebugRecipients, engineerEmail, true
 }

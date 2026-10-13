@@ -751,7 +751,8 @@ func main() {
 	projectConsumers := startConsumers(ctx, "project", projectCfg, projectConsumerGroup, projectConsumerCount, dispatcher.Handle, projectToDeadLetter)
 	projectDLQConsumers := startConsumers(ctx, "project-dlq", projectDLQCfg, projectDLQConsumerGroup, projectDLQConsumerCount, dispatcher.Handle, nil)
 
-	// Live-chat events (chat.assigned_while_away) ride their own topic,
+	// Live-chat events (chat.assigned_while_away,
+	// chat.engineer_away_warning) ride their own topic,
 	// which csm-portal-backend publishes to (CHAT_EVENT_HUB_TOPIC there
 	// too). Opt-in: unset, nothing is consumed, so a deployment whose Event
 	// Hub namespace has no such topic yet runs exactly as before.

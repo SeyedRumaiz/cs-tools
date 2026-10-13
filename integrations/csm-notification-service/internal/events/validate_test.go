@@ -350,6 +350,47 @@ func TestValidate_ChatAssignedWhileAway(t *testing.T) {
 	}
 }
 
+// TestValidate_ChatEngineerAwayWarning covers chat.engineer_away_warning
+// the same way, with its two times required.
+func TestValidate_ChatEngineerAwayWarning(t *testing.T) {
+	const id = "11111111-1111-1111-1111-111111111111"
+	payload := func(mod func(p map[string]any)) json.RawMessage {
+		p := map[string]any{
+			"caseId": id, "engineerEmail": "eng@wso2.com", "customerName": "Jane Doe",
+			"product": "devant", "subject": "Deploy fails", "lastActiveAt": "2026-10-12T04:43:05Z",
+			"endsAt": "2026-10-12T04:48:05Z", "chatLink": "https://csm.example/chat",
+		}
+		if mod != nil {
+			mod(p)
+		}
+		raw, _ := json.Marshal(p)
+		return raw
+	}
+
+	if err := Validate(id, TypeChatEngineerAwayWarning, payload(nil)); err != nil {
+		t.Fatalf("a well-formed event: Validate() = %v, want nil", err)
+	}
+	optional := func(p map[string]any) { delete(p, "customerName"); delete(p, "product"); delete(p, "subject") }
+	if err := Validate(id, TypeChatEngineerAwayWarning, payload(optional)); err != nil {
+		t.Fatalf("customer, product and subject are optional: Validate() = %v, want nil", err)
+	}
+
+	for name, mod := range map[string]func(p map[string]any){
+		"malformed email":    func(p map[string]any) { p["engineerEmail"] = "not-an-email" },
+		"no last reply time": func(p map[string]any) { delete(p, "lastActiveAt") },
+		"no end time":        func(p map[string]any) { delete(p, "endsAt") },
+		"non-http chat link": func(p map[string]any) { p["chatLink"] = "javascript:alert(1)" },
+		"other case's id":    func(p map[string]any) { p["caseId"] = "22222222-2222-2222-2222-222222222222" },
+		"unknown field":      func(p map[string]any) { p["message"] = "hello" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := Validate(id, TypeChatEngineerAwayWarning, payload(mod)); err == nil {
+				t.Fatal("Validate() = nil, want an error")
+			}
+		})
+	}
+}
+
 func TestValidate_OutageStatusPageDue(t *testing.T) {
 	const ok = `{"webhookId":"W-1","claimToken":"T-1","outageId":"O-1","number":"OUT0010021","cloud":"choreo","event":"outage_begin","timestamp":"2026-10-09T06:54:00.000Z"}`
 	cases := []struct {

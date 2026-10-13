@@ -43,3 +43,29 @@ type ChatAssignedWhileAwayPayload struct {
 	// has no other way to know, and the recipient is always an engineer.
 	ChatLink string `json:"chatLink"`
 }
+
+// TypeChatEngineerAwayWarning: the engineer on an accepted live chat has
+// had no csm-portal tab open and has not replied for the idle warning time,
+// so the customer was just told they seem to have stepped away. Emailed
+// here to that engineer alone, so they can come back before the chat is
+// ended. Same topic, same source of truth as TypeChatAssignedWhileAway.
+// EntityID is the chat's case id.
+const TypeChatEngineerAwayWarning Type = "chat.engineer_away_warning"
+
+// ChatEngineerAwayWarningPayload is TypeChatEngineerAwayWarning's payload.
+type ChatEngineerAwayWarningPayload struct {
+	CaseID        string `json:"caseId"`
+	EngineerEmail string `json:"engineerEmail"`
+	// CustomerName is the customer's name, else their email.
+	CustomerName string `json:"customerName,omitempty"`
+	// Product is the tenant the chat came from, e.g. "devant".
+	Product string `json:"product,omitempty"`
+	Subject string `json:"subject,omitempty"`
+	// LastActiveAt is the engineer's last message, or the accept before
+	// their first one, RFC3339.
+	LastActiveAt string `json:"lastActiveAt"`
+	// EndsAt is when the chat is ended if the engineer stays away, RFC3339.
+	EndsAt string `json:"endsAt"`
+	// ChatLink is csm-portal's Chat page; see ChatAssignedWhileAwayPayload.
+	ChatLink string `json:"chatLink"`
+}

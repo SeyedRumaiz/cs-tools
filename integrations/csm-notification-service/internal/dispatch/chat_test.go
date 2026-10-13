@@ -120,3 +120,72 @@ func TestDispatcher_Handle_ChatAssignedWhileAway_InvalidNotSent(t *testing.T) {
 		t.Errorf("sent %d emails for an invalid event", len(mock.calls))
 	}
 }
+
+func chatEngineerAwayWarningRecord(engineerEmail string) eventbus.Record {
+	return eventbus.Record{Value: []byte(`{"type":"chat.engineer_away_warning","entityId":"` + awayChatCase + `","payload":{` +
+		`"caseId":"` + awayChatCase + `","engineerEmail":"` + engineerEmail + `",` +
+		`"customerName":"jane@example.com","product":"devant","subject":"Deploy fails",` +
+		`"lastActiveAt":"2026-10-12T04:43:05Z","endsAt":"2026-10-12T04:48:05Z","chatLink":"https://csm.example/chat"}}`)}
+}
+
+// TestDispatcher_Handle_ChatEngineerAwayWarning_EmailsEngineerOnly: the
+// warning goes to the engineer alone, with when they last replied and when
+// the chat ends.
+func TestDispatcher_Handle_ChatEngineerAwayWarning_EmailsEngineerOnly(t *testing.T) {
+	mock := &mockEmailSender{}
+	d := newTestDispatcher(mock, &mockGoogleChatSender{}, &mockCallSender{})
+
+	if err := d.Handle(context.Background(), chatEngineerAwayWarningRecord("eng@wso2.com")); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(mock.calls) != 1 {
+		t.Fatalf("sent %d emails, want 1", len(mock.calls))
+	}
+	got := mock.calls[0]
+	if want := []string{"eng@wso2.com"}; !reflect.DeepEqual(got.to, want) {
+		t.Errorf("to = %v, want %v", got.to, want)
+	}
+	if len(got.cc) != 0 || len(got.bcc) != 0 {
+		t.Errorf("a private email must have no cc/bcc, got cc=%v bcc=%v", got.cc, got.bcc)
+	}
+	if want := "[WSO2 Support] Your live chat will end soon"; got.subject != want {
+		t.Errorf("subject = %q, want %q", got.subject, want)
+	}
+	for _, want := range []string{
+		"Your live chat will end soon", "the customer was told you seem to have stepped away",
+		">Customer<", ">jane@example.com<", ">devant<", ">Deploy fails<",
+		">Your Last Reply<", ">2026-10-12 10:13:05<", ">Ends At<", ">2026-10-12 10:18:05<",
+		`href="https://csm.example/chat"`, "Open Chat",
+	} {
+		if !strings.Contains(got.htmlBody, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+	if strings.Contains(got.htmlBody, "Expected sent to") {
+		t.Error("the debug-mode recipient line must not render outside debug mode")
+	}
+}
+
+func TestDispatcher_Handle_ChatEngineerAwayWarning_DebugModeRedirects(t *testing.T) {
+	mock := &mockEmailSender{}
+	d := NewDispatcher(mock, &mockGoogleChatSender{}, &mockCallSender{}, &mockLinkResolver{}, true, true, []string{"debug@wso2.com"}, true, "", nil)
+
+	if err := d.Handle(context.Background(), chatEngineerAwayWarningRecord("eng@wso2.com")); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	got := mock.calls[0]
+	if want := []string{"debug@wso2.com"}; !reflect.DeepEqual(got.to, want) {
+		t.Errorf("to = %v, want %v", got.to, want)
+	}
+	if !strings.Contains(got.htmlBody, "Expected sent to: eng@wso2.com") {
+		t.Error("debug mode must show who the mail was meant for")
+	}
+}
+
+func TestDispatcher_Handle_ChatEngineerAwayWarning_SendFailureRetries(t *testing.T) {
+	mock := &mockEmailSender{err: errors.New("smtp down")}
+	d := newTestDispatcher(mock, &mockGoogleChatSender{}, &mockCallSender{})
+	if err := d.Handle(context.Background(), chatEngineerAwayWarningRecord("eng@wso2.com")); err == nil {
+		t.Fatal("a failed send must return an error so the consumer retries")
+	}
+}

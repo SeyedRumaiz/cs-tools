@@ -408,6 +408,23 @@ func Validate(entityID string, t Type, raw json.RawMessage) error {
 		if !strings.HasPrefix(p.ChatLink, "https://") && !strings.HasPrefix(p.ChatLink, "http://") {
 			return fmt.Errorf("events: chatLink for %s must be an http(s) URL", t)
 		}
+	case TypeChatEngineerAwayWarning:
+		var p ChatEngineerAwayWarningPayload
+		if err := decodeStrict(raw, &p); err != nil {
+			return err
+		}
+		if p.CaseID == "" || p.LastActiveAt == "" || p.EndsAt == "" || p.ChatLink == "" {
+			return fmt.Errorf("events: missing required field for %s", t)
+		}
+		if p.CaseID != entityID {
+			return fmt.Errorf("events: payload caseId %q does not match entityId %q", p.CaseID, entityID)
+		}
+		if !emailPattern.MatchString(p.EngineerEmail) {
+			return fmt.Errorf("events: invalid engineerEmail for %s", t)
+		}
+		if !strings.HasPrefix(p.ChatLink, "https://") && !strings.HasPrefix(p.ChatLink, "http://") {
+			return fmt.Errorf("events: chatLink for %s must be an http(s) URL", t)
+		}
 	case TypeCRApprovalRequested:
 		var p CRApprovalRequestedPayload
 		if err := decodeStrict(raw, &p); err != nil {

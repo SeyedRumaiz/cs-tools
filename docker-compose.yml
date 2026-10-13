@@ -563,7 +563,8 @@ services:
       # Read with the same name entity-service publishes to (the SME page's
       # incident.special_ops_alert among others).
       SRE_EVENT_HUB_TOPIC: sre-events
-      # csm-portal-backend's live-chat events (chat.assigned_while_away).
+      # csm-portal-backend's live-chat events (chat.assigned_while_away,
+      # chat.engineer_away_warning).
       CHAT_EVENT_HUB_TOPIC: chat-events
       CHAT_EVENT_HUB_DLQ_TOPIC: chat-events-dlq
       SSL_CERT_FILE: /certs/ca.crt
