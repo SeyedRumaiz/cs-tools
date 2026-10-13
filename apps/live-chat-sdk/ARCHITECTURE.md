@@ -22,7 +22,9 @@ console-chat-bridge           tenant auth, CORS, tenant isolation,
    |  machine-to-machine (client credentials)
    v
 csm-portal/backend            engineers' app, idle rules, Google Chat alerts
-   |
+   |         \
+   |          \--> chat-events topic --> csm-notification-service
+   |               (engineer's tab closed)  emails that engineer
    v
 chat-routing-service          presence, queue, assignment, timeouts
 ```
@@ -139,6 +141,10 @@ integrations use `/v1`.
   rules: when an engineer's tab is closed, the customer is warned after
   2 minutes and the chat ends after 5; when the tab is open, the customer
   is told the engineer is still looking into it, and the chat stays open.
+  When a chat is assigned to an engineer whose tab has been closed for
+  more than 30 seconds, it publishes `chat.assigned_while_away` to the
+  `chat-events` topic, and csm-notification-service emails that engineer
+  alone with a link to the Chat page. The chat is routed as before.
 - **chat-routing-service** tracks presence, gives each chat to the
   least-busy free engineer, queues chats when nobody is free, and passes on
   chats not accepted within 90 seconds.
@@ -156,7 +162,9 @@ tenant's routing source, channel and project.
    `startChat` with the AI conversation as prior messages.
 4. The bridge verifies the token and calls csm-portal's
    `POST /internal/chat/escalate`. csm-portal asks chat-routing-service for
-   a free engineer, who gets the pop-up, or queues the chat.
+   a free engineer, who gets the pop-up, or queues the chat. If that
+   engineer's tab is closed, they are also emailed; a chat not accepted
+   within 90 seconds moves to the next engineer either way.
 5. The widget subscribes to the chat's events. When the engineer accepts,
    csm-portal pushes `assigned` to the bridge, which forwards it.
 6. Messages flow both ways: `sendMessage` up, `message` events down.
