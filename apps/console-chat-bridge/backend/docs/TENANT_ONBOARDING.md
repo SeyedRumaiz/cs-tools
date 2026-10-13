@@ -186,6 +186,18 @@ SCIM2-view scope (e.g. WSO2 IS's `internal_user_mgt_list` — not
 `internal_user_mgt_view`, which doesn't cover a filtered *search* call)
 and nothing else.
 
+## AI assistant
+
+Each tenant's panel answers with an AI assistant before offering an
+engineer. Which one is the bridge's choice, so the product's code does not
+change: `ASSISTANT_PROVIDER` is the default for every tenant (`novera`,
+`http`, `mock` or `off`), `TENANT_<SLUG>_ASSISTANT_PROVIDER` overrides it
+for one tenant, and `ASSISTANT_DISABLED_TENANTS` turns it off for the ones
+listed. With `http`, the bridge sends each question to the product's own AI
+service at `TENANT_<SLUG>_ASSISTANT_HTTP_URL`. The request and response
+contract, and a runnable example, are in
+[`ASSISTANT_PROVIDERS.md`](ASSISTANT_PROVIDERS.md).
+
 ## Example configs
 
 Both examples below use placeholder values only — `<...>` markers are not
@@ -293,9 +305,11 @@ slug, as above.
 
 ## New-tenant onboarding checklist
 
-1. Confirm your IdP's token introspection response for a real user token —
-   does it carry `sub` directly? If yes, you're on the fast path; skip to
-   step 5.
+1. Decode a real user token from the running product. A signed JWT whose
+   issuer publishes a JWKS endpoint can use `validationType: jwks`: no
+   setup in the IdP, so skip to step 6. Otherwise, confirm the IdP's token
+   introspection response for that token: does it carry `sub` directly?
+   If yes, skip to step 5.
 2. If not, confirm whether your IdP application's access tokens are
    token-binding-bound (check its own "Access Token" / token-binding
    setting). If bound, plan on SCIM (step 3); if not, plan on UserInfo
@@ -321,14 +335,18 @@ slug, as above.
    `TENANT_<SLUG>_SCIM_CLIENT_SECRET` env vars.
 8. Set this tenant's `allowedOrigins` to the exact browser origin your
    product is served from.
-9. Point your product's own code at `@wso2/live-chat-client`
-   (`createLiveChatClient({baseUrl, tenant: "<your-slug>", getAccessToken})`)
-   using your product's own existing token provider — see that package's
-   own README for the full client API.
-10. Verify end to end: `startChat` succeeds (`202`), an engineer can
-    accept the case, messages flow both directions, `completeChat` works,
-    and a token from a *different* tenant is rejected (`403`) against this
-    tenant's cases.
+9. Choose the tenant's AI assistant (see "AI assistant" above): leave it on
+   the default, set `TENANT_<SLUG>_ASSISTANT_PROVIDER`, or turn it off.
+10. Add the `<wso2-live-chat>` web component (`@wso2/live-chat-widget`) to
+    the product with a configuration file naming `bridgeUrl` and this
+    tenant's slug, and give it the product's own `getAccessToken` (or a
+    `transport` when the page cannot read the token). See that package's
+    README. A product that builds its own UI can use
+    `@wso2/live-chat-client` directly instead.
+11. Verify end to end: the assistant answers, starting a chat succeeds
+    (`202`), an engineer can accept it, messages flow both ways, ending it
+    works from either side, a reload restores it, and a token from a
+    *different* tenant is rejected (`403`) against this tenant's chats.
 
 No code change on `csm-portal/backend`, `chat-routing-service`,
 `console-chat-bridge`'s own route handlers, or `@wso2/live-chat-client`
