@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/sdk-go/routingclient"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/chatevents"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/chatnotify"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/csmintegration"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/csmnotification"
@@ -263,6 +264,12 @@ func main() {
 	})
 	notificationHandler := handler.NewNotificationHandler(googleChatClient, os.Getenv("CSM_PORTAL_WEB_BASE_URL"))
 	chatHandler.WithLiveChatAlerts(googleChatClient, os.Getenv("CSM_PORTAL_WEB_BASE_URL"))
+	// Optional: email an engineer who is assigned a chat while their
+	// csm-portal tab is closed, through csm-notification-service.
+	if chatEvents := loadChatEventPublisher(); chatEvents != nil {
+		defer func() { _ = chatEvents.Close() }()
+		chatHandler.WithAwayEngineerEmails(chatEvents, os.Getenv("CSM_PORTAL_WEB_BASE_URL"))
+	}
 
 	// SFTPGo-backed attachment storage — off by default (see loadSftpgoConfig).
 	// When disabled, no SFTPGO_* env var is read at all and neither the client
@@ -1428,6 +1435,35 @@ func validateSecureURL(value string, allowPath bool) error {
 		return errors.New("must not include a fragment")
 	}
 	return nil
+}
+
+// loadChatEventPublisher returns the publisher for live-chat events
+// (internal/chatevents), or nil when CHAT_EVENT_HUB_TOPIC is unset. With the
+// topic set, EVENT_HUB_BROKER and EVENT_HUB_CONNECTION_STRING are required,
+// and CSM_PORTAL_WEB_BASE_URL is needed for the email's link.
+// EVENT_HUB_CA_FILE optionally pins the broker's CA (local Kafka only).
+func loadChatEventPublisher() *chatevents.Publisher {
+	topic := strings.TrimSpace(os.Getenv("CHAT_EVENT_HUB_TOPIC"))
+	if topic == "" {
+		slog.Info("chat events off: CHAT_EVENT_HUB_TOPIC is not set, so an engineer whose tab is closed is not emailed about a new chat")
+		return nil
+	}
+	if strings.TrimSpace(os.Getenv("CSM_PORTAL_WEB_BASE_URL")) == "" {
+		slog.Warn("chat events off: CSM_PORTAL_WEB_BASE_URL is not set, so the email would have no link to the Chat page")
+		return nil
+	}
+	publisher, err := chatevents.NewPublisher(chatevents.Config{
+		Broker:           mustEnv("EVENT_HUB_BROKER"),
+		ConnectionString: mustEnv("EVENT_HUB_CONNECTION_STRING"),
+		Topic:            topic,
+		CAFile:           os.Getenv("EVENT_HUB_CA_FILE"),
+	})
+	if err != nil {
+		slog.Error("chat events: invalid configuration", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("chat events on: an engineer whose tab is closed is emailed about a new chat", "topic", topic)
+	return publisher
 }
 
 func mustEnv(key string) string {

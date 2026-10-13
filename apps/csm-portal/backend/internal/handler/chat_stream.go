@@ -80,6 +80,10 @@ func (h *ChatHandler) StreamEngineerAlerts(w http.ResponseWriter, r *http.Reques
 
 	ownKey := engineerHubKey(user.UserID)
 	ownCh := h.hub.Register(ownKey)
+	h.engineerTabOpened(user.UserID)
+	// Deferred first so it runs last, after this tab has unregistered: it
+	// records the close only when no other tab of this engineer is open.
+	defer h.engineerTabClosed(user.UserID)
 	defer h.hub.Unregister(ownKey, ownCh)
 
 	broadcastCh := h.hub.Register(broadcastHubKey)

@@ -100,6 +100,7 @@ func (h *ChatHandler) rememberEngineer(user *middleware.UserInfo) {
 // when it is not accepted. Only the assigned engineer can accept it.
 func (h *ChatHandler) publishAssignment(ctx context.Context, engineerID string, ci routingclient.CaseInfo, kind liveChatAlertKind) {
 	h.publishToEngineer(engineerID, assignedCaseEvent(ci))
+	h.emailIfAway(ctx, engineerID, ci)
 	who, mention := "an available engineer", ""
 	if h.engineers != nil {
 		if email := h.engineers.email(engineerID); email != "" {

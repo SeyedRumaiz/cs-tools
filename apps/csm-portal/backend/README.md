@@ -204,6 +204,18 @@ Both optional — used only to back `GET /health/dependencies` today (see "Healt
 | `NOTIFICATIONS_GOOGLE_CHAT_SPACES` | JSON array of `{"product","webhookUrl"}` objects, one per Google Chat space — e.g. `[{"product":"api-manager","webhookUrl":"https://chat.googleapis.com/..."}]`. Optional — left unset, malformed, Google Chat alerts are unavailable but startup and every other endpoint work normally |
 | `CSM_PORTAL_WEB_BASE_URL` | Base URL of the CSM portal webapp, used to build the "Open in CSM Portal" link at `/operations/incidents/{caseId}` (e.g. `http://localhost:3001` for local dev). Optional — only needed alongside `NOTIFICATIONS_GOOGLE_CHAT_SPACES` above |
 
+### Live-chat email to an engineer whose tab is closed (optional)
+
+When a live chat is assigned to an engineer whose CSM portal tab has been closed for longer than `ENGINEER_TAB_CLOSED_GRACE_SECONDS`, this backend publishes `chat.assigned_while_away` to Event Hub and csm-notification-service emails the engineer. Off unless `CHAT_EVENT_HUB_TOPIC` is set.
+
+| Variable | Description |
+|---|---|
+| `CHAT_EVENT_HUB_TOPIC` | Event Hub (Kafka topic) to publish live-chat events to, e.g. `chat-events`. Must match csm-notification-service's own `CHAT_EVENT_HUB_TOPIC`. Unset turns the feature off |
+| `EVENT_HUB_BROKER` | `<namespace>.servicebus.windows.net:9093`. Required when `CHAT_EVENT_HUB_TOPIC` is set |
+| `EVENT_HUB_CONNECTION_STRING` | The namespace's Shared Access Policy connection string. Required when `CHAT_EVENT_HUB_TOPIC` is set |
+| `CSM_PORTAL_WEB_BASE_URL` | Used for the email's link to the Chat page (`<base>/chat`). Without it the feature stays off |
+| `EVENT_HUB_CA_FILE` | Local Kafka only: PEM file of the CA to trust for the broker's certificate (macOS ignores `SSL_CERT_FILE`). Leave unset for Event Hub |
+
 ### Dashboards
 
 Dashboard definitions are files, one JSON file per dashboard, read once at startup and held in

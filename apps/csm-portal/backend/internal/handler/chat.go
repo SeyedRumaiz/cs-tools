@@ -133,6 +133,14 @@ type ChatHandler struct {
 	// chat_engineer_idle.go.
 	idlePolicy EngineerIdlePolicy
 	idle       idleTracker
+
+	// tabs, awayPublisher, awayPortalURL and awaySent drive the email to an
+	// engineer assigned a chat while their tab is closed; see
+	// chat_away_email.go.
+	tabs          *tabTracker
+	awayPublisher chatEventPublisher
+	awayPortalURL string
+	awaySent      awayEmails
 }
 
 // NewChatHandler creates a ChatHandler. hub and routing must both be
@@ -144,6 +152,8 @@ func NewChatHandler(entity entityChatClient, hub *stream.BroadcastHub, notifiers
 		engineers:  newEngineerDirectory(),
 		idlePolicy: DefaultEngineerIdlePolicy(),
 		idle:       newIdleTracker(),
+		tabs:       newTabTracker(),
+		awaySent:   awayEmails{sent: make(map[string]time.Time)},
 	}
 }
 
