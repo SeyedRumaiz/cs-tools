@@ -178,6 +178,18 @@ Required — a record that exhausts the main consumer's retries is published her
 | `PROJECT_CONSUMER_COUNT` | How many concurrent consumer instances to run for `PROJECT_EVENT_HUB_TOPIC`. Optional — defaults to `1`; same partition-count guidance as `MAIN_CONSUMER_COUNT` |
 | `PROJECT_DLQ_CONSUMER_COUNT` | Same, for `PROJECT_EVENT_HUB_DLQ_TOPIC`. Optional — defaults to `1` |
 
+### Live-chat topics
+
+`chat.assigned_while_away` — csm-portal-backend's email request for an engineer who was assigned a live chat while their CSM Portal tab was closed — rides its own topic pair. Opt-in: with `CHAT_EVENT_HUB_TOPIC` unset no chat consumer starts, so a namespace without the topic runs as before. The email goes to that engineer alone, honours `EMAIL_SENDING_ENABLED` and `EMAIL_DEBUG_MODE`, and carries no chat message text.
+
+| Variable | Description |
+|---|---|
+| `CHAT_EVENT_HUB_TOPIC` | Event Hub carrying the live-chat events; must match csm-portal-backend's own `CHAT_EVENT_HUB_TOPIC`. Unset starts no chat consumer |
+| `CHAT_EVENT_HUB_DLQ_TOPIC` | Its dead-letter Event Hub. Optional — defaults to `<CHAT_EVENT_HUB_TOPIC>-dlq` |
+| `CHAT_CONSUMER_GROUP` | Consumer group ID for `CHAT_EVENT_HUB_TOPIC`. Optional — defaults to `csm-notification-service-chat` |
+| `CHAT_DLQ_CONSUMER_GROUP` | Consumer group ID for `CHAT_EVENT_HUB_DLQ_TOPIC`. Optional — defaults to `csm-notification-service-chat-dlq` |
+| `CHAT_CONSUMER_COUNT` / `CHAT_DLQ_CONSUMER_COUNT` | Concurrent consumer instances for each. Optional — default to `1` |
+
 ### SLA breach-alerting engine
 
 Optional, gated on `REDIS_URL` or `REDIS_ADDR` — unset (both) means `internal/slaengine` never starts. Not a Kafka consumer of its own: `RegisterClocks`/`ApplyStateEffects`/`CompleteResponseClock` are called directly from three of `dispatch.Dispatcher`'s own handlers (`case.created`/`case.status_changed`/`case.comment_added`) on the existing main consumer — only the tick itself runs on its own ticker, scanning a Redis wake-index this engine computes and schedules entirely on its own (every clock's due dates, display fields, paused flag and alerted-tier cursor all live in Redis — see `internal/slaengine`'s own `CLAUDE.md` section). On a genuinely new 50%/75%/100% crossing it publishes `sla.tier_reached` and sends a Google Chat breach alert directly (not routed through `internal/dispatch`). Durations come from `GET /sla-duration-policy` — a small, static reference table, fetched once at startup, independent of the ServiceNow-synced `sla`/`sla_policy` tables an earlier design here polled in bulk every tick (that endpoint's own query turned out to be too slow at real data volumes — reliably timing out — which is what this redesign replaces). Pausing/resuming/completing a clock is driven entirely by the same three events, not a live lookup: `case.status_changed`'s `Awaiting Info`/`Solution Proposed`/`Closed` pause or complete `workaround`/`resolution`, and a qualifying support-engineer reply (`case.comment_added`'s own `isSupportEngineerResponse`, computed by entity-service) completes `response` early.

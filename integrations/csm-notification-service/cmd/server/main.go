@@ -751,6 +751,32 @@ func main() {
 	projectConsumers := startConsumers(ctx, "project", projectCfg, projectConsumerGroup, projectConsumerCount, dispatcher.Handle, projectToDeadLetter)
 	projectDLQConsumers := startConsumers(ctx, "project-dlq", projectDLQCfg, projectDLQConsumerGroup, projectDLQConsumerCount, dispatcher.Handle, nil)
 
+	// Live-chat events (chat.assigned_while_away) ride their own topic,
+	// which csm-portal-backend publishes to (CHAT_EVENT_HUB_TOPIC there
+	// too). Opt-in: unset, nothing is consumed, so a deployment whose Event
+	// Hub namespace has no such topic yet runs exactly as before.
+	var chatConsumers, chatDLQConsumers []*eventbus.Consumer
+	if chatTopic := strings.TrimSpace(os.Getenv("CHAT_EVENT_HUB_TOPIC")); chatTopic != "" {
+		chatCfg := eventbus.Config{Broker: eventBusCfg.Broker, ConnectionString: eventBusCfg.ConnectionString, Topic: chatTopic}
+		chatDLQCfg := eventbus.Config{Broker: eventBusCfg.Broker, ConnectionString: eventBusCfg.ConnectionString,
+			Topic: envOrDefault("CHAT_EVENT_HUB_DLQ_TOPIC", chatTopic+"-dlq")}
+		chatDLQProducer := eventbus.NewProducer(chatDLQCfg)
+		defer chatDLQProducer.Close()
+		chatToDeadLetter := func(ctx context.Context, record eventbus.Record, handleErr error) error {
+			attrs := []any{"topic", record.Topic, "partition", record.Partition,
+				"offset", record.Offset, "dlqTopic", chatDLQCfg.Topic}
+			slog.WarnContext(ctx, "eventbus: handler exhausted retries, publishing to dead-letter topic",
+				append(attrs, deadLetterErrAttrs(handleErr)...)...)
+			return chatDLQProducer.Publish(ctx, record.Key, record.Value)
+		}
+		chatGroup := envOrDefault("CHAT_CONSUMER_GROUP", "csm-notification-service-chat")
+		chatDLQGroup := envOrDefault("CHAT_DLQ_CONSUMER_GROUP", "csm-notification-service-chat-dlq")
+		chatConsumers = startConsumers(ctx, "chat", chatCfg, chatGroup, envInt("CHAT_CONSUMER_COUNT", 1), dispatcher.Handle, chatToDeadLetter)
+		chatDLQConsumers = startConsumers(ctx, "chat-dlq", chatDLQCfg, chatDLQGroup, envInt("CHAT_DLQ_CONSUMER_COUNT", 1), dispatcher.Handle, nil)
+		slog.Info("chat-events consumer enabled", "topic", chatTopic, "group", chatGroup,
+			"dlqTopic", chatDLQCfg.Topic, "dlqGroup", chatDLQGroup)
+	}
+
 	// The incident call-escalation ladder (internal/paging) shares the Redis
 	// connected further up (for the SLA engine, started before any consumer
 	// — see that block's own doc comment) — its own keys, its own ZSET, and
@@ -1117,6 +1143,12 @@ func main() {
 		c.Close()
 	}
 	for _, c := range projectDLQConsumers {
+		c.Close()
+	}
+	for _, c := range chatConsumers {
+		c.Close()
+	}
+	for _, c := range chatDLQConsumers {
 		c.Close()
 	}
 	for _, c := range escalationConsumers {

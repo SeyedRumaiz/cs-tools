@@ -671,6 +671,8 @@ func (d *Dispatcher) Handle(ctx context.Context, record eventbus.Record) error {
 		return nil
 	case events.TypeCaseEscalated:
 		return d.handleCaseEscalated(ctx, record, env.Payload)
+	case events.TypeChatAssignedWhileAway:
+		return d.handleChatAssignedWhileAway(ctx, record, env.Payload)
 	case events.TypeCRApprovalRequested:
 		return d.handleCRApprovalRequested(ctx, record, env.Payload)
 	case events.TypeCRPlanDateNotice:
