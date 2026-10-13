@@ -220,6 +220,8 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic case-events-dlq --partitions 1 --replication-factor 1
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic sre-events --partitions 1 --replication-factor 1
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic sre-events-dlq --partitions 1 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic chat-events --partitions 1 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic chat-events-dlq --partitions 1 --replication-factor 1
 
   # Mock OpenID Connect provider. LOCAL DEV ONLY -- see
   # scripts/csm-compose/mock-oidc/main.go. Issues real RS256-signed JWTs so
@@ -337,8 +339,14 @@ services:
       context: ./apps/csm-portal/backend
       dockerfile: ../../../docker/local/csm-portal-backend.Dockerfile
     depends_on:
-      - entity-service
-      - mock-oidc
+      entity-service:
+        condition: service_started
+      mock-oidc:
+        condition: service_started
+      kafka-topics-init:
+        condition: service_completed_successfully
+    volumes:
+      - csm-dev-certs:/certs:ro
     environment:
       OAUTH2_CLIENT_ID: csm-portal-backend-dev-client
       OAUTH2_CLIENT_SECRET: dev-secret
@@ -385,6 +393,14 @@ services:
       # are not exercised by this stack; every other client keeps using
       # OAUTH2_TOKEN_URL and reaches mock-oidc normally.
       PLG_ENTITY_OAUTH_TOKEN_URL: http://localhost:9100/oauth2/token
+      # Live-chat events: an engineer assigned a chat while their tab is
+      # closed is emailed through csm-notification-service, which reads
+      # the same topic. The Chat page link uses CSM_PORTAL_WEB_BASE_URL.
+      EVENT_HUB_BROKER: kafka:9094
+      EVENT_HUB_CONNECTION_STRING: local-dev-shared-secret
+      CHAT_EVENT_HUB_TOPIC: chat-events
+      SSL_CERT_FILE: /certs/ca.crt
+      CSM_PORTAL_WEB_BASE_URL: http://localhost:3001
     # No host port published: csm-portal-gateway-shim below takes over
     # :8082 on the host so it sits on the request path (Authorization ->
     # x-jwt-assertion), the one job Choreo's real gateway does in
@@ -547,6 +563,9 @@ services:
       # Read with the same name entity-service publishes to (the SME page's
       # incident.special_ops_alert among others).
       SRE_EVENT_HUB_TOPIC: sre-events
+      # csm-portal-backend's live-chat events (chat.assigned_while_away).
+      CHAT_EVENT_HUB_TOPIC: chat-events
+      CHAT_EVENT_HUB_DLQ_TOPIC: chat-events-dlq
       SSL_CERT_FILE: /certs/ca.crt
       CUSTOMER_ENTITY_BASE_URL: http://entity-service:8080
       OAUTH2_CLIENT_ID: csm-notification-service-dev-client
