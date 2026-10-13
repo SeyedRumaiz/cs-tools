@@ -112,6 +112,9 @@ func (h *ChatHandler) sweepEngineerIdleOnce(ctx context.Context, now time.Time) 
 			delete(h.idle.notices, chat.CaseID)
 			continue
 		case away && idle >= p.AwayWarnAfter:
+			if notice.status != pushevents.EngineerAway {
+				h.emailAwayWarning(ctx, chat, now, chat.EngineerActiveAt.Add(p.AwayEndAfter))
+			}
 			notice.status = h.tellCustomer(ctx, chat, notice.status, pushevents.EngineerAway)
 		case !away && notice.status == pushevents.EngineerAway:
 			h.tellCustomer(ctx, chat, notice.status, pushevents.EngineerBack)

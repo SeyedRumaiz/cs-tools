@@ -33,6 +33,7 @@ type fakeChatEventPublisher struct {
 	mu        sync.Mutex
 	err       error
 	published []chatevents.AssignedWhileAwayPayload
+	warnings  []chatevents.EngineerAwayWarningPayload
 	types     []string
 	keys      []string
 	done      chan struct{}
@@ -48,8 +49,11 @@ func (f *fakeChatEventPublisher) Publish(_ context.Context, eventType, entityID 
 	defer f.mu.Unlock()
 	f.types = append(f.types, eventType)
 	f.keys = append(f.keys, entityID)
-	if p, ok := payload.(chatevents.AssignedWhileAwayPayload); ok {
+	switch p := payload.(type) {
+	case chatevents.AssignedWhileAwayPayload:
 		f.published = append(f.published, p)
+	case chatevents.EngineerAwayWarningPayload:
+		f.warnings = append(f.warnings, p)
 	}
 	return f.err
 }

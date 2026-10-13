@@ -68,6 +68,33 @@ type AssignedWhileAwayPayload struct {
 	ChatLink string `json:"chatLink"`
 }
 
+// TypeEngineerAwayWarning: the engineer on an accepted chat has had no
+// csm-portal tab open and has not replied for the idle policy's warning
+// time, so the customer was just told they seem to have stepped away.
+// csm-notification-service emails that engineer so they can come back
+// before the chat is ended. EntityID is the chat's case ID.
+const TypeEngineerAwayWarning = "chat.engineer_away_warning"
+
+// EngineerAwayWarningPayload is TypeEngineerAwayWarning's payload. Like
+// AssignedWhileAwayPayload, it carries no message text.
+type EngineerAwayWarningPayload struct {
+	CaseID        string `json:"caseId"`
+	EngineerEmail string `json:"engineerEmail"`
+	// CustomerName is the customer's name, else their email.
+	CustomerName string `json:"customerName,omitempty"`
+	// Product is the tenant the chat came from, e.g. "devant".
+	Product string `json:"product,omitempty"`
+	Subject string `json:"subject,omitempty"`
+	// LastActiveAt is the engineer's last message, or the accept before
+	// their first one, RFC3339.
+	LastActiveAt string `json:"lastActiveAt"`
+	// EndsAt is when the chat will be ended if the engineer stays away,
+	// RFC3339.
+	EndsAt string `json:"endsAt"`
+	// ChatLink is csm-portal's Chat page.
+	ChatLink string `json:"chatLink"`
+}
+
 // Config is the Event Hub connection. Broker and ConnectionString are the
 // same values entity-service and csm-notification-service use.
 type Config struct {

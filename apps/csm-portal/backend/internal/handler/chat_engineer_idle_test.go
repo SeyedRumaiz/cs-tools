@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/wso2-open-operations/cs-tools/apps/chat-routing-service/sdk-go/routingclient"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/chatevents"
 )
 
 // idleFixture is one accepted chat whose engineer last wrote at start.
@@ -205,4 +206,72 @@ func TestEngineerIdle_AMessageStartsOver(t *testing.T) {
 
 	f.at(6*time.Minute + 30*time.Second)
 	f.expectPushed("engineer_status:away", "engineer_status:away")
+}
+
+// withWarningEmails turns on the away emails for the fixture's handler.
+func (f *idleFixture) withWarningEmails() *fakeChatEventPublisher {
+	pub := newFakeChatEventPublisher()
+	f.h.WithAwayEngineerEmails(pub, "https://csm.example")
+	return pub
+}
+
+func TestEngineerIdle_AwayWarningEmailsTheEngineerOnce(t *testing.T) {
+	f := newIdleFixture(t)
+	f.h.routing.(*mockRoutingService).getCaseInfoFn = func(_ context.Context, caseID string) (routingclient.CaseInfo, error) {
+		return routingclient.CaseInfo{CaseID: caseID, CustomerEmail: "jane@example.com", TenantSlug: "devant", Subject: "Deploy fails"}, nil
+	}
+	pub := f.withWarningEmails()
+
+	f.at(90 * time.Second)
+	f.at(2 * time.Minute)
+	pub.wait(t, 1)
+	f.at(3 * time.Minute)
+	f.at(4 * time.Minute)
+	if pub.count() != 1 {
+		t.Fatalf("published %d events, want one warning per quiet spell", pub.count())
+	}
+	if pub.types[0] != chatevents.TypeEngineerAwayWarning || pub.keys[0] != "case-1" {
+		t.Errorf("published %s keyed %s", pub.types[0], pub.keys[0])
+	}
+	got := pub.warnings[0]
+	want := chatevents.EngineerAwayWarningPayload{
+		CaseID: "case-1", EngineerEmail: "eng@example.com", CustomerName: "jane@example.com",
+		Product: "devant", Subject: "Deploy fails", LastActiveAt: "2026-10-08T10:00:00Z",
+		EndsAt: "2026-10-08T10:05:00Z", ChatLink: "https://csm.example/chat",
+	}
+	if got != want {
+		t.Errorf("payload = %+v\nwant      %+v", got, want)
+	}
+}
+
+func TestEngineerIdle_AwayWarningAgainAfterTheEngineerWrites(t *testing.T) {
+	f := newIdleFixture(t)
+	pub := f.withWarningEmails()
+
+	f.at(90 * time.Second)
+	f.at(2 * time.Minute)
+	pub.wait(t, 1)
+
+	// The engineer replies from their phone, without the portal, then goes
+	// quiet again.
+	f.start = f.start.Add(3 * time.Minute)
+	f.chat.EngineerActiveAt = f.start
+	f.at(0)
+	f.at(2 * time.Minute)
+	pub.wait(t, 1)
+	if pub.count() != 2 {
+		t.Fatalf("published %d events, want a second warning for the new quiet spell", pub.count())
+	}
+}
+
+func TestEngineerIdle_NoAwayWarningWithTheTabOpen(t *testing.T) {
+	f := newIdleFixture(t)
+	pub := f.withWarningEmails()
+	defer f.openTab()()
+
+	f.at(4 * time.Minute)
+	f.at(6 * time.Minute)
+	if pub.count() != 0 {
+		t.Errorf("published %d events for an engineer with the portal open", pub.count())
+	}
 }

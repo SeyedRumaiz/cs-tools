@@ -206,7 +206,7 @@ Both optional — used only to back `GET /health/dependencies` today (see "Healt
 
 ### Live-chat email to an engineer whose tab is closed (optional)
 
-When a live chat is assigned to an engineer whose CSM portal tab has been closed for longer than `ENGINEER_TAB_CLOSED_GRACE_SECONDS`, this backend publishes `chat.assigned_while_away` to Event Hub and csm-notification-service emails the engineer. Off unless `CHAT_EVENT_HUB_TOPIC` is set.
+When a live chat is assigned to an engineer whose CSM portal tab has been closed for longer than `ENGINEER_TAB_CLOSED_GRACE_SECONDS`, this backend publishes `chat.assigned_while_away` to Event Hub and csm-notification-service emails the engineer. The same happens for a chat the engineer already accepted: when the customer is told the engineer seems to have stepped away (`ENGINEER_AWAY_WARN_SECONDS`), `chat.engineer_away_warning` emails the engineer with the time the chat will end, so they can come back first. Off unless `CHAT_EVENT_HUB_TOPIC` is set.
 
 | Variable | Description |
 |---|---|

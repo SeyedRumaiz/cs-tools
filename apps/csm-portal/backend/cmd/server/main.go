@@ -1462,7 +1462,7 @@ func loadChatEventPublisher() *chatevents.Publisher {
 		slog.Error("chat events: invalid configuration", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("chat events on: an engineer whose tab is closed is emailed about a new chat", "topic", topic)
+	slog.Info("chat events on: an engineer whose tab is closed is emailed about a new chat, and before an accepted chat is ended", "topic", topic)
 	return publisher
 }
 

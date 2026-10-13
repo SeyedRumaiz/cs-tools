@@ -32,6 +32,12 @@ import (
 // before moving on. When that happens this backend publishes
 // chat.assigned_while_away, and csm-notification-service emails the
 // engineer. The chat itself is routed exactly as before.
+//
+// The same goes for a chat the engineer already accepted: with the tab
+// closed they do not see that the customer was told they stepped away.
+// At that point this backend publishes chat.engineer_away_warning, and the
+// engineer is emailed while there is still time to reply before the chat
+// is ended.
 
 // awayEmailTimeout bounds one publish.
 const awayEmailTimeout = 10 * time.Second
@@ -202,5 +208,59 @@ func (h *ChatHandler) emailIfAway(ctx context.Context, engineerID string, ci rou
 			return
 		}
 		slog.Info("chat: engineer away, email requested", "caseId", ci.CaseID, "engineerId", engineerID)
+	}()
+}
+
+// emailAwayWarning publishes chat.engineer_away_warning for an accepted
+// chat whose engineer was just reported away to the customer. The idle
+// sweep calls it once per quiet spell; the claim below also covers a sweep
+// that forgot its notices. Best-effort and in the background, like
+// emailIfAway.
+func (h *ChatHandler) emailAwayWarning(ctx context.Context, chat routingclient.ActiveChat, now, endsAt time.Time) {
+	if h.awayPublisher == nil || h.awayPortalURL == "" || chat.AssigneeID == "" {
+		return
+	}
+	email := ""
+	if h.engineers != nil {
+		email = h.engineers.email(chat.AssigneeID)
+	}
+	if email == "" {
+		slog.WarnContext(ctx, "chat: engineer away but email unknown, not warning them", "caseId", chat.CaseID, "engineerId", chat.AssigneeID)
+		return
+	}
+	// A new quiet spell (the engineer wrote since) may be warned again.
+	key := "warning|" + chat.CaseID + "|" + chat.AssigneeID + "|" + chat.EngineerActiveAt.UTC().Format(time.RFC3339Nano)
+	if !h.awaySent.claim(key, now) {
+		return
+	}
+
+	pubCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), awayEmailTimeout)
+	go func() {
+		defer cancel()
+		payload := chatevents.EngineerAwayWarningPayload{
+			CaseID:        chat.CaseID,
+			EngineerEmail: email,
+			LastActiveAt:  chat.EngineerActiveAt.UTC().Format(time.RFC3339),
+			EndsAt:        endsAt.UTC().Format(time.RFC3339),
+			ChatLink:      h.awayPortalURL + "/chat",
+		}
+		// The customer, product and subject only make the email clearer; a
+		// failed lookup still sends it.
+		if ci, err := h.routing.GetCaseInfo(pubCtx, chat.CaseID); err == nil {
+			payload.CustomerName = ci.CustomerName
+			if payload.CustomerName == "" {
+				payload.CustomerName = ci.CustomerEmail
+			}
+			payload.Product = ci.TenantSlug
+			payload.Subject = ci.Subject
+		} else {
+			slog.WarnContext(pubCtx, "chat: case lookup for the away warning failed, sending without details", "caseId", chat.CaseID, "err", err)
+		}
+		if err := h.awayPublisher.Publish(pubCtx, chatevents.TypeEngineerAwayWarning, chat.CaseID, payload); err != nil {
+			h.awaySent.release(key)
+			slog.Error("chat: publishing away-warning email event failed", "caseId", chat.CaseID, "engineerId", chat.AssigneeID, "err", err)
+			return
+		}
+		slog.Info("chat: engineer away on an accepted chat, warning email requested", "caseId", chat.CaseID, "engineerId", chat.AssigneeID)
 	}()
 }
