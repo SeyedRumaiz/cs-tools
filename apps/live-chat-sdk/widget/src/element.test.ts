@@ -148,7 +148,9 @@ describe("<wso2-live-chat>", () => {
 
     fake.push({ type: "assigned", engineerEmail: "eng@example.com" });
     fake.push({ type: "assigned", engineerEmail: "eng@example.com" });
-    expect(q(".status").textContent).toBe("Connected with eng@example.com");
+    expect(q(".status").textContent).toBe("Connected with Eng");
+    expect(q(".status").title).toBe("eng@example.com");
+    expect(q(".avatar").dataset.initials).toBe("E");
     expect(el.shadowRoot!.querySelectorAll('.message[data-from="system"]')).toHaveLength(1);
 
     fake.push({ type: "message", content: "<img src=x onerror=alert(1)>", engineerEmail: "eng@example.com" });
@@ -218,7 +220,7 @@ describe("<wso2-live-chat>", () => {
 
     const notes = [...el.shadowRoot!.querySelectorAll('.message[data-from="system"]')].map((m) => m.textContent);
     expect(notes).toEqual([
-      "eng@example.com joined the chat.",
+      "Eng joined the chat.",
       "The engineer seems to have stepped away. You can keep waiting or end the chat.",
       "The engineer is back.",
       "The engineer is still looking into this.",
@@ -346,7 +348,7 @@ describe("<wso2-live-chat>", () => {
       expect(el.state).toMatchObject({ phase: "connected", caseId: "case-9", open: false });
       expect(fake.client.subscribe).toHaveBeenCalledWith("case-9", expect.any(Function));
       expect(fake.client.startChat).not.toHaveBeenCalled();
-      expect(q(".status").textContent).toBe("Connected with eng@example.com");
+      expect(q(".status").textContent).toBe("Connected with Eng");
       const texts = [...el.shadowRoot!.querySelectorAll(".message")].map((m) => m.textContent);
       expect(texts).toEqual(["It still fails", "Let me check.", "Your chat was restored."]);
       expect(resumed).toHaveBeenCalledOnce();
@@ -365,7 +367,7 @@ describe("<wso2-live-chat>", () => {
       });
       await settle();
       expect(el.state.phase).toBe("connected");
-      expect(q(".status").textContent).toBe("Connected with eng@example.com");
+      expect(q(".status").textContent).toBe("Connected with Eng");
     });
 
     it("shows a restored chat as ended if it ended during the reload", async () => {
@@ -405,7 +407,7 @@ describe("<wso2-live-chat>", () => {
       );
       await settle();
       fake.push({ type: "assigned", engineerEmail: "eng@example.com" });
-      expect(q(".status").textContent).toBe("Connected with eng@example.com");
+      expect(q(".status").textContent).toBe("Connected with Eng");
       const texts = [...el.shadowRoot!.querySelectorAll(".message")].map((m) => m.textContent);
       expect(texts).toEqual(["Your chat was restored."]);
     });
@@ -636,6 +638,111 @@ describe("<wso2-live-chat>", () => {
       await type("Hello");
       fake.answer({ type: "disconnected", message: "network" });
       expect(bubbles(el)).toEqual(["customer: Hello", "system: The connection was lost."]);
+    });
+  });
+
+  describe("interface details", () => {
+    const withAssistant = (f: ReturnType<typeof fakeClient>) => f.client.isAssistantAvailable.mockResolvedValue(true);
+
+    it("names the engineer from their email", async () => {
+      const { engineerDisplayName } = await import("./element.js");
+      expect(engineerDisplayName("jane.doe@example.com")).toBe("Jane Doe");
+      expect(engineerDisplayName("j_smith-lee@example.com")).toBe("J Smith Lee");
+      expect(engineerDisplayName("Support team")).toBe("Support team");
+    });
+
+    it("offers suggested questions before the first one, and asks the one clicked", async () => {
+      const config = { bridgeUrl: "https://b", tenant: "t", assistant: { suggestions: ["How do I deploy?", "Reset my key"] } };
+      const { el, fake, q } = mount(config, withAssistant);
+      await settle();
+      el.open();
+      const buttons = [...el.shadowRoot!.querySelectorAll<HTMLButtonElement>(".suggestion")];
+      expect(buttons.map((b) => b.textContent)).toEqual(["How do I deploy?", "Reset my key"]);
+      expect(q(".suggestions-title").textContent).toBe("Try asking");
+
+      buttons[1]!.click();
+      await flush();
+      expect(fake.client.askAssistant).toHaveBeenCalledWith(expect.any(String), "Reset my key");
+      expect(q(".suggestions")).toBeNull();
+    });
+
+    it("keeps the thinking text readable behind the animated dots", async () => {
+      const { el, q, type } = mount(undefined, withAssistant);
+      await settle();
+      el.open();
+      await type("Hello");
+      expect(q(".thinking .dots").getAttribute("aria-hidden")).toBe("true");
+      expect(q(".thinking").textContent).toBe("Thinking…");
+    });
+
+    it("stamps messages with the time, once per minute and sender", async () => {
+      vi.spyOn(Date, "now").mockReturnValue(new Date(2026, 0, 5, 14, 3).getTime());
+      const { el, fake, type } = mount();
+      el.open();
+      await type("first");
+      fake.push({ type: "assigned", engineerEmail: "eng@example.com" });
+      await type("second");
+      fake.push({ type: "message", content: "hi", engineerEmail: "eng@example.com" });
+      const rows = [...el.shadowRoot!.querySelectorAll<HTMLElement>(".row")];
+      expect(rows.map((r) => `${r.dataset.from}:${r.querySelector(".time") ? "time" : "-"}`)).toEqual([
+        "customer:time",
+        "customer:-",
+        "engineer:time",
+      ]);
+      expect(rows[0]!.querySelector("time")!.dateTime).toBe(new Date(2026, 0, 5, 14, 3).toISOString());
+    });
+
+    it("leaves timestamps out when turned off", async () => {
+      const { el, type } = mount({ bridgeUrl: "https://b", tenant: "t", features: { timestamps: false } });
+      el.open();
+      await type("first");
+      expect(el.shadowRoot!.querySelector(".time")).toBeNull();
+    });
+
+    it("animates only messages that are new since the last render", async () => {
+      const { el, fake, type } = mount();
+      el.open();
+      await type("first");
+      fake.push({ type: "assigned", engineerEmail: "eng@example.com" });
+      const rows = [...el.shadowRoot!.querySelectorAll(".row, .message[data-from='system']")];
+      expect(rows.map((r) => r.classList.contains("enter"))).toEqual([false, true]);
+      expect(el.dataset.animate).toBe("true");
+    });
+
+    it("counts engineer replies while the panel is closed, chimes, and clears on open", async () => {
+      const { el, fake, q, type } = mount();
+      const chime = vi.fn();
+      el.playChime = chime;
+      const unread = vi.fn();
+      el.addEventListener(LIVE_CHAT_EVENTS.unread, (e) => unread((e as CustomEvent).detail.count));
+      el.open();
+      await type("help");
+      fake.push({ type: "assigned", engineerEmail: "eng@example.com" });
+      expect(chime).not.toHaveBeenCalled();
+
+      el.close();
+      fake.push({ type: "message", content: "one", engineerEmail: "eng@example.com" });
+      fake.push({ type: "message", content: "two", engineerEmail: "eng@example.com" });
+      expect(chime).toHaveBeenCalledTimes(2);
+      expect(q(".badge").hidden).toBe(false);
+      expect(q(".badge").textContent).toBe("2");
+      expect(q(".launcher").getAttribute("aria-label")).toBe("Chat with Support (2 unread)");
+
+      el.open();
+      expect(q(".badge").hidden).toBe(true);
+      expect(unread.mock.calls.map((c) => c[0])).toEqual([1, 2, 0]);
+    });
+
+    it("shows no badge and plays no sound when both are turned off", async () => {
+      const { el, fake, q, type } = mount({ bridgeUrl: "https://b", tenant: "t", features: { unreadBadge: false, sound: false } });
+      const chime = vi.fn();
+      el.playChime = chime;
+      el.open();
+      await type("help");
+      el.close();
+      fake.push({ type: "message", content: "one", engineerEmail: "eng@example.com" });
+      expect(q(".badge").hidden).toBe(true);
+      expect(chime).not.toHaveBeenCalled();
     });
   });
 });

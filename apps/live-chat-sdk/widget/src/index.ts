@@ -14,16 +14,24 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import { defineLiveChatWidget } from "./element.js";
+import { defineLiveChatWidget, type LiveChatWidgetElement } from "./element.js";
+
+declare global {
+  interface HTMLElementTagNameMap {
+    "wso2-live-chat": LiveChatWidgetElement;
+  }
+}
 
 export {
   DEFAULT_ASSISTANT,
+  DEFAULT_FEATURES,
   DEFAULT_LAYOUT,
   DEFAULT_TEXTS,
   DEFAULT_THEME,
   LiveChatConfigError,
   resolveConfig,
   type LiveChatAssistant,
+  type LiveChatFeatures,
   type LiveChatLayout,
   type LiveChatPosition,
   type LiveChatTexts,
@@ -46,6 +54,7 @@ export {
   type LiveChatPhase,
   type LiveChatPriorMessage,
   type LiveChatTranscriptEntry,
+  type LiveChatUnreadDetail,
 } from "./element.js";
 
 // Importing the package registers <wso2-live-chat>.

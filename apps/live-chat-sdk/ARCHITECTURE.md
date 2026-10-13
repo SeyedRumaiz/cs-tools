@@ -68,7 +68,7 @@ button, a help menu) and how it looks, through `live-chat.config.json`
   token away from page scripts (the Asgardeo SDK in web-worker mode).
 
 It can listen for the widget's DOM events (`live-chat-started`, `-assigned`,
-`-resumed`, `-ended`, `-open`, `-close`, `-error`). It writes no chat UI.
+`-resumed`, `-ended`, `-open`, `-close`, `-error`, `-unread`). It writes no chat UI.
 
 ### `@wso2/live-chat-widget` — the panel
 

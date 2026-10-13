@@ -56,6 +56,15 @@ export type LiveChatEndReason = "customer" | "engineer" | "inactive" | "converte
 export interface LiveChatTranscriptEntry {
   from: "customer" | "assistant" | "engineer" | "system";
   text: string;
+  /** When the message was sent, in milliseconds since the epoch, when known. */
+  at?: number;
+}
+
+/** Detail of the `live-chat-unread` event. */
+export interface LiveChatUnreadDetail {
+  /** Engineer messages that arrived while the panel was closed; 0 once it is
+   * opened. */
+  count: number;
 }
 
 export interface LiveChatEndedDetail {
@@ -75,6 +84,7 @@ export const LIVE_CHAT_EVENTS = {
   assigned: "live-chat-assigned",
   ended: "live-chat-ended",
   error: "live-chat-error",
+  unread: "live-chat-unread",
 } as const;
 
 export type AccessTokenProvider = () => Promise<string> | string;
@@ -144,6 +154,54 @@ function fitPriorMessages(messages: LiveChatPriorMessage[]): LiveChatPriorMessag
   return kept;
 }
 
+/** "jane.doe@example.com" -> "Jane Doe"; anything that is not an email is
+ * shown as it is. */
+export function engineerDisplayName(engineer: string): string {
+  const at = engineer.indexOf("@");
+  if (at <= 0) return engineer;
+  const words = engineer.slice(0, at).split(/[._\-+]+/).filter(Boolean);
+  return words.length ? words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") : engineer;
+}
+
+function initials(name: string): string {
+  const letters = name.split(/\s+/).filter(Boolean).map((w) => w.charAt(0)).join("");
+  return (letters.slice(0, 2) || "?").toUpperCase();
+}
+
+function timeLabel(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+let chimeContext: AudioContext | null = null;
+
+// A soft two-note chime made with the Web Audio API, so no sound file is
+// shipped. Browsers allow it once the user has interacted with the page,
+// which a customer in a chat has.
+function playChime(): void {
+  try {
+    const Context = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Context) return;
+    chimeContext ??= new Context();
+    const ctx = chimeContext;
+    const now = ctx.currentTime;
+    [660, 880].forEach((frequency, i) => {
+      const start = now + i * 0.12;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.06, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.25);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + 0.26);
+    });
+  } catch {
+    // No audio available; the badge still shows.
+  }
+}
+
 const CHAT_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 
@@ -163,6 +221,9 @@ export class LiveChatWidgetElement extends HTMLElement {
 
   /** @internal Builds the SDK client; replaced in tests. */
   createClient: (config: LiveChatClientConfig) => LiveChatClient = createLiveChatClient;
+
+  /** @internal Plays the new-message chime; replaced in tests. */
+  playChime: () => void = playChime;
 
   private tokenProvider: AccessTokenProvider | null = null;
   private customTransport: LiveChatTransport | null = null;
@@ -190,10 +251,16 @@ export class LiveChatWidgetElement extends HTMLElement {
   private assistantStatus: string | null = null;
   private assistantFailures = 0;
 
+  /** Engineer messages that arrived while the panel was closed. */
+  private unread = 0;
+  /** Entries already drawn once, so only new messages animate in. */
+  private drawn = new WeakSet<LiveChatTranscriptEntry>();
+
   private readonly root: ShadowRoot;
   private readonly ui: {
     launcher: HTMLButtonElement;
     launcherLabel: HTMLSpanElement;
+    badge: HTMLSpanElement;
     panel: HTMLElement;
     title: HTMLHeadingElement;
     subtitle: HTMLParagraphElement;
@@ -217,7 +284,7 @@ export class LiveChatWidgetElement extends HTMLElement {
     this.root = this.attachShadow({ mode: "open" });
     this.root.innerHTML = `
       <style>${STYLES}</style>
-      <button class="launcher" part="launcher" type="button">${CHAT_ICON}<span></span></button>
+      <button class="launcher" part="launcher" type="button">${CHAT_ICON}<span class="launcher-label"></span><span class="badge" part="badge" aria-hidden="true" hidden></span></button>
       <section class="panel" part="panel" role="dialog" hidden>
         <header class="header" part="header">
           <div><h2 class="title"></h2><p class="subtitle"></p></div>
@@ -241,7 +308,8 @@ export class LiveChatWidgetElement extends HTMLElement {
     const q = <T extends Element>(selector: string): T => this.root.querySelector(selector) as T;
     this.ui = {
       launcher: q(".launcher"),
-      launcherLabel: q(".launcher span"),
+      launcherLabel: q(".launcher-label"),
+      badge: q(".badge"),
       panel: q(".panel"),
       title: q(".title"),
       subtitle: q(".subtitle"),
@@ -368,6 +436,10 @@ export class LiveChatWidgetElement extends HTMLElement {
       this.rememberOpen(true);
       this.emit(LIVE_CHAT_EVENTS.open, {});
     }
+    if (this.unread > 0) {
+      this.unread = 0;
+      this.emit(LIVE_CHAT_EVENTS.unread, { count: 0 } satisfies LiveChatUnreadDetail);
+    }
     this.render();
     this.ui.input.focus();
   }
@@ -427,6 +499,7 @@ export class LiveChatWidgetElement extends HTMLElement {
     }
     this.dataset.position = layout.position;
     this.dataset.launcher = String(layout.showLauncher);
+    this.dataset.animate = String(this.resolved.features.animations);
     this.restoreStarted = false;
     this.render();
     this.maybeRestore();
@@ -501,7 +574,7 @@ export class LiveChatWidgetElement extends HTMLElement {
       this.phase = "queued";
       this.priorMessages = [];
       if (showAsCustomer) {
-        this.transcript.push({ from: "customer", text: message });
+        this.add("customer", message);
         this.ui.input.value = "";
       }
       this.listen(result.caseId);
@@ -520,12 +593,12 @@ export class LiveChatWidgetElement extends HTMLElement {
     const client = this.getClient();
     if (!client || !this.caseId) return;
     this.ui.input.value = "";
-    this.transcript.push({ from: "customer", text });
+    this.add("customer", text);
     this.render();
     try {
       await client.sendMessage(this.caseId, { content: text });
     } catch {
-      this.transcript.push({ from: "system", text: this.texts().sendFailed });
+      this.add("system", this.texts().sendFailed);
       this.render();
     }
   }
@@ -558,33 +631,35 @@ export class LiveChatWidgetElement extends HTMLElement {
         }
         this.phase = "connected";
         this.engineer = engineer;
-        this.transcript.push({ from: "system", text: format(texts.engineerJoined, { engineer: this.engineerName() }) });
+        this.add("system", format(texts.engineerJoined, { engineer: this.engineerName() }));
+        this.notifyIncoming(false);
         this.emit(LIVE_CHAT_EVENTS.assigned, { caseId: this.caseId, engineerEmail: event.engineerEmail });
         break;
       }
       case "message":
         if (this.phase === "queued") this.phase = "connected";
-        this.transcript.push({ from: "engineer", text: event.content });
+        this.add("engineer", event.content);
+        this.notifyIncoming(true);
         break;
       case "disconnected": {
         const inactive = event.reason === "inactive";
-        this.transcript.push({ from: "system", text: inactive ? texts.endedInactive : texts.endedByEngineer });
+        this.add("system", inactive ? texts.endedInactive : texts.endedByEngineer);
         this.finish(inactive ? "inactive" : "engineer");
         return;
       }
       case "engineerStatus": {
         const text = { away: texts.engineerAway, back: texts.engineerBack, busy: texts.engineerBusy }[event.status];
         if (this.phase === "connected" && this.transcript.at(-1)?.text !== text) {
-          this.transcript.push({ from: "system", text });
+          this.add("system", text);
         }
         break;
       }
       case "converted":
-        this.transcript.push({ from: "system", text: format(texts.convertedToCase, { caseId: event.entityCaseId }) });
+        this.add("system", format(texts.convertedToCase, { caseId: event.entityCaseId }));
         this.finish("converted", event.entityCaseId);
         return;
       case "expired":
-        this.transcript.push({ from: "system", text: event.message || texts.expired });
+        this.add("system", event.message || texts.expired);
         this.finish("expired");
         return;
       case "error":
@@ -674,14 +749,14 @@ export class LiveChatWidgetElement extends HTMLElement {
     }
     if (this.caseId !== caseId || (this.phase !== "queued" && this.phase !== "connected")) return;
     if (!chat || chat.caseId !== caseId) {
-      this.transcript.push({ from: "system", text: this.texts().endedWhileAway });
+      this.add("system", this.texts().endedWhileAway);
       this.finish("unknown");
       return;
     }
     if (chat.status === "connected" && this.phase === "queued") {
       this.phase = "connected";
       this.engineer = chat.engineerEmail ?? this.engineer;
-      this.transcript.push({ from: "system", text: format(this.texts().engineerJoined, { engineer: this.engineerName() }) });
+      this.add("system", format(this.texts().engineerJoined, { engineer: this.engineerName() }));
       this.emit(LIVE_CHAT_EVENTS.assigned, { caseId, engineerEmail: chat.engineerEmail ?? "" });
       this.render();
     }
@@ -699,7 +774,7 @@ export class LiveChatWidgetElement extends HTMLElement {
       const entries = (from: number, to?: number): LiveChatTranscriptEntry[] =>
         history.slice(from, to).flatMap((m): LiveChatTranscriptEntry[] =>
           m.role === "customer" || m.role === "engineer" || (m.role === "assistant" && this.assistantMode())
-            ? [{ from: m.role, text: m.content }]
+            ? [{ from: m.role, text: m.content, ...(m.createdAt && !Number.isNaN(Date.parse(m.createdAt)) ? { at: Date.parse(m.createdAt) } : {}) }]
             : [],
         );
       if (!this.assistantMode() || aiEnd === 0) return entries(aiEnd);
@@ -741,8 +816,8 @@ export class LiveChatWidgetElement extends HTMLElement {
     }
     this.ui.input.value = "";
     this.error = null;
-    this.transcript.push({ from: "customer", text });
-    this.assistantPending = { from: "assistant", text: "" };
+    this.add("customer", text);
+    this.assistantPending = { from: "assistant", text: "", at: Date.now() };
     this.transcript.push(this.assistantPending);
     this.assistantStatus = this.texts().assistantThinking;
     this.render();
@@ -789,7 +864,7 @@ export class LiveChatWidgetElement extends HTMLElement {
     this.assistantPending = null;
     this.assistantStatus = null;
     this.assistantFailures++;
-    this.transcript.push({ from: "system", text });
+    this.add("system", text);
     this.persistAssistant();
     this.render();
   }
@@ -820,7 +895,7 @@ export class LiveChatWidgetElement extends HTMLElement {
       t.from === "customer" || t.from === "assistant" ? [{ role: t.from, content: t.text }] : [],
     );
     this.priorMessages = fitPriorMessages([...this.priorMessages, ...turns]);
-    this.transcript.push({ from: "system", text: this.texts().escalationNotice });
+    this.add("system", this.texts().escalationNotice);
     await this.start(this.texts().escalationMessage, false);
     this.persistAssistant();
   }
@@ -863,7 +938,8 @@ export class LiveChatWidgetElement extends HTMLElement {
             typeof t === "object" &&
             t !== null &&
             ["customer", "assistant", "engineer", "system"].includes((t as LiveChatTranscriptEntry).from) &&
-            typeof (t as LiveChatTranscriptEntry).text === "string",
+            typeof (t as LiveChatTranscriptEntry).text === "string" &&
+            ((t as LiveChatTranscriptEntry).at === undefined || typeof (t as LiveChatTranscriptEntry).at === "number"),
         );
       }
     } catch {
@@ -901,7 +977,7 @@ export class LiveChatWidgetElement extends HTMLElement {
   private finish(reason: LiveChatEndReason, entityCaseId?: string): void {
     this.stopListening();
     this.phase = "ended";
-    if (reason === "customer") this.transcript.push({ from: "system", text: this.texts().endedByCustomer });
+    if (reason === "customer") this.add("system", this.texts().endedByCustomer);
     this.error = null;
     this.persistAssistant();
     this.render();
@@ -922,13 +998,30 @@ export class LiveChatWidgetElement extends HTMLElement {
     this.error = null;
   }
 
+  private add(from: LiveChatTranscriptEntry["from"], text: string): void {
+    this.transcript.push({ from, text, at: Date.now() });
+  }
+
+  // An engineer joined or replied: count it while the panel is closed, and
+  // chime when the customer may not be looking.
+  private notifyIncoming(countsAsUnread: boolean): void {
+    const features = this.resolved?.features;
+    if (!features) return;
+    if (countsAsUnread && !this.isOpen && features.unreadBadge) {
+      this.unread++;
+      this.emit(LIVE_CHAT_EVENTS.unread, { count: this.unread } satisfies LiveChatUnreadDetail);
+    }
+    const hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+    if (features.sound && (!this.isOpen || hidden)) this.playChime();
+  }
+
   private showError(text: string, canReconnect: boolean): void {
     this.error = { text, canReconnect };
     this.render();
   }
 
   private engineerName(): string {
-    return this.engineer ?? "An engineer";
+    return this.engineer ? engineerDisplayName(this.engineer) : "An engineer";
   }
 
   private emit(name: string, detail: object): void {
@@ -942,7 +1035,12 @@ export class LiveChatWidgetElement extends HTMLElement {
 
     ui.launcher.hidden = !this.resolved || !showLauncher || this.isOpen;
     ui.launcherLabel.textContent = texts.launcherLabel;
-    ui.launcher.setAttribute("aria-label", texts.launcherLabel);
+    ui.launcher.setAttribute(
+      "aria-label",
+      this.unread > 0 ? `${texts.launcherLabel} (${format(texts.unreadLabel, { count: String(this.unread) })})` : texts.launcherLabel,
+    );
+    ui.badge.hidden = this.unread === 0;
+    ui.badge.textContent = this.unread > 9 ? "9+" : String(this.unread);
     ui.panel.hidden = !this.isOpen;
     ui.panel.setAttribute("aria-label", texts.title);
     ui.title.textContent = texts.title;
@@ -951,18 +1049,30 @@ export class LiveChatWidgetElement extends HTMLElement {
 
     const assistant = this.assistantMode() && (this.phase === "idle" || this.phase === "ended");
     ui.status.dataset.phase = assistant ? "assistant" : this.phase;
-    ui.status.textContent = assistant
-      ? texts.statusAssistant
-      : this.phase === "connected"
-        ? this.engineer
-          ? format(texts.statusConnected, { engineer: this.engineer })
-          : texts.statusConnectedAnonymous
+    if (!assistant && this.phase === "connected") {
+      // An initials avatar and the engineer's name; the full email is in
+      // the tooltip.
+      const name = this.engineer ? engineerDisplayName(this.engineer) : null;
+      const avatar = document.createElement("span");
+      avatar.className = "avatar";
+      avatar.setAttribute("aria-hidden", "true");
+      avatar.dataset.initials = name ? initials(name) : "";
+      const label = document.createElement("span");
+      label.textContent = name ? format(texts.statusConnected, { engineer: name }) : texts.statusConnectedAnonymous;
+      ui.status.replaceChildren(avatar, label);
+      ui.status.title = this.engineer ?? "";
+    } else {
+      ui.status.textContent = assistant
+        ? texts.statusAssistant
         : {
             idle: texts.statusIdle,
             starting: texts.statusStarting,
             queued: texts.statusQueued,
+            connected: texts.statusConnectedAnonymous,
             ended: texts.statusEnded,
           }[this.phase];
+      ui.status.removeAttribute("title");
+    }
 
     this.renderMessages();
 
@@ -995,11 +1105,18 @@ export class LiveChatWidgetElement extends HTMLElement {
       return p;
     };
     if (this.assistantMode()) {
-      if (this.transcript.length === 0) nodes.push(paragraph("intro", texts.assistantIntro));
+      if (this.transcript.length === 0) {
+        nodes.push(paragraph("intro", texts.assistantIntro));
+        const suggestions = this.resolved?.assistant.suggestions ?? [];
+        if (suggestions.length > 0 && this.assistantStatus === null) nodes.push(this.suggestionList(suggestions));
+      }
     } else if (this.phase === "idle" || (this.phase === "starting" && this.transcript.length === 0)) {
       nodes.push(paragraph("intro", texts.intro));
       if (this.priorMessages.length > 0) nodes.push(paragraph("notice", texts.contextNotice));
     }
+    const showTimes = this.resolved?.features.timestamps ?? false;
+    let lastTime = "";
+    let lastFrom = "";
     for (const entry of this.transcript) {
       if (entry === this.assistantPending && entry.text === "") continue;
       const div = document.createElement("div");
@@ -1008,11 +1125,69 @@ export class LiveChatWidgetElement extends HTMLElement {
       // Assistant answers are Markdown; everything else is plain text.
       if (entry.from === "assistant") div.append(renderMarkdown(entry.text));
       else div.textContent = entry.text;
-      nodes.push(div);
+      // Only messages that arrived since the last render slide in.
+      const isNew = !this.drawn.has(entry);
+      this.drawn.add(entry);
+      if (entry.from === "system") {
+        if (isNew) div.classList.add("enter");
+        nodes.push(div);
+        continue;
+      }
+      const row = document.createElement("div");
+      row.className = isNew ? "row enter" : "row";
+      row.dataset.from = entry.from;
+      row.append(div);
+      // A time under a message when the minute or the sender changes, so a
+      // run of quick messages is not stamped on every line.
+      if (showTimes && entry.at !== undefined) {
+        const label = timeLabel(entry.at);
+        if (label !== lastTime || entry.from !== lastFrom) {
+          const time = document.createElement("time");
+          time.className = "time";
+          time.dateTime = new Date(entry.at).toISOString();
+          time.textContent = label;
+          row.append(time);
+        }
+        lastTime = label;
+      }
+      lastFrom = entry.from;
+      nodes.push(row);
     }
-    if (this.assistantStatus) nodes.push(paragraph("thinking", this.assistantStatus));
+    if (this.assistantStatus) {
+      // Three animated dots, hidden from screen readers, before the text.
+      const thinking = paragraph("thinking", "");
+      const dots = document.createElement("span");
+      dots.className = "dots";
+      dots.setAttribute("aria-hidden", "true");
+      dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
+      const text = document.createElement("span");
+      text.textContent = this.assistantStatus;
+      thinking.append(dots, text);
+      nodes.push(thinking);
+    }
     this.ui.messages.replaceChildren(...nodes);
     this.ui.messages.scrollTop = this.ui.messages.scrollHeight;
+  }
+
+  private suggestionList(suggestions: string[]): HTMLElement {
+    const box = document.createElement("div");
+    box.className = "suggestions";
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", this.texts().suggestionsTitle);
+    const title = document.createElement("p");
+    title.className = "suggestions-title";
+    title.textContent = this.texts().suggestionsTitle;
+    box.append(title);
+    for (const text of suggestions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "suggestion";
+      button.setAttribute("part", "suggestion");
+      button.textContent = text;
+      button.addEventListener("click", () => void this.ask(text));
+      box.append(button);
+    }
+    return box;
   }
 
   private renderComposer(): void {

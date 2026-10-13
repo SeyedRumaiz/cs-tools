@@ -62,6 +62,24 @@ export interface LiveChatAssistant {
    * in a row. */
   offerEngineer: "always" | "after-errors";
   errorsBeforeEngineer: number;
+  /** Example questions shown as buttons before the first question, at most
+   * four. Clicking one asks it. */
+  suggestions: string[];
+}
+
+/** Optional touches, all on by default. */
+export interface LiveChatFeatures {
+  /** Shows the time under each message. */
+  timestamps: boolean;
+  /** Animates the panel opening, new messages and the assistant's thinking
+   * dots. Always off when the user's system asks for reduced motion. */
+  animations: boolean;
+  /** Counts engineer messages that arrive while the panel is closed, on the
+   * launcher and in the `live-chat-unread` event. */
+  unreadBadge: boolean;
+  /** Plays a short chime when the engineer joins or replies while the panel
+   * is closed or the page is in the background. */
+  sound: boolean;
 }
 
 /** Every string the widget shows. `{engineer}` and `{caseId}` are filled in
@@ -83,12 +101,12 @@ export interface LiveChatTexts {
   statusIdle: string;
   statusStarting: string;
   statusQueued: string;
-  /** `{engineer}` is the engineer's email. */
+  /** `{engineer}` is the engineer's name, taken from their email ("jane.doe@…" -> "Jane Doe"). */
   statusConnected: string;
   /** Used instead of statusConnected when the engineer's email is unknown. */
   statusConnectedAnonymous: string;
   statusEnded: string;
-  /** `{engineer}` is the engineer's email. */
+  /** `{engineer}` is the engineer's name, taken from their email ("jane.doe@…" -> "Jane Doe"). */
   engineerJoined: string;
   endedByCustomer: string;
   endedByEngineer: string;
@@ -130,6 +148,11 @@ export interface LiveChatTexts {
   escalationMessage: string;
   /** Marks where the assistant conversation ends in a restored chat. */
   assistantDivider: string;
+  /** Heading above the suggested questions. */
+  suggestionsTitle: string;
+  /** Read out with the launcher when there are unread messages; `{count}`
+   * is the number. */
+  unreadLabel: string;
 }
 
 /**
@@ -146,6 +169,7 @@ export interface LiveChatWidgetConfig {
   theme?: Partial<LiveChatTheme>;
   texts?: Partial<LiveChatTexts>;
   assistant?: Partial<LiveChatAssistant>;
+  features?: Partial<LiveChatFeatures>;
   /** Prefix for the conversation ids the widget mints. */
   conversationIdPrefix?: string;
 }
@@ -157,6 +181,7 @@ export interface ResolvedLiveChatConfig {
   theme: LiveChatTheme;
   texts: LiveChatTexts;
   assistant: LiveChatAssistant;
+  features: LiveChatFeatures;
   conversationIdPrefix: string;
 }
 
@@ -230,13 +255,26 @@ export const DEFAULT_TEXTS: LiveChatTexts = {
   escalationNotice: "Connecting you to a support engineer. They will see this conversation.",
   escalationMessage: "I'd like to talk to a support engineer.",
   assistantDivider: "Support engineer chat",
+  suggestionsTitle: "Try asking",
+  unreadLabel: "{count} unread",
 };
 
 export const DEFAULT_ASSISTANT: LiveChatAssistant = {
   enabled: true,
   offerEngineer: "always",
   errorsBeforeEngineer: 3,
+  suggestions: [],
 };
+
+export const DEFAULT_FEATURES: LiveChatFeatures = {
+  timestamps: true,
+  animations: true,
+  unreadBadge: true,
+  sound: true,
+};
+
+const MAX_SUGGESTIONS = 4;
+const MAX_SUGGESTION_LENGTH = 120;
 
 const DEFAULT_CONVERSATION_PREFIX = "live-chat-";
 
@@ -291,6 +329,13 @@ export function resolveConfig(input: unknown): ResolvedLiveChatConfig {
   if (!Number.isInteger(assistant.errorsBeforeEngineer) || assistant.errorsBeforeEngineer < 1) {
     assistant.errorsBeforeEngineer = DEFAULT_ASSISTANT.errorsBeforeEngineer;
   }
+  assistant.suggestions = Array.isArray(assistant.suggestions)
+    ? assistant.suggestions
+        .filter((q): q is string => typeof q === "string")
+        .map((q) => q.trim())
+        .filter((q) => q !== "" && q.length <= MAX_SUGGESTION_LENGTH)
+        .slice(0, MAX_SUGGESTIONS)
+    : [];
 
   return {
     bridgeUrl,
@@ -299,6 +344,7 @@ export function resolveConfig(input: unknown): ResolvedLiveChatConfig {
     theme: pick(DEFAULT_THEME, input.theme),
     texts: pick(DEFAULT_TEXTS, input.texts),
     assistant,
+    features: pick(DEFAULT_FEATURES, input.features),
     conversationIdPrefix:
       typeof input.conversationIdPrefix === "string" ? input.conversationIdPrefix : DEFAULT_CONVERSATION_PREFIX,
   };

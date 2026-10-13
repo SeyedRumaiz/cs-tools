@@ -15,7 +15,7 @@
 // under the License.
 
 import { describe, expect, it } from "vitest";
-import { DEFAULT_LAYOUT, DEFAULT_TEXTS, DEFAULT_THEME, format, LiveChatConfigError, resolveConfig } from "./config.js";
+import { DEFAULT_FEATURES, DEFAULT_LAYOUT, DEFAULT_TEXTS, DEFAULT_THEME, format, LiveChatConfigError, resolveConfig } from "./config.js";
 
 describe("resolveConfig", () => {
   it("fills every missing key with its default", () => {
@@ -56,6 +56,21 @@ describe("resolveConfig", () => {
     expect(c.layout.height).toBe(DEFAULT_LAYOUT.height);
     expect(c.theme.primaryColor).toBe(DEFAULT_THEME.primaryColor);
     expect(c.layout).not.toHaveProperty("unknown");
+  });
+
+  it("turns features on by default and lets a product switch each off", () => {
+    expect(resolveConfig({ bridgeUrl: "https://b", tenant: "t" }).features).toEqual(DEFAULT_FEATURES);
+    const c = resolveConfig({ bridgeUrl: "https://b", tenant: "t", features: { sound: false, animations: "no" } });
+    expect(c.features.sound).toBe(false);
+    expect(c.features.animations).toBe(true);
+    expect(c.features.timestamps).toBe(true);
+  });
+
+  it("keeps up to four non-empty suggested questions", () => {
+    const suggestions = [" How do I deploy? ", "", 7, "x".repeat(121), "B", "C", "D", "E"];
+    const c = resolveConfig({ bridgeUrl: "https://b", tenant: "t", assistant: { suggestions } });
+    expect(c.assistant.suggestions).toEqual(["How do I deploy?", "B", "C", "D"]);
+    expect(resolveConfig({ bridgeUrl: "https://b", tenant: "t", assistant: { suggestions: "B" } }).assistant.suggestions).toEqual([]);
   });
 
   it("requires bridgeUrl and tenant", () => {

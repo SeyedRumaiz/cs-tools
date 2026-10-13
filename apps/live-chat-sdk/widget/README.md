@@ -16,14 +16,14 @@ Not yet published to a registry. Build a package file and vendor it into your pr
 ```bash
 cd apps/live-chat-sdk/widget
 pnpm install && pnpm run build && pnpm pack
-# -> wso2-live-chat-widget-0.2.0.tgz
+# -> wso2-live-chat-widget-0.3.0.tgz
 ```
 
 Copy it to `<your-app>/vendor/` and add it to your `package.json`:
 
 ```json
 "dependencies": {
-  "@wso2/live-chat-widget": "file:./vendor/wso2-live-chat-widget-0.2.0.tgz"
+  "@wso2/live-chat-widget": "file:./vendor/wso2-live-chat-widget-0.3.0.tgz"
 }
 ```
 
@@ -95,6 +95,12 @@ Only `bridgeUrl` and `tenant` are required. Every other key is optional and fall
     "fontFamily": "Gilmer, Arial, sans-serif",
     "borderRadius": "8px"
   },
+  "assistant": {
+    "suggestions": ["How do I deploy my app?", "Why did my build fail?"]
+  },
+  "features": {
+    "sound": false
+  },
   "texts": {
     "title": "Chat with Support",
     "launcherLabel": "Ask an engineer"
@@ -140,12 +146,26 @@ When `console-chat-bridge` has an AI assistant configured for the product (Nover
 | `enabled` | `true` | Set `false` to offer only the engineer chat. |
 | `offerEngineer` | `"always"` | `"always"`, or `"after-errors"` to offer the engineer only once the assistant has failed `errorsBeforeEngineer` times in a row. |
 | `errorsBeforeEngineer` | `3` | See `offerEngineer`. |
+| `suggestions` | `[]` | Up to four example questions, shown as buttons under the intro until the first question is asked. Clicking one asks it. Each is at most 120 characters. |
 
 The assistant conversation is kept for the browser tab, so a reload continues it. Its answers are Markdown, rendered without ever parsing HTML.
 
+### `features`
+
+All on by default; set any to `false` to turn it off.
+
+| Key | What it does |
+|---|---|
+| `timestamps` | Shows the time under a message, once per minute and sender. |
+| `animations` | The panel slides in, new messages fade in, and the assistant shows bouncing dots while it thinks. Always off for visitors whose system asks for reduced motion. |
+| `unreadBadge` | While the panel is closed, counts engineer replies on the launcher and in the `live-chat-unread` event. |
+| `sound` | A short chime when the engineer joins or replies while the panel is closed or the tab is in the background. |
+
+When connected, the status line shows the engineer's initials and name, taken from their email (`jane.doe@example.com` shows as "Jane Doe"); the full email is in its tooltip.
+
 ### `texts`
 
-Every visible string can be replaced, for wording or translation: `title`, `subtitle`, `launcherLabel`, `intro`, `contextNotice`, `inputPlaceholder`, `startButton`, `sendButton`, `endButton`, `newChatButton`, `reconnectButton`, `closeLabel`, `statusIdle`, `statusStarting`, `statusQueued`, `statusConnected`, `statusEnded`, `engineerJoined`, `endedByCustomer`, `endedByEngineer`, `endedInactive`, `engineerAway`, `engineerBack`, `engineerBusy`, `convertedToCase`, `expired`, `connectionLost`, `startFailed`, `alreadyOpen`, `sendFailed`, `endFailed`, `notConfigured`, `statusConnectedAnonymous`, `chatResumed`, `alreadyOpenResumed`, `endedWhileAway`, and for the assistant `assistantIntro`, `statusAssistant`, `assistantThinking`, `assistantFailed`, `chatWithEngineerButton`, `escalationNotice`, `escalationMessage`, `assistantDivider`. `{engineer}` and `{caseId}` are filled in where they apply. See `DEFAULT_TEXTS` in `src/config.ts` for the defaults.
+Every visible string can be replaced, for wording or translation: `title`, `subtitle`, `launcherLabel`, `intro`, `contextNotice`, `inputPlaceholder`, `startButton`, `sendButton`, `endButton`, `newChatButton`, `reconnectButton`, `closeLabel`, `statusIdle`, `statusStarting`, `statusQueued`, `statusConnected`, `statusEnded`, `engineerJoined`, `endedByCustomer`, `endedByEngineer`, `endedInactive`, `engineerAway`, `engineerBack`, `engineerBusy`, `convertedToCase`, `expired`, `connectionLost`, `startFailed`, `alreadyOpen`, `sendFailed`, `endFailed`, `notConfigured`, `statusConnectedAnonymous`, `chatResumed`, `alreadyOpenResumed`, `endedWhileAway`, and for the assistant `assistantIntro`, `statusAssistant`, `assistantThinking`, `assistantFailed`, `chatWithEngineerButton`, `escalationNotice`, `escalationMessage`, `assistantDivider`, `suggestionsTitle`, and `unreadLabel` (`{count} unread`, read out on the launcher). `{engineer}`, `{caseId}` and `{count}` are filled in where they apply. See `DEFAULT_TEXTS` in `src/config.ts` for the defaults.
 
 ## Opening it from your own UI
 
@@ -181,6 +201,7 @@ The element dispatches DOM events that bubble out of the shadow root:
 | `live-chat-assigned` | `{ caseId, engineerEmail }` | An engineer accepted it. |
 | `live-chat-ended` | `{ caseId, reason, entityCaseId?, transcript }` | The chat ended. `reason` is `customer`, `engineer`, `inactive` (the engineer was away too long), `converted`, `expired`, or `unknown` when it ended while the page was not listening (for example during a reload). |
 | `live-chat-error` | `{ message }` | Starting failed or the connection dropped. |
+| `live-chat-unread` | `{ count }` | The number of engineer replies received while the panel was closed changed; `0` when it is opened. Useful for a badge on your own button when `showLauncher` is `false`. |
 
 For example, to return the customer to your AI assistant when the chat ends:
 
@@ -195,7 +216,7 @@ chat.addEventListener("live-chat-ended", () => {
 The config covers most needs. For more, the host page can:
 
 - override CSS variables on the element, for example `wso2-live-chat { --lc-primary: hotpink; }` (values set through `config.theme` take precedence);
-- style named parts with `::part()`: `launcher`, `panel`, `header`, `status`, `messages`, `error`, `composer`, `actions`.
+- style named parts with `::part()`: `launcher`, `panel`, `header`, `status`, `messages`, `error`, `composer`, `actions`, `badge`, `suggestion`.
 
 ## Behaviour notes
 

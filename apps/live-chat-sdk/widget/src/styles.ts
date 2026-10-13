@@ -82,6 +82,22 @@ export const STYLES = `
   cursor: pointer;
 }
 .launcher svg { width: 22px; height: 22px; }
+.badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 11px;
+  border: 2px solid var(--lc-background);
+  background: var(--lc-error);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
 
 .panel {
   display: flex;
@@ -126,7 +142,53 @@ export const STYLES = `
   color: var(--lc-muted);
   font-size: 0.9em;
 }
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 37px;
+}
 .status[data-phase="connected"] { color: var(--lc-text); font-weight: 600; }
+/* A dot before the status: blue for the assistant, amber while waiting. */
+.status[data-phase="assistant"]::before,
+.status[data-phase="queued"]::before,
+.status[data-phase="starting"]::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lc-primary);
+}
+.status[data-phase="queued"]::before,
+.status[data-phase="starting"]::before { background: #e0a100; }
+.avatar {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--lc-primary);
+  color: var(--lc-on-primary);
+  font-size: 11px;
+  font-weight: 700;
+}
+.avatar::before { content: attr(data-initials); }
+/* Green "connected" dot on the avatar. */
+.avatar::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #2e9d4f;
+  border: 2px solid var(--lc-background);
+}
 
 .messages {
   flex: 1;
@@ -183,6 +245,44 @@ export const STYLES = `
 .message[data-from="assistant"] pre code { background: none; padding: 0; }
 .message[data-from="assistant"] a { color: var(--lc-primary); }
 .thinking { margin: 0; color: var(--lc-muted); font-style: italic; font-size: 0.9em; }
+.row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 80%;
+  align-self: flex-start;
+}
+.row[data-from="customer"] { align-self: flex-end; align-items: flex-end; }
+.row .message { max-width: 100%; }
+.time { margin-top: 3px; padding: 0 4px; color: var(--lc-muted); font-size: 0.75em; }
+.thinking { display: flex; align-items: center; gap: 8px; }
+.dots { display: inline-flex; gap: 3px; }
+.dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--lc-muted);
+  opacity: 0.6;
+}
+.suggestions { display: flex; flex-wrap: wrap; gap: 8px; }
+.suggestions-title { flex-basis: 100%; margin: 4px 0 0; color: var(--lc-muted); font-size: 0.85em; }
+.suggestion {
+  padding: 7px 12px;
+  border: 1px solid var(--lc-border);
+  border-radius: 16px;
+  background: var(--lc-background);
+  color: var(--lc-text);
+  font: inherit;
+  font-size: 0.92em;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.suggestion:hover, .suggestion:focus-visible {
+  border-color: var(--lc-primary);
+  background: color-mix(in srgb, var(--lc-primary) 8%, var(--lc-background));
+}
+.suggestion:focus-visible { outline: 2px solid var(--lc-primary); outline-offset: 1px; }
 .message[data-from="system"] {
   align-self: center;
   max-width: 100%;
@@ -259,4 +359,39 @@ export const STYLES = `
   padding: 0 16px 12px;
 }
 .actions:empty { display: none; }
+
+/* Motion, for hosts with animations on and viewers who have not asked the
+   system to reduce it. */
+@media (prefers-reduced-motion: no-preference) {
+  :host([data-animate="true"]) .panel:not([hidden]) { animation: lc-panel-in 0.2s ease-out; }
+  :host([data-animate="true"]) .enter { animation: lc-message-in 0.22s ease-out; }
+  :host([data-animate="true"]) .badge:not([hidden]) { animation: lc-pop 0.25s ease-out; }
+  :host([data-animate="true"]) .dots i { animation: lc-bounce 1.2s infinite ease-in-out; }
+  :host([data-animate="true"]) .dots i:nth-child(2) { animation-delay: 0.15s; }
+  :host([data-animate="true"]) .dots i:nth-child(3) { animation-delay: 0.3s; }
+  :host([data-animate="true"]) .status[data-phase="queued"]::before { animation: lc-pulse 1.4s infinite ease-in-out; }
+  :host([data-animate="true"]) .launcher { transition: transform 0.15s; }
+  :host([data-animate="true"]) .launcher:hover { transform: translateY(-2px); }
+}
+@keyframes lc-panel-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes lc-message-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes lc-pop {
+  0% { transform: scale(0.4); }
+  70% { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+@keyframes lc-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+  40% { transform: translateY(-4px); opacity: 1; }
+}
+@keyframes lc-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 `;
