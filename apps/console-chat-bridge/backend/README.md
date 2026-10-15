@@ -72,13 +72,13 @@ variable in full.
 
 | Area | Variables | Required |
 |---|---|---|
-| Tenants | `TENANT_REGISTRY` (one row per product), `TENANT_<SLUG>_CLIENT_SECRET` for an introspection tenant, `BRIDGE_ROUTING_SOURCE` | Yes, for the `/v1` API |
+| Tenants | `TENANT_REGISTRY` (one row per product), `TENANT_<SLUG>_CLIENT_SECRET` for an introspection tenant, `TENANT_<SLUG>_SCIM_CLIENT_SECRET` for a tenant with SCIM in its row, `BRIDGE_ROUTING_SOURCE` | Yes, for the `/v1` API |
 | Outbound to csm-portal | `CSM_PORTAL_BASE_URL`, `CSM_PORTAL_TOKEN_URL`, `CSM_PORTAL_CLIENT_ID`, `CSM_PORTAL_CLIENT_SECRET`, `CSM_PORTAL_SCOPES` | Yes |
 | Inbound from csm-portal | `CSM_PORTAL_PUSH_CLIENT_ID` (the client allowed to call `POST /internal/chat-events`) | Yes |
 | AI assistant | `ASSISTANT_PROVIDER` (`novera`, `http`, `mock` or `off`), `TENANT_<SLUG>_ASSISTANT_PROVIDER` to override it for one product, `TENANT_<SLUG>_ASSISTANT_HTTP_URL`/`_HTTP_TOKEN` for an `http` provider, `ASSISTANT_DISABLED_TENANTS` | No; see [`docs/ASSISTANT_PROVIDERS.md`](docs/ASSISTANT_PROVIDERS.md) |
 | Novera | `NOVERA_WS_BASE_URL`, `NOVERA_TOKEN_URL`, `NOVERA_CLIENT_ID`, `NOVERA_CLIENT_SECRET`, `NOVERA_SCOPES` | Only for the `novera` provider |
-| Legacy single-tenant path | `KNOWN_ISSUER_BASE_URL`, `INTROSPECTION_CLIENT_ID`, `INTROSPECTION_CLIENT_SECRET`, `INTROSPECTION_INSECURE_SKIP_VERIFY`, `CORS_ALLOWED_ORIGINS` | Only for `/support/chats` |
-| User ID lookup via SCIM | `SCIM_BASE_URL`, `SCIM_TOKEN_URL`, `SCIM_CLIENT_ID`, `SCIM_CLIENT_SECRET`, `SCIM_SCOPES` | No; only for tokens that carry no usable `sub` |
+| Legacy single-tenant path | `KNOWN_ISSUER_BASE_URL`, `INTROSPECTION_CLIENT_ID`, `INTROSPECTION_CLIENT_SECRET`, `INTROSPECTION_INSECURE_SKIP_VERIFY`, `CORS_ALLOWED_ORIGINS` | Yes: the bridge does not start without the first three and `CORS_ALLOWED_ORIGINS`, even when every product is a `TENANT_REGISTRY` row. They configure `/support/chats` |
+| User ID lookup via SCIM, legacy path | `SCIM_BASE_URL`, `SCIM_TOKEN_URL`, `SCIM_CLIENT_ID`, `SCIM_CLIENT_SECRET`, `SCIM_SCOPES` | No; only for `/support/chats`. A `TENANT_REGISTRY` tenant sets SCIM in its own row (fields 14–17) |
 | Server | `PORT` | No, defaults to `8090` |
 
 The bridge reads its configuration once at startup and refuses to start on
@@ -111,8 +111,11 @@ notifier" in `docs/TENANT_ONBOARDING.md`.
 2. If the product's tokens are bound to the browser (WSO2 IS's built-in
    Console app is), the bridge cannot read the user from UserInfo. In that
    case register a second client-credentials application with only the
-   `internal_user_mgt_list` scope on the tenant's "SCIM2 Users API", and set
-   the `SCIM_*` variables. `docs/TENANT_ONBOARDING.md` has the details.
+   `internal_user_mgt_list` scope on the tenant's "SCIM2 Users API". Give
+   the tenant row all 17 fields: field 13 blank, then the SCIM client ID,
+   SCIM base URL, token URL and `internal_user_mgt_list`. Its secret goes
+   in `TENANT_<SLUG>_SCIM_CLIENT_SECRET`. `docs/TENANT_ONBOARDING.md` has
+   the details.
 
 A JWKS tenant (signed JWTs, e.g. Devant through Choreo's STS) needs no
 setup in its identity provider: the bridge only reads its public keys.

@@ -11,10 +11,12 @@ It talks to `console-chat-bridge`'s `/v1/{tenant}/...` API. Your product needs a
 
 ## Install
 
-Not yet published to a registry. Build a package file and vendor it into your product:
+Not yet published to a registry. Build a package file and vendor it into your product. The widget is built on `sdk-ts`, so build that first:
 
 ```bash
-cd apps/live-chat-sdk/widget
+cd apps/live-chat-sdk/sdk-ts
+pnpm install && pnpm run build
+cd ../widget
 pnpm install && pnpm run build && pnpm pack
 # -> wso2-live-chat-widget-0.3.0.tgz
 ```
