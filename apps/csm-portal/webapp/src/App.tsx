@@ -26,6 +26,7 @@ import {
 } from "react-router";
 import AuthGuard from "@layouts/AuthGuard";
 import { plgRoutes } from "@features/plg/PlgRoutes";
+import { wso2CloudRoutes } from "@features/csm-wso2-cloud/Wso2CloudRoutes";
 import {
   LegacyQueryTabRedirect,
   SectionIndexRedirect,
@@ -312,6 +313,10 @@ export default function App(): JSX.Element {
                       csm-portal's routing the merge touches.
                       */}
                   {plgRoutes()}
+
+                  {/* WSO2 Cloud organisation and user management. Pages and
+                      nav section live under features/csm-wso2-cloud. */}
+                  {wso2CloudRoutes()}
 
                   {/* Customers — Accounts + Projects under one tabbed section.
                       BFF-backed pages (entity-service search + by-id endpoints).

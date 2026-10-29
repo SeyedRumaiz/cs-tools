@@ -82,6 +82,7 @@ describe("top-level nav order", () => {
       "customers",
       "kb-articles",
       "plg",
+      "wso2-cloud",
       "updates",
       "time-cards",
       "team-schedule",

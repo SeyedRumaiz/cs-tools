@@ -57,6 +57,7 @@ import type { PortalAccess } from "@context/current-user/portalAccess";
  * visibility state.
  */
 import { PLG_NAV_SECTION } from "@features/plg/config/plgNavItems";
+import { WSO2_CLOUD_NAV_SECTION } from "@features/csm-wso2-cloud/config/wso2CloudNavItems";
 
 export interface CsmNavNode {
   /**
@@ -310,6 +311,10 @@ export const CSM_NAV_ITEMS: CsmNavSection[] = [
   // touch this file. Hide the whole section with
   // CSM_PORTAL_FEATURE_OVERRIDES: { "plg": "hidden" }.
   PLG_NAV_SECTION,
+  // WSO2 Cloud organisation and user management (replacing the Ops portal).
+  // Declared in features/csm-wso2-cloud/config/wso2CloudNavItems; hide it
+  // with CSM_PORTAL_FEATURE_OVERRIDES: { "wso2-cloud": "hidden" }.
+  WSO2_CLOUD_NAV_SECTION,
   {
     id: "updates",
     label: "Updates",
