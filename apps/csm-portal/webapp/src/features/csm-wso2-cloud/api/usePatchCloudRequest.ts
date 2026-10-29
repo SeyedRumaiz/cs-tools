@@ -25,12 +25,16 @@ interface ResolveInput {
   status: "approved" | "rejected";
 }
 
-/** Approves or rejects a pending request. */
+/**
+ * Approves or rejects a pending request. An approval changes the organisation
+ * or user it targets, so every cached WSO2 Cloud query is refreshed, not only
+ * the request lists.
+ */
 export function usePatchCloudRequest() {
   const queryClient = useQueryClient();
   const email = useIdTokenClaims()?.email ?? "you";
   return useMutation<CloudRequest | null, Error, ResolveInput>({
     mutationFn: ({ id, status }) => resolveRequest(id, status, email),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY, "requests"] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY] }),
   });
 }

@@ -23,8 +23,9 @@
  * functions below, so swapping in the real backend means changing the hooks'
  * `queryFn`/`mutationFn` and deleting this file, not touching the pages.
  *
- * Everything here is made up. Requests created while the page is open live
- * only in this module and are gone on reload.
+ * Everything here is made up. Requests created while the page is open, and
+ * the changes approving them makes, live only in this module and are gone on
+ * reload.
  */
 import type {
   CloudOrganization,
@@ -246,6 +247,58 @@ export function resolveRequest(
     resolved = { ...r, status, resolvedBy, resolvedOn: new Date().toISOString() };
     return resolved;
   });
+  if (resolved && status === "approved") applyApproved(resolved);
   return delay(resolved);
 }
 
+/**
+ * Carries out an approved request, standing in for the call the backend will
+ * make to WSO2 Cloud once the real API is wired in. Records are replaced, not
+ * mutated, so a cached copy is never changed under a page that holds it.
+ */
+function applyApproved(request: CloudRequest): void {
+  const now = new Date().toISOString();
+  const { id } = request.target;
+
+  if (request.target.kind === "organization") {
+    const index = ORGANIZATIONS.findIndex((o) => o.id === id);
+    if (index < 0) return;
+    if (request.type === "upgrade_organization") {
+      const org = ORGANIZATIONS[index];
+      ORGANIZATIONS[index] = {
+        ...org,
+        tier: request.tier ?? org.tier,
+        limits: request.limits ?? org.limits,
+      };
+    } else if (request.type === "delete_organization") {
+      ORGANIZATIONS.splice(index, 1);
+      USERS.forEach((u, i) => {
+        if (u.organizations.some((o) => o.id === id)) {
+          USERS[i] = { ...u, organizations: u.organizations.filter((o) => o.id !== id) };
+        }
+      });
+    }
+    return;
+  }
+
+  const index = USERS.findIndex((u) => u.id === id);
+  if (index < 0) return;
+  const user = USERS[index];
+  switch (request.type) {
+    case "lock_user":
+      USERS[index] = { ...user, locked: true, lockedReason: "Locked by WSO2 support", lastModifiedOn: now };
+      break;
+    case "unlock_user":
+      USERS[index] = { ...user, locked: false, lockedReason: undefined, failedLoginAttempts: 0, lastModifiedOn: now };
+      break;
+    case "disable_user":
+      USERS[index] = { ...user, disabled: true, lastModifiedOn: now };
+      break;
+    case "enable_user":
+      USERS[index] = { ...user, disabled: false, lastModifiedOn: now };
+      break;
+    case "delete_user":
+      USERS.splice(index, 1);
+      break;
+  }
+}
