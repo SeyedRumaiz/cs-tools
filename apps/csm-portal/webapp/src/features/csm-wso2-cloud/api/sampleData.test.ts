@@ -39,6 +39,27 @@ describe("resolving a request in the sample data", () => {
     expect((await api.getUser("u-1001"))?.locked).toBe(true);
   });
 
+  it("keeps the reason a request was rejected", async () => {
+    const api = await load();
+    const request = await api.createRequest(
+      {
+        type: "delete_user",
+        target: { kind: "user", id: "u-1003", label: "alex.lee@example.org" },
+        summary: "Delete alex.lee@example.org",
+      },
+      "engineer@example.com",
+    );
+
+    const rejected = await api.resolveRequest(
+      request.id,
+      "rejected",
+      "approver@example.com",
+      "  The customer still uses this account.  ",
+    );
+    expect(rejected?.remark).toBe("The customer still uses this account.");
+    expect(await api.getUser("u-1003")).not.toBeNull();
+  });
+
   it("leaves the user as is when the request is rejected", async () => {
     const api = await load();
     const request = await api.createRequest(

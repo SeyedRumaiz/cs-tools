@@ -37,6 +37,7 @@ import { useIdTokenClaims } from "@hooks/useIdTokenClaims";
 import { useGetCloudRequests } from "@features/csm-wso2-cloud/api/useGetCloudRequests";
 import { usePatchCloudRequest } from "@features/csm-wso2-cloud/api/usePatchCloudRequest";
 import CancelRequestDialog from "@features/csm-wso2-cloud/components/CancelRequestDialog";
+import RejectRequestDialog from "@features/csm-wso2-cloud/components/RejectRequestDialog";
 import {
   RequestStatusChip,
   SampleDataNotice,
@@ -74,6 +75,7 @@ export default function CloudRequestsPage(): JSX.Element {
   const { data, isLoading, isError, error } = useGetCloudRequests();
   const resolve = usePatchCloudRequest();
   const [cancelling, setCancelling] = useState<CloudRequest | null>(null);
+  const [rejecting, setRejecting] = useState<CloudRequest | null>(null);
 
   const all = data ?? [];
   const rows = all.filter((r) =>
@@ -151,7 +153,8 @@ export default function CloudRequestsPage(): JSX.Element {
                     request={r}
                     tab={tab}
                     busy={resolve.isPending}
-                    onResolve={(status) => resolve.mutate({ id: r.id, status })}
+                    onApprove={() => resolve.mutate({ id: r.id, status: "approved" })}
+                    onReject={() => setRejecting(r)}
                     onCancel={() => setCancelling(r)}
                   />
                 ))
@@ -162,6 +165,7 @@ export default function CloudRequestsPage(): JSX.Element {
       </Box>
 
       <CancelRequestDialog request={cancelling} onClose={() => setCancelling(null)} />
+      <RejectRequestDialog request={rejecting} onClose={() => setRejecting(null)} />
     </Box>
   );
 }
@@ -170,13 +174,15 @@ function RequestRow({
   request: r,
   tab,
   busy,
-  onResolve,
+  onApprove,
+  onReject,
   onCancel,
 }: {
   request: CloudRequest;
   tab: RequestsTab;
   busy: boolean;
-  onResolve: (status: "approved" | "rejected") => void;
+  onApprove: () => void;
+  onReject: () => void;
   onCancel: () => void;
 }): JSX.Element {
   const location = useLocation();
@@ -212,8 +218,19 @@ function RequestRow({
         </Typography>
       </TableCell>
       <TableCell>{formatDateTime(r.requestedOn)}</TableCell>
-      <TableCell>
+      <TableCell sx={{ maxWidth: 260 }}>
         <RequestStatusChip status={r.status} />
+        {r.remark && (
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            noWrap
+            title={r.remark}
+            sx={{ display: "block", mt: 0.5 }}
+          >
+            {r.remark}
+          </Typography>
+        )}
       </TableCell>
       {tab === "resolved" && (
         <TableCell sx={{ maxWidth: 220 }}>
@@ -227,10 +244,10 @@ function RequestRow({
       )}
       {tab === "pending" && (
         <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
-          <Button size="small" color="success" disabled={busy} onClick={() => onResolve("approved")}>
+          <Button size="small" color="success" disabled={busy} onClick={onApprove}>
             Approve
           </Button>
-          <Button size="small" color="error" disabled={busy} onClick={() => onResolve("rejected")}>
+          <Button size="small" color="error" disabled={busy} onClick={onReject}>
             Reject
           </Button>
         </TableCell>

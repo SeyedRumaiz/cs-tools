@@ -132,6 +132,8 @@ export interface CloudRequest {
   status: CloudRequestStatus;
   resolvedBy?: string;
   resolvedOn?: string;
+  /** Why it was rejected. The Ops portal keeps one remark per decision. */
+  remark?: string;
 }
 
 export interface NewCloudRequest {

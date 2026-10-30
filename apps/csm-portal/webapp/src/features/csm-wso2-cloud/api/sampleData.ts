@@ -168,6 +168,7 @@ let requests: CloudRequest[] = [
     status: "rejected",
     resolvedBy: "pat.morgan@example.com",
     resolvedOn: "2026-10-21T08:00:00Z",
+    remark: "The lock clears on its own after the lockout period.",
   },
   {
     id: "REQ-0001",
@@ -283,11 +284,18 @@ export function resolveRequest(
   id: string,
   status: Exclude<CloudRequestStatus, "pending">,
   resolvedBy: string,
+  remark?: string,
 ): Promise<CloudRequest | null> {
   let resolved: CloudRequest | null = null;
   requests = requests.map((r) => {
     if (r.id !== id || r.status !== "pending") return r;
-    resolved = { ...r, status, resolvedBy, resolvedOn: new Date().toISOString() };
+    resolved = {
+      ...r,
+      status,
+      resolvedBy,
+      resolvedOn: new Date().toISOString(),
+      remark: remark?.trim() || undefined,
+    };
     return resolved;
   });
   if (resolved && status === "approved") applyApproved(resolved);

@@ -23,6 +23,8 @@ import type { CloudRequest } from "@features/csm-wso2-cloud/types/wso2Cloud";
 interface ResolveInput {
   id: string;
   status: "approved" | "rejected";
+  /** Why, when rejecting. */
+  remark?: string;
 }
 
 /**
@@ -34,7 +36,7 @@ export function usePatchCloudRequest() {
   const queryClient = useQueryClient();
   const email = useIdTokenClaims()?.email ?? "you";
   return useMutation<CloudRequest | null, Error, ResolveInput>({
-    mutationFn: ({ id, status }) => resolveRequest(id, status, email),
+    mutationFn: ({ id, status, remark }) => resolveRequest(id, status, email, remark),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY] }),
   });
 }

@@ -16,7 +16,7 @@
 
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 import { createRequest } from "@features/csm-wso2-cloud/api/sampleData";
@@ -60,5 +60,39 @@ describe("CloudRequestsPage", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel request" }));
 
     expect(await screen.findByText("You have not raised any requests.")).toBeInTheDocument();
+  });
+
+  it("asks for a reason before rejecting, and shows it with the decision", async () => {
+    const request = await createRequest(
+      {
+        type: "lock_user",
+        target: { kind: "user", id: "u-1001", label: "jane.doe@example.com" },
+        summary: "Lock jane.doe@example.com",
+      },
+      "someone@example.com",
+    );
+    renderPage("pending");
+
+    const row = (await screen.findByText(request.id)).closest("tr");
+    if (!row) throw new Error("request row not rendered");
+    fireEvent.click(within(row).getByRole("button", { name: "Reject" }));
+
+    const dialog = await screen.findByRole("dialog");
+    const confirm = within(dialog).getByRole("button", { name: "Reject request" });
+    expect(confirm).toBeDisabled();
+
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Reason/ }), {
+      target: { value: "Raised for the wrong account." },
+    });
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.queryByText(request.id)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+
+    const resolved = (await screen.findByText(request.id)).closest("tr");
+    if (!resolved) throw new Error("resolved row not rendered");
+    expect(within(resolved).getByText("Rejected")).toBeInTheDocument();
+    expect(within(resolved).getByText("Raised for the wrong account.")).toBeInTheDocument();
   });
 });
