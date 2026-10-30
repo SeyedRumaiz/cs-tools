@@ -30,12 +30,13 @@ import {
   Tabs,
   Typography,
 } from "@wso2/oxygen-ui";
-import type { JSX } from "react";
+import { useState, type JSX } from "react";
 import { Link as RouterLink, useLocation, useSearchParams } from "react-router";
 import QueryErrorState from "@components/QueryErrorState";
 import { useIdTokenClaims } from "@hooks/useIdTokenClaims";
 import { useGetCloudRequests } from "@features/csm-wso2-cloud/api/useGetCloudRequests";
 import { usePatchCloudRequest } from "@features/csm-wso2-cloud/api/usePatchCloudRequest";
+import CancelRequestDialog from "@features/csm-wso2-cloud/components/CancelRequestDialog";
 import {
   RequestStatusChip,
   SampleDataNotice,
@@ -72,6 +73,7 @@ export default function CloudRequestsPage(): JSX.Element {
   const me = useIdTokenClaims()?.email ?? "you";
   const { data, isLoading, isError, error } = useGetCloudRequests();
   const resolve = usePatchCloudRequest();
+  const [cancelling, setCancelling] = useState<CloudRequest | null>(null);
 
   const all = data ?? [];
   const rows = all.filter((r) =>
@@ -86,7 +88,7 @@ export default function CloudRequestsPage(): JSX.Element {
     "Requested",
     "Status",
     ...(tab === "resolved" ? ["Resolved by"] : []),
-    ...(tab === "pending" ? [""] : []),
+    ...(tab === "resolved" ? [] : [""]),
   ];
 
   return (
@@ -150,6 +152,7 @@ export default function CloudRequestsPage(): JSX.Element {
                     tab={tab}
                     busy={resolve.isPending}
                     onResolve={(status) => resolve.mutate({ id: r.id, status })}
+                    onCancel={() => setCancelling(r)}
                   />
                 ))
               )}
@@ -157,6 +160,8 @@ export default function CloudRequestsPage(): JSX.Element {
           </Table>
         </TableContainer>
       </Box>
+
+      <CancelRequestDialog request={cancelling} onClose={() => setCancelling(null)} />
     </Box>
   );
 }
@@ -166,11 +171,13 @@ function RequestRow({
   tab,
   busy,
   onResolve,
+  onCancel,
 }: {
   request: CloudRequest;
   tab: RequestsTab;
   busy: boolean;
   onResolve: (status: "approved" | "rejected") => void;
+  onCancel: () => void;
 }): JSX.Element {
   const location = useLocation();
   const targetPath =
@@ -226,6 +233,15 @@ function RequestRow({
           <Button size="small" color="error" disabled={busy} onClick={() => onResolve("rejected")}>
             Reject
           </Button>
+        </TableCell>
+      )}
+      {tab === "mine" && (
+        <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
+          {r.status === "pending" && (
+            <Button size="small" color="error" onClick={onCancel}>
+              Cancel
+            </Button>
+          )}
         </TableCell>
       )}
     </TableRow>

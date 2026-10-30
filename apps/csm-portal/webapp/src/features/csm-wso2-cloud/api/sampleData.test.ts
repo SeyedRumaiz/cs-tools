@@ -75,3 +75,47 @@ describe("resolving a request in the sample data", () => {
     expect(upgraded?.limits).toEqual(limits);
   });
 });
+
+describe("cancelling a request in the sample data", () => {
+  const lock = {
+    type: "lock_user" as const,
+    target: { kind: "user" as const, id: "u-1001", label: "jane.doe@example.com" },
+    summary: "Lock jane.doe@example.com",
+  };
+
+  it("removes a pending request its requester cancels", async () => {
+    const api = await load();
+    const request = await api.createRequest(lock, "engineer@example.com");
+
+    await api.cancelRequest(request.id, "engineer@example.com");
+    expect((await api.listRequests()).some((r) => r.id === request.id)).toBe(false);
+  });
+
+  it("refuses anyone but the requester", async () => {
+    const api = await load();
+    const request = await api.createRequest(lock, "engineer@example.com");
+
+    await expect(api.cancelRequest(request.id, "someone@example.com")).rejects.toThrow(
+      "Only the person who raised a request can cancel it.",
+    );
+  });
+
+  it("refuses a request that has already been decided", async () => {
+    const api = await load();
+    const request = await api.createRequest(lock, "engineer@example.com");
+    await api.resolveRequest(request.id, "approved", "approver@example.com");
+
+    await expect(api.cancelRequest(request.id, "engineer@example.com")).rejects.toThrow(
+      "has already been approved",
+    );
+  });
+
+  it("never hands a cancelled request's number to a new one", async () => {
+    const api = await load();
+    const first = await api.createRequest(lock, "engineer@example.com");
+    await api.cancelRequest(first.id, "engineer@example.com");
+    const second = await api.createRequest(lock, "engineer@example.com");
+
+    expect(second.id).not.toBe(first.id);
+  });
+});

@@ -224,16 +224,39 @@ export function listRequests(): Promise<CloudRequest[]> {
   return delay([...requests]);
 }
 
+// Counted, not derived from the list's length: a cancelled request leaves the
+// list, and its number must not be handed out again.
+let lastRequestNumber = requests.length;
+
 export function createRequest(input: NewCloudRequest, requestedBy: string): Promise<CloudRequest> {
+  lastRequestNumber += 1;
   const created: CloudRequest = {
     ...input,
-    id: `REQ-${String(requests.length + 1).padStart(4, "0")}`,
+    id: `REQ-${String(lastRequestNumber).padStart(4, "0")}`,
     requestedBy,
     requestedOn: new Date().toISOString(),
     status: "pending",
   };
   requests = [created, ...requests];
   return delay(created);
+}
+
+/**
+ * Withdraws a request before anyone has decided it. As in the Ops portal, only
+ * the person who raised it can, only while it is pending, and the request is
+ * removed rather than kept with a status of its own.
+ */
+export function cancelRequest(id: string, cancelledBy: string): Promise<void> {
+  const request = requests.find((r) => r.id === id);
+  if (!request) return Promise.reject(new Error(`${id} no longer exists.`));
+  if (request.requestedBy !== cancelledBy) {
+    return Promise.reject(new Error("Only the person who raised a request can cancel it."));
+  }
+  if (request.status !== "pending") {
+    return Promise.reject(new Error(`${id} has already been ${request.status}.`));
+  }
+  requests = requests.filter((r) => r.id !== id);
+  return delay(undefined);
 }
 
 export function resolveRequest(
