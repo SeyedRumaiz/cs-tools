@@ -56,7 +56,7 @@ describe("resolving a request in the sample data", () => {
 
   it("applies the tier and limits of an approved upgrade", async () => {
     const api = await load();
-    const [org] = await api.searchOrganizations("initech");
+    const [org] = await api.searchOrganizations("acme");
     const limits = { ...org.limits, monthlyActiveUsers: 50000 };
     const request = await api.createRequest(
       {
@@ -117,5 +117,43 @@ describe("cancelling a request in the sample data", () => {
     const second = await api.createRequest(lock, "engineer@example.com");
 
     expect(second.id).not.toBe(first.id);
+  });
+});
+
+describe("raising a request in the sample data", () => {
+  const disable = {
+    type: "disable_user" as const,
+    target: { kind: "user" as const, id: "u-1003", label: "alex.lee@example.org" },
+    summary: "Disable alex.lee@example.org",
+  };
+
+  it("refuses a second pending request of the same type for the same target", async () => {
+    const api = await load();
+    const first = await api.createRequest(disable, "engineer@example.com");
+
+    await expect(api.createRequest(disable, "someone@example.com")).rejects.toThrow(
+      `alex.lee@example.org already has a pending disable user request (${first.id})`,
+    );
+  });
+
+  it("allows a different type for the same target", async () => {
+    const api = await load();
+    await api.createRequest(disable, "engineer@example.com");
+
+    await expect(
+      api.createRequest({ ...disable, type: "lock_user", summary: "Lock alex.lee@example.org" }, "engineer@example.com"),
+    ).resolves.toMatchObject({ status: "pending" });
+  });
+
+  it("allows it again once the first is decided or cancelled", async () => {
+    const api = await load();
+    const first = await api.createRequest(disable, "engineer@example.com");
+    await api.resolveRequest(first.id, "rejected", "approver@example.com");
+    const second = await api.createRequest(disable, "engineer@example.com");
+    await api.cancelRequest(second.id, "engineer@example.com");
+
+    await expect(api.createRequest(disable, "engineer@example.com")).resolves.toMatchObject({
+      status: "pending",
+    });
   });
 });

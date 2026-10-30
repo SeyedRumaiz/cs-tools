@@ -27,12 +27,13 @@
  * the changes approving them makes, live only in this module and are gone on
  * reload.
  */
-import type {
-  CloudOrganization,
-  CloudRequest,
-  CloudRequestStatus,
-  CloudUser,
-  NewCloudRequest,
+import {
+  CLOUD_REQUEST_TYPE_LABELS,
+  type CloudOrganization,
+  type CloudRequest,
+  type CloudRequestStatus,
+  type CloudUser,
+  type NewCloudRequest,
 } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
 const SAMPLE_DELAY_MS = 300;
@@ -228,7 +229,26 @@ export function listRequests(): Promise<CloudRequest[]> {
 // list, and its number must not be handed out again.
 let lastRequestNumber = requests.length;
 
+/**
+ * Raises a request. As in the Ops portal, an organisation or user can have only
+ * one pending request of each type: a second upgrade or deletion waits for the
+ * first to be decided or cancelled.
+ */
 export function createRequest(input: NewCloudRequest, requestedBy: string): Promise<CloudRequest> {
+  const waiting = requests.find(
+    (r) =>
+      r.status === "pending" &&
+      r.type === input.type &&
+      r.target.kind === input.target.kind &&
+      r.target.id === input.target.id,
+  );
+  if (waiting) {
+    return Promise.reject(
+      new Error(
+        `${input.target.label} already has a pending ${CLOUD_REQUEST_TYPE_LABELS[input.type].toLowerCase()} request (${waiting.id}). It has to be approved, rejected or cancelled before another one is raised.`,
+      ),
+    );
+  }
   lastRequestNumber += 1;
   const created: CloudRequest = {
     ...input,

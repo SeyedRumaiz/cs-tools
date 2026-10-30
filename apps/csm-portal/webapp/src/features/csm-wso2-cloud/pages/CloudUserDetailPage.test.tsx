@@ -19,6 +19,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { describe, expect, it, vi } from "vitest";
+import { createRequest } from "@features/csm-wso2-cloud/api/sampleData";
 import CloudUserDetailPage from "./CloudUserDetailPage";
 
 vi.mock("@hooks/useIdTokenClaims", () => ({
@@ -59,6 +60,26 @@ describe("CloudUserDetailPage", () => {
     expect(await screen.findByText(/Waiting for approval: Disable user/)).toBeInTheDocument();
     // Still active: approval is what disables the account.
     expect(await screen.findByRole("button", { name: "Disable" })).toBeInTheDocument();
+  });
+
+  it("says why when the same request is already waiting", async () => {
+    await createRequest(
+      {
+        type: "lock_user",
+        target: { kind: "user", id: "u-1003", label: "alex.lee@example.org" },
+        summary: "Lock alex.lee@example.org",
+      },
+      "someone@example.com",
+    );
+    renderPage("u-1003");
+    fireEvent.click(await screen.findByRole("button", { name: "Lock" }));
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Request lock" }));
+
+    expect(
+      await within(dialog).findByText(/already has a pending lock user request/),
+    ).toBeInTheDocument();
   });
 
   it("says so when there is no such user", async () => {
