@@ -35,7 +35,7 @@ interface ResolveInput {
 export function usePatchCloudRequest() {
   const queryClient = useQueryClient();
   const email = useIdTokenClaims()?.email ?? "you";
-  return useMutation<CloudRequest | null, Error, ResolveInput>({
+  return useMutation<CloudRequest, Error, ResolveInput>({
     mutationFn: ({ id, status, remark }) => resolveRequest(id, status, email, remark),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY] }),
   });

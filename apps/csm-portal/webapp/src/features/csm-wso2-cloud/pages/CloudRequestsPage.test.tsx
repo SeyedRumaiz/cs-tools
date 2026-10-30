@@ -19,7 +19,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { describe, expect, it, vi } from "vitest";
-import { createRequest } from "@features/csm-wso2-cloud/api/sampleData";
+import { createRequest, resolveRequest } from "@features/csm-wso2-cloud/api/sampleData";
 import CloudRequestsPage from "./CloudRequestsPage";
 
 vi.mock("@config/apiConfig", () => ({ apiConfig: { backendUrl: "https://example.test" } }));
@@ -94,5 +94,28 @@ describe("CloudRequestsPage", () => {
     if (!resolved) throw new Error("resolved row not rendered");
     expect(within(resolved).getByText("Rejected")).toBeInTheDocument();
     expect(within(resolved).getByText("Raised for the wrong account.")).toBeInTheDocument();
+  });
+
+  it("keeps an approval that could not be applied pending and says why", async () => {
+    const target = { kind: "user" as const, id: "u-1002", label: "john.smith@example.com" };
+    const lock = await createRequest(
+      { type: "lock_user", target, summary: "Lock john.smith@example.com" },
+      "someone@example.com",
+    );
+    const remove = await createRequest(
+      { type: "delete_user", target, summary: "Delete john.smith@example.com" },
+      "someone@example.com",
+    );
+    await resolveRequest(remove.id, "approved", "approver@example.com");
+    renderPage("pending");
+
+    const row = (await screen.findByText(lock.id)).closest("tr");
+    if (!row) throw new Error("request row not rendered");
+    fireEvent.click(within(row).getByRole("button", { name: "Approve" }));
+
+    expect(
+      await screen.findByText(/the user john.smith@example.com no longer exists/),
+    ).toBeInTheDocument();
+    expect(within(row).getByText("Pending")).toBeInTheDocument();
   });
 });

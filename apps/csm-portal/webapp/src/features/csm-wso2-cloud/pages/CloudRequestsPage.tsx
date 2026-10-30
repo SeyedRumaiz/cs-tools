@@ -109,7 +109,11 @@ export default function CloudRequestsPage(): JSX.Element {
         ))}
       </Tabs>
 
-      {resolve.isError && <Alert severity="error">{resolve.error.message}</Alert>}
+      {resolve.isError && (
+        <Alert severity="error" onClose={() => resolve.reset()}>
+          {resolve.error.message}
+        </Alert>
+      )}
 
       <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
         <TableContainer>

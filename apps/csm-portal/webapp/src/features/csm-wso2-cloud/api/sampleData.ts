@@ -280,32 +280,46 @@ export function cancelRequest(id: string, cancelledBy: string): Promise<void> {
   return delay(undefined);
 }
 
+/**
+ * Approves or rejects a pending request. As in the Ops portal, an approval
+ * carries out the change first and is recorded only once that succeeds: if it
+ * fails, the request stays pending and the error says why, so the approver can
+ * reject it instead.
+ */
 export function resolveRequest(
   id: string,
   status: Exclude<CloudRequestStatus, "pending">,
   resolvedBy: string,
   remark?: string,
-): Promise<CloudRequest | null> {
-  let resolved: CloudRequest | null = null;
-  requests = requests.map((r) => {
-    if (r.id !== id || r.status !== "pending") return r;
-    resolved = {
-      ...r,
-      status,
-      resolvedBy,
-      resolvedOn: new Date().toISOString(),
-      remark: remark?.trim() || undefined,
-    };
-    return resolved;
-  });
-  if (resolved && status === "approved") applyApproved(resolved);
+): Promise<CloudRequest> {
+  const request = requests.find((r) => r.id === id);
+  if (!request) return Promise.reject(new Error(`${id} no longer exists.`));
+  if (request.status !== "pending") {
+    return Promise.reject(new Error(`${id} has already been ${request.status}.`));
+  }
+  if (status === "approved") {
+    try {
+      applyApproved(request);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  }
+  const resolved: CloudRequest = {
+    ...request,
+    status,
+    resolvedBy,
+    resolvedOn: new Date().toISOString(),
+    remark: remark?.trim() || undefined,
+  };
+  requests = requests.map((r) => (r.id === id ? resolved : r));
   return delay(resolved);
 }
 
 /**
  * Carries out an approved request, standing in for the call the backend will
- * make to WSO2 Cloud once the real API is wired in. Records are replaced, not
- * mutated, so a cached copy is never changed under a page that holds it.
+ * make to WSO2 Cloud once the real API is wired in. Throws when it cannot,
+ * which leaves the request pending. Records are replaced, not mutated, so a
+ * cached copy is never changed under a page that holds it.
  */
 function applyApproved(request: CloudRequest): void {
   const now = new Date().toISOString();
@@ -313,7 +327,7 @@ function applyApproved(request: CloudRequest): void {
 
   if (request.target.kind === "organization") {
     const index = ORGANIZATIONS.findIndex((o) => o.id === id);
-    if (index < 0) return;
+    if (index < 0) throw targetGone(request);
     if (request.type === "upgrade_organization") {
       const org = ORGANIZATIONS[index];
       ORGANIZATIONS[index] = {
@@ -333,7 +347,7 @@ function applyApproved(request: CloudRequest): void {
   }
 
   const index = USERS.findIndex((u) => u.id === id);
-  if (index < 0) return;
+  if (index < 0) throw targetGone(request);
   const user = USERS[index];
   switch (request.type) {
     case "lock_user":
@@ -352,4 +366,11 @@ function applyApproved(request: CloudRequest): void {
       USERS.splice(index, 1);
       break;
   }
+}
+
+function targetGone(request: CloudRequest): Error {
+  const what = request.target.kind === "organization" ? "organisation" : "user";
+  return new Error(
+    `${request.id} could not be applied: the ${what} ${request.target.label} no longer exists. It is still pending; reject it instead.`,
+  );
 }

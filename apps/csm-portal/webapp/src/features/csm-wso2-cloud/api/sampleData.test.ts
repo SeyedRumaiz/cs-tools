@@ -178,3 +178,45 @@ describe("raising a request in the sample data", () => {
     });
   });
 });
+
+describe("an approval that cannot be applied", () => {
+  it("stays pending when its user was deleted in the meantime", async () => {
+    const api = await load();
+    const lock = await api.createRequest(
+      {
+        type: "lock_user",
+        target: { kind: "user", id: "u-1002", label: "john.smith@example.com" },
+        summary: "Lock john.smith@example.com",
+      },
+      "engineer@example.com",
+    );
+    const remove = await api.createRequest(
+      {
+        type: "delete_user",
+        target: { kind: "user", id: "u-1002", label: "john.smith@example.com" },
+        summary: "Delete john.smith@example.com",
+      },
+      "engineer@example.com",
+    );
+    await api.resolveRequest(remove.id, "approved", "approver@example.com");
+
+    await expect(api.resolveRequest(lock.id, "approved", "approver@example.com")).rejects.toThrow(
+      "the user john.smith@example.com no longer exists",
+    );
+    const after = (await api.listRequests()).find((r) => r.id === lock.id);
+    expect(after?.status).toBe("pending");
+    expect(after?.resolvedBy).toBeUndefined();
+
+    // Rejecting it is still possible, and is the way to clear it.
+    await expect(
+      api.resolveRequest(lock.id, "rejected", "approver@example.com", "User was deleted."),
+    ).resolves.toMatchObject({ status: "rejected" });
+  });
+
+  it("refuses to decide a request twice", async () => {
+    const api = await load();
+    await expect(api.resolveRequest("REQ-0001", "rejected", "approver@example.com")).rejects.toThrow(
+      "REQ-0001 has already been approved.",
+    );
+  });
+});
