@@ -49,6 +49,14 @@ export interface CloudOrganizationLimits {
   supportLevel: CloudSupportLevel;
 }
 
+export const CLOUD_LIMIT_LABELS: Record<keyof CloudOrganizationLimits, string> = {
+  monthlyActiveUsers: "Monthly active users",
+  serviceProviders: "Service providers",
+  identityProviders: "Identity providers",
+  subOrganizations: "Sub-organizations",
+  supportLevel: "Support level",
+};
+
 export interface CloudUserRef {
   id: string;
   email: string;
@@ -127,6 +135,12 @@ export interface CloudRequest {
   /** Present on an upgrade request: the limits asked for. */
   limits?: CloudOrganizationLimits;
   tier?: CloudTier;
+  /**
+   * Present on an upgrade request: the tier and limits when it was raised, so
+   * an approver sees the change rather than only its result.
+   */
+  previousTier?: CloudTier;
+  previousLimits?: CloudOrganizationLimits;
   requestedBy: string;
   requestedOn: string;
   status: CloudRequestStatus;
@@ -142,4 +156,6 @@ export interface NewCloudRequest {
   summary: string;
   limits?: CloudOrganizationLimits;
   tier?: CloudTier;
+  previousTier?: CloudTier;
+  previousLimits?: CloudOrganizationLimits;
 }

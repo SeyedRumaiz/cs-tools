@@ -197,7 +197,15 @@ function RequestRow({
 
   return (
     <TableRow hover>
-      <TableCell sx={{ fontFamily: "monospace" }}>{r.id}</TableCell>
+      <TableCell sx={{ fontFamily: "monospace", whiteSpace: "nowrap" }}>
+        <Link
+          component={RouterLink}
+          to={`${WSO2_CLOUD_BASE}/requests/${r.id}`}
+          state={{ from: `${location.pathname}${location.search}` }}
+        >
+          {r.id}
+        </Link>
+      </TableCell>
       <TableCell>{CLOUD_REQUEST_TYPE_LABELS[r.type]}</TableCell>
       <TableCell sx={{ maxWidth: 240 }}>
         <Link

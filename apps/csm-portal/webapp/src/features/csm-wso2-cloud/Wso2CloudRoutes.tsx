@@ -18,6 +18,7 @@ import { Navigate, Route } from "react-router";
 import CloudOrganizationDetailPage from "./pages/CloudOrganizationDetailPage";
 import CloudOrganizationUpgradePage from "./pages/CloudOrganizationUpgradePage";
 import CloudOrganizationsPage from "./pages/CloudOrganizationsPage";
+import CloudRequestDetailPage from "./pages/CloudRequestDetailPage";
 import CloudRequestsPage from "./pages/CloudRequestsPage";
 import CloudUserDetailPage from "./pages/CloudUserDetailPage";
 import CloudUsersPage from "./pages/CloudUsersPage";
@@ -42,6 +43,7 @@ export function wso2CloudRoutes() {
       <Route path="users" element={<CloudUsersPage />} />
       <Route path="users/:userId" element={<CloudUserDetailPage />} />
       <Route path="requests" element={<CloudRequestsPage />} />
+      <Route path="requests/:requestId" element={<CloudRequestDetailPage />} />
     </Route>
   );
 }

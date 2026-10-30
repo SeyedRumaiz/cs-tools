@@ -36,6 +36,7 @@ import {
 } from "@features/csm-wso2-cloud/components/Wso2CloudCommon";
 import { WSO2_CLOUD_BASE } from "@features/csm-wso2-cloud/config/wso2CloudNavItems";
 import {
+  CLOUD_LIMIT_LABELS,
   CLOUD_SUPPORT_LEVEL_LABELS,
   CLOUD_TIER_LABELS,
   type CloudOrganization,
@@ -46,15 +47,11 @@ import {
 
 type NumericLimit = Exclude<keyof CloudOrganizationLimits, "supportLevel">;
 
-const NUMERIC_LIMITS: { key: NumericLimit; label: string; help: string }[] = [
-  {
-    key: "monthlyActiveUsers",
-    label: "Monthly active users",
-    help: "Users who sign in at least once a month.",
-  },
-  { key: "serviceProviders", label: "Service providers", help: "Applications registered." },
-  { key: "identityProviders", label: "Identity providers", help: "External IdPs connected." },
-  { key: "subOrganizations", label: "Sub-organizations", help: "Child organizations allowed." },
+const NUMERIC_LIMITS: { key: NumericLimit; help: string }[] = [
+  { key: "monthlyActiveUsers", help: "Users who sign in at least once a month." },
+  { key: "serviceProviders", help: "Applications registered." },
+  { key: "identityProviders", help: "External IdPs connected." },
+  { key: "subOrganizations", help: "Child organizations allowed." },
 ];
 
 /**
@@ -131,6 +128,8 @@ function UpgradeForm({
             : `${CLOUD_TIER_LABELS[org.tier]} → ${CLOUD_TIER_LABELS[tier]}`,
         tier,
         limits,
+        previousTier: org.tier,
+        previousLimits: org.limits,
       },
       { onSuccess: () => navigate(`${WSO2_CLOUD_BASE}/requests?tab=mine`) },
     );
@@ -175,12 +174,12 @@ function UpgradeForm({
             gridTemplateColumns: { xs: "1fr", sm: "repeat(2, minmax(0, 1fr))" },
           }}
         >
-          {NUMERIC_LIMITS.map(({ key, label, help }) => (
+          {NUMERIC_LIMITS.map(({ key, help }) => (
             <TextField
               key={key}
               size="small"
               type="number"
-              label={label}
+              label={CLOUD_LIMIT_LABELS[key]}
               value={Number.isNaN(limits[key]) ? "" : limits[key]}
               onChange={(e) => setLimits({ ...limits, [key]: parseInt(e.target.value, 10) })}
               helperText={`${help} Current: ${org.limits[key].toLocaleString()}`}
@@ -190,7 +189,7 @@ function UpgradeForm({
           <TextField
             select
             size="small"
-            label="Support level"
+            label={CLOUD_LIMIT_LABELS.supportLevel}
             value={limits.supportLevel}
             onChange={(e) =>
               setLimits({ ...limits, supportLevel: e.target.value as CloudSupportLevel })

@@ -30,13 +30,19 @@ import {
   type CloudRequest,
 } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
-/** Confirms cancelling one of your own pending requests. `request` is null while closed. */
+/**
+ * Confirms cancelling one of your own pending requests. `request` is null while
+ * closed; `onCancelled` runs once the request is gone, for a page that showed
+ * only that request.
+ */
 export default function CancelRequestDialog({
   request,
   onClose,
+  onCancelled,
 }: {
   request: CloudRequest | null;
   onClose: () => void;
+  onCancelled?: () => void;
 }): JSX.Element {
   const cancel = useDeleteCloudRequest();
 
@@ -52,6 +58,7 @@ export default function CancelRequestDialog({
       onSuccess: () => {
         cancel.reset();
         onClose();
+        onCancelled?.();
       },
     });
   };
@@ -75,7 +82,12 @@ export default function CancelRequestDialog({
         <Button onClick={handleClose} disabled={cancel.isPending}>
           Go back
         </Button>
-        <Button variant="contained" color="error" onClick={handleConfirm} disabled={cancel.isPending}>
+        <Button
+          variant="contained"
+          color="error"
+          onClick={handleConfirm}
+          disabled={cancel.isPending}
+        >
           Cancel request
         </Button>
       </DialogActions>

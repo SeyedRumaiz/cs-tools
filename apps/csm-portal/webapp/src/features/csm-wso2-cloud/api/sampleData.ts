@@ -154,6 +154,15 @@ let requests: CloudRequest[] = [
     target: { kind: "organization", id: ORGANIZATIONS[3].id, label: "initech" },
     summary: "Free → Enterprise",
     tier: "enterprise",
+    limits: {
+      monthlyActiveUsers: 50000,
+      serviceProviders: 50,
+      identityProviders: 10,
+      subOrganizations: 20,
+      supportLevel: "premium",
+    },
+    previousTier: "free",
+    previousLimits: ORGANIZATIONS[3].limits,
     requestedBy: "sam.taylor@example.com",
     requestedOn: "2026-10-27T09:00:00Z",
     status: "pending",
@@ -176,6 +185,15 @@ let requests: CloudRequest[] = [
     target: { kind: "organization", id: ORGANIZATIONS[2].id, label: "globex" },
     summary: "Pay as you go → Enterprise",
     tier: "enterprise",
+    limits: ORGANIZATIONS[2].limits,
+    previousTier: "payg",
+    previousLimits: {
+      monthlyActiveUsers: 15000,
+      serviceProviders: 20,
+      identityProviders: 5,
+      subOrganizations: 10,
+      supportLevel: "community",
+    },
     requestedBy: "sam.taylor@example.com",
     requestedOn: "2026-09-02T10:00:00Z",
     status: "approved",
@@ -224,6 +242,10 @@ export function getUser(id: string): Promise<CloudUser | null> {
 
 export function listRequests(): Promise<CloudRequest[]> {
   return delay([...requests]);
+}
+
+export function getRequest(id: string): Promise<CloudRequest | null> {
+  return delay(requests.find((r) => r.id === id) ?? null);
 }
 
 // Counted, not derived from the list's length: a cancelled request leaves the
