@@ -231,41 +231,49 @@ type Config struct {
 	// SLADataSource. Defaults to "postgres" -- see AttachmentDataSource's
 	// own doc comment.
 	AttachmentDataSource AttachmentDataSource
-	// CSMSLAEngineEnabled gates the CSM-native SLA clock engine
-	// (internal/service/sla_engine_service.go, source='CSM' "sla" rows) --
-	// independently of DataSource/SLADataSource, and independently of
-	// whether an external SLA engine is also tracking the same case.
-	// Defaults to true: this engine is meant to run on every deployment
-	// regardless of data source, not just the ones that already involve the
-	// external system, which is how it used to be gated in practice
-	// (routes.go only ever wired its one real trigger -- registering a new
-	// case's clocks -- into the external-system-backed CreateCase path; the
-	// plain-Postgres CreateCase never called it at all, so a case created
-	// under a plain-Postgres data source got no SLA tracking from creation
-	// onward unless its severity happened to change later). Was previously
-	// an implicit "db != nil" check with no name of its own; now an
-	// explicit, independently-documented toggle an operator can use to turn
-	// this engine off on purpose (CSM_SLA_ENGINE_ENABLED=false) -- e.g. a
-	// deployment that wants the external system's own synced
-	// source='SERVICENOW' rows as the only SLA truth, with this engine's
-	// own source='CSM' rows never created at all. Left on, both sets of
-	// rows coexist in the same "sla" table side by side, distinguished by
-	// source -- this is already what happens today on any data source that
-	// involves the external system, just without a named switch
-	// controlling it.
+	// CSMSLAEngineEnabled gates this service's own in-process SLA clock
+	// engine (internal/service/sla_engine_service.go, source='CSM' "sla"
+	// rows -- see repository.SLAEngineRepository's own doc comment for why
+	// this engine's clocks must never carry the 'SERVICENOW' tag instead, a
+	// real external sync job's own ownership tag) -- independently of
+	// DataSource/SLADataSource, and
+	// independently of whether an external SLA engine is also tracking the
+	// same case. Defaults to true: this engine is meant to run on every
+	// deployment regardless of data source, not just the ones that already
+	// involve the external system, which is how it used to be gated in
+	// practice (routes.go only ever wired its one real trigger --
+	// registering a new case's clocks -- into the external-system-backed
+	// CreateCase path; the plain-Postgres CreateCase never called it at
+	// all, so a case created under a plain-Postgres data source got no SLA
+	// tracking from creation onward unless its severity happened to change
+	// later). Was previously an implicit "db != nil" check with no name of
+	// its own; now an explicit, independently-documented toggle an operator
+	// can use to turn this engine off on purpose
+	// (CSM_SLA_ENGINE_ENABLED=false) -- e.g. a deployment that wants the
+	// external system's own synced rows as the only SLA truth, with this
+	// engine never writing a row of its own at all.
+	//
+	// This engine's own clocks (source='CSM') and the external sync job's
+	// own rows (source='SERVICENOW', confirmed real and continuously
+	// running -- the external sync job that populates sla_policy/sla maps
+	// the previous system's task SLA records straight into this database's
+	// "sla" table) are kept apart by that tag precisely so the two can
+	// never collide on the same (work_item_id, target) pair -- a
+	// dual-write-mode case can genuinely have both.
 	//
 	// Known limitation: flipping this to false only stops NEW writes --
-	// any source='CSM' row already IN_PROGRESS/BREACHED at that moment is
-	// left exactly as it was (still is_active, still returned by every
-	// unscoped read: sla_live, GetClockState, SearchActiveSLAStatuses),
-	// since nothing retires or excludes it. It will simply never be
-	// updated again. This is intentional scope: deciding whether such a
-	// clock should be force-completed, cancelled, or left visible as a
-	// frozen record is a product decision, not something this flag's
-	// on/off switch should make unilaterally. An operator disabling this
-	// engine should do so only once they've confirmed they're fine with
-	// whatever in-flight source='CSM' clocks exist at that moment going
-	// stale, or has a separate plan (e.g. a one-off migration) for them.
+	// any row this engine already registered and left IN_PROGRESS/BREACHED
+	// at that moment is left exactly as it was (still is_active, still
+	// returned by every unscoped read: sla_live, GetClockState,
+	// SearchActiveSLAStatuses), since nothing retires or excludes it. It
+	// will simply never be updated again. This is intentional scope:
+	// deciding whether such a clock should be force-completed, cancelled,
+	// or left visible as a frozen record is a product decision, not
+	// something this flag's on/off switch should make unilaterally. An
+	// operator disabling this engine should do so only once they've
+	// confirmed they're fine with whatever in-flight clocks this engine
+	// registered going stale, or has a separate plan (e.g. a one-off
+	// migration) for them.
 	CSMSLAEngineEnabled bool
 	// ServiceNowIntegrationServiceBaseURL is the base URL for the ServiceNow integration service API.
 	// Required when DataSource is "servicenow" (or SLADataSource is "servicenow" -- see Validate).
@@ -344,6 +352,23 @@ type Config struct {
 	// nothing refreshes partners and the route is not registered, because
 	// csm-sync-service still copies account_relationship from ServiceNow.
 	CSMMigrationSalesforcePartnerIngestEnabled bool
+	// ACPReopenEnabled turns on the ACP reopen check after Project__c and
+	// Invoice__c events (internal/service/acp_reopen.go), from
+	// CSM_ACP_REOPEN_ENABLED=true. Defaults to false: no project is reopened.
+	// It also needs a pool and the SALES_ENTITY_* client.
+	ACPReopenEnabled bool
+	// ACPReopenDryRun makes the reopen check decide and log only, writing
+	// nothing (CSM_ACP_REOPEN_DRY_RUN). Defaults to true; anything that does
+	// not parse as a boolean keeps it true.
+	ACPReopenDryRun bool
+	// ACPReopenTestProjectSfID limits the reopen check to one Salesforce
+	// project (CSM_ACP_REOPEN_TEST_PROJECT_SF_ID). Empty: every project.
+	ACPReopenTestProjectSfID string
+	// ACPReactivationPollInterval is how often ProjectReactivationDrainer
+	// looks for queued "Back to Open state" notices
+	// (ACP_REACTIVATION_POLL_INTERVAL, default 5s), on its own so tuning
+	// another drainer never changes it.
+	ACPReactivationPollInterval time.Duration
 	// CSMMigrationMembershipRegistrationEnabled turns on POST /users/me/memberships/register,
 	// which marks the signed-in user's still-INVITED memberships as
 	// REGISTERED in Salesforce (see membership_registration_service.go). Defaults to
@@ -549,6 +574,15 @@ type Config struct {
 	MigrationCaseReportHoldTag     string
 	MigrationCaseReportAccountsTag string
 	MigrationCaseReportTeamKeys    []string
+	// LongOpenCasesReportProjectTypes are the project type names (compared
+	// exactly) a case's project must have to appear in the long-open cases
+	// report (GET /reports/long-open-cases). LongOpenCasesReportExcludedTags
+	// are tag names (compared ignoring case) that remove a case from it.
+	// A blank value falls back to the defaults rather than emptying the
+	// list: no project types would silently produce an empty report, and no
+	// excluded tags would list cases the team has set aside.
+	LongOpenCasesReportProjectTypes []string
+	LongOpenCasesReportExcludedTags []string
 	// CustomerRoles is a comma-separated list of ServiceNow role names
 	// (organisation-specific vocabulary, the same reasoning
 	// apps/csm-portal/backend's own CSM_TEAM_REGISTRY uses for not shipping
@@ -706,6 +740,12 @@ type Config struct {
 	// setting. Matched exactly, as the portal does. Empty means nobody is (the
 	// portal's own rule for an unset role).
 	AuthAdminRoles []string
+	// AuthProductCatalogManagerRoles is AUTH_PRODUCT_CATALOG_MANAGER_ROLES,
+	// comma-separated: the same variable, with the same value, as
+	// csm-portal-backend's -- the token roles that may edit the product
+	// catalogue. AUTH_ADMIN_ROLES may edit it too.
+	// Matched exactly. Empty means only admins can.
+	AuthProductCatalogManagerRoles []string
 	// CaseAlertsSecretKey is CASE_ALERTS_SECRET_KEY: 32 bytes, base64, the
 	// AES-256-GCM key that seals the Case Alerts chat-room webhook URLs
 	// (migration 0233). One per environment, so a database copied from
@@ -980,11 +1020,14 @@ func Load() *Config {
 		MigrationCaseReportHoldTag:                    getEnvOrDefault("MIGRATION_CASE_REPORT_HOLD_TAG", "s_mig_hold"),
 		MigrationCaseReportAccountsTag:                getEnvOrDefault("MIGRATION_CASE_REPORT_ACCOUNTS_TAG", "s_acc"),
 		MigrationCaseReportTeamKeys:                   splitComma(os.Getenv("MIGRATION_CASE_REPORT_TEAM_KEYS")),
+		LongOpenCasesReportProjectTypes:               splitCommaOrDefault(os.Getenv("LONG_OPEN_CASES_REPORT_PROJECT_TYPES"), defaultLongOpenCasesReportProjectTypes),
+		LongOpenCasesReportExcludedTags:               splitCommaOrDefault(os.Getenv("LONG_OPEN_CASES_REPORT_EXCLUDED_TAGS"), defaultLongOpenCasesReportExcludedTags),
 		AuthIssuer:                                    os.Getenv("AUTH_ISSUER"),
 		AuthJWKSURL:                                   os.Getenv("AUTH_JWKS_URL"),
 		AuthUserTokenAudiences:                        splitComma(os.Getenv("AUTH_USER_TOKEN_AUDIENCES")),
 		AuthClockSkew:                                 envDuration("AUTH_CLOCK_SKEW", 30*time.Second),
 		AuthAdminRoles:                                splitComma(os.Getenv("AUTH_ADMIN_ROLES")),
+		AuthProductCatalogManagerRoles:                splitComma(os.Getenv("AUTH_PRODUCT_CATALOG_MANAGER_ROLES")),
 		CaseAlertsSecretKey:                           strings.TrimSpace(os.Getenv("CASE_ALERTS_SECRET_KEY")),
 		CaseAlertsSecretKeyID:                         getEnvOrDefault("CASE_ALERTS_SECRET_KEY_ID", "1"),
 		CaseAlertsRuntimeClientIDs:                    splitComma(os.Getenv("CASE_ALERTS_RUNTIME_CLIENT_IDS")),
@@ -1049,6 +1092,10 @@ func Load() *Config {
 	cfg.CSMMigrationSalesforceProjectIngestEnabled = envFlagOn("CSM_MIGRATION_SALESFORCE_PROJECT_INGEST_ENABLED")
 	cfg.CSMMigrationSalesforceProjectInsertEnabled = envFlagOn("CSM_MIGRATION_SALESFORCE_PROJECT_INSERT_ENABLED")
 	cfg.CSMMigrationSalesforcePartnerIngestEnabled = envFlagOn("CSM_MIGRATION_SALESFORCE_PARTNER_INGEST_ENABLED")
+	cfg.ACPReopenEnabled = os.Getenv("CSM_ACP_REOPEN_ENABLED") == "true"
+	cfg.ACPReopenDryRun = getBoolOrDefault("CSM_ACP_REOPEN_DRY_RUN", true)
+	cfg.ACPReopenTestProjectSfID = strings.TrimSpace(os.Getenv("CSM_ACP_REOPEN_TEST_PROJECT_SF_ID"))
+	cfg.ACPReactivationPollInterval = envDuration("ACP_REACTIVATION_POLL_INTERVAL", 5*time.Second)
 	cfg.CSMMigrationCustomerEngagementIngestEnabled = envFlagOn("CSM_MIGRATION_CUSTOMER_ENGAGEMENT_INGEST_ENABLED")
 	cfg.CustomerEngagementFirefightingTypeID = strings.TrimSpace(os.Getenv("CUSTOMER_ENGAGEMENT_FIREFIGHTING_TYPE_ID"))
 	cfg.RedisURL = strings.TrimSpace(os.Getenv("REDIS_URL"))
@@ -1151,6 +1198,18 @@ func getBoolOrDefault(key string, defaultVal bool) bool {
 // splitComma parses a comma-separated env var into a trimmed, non-empty
 // slice ("" for an unset/empty var, matching integrations/csm-notification-service's
 // own copy of this exact helper).
+
+// defaultLongOpenCasesReportProjectTypes and defaultLongOpenCasesReportExcludedTags
+// are the long-open cases report's filter sets when the environment does not
+// override them.
+var (
+	defaultLongOpenCasesReportProjectTypes = []string{
+		"Subscription", "Managed Cloud Subscription", "Cloud Support", "Development Support", "Professional Services",
+	}
+	// "migrartion" is a historic misspelling that exists as stored on
+	// real cases; it must stay exactly as is to match them.
+	defaultLongOpenCasesReportExcludedTags = []string{"migrartion", "migration-assistance"}
+)
 
 func splitComma(s string) []string {
 	if s == "" {

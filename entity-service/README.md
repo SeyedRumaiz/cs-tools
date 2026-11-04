@@ -196,7 +196,7 @@ separate scheduled-task component that calls this service's `/scheduled-tasks/at
   2. `1NNNNN_<description>.sql`: six-digit, 100000 and above. Row-level-security policy migrations,
      applied after every schema migration so the tables they protect already exist.
   3. `0NNNNN_<description>.up.sql` (with `.down.sql` rollbacks that are never auto-applied): legacy
-     files numbered 000020 to 000105, applied last.
+     files numbered 000086 to 000105, applied last.
 - Run the service as a non-superuser database role. PostgreSQL superusers bypass
   row-level security, so a superuser connection hides policy problems. The local compose stack
   migrates as an admin role and runs the service as a separate application role for this reason.
@@ -515,6 +515,8 @@ synchronous with a bounded timeout, and failures are recorded in `event_publish_
 | `MIGRATION_CASE_REPORT_HOLD_TAG` | No | `s_mig_hold` | Tag name (matched ignoring case) that places a long-running migration in the weekly scan's "customer requested to hold" table (`GET /reports/migration-cases`). | `s_mig_hold` |
 | `MIGRATION_CASE_REPORT_ACCOUNTS_TAG` | No | `s_acc` | Tag name (matched ignoring case) for the scan's "waiting on accounts team" table. | `s_acc` |
 | `MIGRATION_CASE_REPORT_TEAM_KEYS` | No | none | Comma-separated team keys whose mail groups (`team.group_email`) the scan returns as its `recipients`. Empty = the scan derives no recipients and the scheduled task must configure its own. | `atlas,vega` |
+| `LONG_OPEN_CASES_REPORT_PROJECT_TYPES` | No | `Subscription,Managed Cloud Subscription,Cloud Support,Development Support,Professional Services` | Comma-separated project type names (matched exactly) a case's project must have to be listed by the long-open cases report (`GET /reports/long-open-cases`). Blank falls back to the default. | `Subscription,Cloud Support` |
+| `LONG_OPEN_CASES_REPORT_EXCLUDED_TAGS` | No | `migrartion,migration-assistance` | Comma-separated tag names (matched ignoring case) that remove a case from the long-open cases report. The first default is a historic misspelling kept as stored. Blank falls back to the default. | `migration-assistance` |
 | `CLOUD_STATUS_SERVICE_IDS` | No | none | Comma-separated service UUIDs whose outages feed the public cloud status data. Empty makes the sweep a no-op. | `00000000-0000-0000-0000-000000000000` |
 | `CLOUD_STATUS_DRAINER_ENABLED` | No | `false` | Exact `true` starts the cloud status drainer (it also rewrites cloud monitor status). | `true` |
 | `CLOUD_STATUS_POLL_INTERVAL` | No | `10s` | Poll interval of that drainer. | `10s` |

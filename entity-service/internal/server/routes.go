@@ -129,6 +129,22 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		)
 	}
 
+	var customDashboardHandler *handler.CustomDashboardHandler
+	var customDashboardShareHandler *handler.CustomDashboardShareHandler
+	var customDashboardTeamShareHandler *handler.CustomDashboardTeamShareHandler
+	if db != nil {
+		customDashboardRepo := repository.NewCustomDashboardRepository(db)
+		customDashboardHandler = handler.NewCustomDashboardHandler(
+			service.NewCustomDashboardService(customDashboardRepo, userRepo),
+		)
+		customDashboardShareHandler = handler.NewCustomDashboardShareHandler(
+			service.NewCustomDashboardShareService(repository.NewCustomDashboardShareRepository(db), customDashboardRepo, userRepo),
+		)
+		customDashboardTeamShareHandler = handler.NewCustomDashboardTeamShareHandler(
+			service.NewCustomDashboardTeamShareService(repository.NewCustomDashboardTeamShareRepository(db), customDashboardRepo, userRepo),
+		)
+	}
+
 	// event_publish_failures, sla_clocks, scheduled_task_run, and
 	// alert_incident_mapping have no ServiceNow equivalent. They are
 	// Postgres-backed and registered only when a pool is available
@@ -210,7 +226,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	var slaStatusHandler *handler.SLAStatusHandler
 	if db != nil {
 		slaStatusRepo := repository.NewSLAStatusRepository(repository.NewScoped(db))
-		slaStatusHandler = handler.NewSLAStatusHandler(service.NewSLAStatusService(slaStatusRepo, accessSvc))
+		slaStatusHandler = handler.NewSLAStatusHandler(service.NewSLAStatusService(slaStatusRepo, accessSvc, cfg.CSMPortalBackendClientID, eventPublisher))
 	}
 
 	// scheduled_task_run has no ServiceNow equivalent either — same
@@ -240,16 +256,19 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	var scheduledTaskRunHandler *handler.ScheduledTaskRunHandler
 	var worklogReportHandler *handler.WorklogReportHandler
 	var queryHourHandler *handler.QueryHourHandler
+	// queryHourSvc is also what refreshes a project's hours when a time card
+	// is approved or rejected (nil without a database).
+	var queryHourSvc service.QueryHourService
 	if db != nil {
 		// Query-hour utilisation. No table of its own: the entitlement
 		// comes from the Salesforce mirror, the consumption from time
 		// cards, and the result is written back to columns that already
 		// exist -- sf_opportunity.query_hour_state and project's three
 		// duration fields.
-		queryHourHandler = handler.NewQueryHourHandler(
-			service.NewQueryHourService(
-				repository.NewQueryHourRepository(repository.NewScoped(db)),
-				cfg.QueryHourInternalEmailDomain))
+		queryHourSvc = service.NewQueryHourService(
+			repository.NewQueryHourRepository(repository.NewScoped(db)),
+			cfg.QueryHourInternalEmailDomain)
+		queryHourHandler = handler.NewQueryHourHandler(queryHourSvc)
 		scheduledTaskRunHandler = handler.NewScheduledTaskRunHandler(service.NewScheduledTaskRunService(repository.NewScheduledTaskRunRepository(db)))
 		// Which teams the CS Worklogs reports cover is deployment
 		// configuration, not a constant: the default is the CRE
@@ -350,8 +369,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	var pagingChainHandler *handler.PagingChainHandler
 	var caseAlertSettingsHandler *handler.CaseAlertSettingsHandler
 	var migrationCaseReportHandler *handler.MigrationCaseReportHandler
+	var longOpenCaseReportHandler *handler.LongOpenCaseReportHandler
 	var runbookHandler *handler.RunbookHandler
+	// standardChangeHandler serves the standard change catalogue and its proposals
+	// (migration 0252); Postgres only. standardChangeRepo is also what the change
+	// request create and PATCH use to apply a template.
+	var standardChangeHandler *handler.StandardChangeHandler
+	var standardChangeRepo repository.StandardChangeRepository
 	var portalBannerHandler *handler.PortalBannerHandler
+	var productCatalogHandler *handler.ProductCatalogHandler
 	var productRegressionReportHandler *handler.ProductRegressionReportHandler
 	// runbookRepo stays a nil interface without a pool, so no incident service gets a catalog.
 	var runbookRepo repository.RunbookRepository
@@ -416,10 +442,16 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	var salesforceEventHandler *handler.SalesforceEventHandler
 	// salesforcePartnerHandler is set when the partner refresh is on.
 	var salesforcePartnerHandler *handler.SalesforcePartnerHandler
+	// salesforceResyncHandler is set when the Salesforce ingest is wired: the
+	// admin resync compares and overwrites through those same ingests, so a
+	// component whose ingest flag is off reports "skipped".
+	var salesforceResyncHandler *handler.SalesforceResyncHandler
 	// membershipRegistrationHandler and projectContactSyncHandler both need
 	// the very same membership-ingest-enabled SalesforceEventService this
 	// block builds, so all three are wired together rather than side by side.
 	var membershipIngestSvc service.SalesforceEventService
+	// resyncIngestSvc is the ingest service the admin resync runs through.
+	var resyncIngestSvc service.SalesforceEventService
 	var salesEntityClient *salesentity.Client
 	// ingestRetryCtx stops the Salesforce ingest retry worker; closePublishers
 	// (returned to cmd/api/main.go) cancels it on shutdown and waits on
@@ -427,6 +459,23 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	// the WaitGroup at zero, so the wait returns at once.
 	ingestRetryCtx, stopIngestRetry := context.WithCancel(context.Background())
 	var ingestRetryWG sync.WaitGroup
+
+	// snWritebackDispatcher is the single shared SNWritebackDispatcher for
+	// every DATA_SOURCE=postgres-servicenow-dual-write best-effort mirror
+	// write (see SNWritebackDispatcher's own doc comment) -- one dispatcher,
+	// one small worker pool, reused by every entity's mirror rather than each
+	// constructing its own: the ACP reopen and project (immediately below),
+	// and case, call_request, time_card, comment, change_request, and case
+	// tags/watch list (all further below, riding on the case dispatch). nil
+	// in every other mode. Built here, ahead of the Salesforce event wiring,
+	// because the ACP reopen mirrors through it too.
+	var snWritebackDispatcher *service.SNWritebackDispatcher
+	if db != nil && cfg.DataSource == config.DataSourcePostgresServiceNowDualWrite {
+		snWritebackDispatcher = service.NewSNWritebackDispatcher(repository.NewSNWritebackFailureRepository(db))
+	}
+	// acpReopenCheckHandler serves the daily ACP reopen check; set when the
+	// reopen check is on.
+	var acpReopenCheckHandler *handler.ACPReopenCheckHandler
 	// PostgresAuthoritative, not DATA_SOURCE=postgres alone: the dual-write
 	// mode serves memberships from PostgreSQL too, and memberships reach
 	// ServiceNow from Salesforce directly, so nothing here needs its mirror.
@@ -542,6 +591,57 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 			}
 			return svc
 		}
+		// The ACP reopen check runs after Project__c and Invoice__c events,
+		// independent of the ingest flags (it reads Salesforce itself). Off
+		// unless CSM_ACP_REOPEN_ENABLED=true; dry run unless
+		// CSM_ACP_REOPEN_DRY_RUN=false. Its "Back to Open state" email goes
+		// out as project.reactivated on the project topic.
+		withACPReopen := func(svc service.SalesforceEventService) service.SalesforceEventService {
+			if !cfg.ACPReopenEnabled {
+				return svc
+			}
+			slog.Info("acp reopen check enabled",
+				"dryRun", cfg.ACPReopenDryRun, "testProjectOnly", cfg.ACPReopenTestProjectSfID != "",
+				"publishes", projectEventPublisher != nil, "mirrors", snWritebackDispatcher != nil)
+			if !cfg.ACPReopenDryRun {
+				// This service cannot see the other half of the pair: say it
+				// at every start, where the deployment is checked.
+				slog.Warn("acp reopen check is live: the daily check (ACP_REOPEN_CHECK_ENABLED=true in csm-scheduled-tasks) must be on too; " +
+					"without it a reopen that fails past Service Bus's redeliveries is never retried, and a project set back to Open by hand is never finished")
+			}
+			reopen := service.ACPReopen{
+				Projects:        repository.NewACPReopenRepository(repository.NewScoped(db)),
+				SalesEntity:     salesEntityClient,
+				Notify:          projectEventPublisher != nil,
+				DryRun:          cfg.ACPReopenDryRun,
+				TestProjectSfID: cfg.ACPReopenTestProjectSfID,
+			}
+			// Dual-write: copy each reopen to the previous system, as PATCH
+			// /projects/{id} copies ACP's suspension.
+			if snWritebackDispatcher != nil && serviceNowIntegrationServiceClient != nil {
+				mirror := service.NewServiceNowProjectUpdateService(serviceNowIntegrationServiceClient)
+				reopen.Mirror = func(ctx context.Context, projectID string, req domain.ProjectUpdateRequest) {
+					snWritebackDispatcher.Dispatch(ctx, "project", projectID, "update", req, func(writeCtx context.Context) error {
+						_, err := mirror.UpdateProject(writeCtx, projectID, req)
+						return err
+					})
+				}
+			}
+			acpReopenCheckHandler = handler.NewACPReopenCheckHandler(&reopen)
+			// The queued "Back to Open state" notices are published from
+			// event_outbox, retried until Event Hub takes them. Stopped with
+			// the ingest retry worker, before the producers close.
+			if projectEventPublisher != nil {
+				drainer := service.NewProjectReactivationDrainer(repository.NewACPReactivationOutbox(repository.NewScoped(db)),
+					projectEventPublisher, cfg.ACPReactivationPollInterval, service.ProjectReactivationMaxAttempts)
+				ingestRetryWG.Add(1)
+				go func() {
+					defer ingestRetryWG.Done()
+					drainer.Run(repository.WithSystemIdentity(ingestRetryCtx))
+				}()
+			}
+			return service.WithACPReopen(svc, reopen)
+		}
 		if cfg.CSMMigrationSalesforceMembershipIngestEnabled {
 			// The membership branch (Project_Contact__c / Contact envelopes)
 			// writes user/account_contact/project_contact rows and the
@@ -559,8 +659,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 					Publisher:   projectEventPublisher,
 					UserCache:   userCacheInvalidator,
 				})
-			membershipIngestSvc = withPartnerIngest(withOpportunityIngest(membershipIngestSvc))
+			membershipIngestSvc = withACPReopen(withPartnerIngest(withOpportunityIngest(membershipIngestSvc)))
 			salesforceEventHandler = handler.NewSalesforceEventHandler(membershipIngestSvc)
+			resyncIngestSvc = membershipIngestSvc
 
 			// The delayed-retry job re-runs memberships whose project or
 			// account was not in CSM when their event arrived. It lives here
@@ -605,8 +706,22 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 				log.Printf("salesforce ingest retry worker enabled (every %s)", cfg.SalesforceIngestRetryInterval)
 			}
 		} else {
-			salesforceEventHandler = handler.NewSalesforceEventHandler(withPartnerIngest(withOpportunityIngest(service.NewSalesforceEventService(accountIngestRepo, salesEntityClient, ingestSupport))))
+			resyncIngestSvc = withACPReopen(withPartnerIngest(withOpportunityIngest(service.NewSalesforceEventService(accountIngestRepo, salesEntityClient, ingestSupport))))
+			salesforceEventHandler = handler.NewSalesforceEventHandler(resyncIngestSvc)
 		}
+		// The admin resync (POST /salesforce/resync/preview and /apply). It
+		// is admin-only (AUTH_ADMIN_ROLES) and adds no flag of its own: each
+		// component runs only when its ingest is on.
+		resyncSvc, err := service.NewSalesforceResyncService(resyncIngestSvc, salesEntityClient,
+			repository.NewSalesforceResyncReadRepository(repository.NewScoped(db)), accessSvc, cfg.AuthAdminRoles)
+		if err != nil {
+			panic("salesforce: " + err.Error())
+		}
+		salesforceResyncHandler = handler.NewSalesforceResyncHandler(resyncSvc)
+	} else if cfg.ACPReopenEnabled {
+		// The reopen check is wired only inside the block above, so without its
+		// prerequisites the flag would otherwise be ignored without a word.
+		log.Printf("CSM_ACP_REOPEN_ENABLED is set but the ACP reopen check needs a database, a Postgres-authoritative DATA_SOURCE and the SALES_ENTITY_* client; it stays off")
 	}
 
 	// POST /users/me/memberships/register (H-0 of the customer onboarding flow).
@@ -750,20 +865,6 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		projectOpportunityLinkHandler = handler.NewProjectOpportunityLinkHandler(service.NewProjectOpportunityLinkService(sfReadRepo, accessSvc))
 	}
 
-	// snWritebackDispatcher is the single shared SNWritebackDispatcher for
-	// every DATA_SOURCE=postgres-servicenow-dual-write best-effort mirror
-	// write (see SNWritebackDispatcher's own doc comment) -- one dispatcher,
-	// one small worker pool, reused by every entity's mirror rather than each
-	// constructing its own: project (immediately below), and case,
-	// call_request, time_card, comment, change_request, and case tags/watch
-	// list (all further below, riding on the case dispatch). nil in every
-	// other mode. Originally constructed only inline for the case pilot;
-	// hoisted here once a second entity (project) needed the same instance.
-	var snWritebackDispatcher *service.SNWritebackDispatcher
-	if cfg.DataSource == config.DataSourcePostgresServiceNowDualWrite {
-		snWritebackDispatcher = service.NewSNWritebackDispatcher(repository.NewSNWritebackFailureRepository(db))
-	}
-
 	projectRepo := repository.NewProjectRepository(repository.NewScoped(db))
 	pgProjectSvc := service.NewProjectService(projectRepo, accessSvc)
 	var activeProjectSvc service.ProjectService
@@ -814,15 +915,19 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	// ReferenceDataRepository's own doc comment.
 	referenceDataRepo := repository.NewReferenceDataRepository(db)
 
-	// sla-duration-policy reads the small, static sla_duration_policy
-	// reference table (migration 0192) -- gated on db != nil like
-	// slaStatusHandler above, since there's nothing to read on a deployment
-	// with no Postgres pool at all. integrations/csm-notification-service
-	// fetches this once at startup to compute its own SLA due dates.
+	// sla-duration-policy computes its response live from the real
+	// sla_policy table (see SLADurationPolicyService's own doc comment) --
+	// gated on db != nil like slaStatusHandler above, since there's nothing
+	// to read on a deployment with no Postgres pool at all. A fresh
+	// SLAEngineRepository is constructed here rather than reusing
+	// slaEngineSvc's own below: that one is nil whenever
+	// cfg.CSMSLAEngineEnabled is off, but this endpoint's own read has
+	// nothing to do with that toggle (a stateless wrapper over the pool
+	// costs nothing extra to construct again).
 	var slaDurationPolicyHandler *handler.SLADurationPolicyHandler
 	if db != nil {
 		slaDurationPolicyHandler = handler.NewSLADurationPolicyHandler(
-			service.NewSLADurationPolicyService(referenceDataRepo, accessSvc))
+			service.NewSLADurationPolicyService(repository.NewSLAEngineRepository(repository.NewScoped(db), cfg.CSEngineerRole), accessSvc))
 	}
 
 	// Every project-stats route is available on both data sources. In
@@ -1000,10 +1105,13 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		snAttachmentDelegate = service.NewServiceNowCaseService(serviceNowIntegrationServiceClient, nil, nil, snUserService, cfg.CustomerRoles, cfg.CSEngineerRole, nil)
 	}
 
-	// The CSM-native SLA engine (internal/service/sla_engine_service.go)
-	// writes its own source='CSM' rows into the "sla" table (migration 0134),
-	// resolving durations from the deterministic, severity-keyed sla_policy
-	// rows migration 0203 seeds. Gated on db (same reason slaStatusHandler
+	// This service's own in-process SLA engine (internal/service/sla_engine_service.go)
+	// writes source='CSM' rows into the "sla" table (migration 0134's own
+	// original enum intent -- see repository.SLAEngineRepository's own doc
+	// comment for why this engine's clocks must never carry the
+	// 'SERVICENOW' tag, which belongs to a real, independent external sync
+	// job), resolving durations AND applicability from the real, decoded
+	// sla_policy conditions (migrations 0250-0258). Gated on db (same reason slaStatusHandler
 	// above is -- nowhere to store a clock at all with no database
 	// configured) AND on cfg.CSMSLAEngineEnabled -- an explicit, named
 	// toggle (default true) replacing what used to be an implicit "runs
@@ -1014,7 +1122,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	// constructing one -- no other code path needs to know why.
 	var slaEngineSvc service.SLAEngineService
 	if db != nil && cfg.CSMSLAEngineEnabled {
-		slaEngineSvc = service.NewSLAEngineService(repository.NewSLAEngineRepository(repository.NewScoped(db)))
+		slaEngineSvc = service.NewSLAEngineService(repository.NewSLAEngineRepository(repository.NewScoped(db), cfg.CSEngineerRole))
 	}
 
 	caseRepo := repository.NewCaseRepository(repository.NewScoped(db), crVisibility)
@@ -1198,6 +1306,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		}
 		slog.Info("service request events enabled", "topic", cfg.SREEventHubTopic, "automatedTeams", len(cfg.SRAlertSRETeamIDs))
 	}
+	if githubSync != nil {
+		service.WithGithubCaseStates(githubSync, activeCaseSvc)
+	}
 	caseHandler := handler.NewCaseHandler(activeCaseSvc, cfg.M2MClientIDs)
 	// activitiesHandler backs POST /cases/{id}/activities/search
 	// specifically -- see AttachmentDataSource's own doc comment for why
@@ -1213,7 +1324,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 			service.NewAnnouncementRequestService(repository.NewAnnouncementRequestRepository(db), activeCaseSvc, accessSvc),
 		)
 		scheduleHandler = handler.NewScheduleHandler(
-			service.NewScheduleService(repository.NewScheduleRepository(db), accessSvc),
+			service.WithScheduleAdminRoles(service.NewScheduleService(repository.NewScheduleRepository(db), accessSvc), cfg.AuthAdminRoles),
 		)
 		engagementAllocationViewHandler = handler.NewEngagementAllocationViewHandler(
 			service.NewEngagementAllocationViewService(repository.NewEngagementAllocationViewRepository(db), accessSvc),
@@ -1422,6 +1533,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	default:
 		activeTimeCardSvc = service.NewTimeCardService(timeCardRepo, userRepo)
 	}
+	if queryHourSvc != nil {
+		activeTimeCardSvc = service.WithTimeCardProjectHours(activeTimeCardSvc, queryHourSvc)
+	}
 	timeCardHandler := handler.NewTimeCardHandler(activeTimeCardSvc)
 
 	// sr_category/catalog_item/catalog_item_category/catalog_variable/
@@ -1566,6 +1680,20 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// (what the call-escalation ladders start from) and takes work notes, with no ServiceNow behind it.
 		activeIncidentSvc = service.NewIncidentServiceWithPublisher(incidentRepo, userRepo, incidentEventPublisher)
 	}
+	// This engine's own in-process SLA clock registration/revision/state
+	// effects, now also wired into incidents (previously case-only) -- see
+	// SLAEngineService.RegisterIncidentClocks' own doc comment. Same
+	// slaEngineSvc instance constructed above for cases (nil when
+	// CSM_SLA_ENGINE_ENABLED=false or no database, which
+	// WithIncidentSLAEngine tolerates); reaches every branch above
+	// (DataSourceServiceNow's *snIncidentService, the dual-write mirror's
+	// own *incidentService, and the plain-Postgres default's
+	// *incidentService) through this one decorator call, mirroring
+	// activeCaseSvc's identical WithSLAEngine wiring. Only one real
+	// sla_policy row currently matches anything for incidents -- see that
+	// doc comment for which one and why everything else is a safe no-op for
+	// now.
+	activeIncidentSvc = service.WithIncidentSLAEngine(activeIncidentSvc, slaEngineSvc)
 	// SLA_DATA_SOURCE=servicenow: SLA-filtered incident search/aggregate is
 	// answered by a read-only ServiceNow-backed incident service instead of the
 	// Postgres sla_live query, the same routing the case service gets via
@@ -1619,12 +1747,44 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 					AccountsTag:       cfg.MigrationCaseReportAccountsTag,
 					RecipientTeamKeys: cfg.MigrationCaseReportTeamKeys,
 				}))
+		// Long-open cases report: the cases still being worked on after a
+		// given age, in two tables by their project's onboarding status. It
+		// reads the Postgres case tables only, so it is not offered when cases
+		// are served from the other data source: a database pool can exist
+		// there too, and the report would be incomplete without saying so.
+		if cfg.DataSource != config.DataSourceServiceNow {
+			longOpenCaseReportHandler = handler.NewLongOpenCaseReportHandler(
+				service.NewLongOpenCaseReportService(
+					repository.NewLongOpenCaseReportRepository(repository.NewScoped(db)),
+					service.LongOpenCaseReportConfig{
+						ProjectTypes: cfg.LongOpenCasesReportProjectTypes,
+						ExcludedTags: cfg.LongOpenCasesReportExcludedTags,
+					}))
+		}
 		// Runbooks: the alert-name to runbook catalog, matched against every new incident's subject.
 		runbookRepo = repository.NewRunbookRepository(db)
 		runbookHandler = handler.NewRunbookHandler(service.NewRunbookService(runbookRepo))
+		// Standard change templates and the proposals that create, modify or
+		// retire them: internal callers only.
+		standardChangeRepo = repository.NewStandardChangeRepository(repository.NewScoped(db))
+		standardChangeHandler = handler.NewStandardChangeHandler(service.NewStandardChangeService(standardChangeRepo, accessSvc))
+		// From here on a standard change is raised from a template of this
+		// catalogue (the change request service is a pointer the handler shares; a
+		// ServiceNow-backed one is returned unchanged).
+		service.WithStandardChangeTemplates(activeChangeRequestSvc, standardChangeRepo)
 		portalBannerHandler = handler.NewPortalBannerHandler(
-			service.NewPortalBannerService(repository.NewPortalBannerRepository(db), accessSvc, cfg.AuthAdminRoles),
+			service.NewPortalBannerService(repository.NewPortalBannerRepository(db), accessSvc, cfg.CSMPortalBackendClientID),
 		)
+		// Product catalogue routes of the products API: editable by
+		// AUTH_PRODUCT_CATALOG_MANAGER_ROLES and by CSM admins. Postgres data
+		// source only: in ServiceNow mode the product searches read ServiceNow.
+		if cfg.DataSource != config.DataSourceServiceNow {
+			productCatalogHandler = handler.NewProductCatalogHandler(
+				service.NewProductCatalogService(repository.NewProductCatalogRepository(db),
+					repository.NewProductRepository(db), repository.NewProductVersionRepository(db), accessSvc,
+					append(append([]string{}, cfg.AuthProductCatalogManagerRoles...), cfg.AuthAdminRoles...)),
+			)
+		}
 		// Monthly product regression reports: one business unit's regression
 		// cases whose fix ETA was shared last month, for the scheduled task
 		// that mails one report per unit.
@@ -1976,8 +2136,20 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	if salesforceEventHandler != nil {
 		mux.HandleFunc("POST /salesforce/events", salesforceEventHandler.HandleEvent)
 	}
+	if acpReopenCheckHandler != nil {
+		// The daily ACP reopen check, called by csm-scheduled-tasks: any
+		// internal service credential (a client in M2M_CLIENT_IDS), as for
+		// the team schedule reminders. A user token, internal or not, is
+		// refused: the check writes to every ACP-suspended project and
+		// queues emails.
+		mux.HandleFunc("POST /acp/reopen-check", serviceOnly(accessSvc, acpReopenCheckHandler.Check))
+	}
 	if salesforcePartnerHandler != nil {
 		mux.HandleFunc("POST /salesforce/accounts/{sfId}/refresh-partners", salesforcePartnerHandler.RefreshPartners)
+	}
+	if salesforceResyncHandler != nil {
+		mux.HandleFunc("POST /salesforce/resync/preview", salesforceResyncHandler.Preview)
+		mux.HandleFunc("POST /salesforce/resync/apply", salesforceResyncHandler.Apply)
 	}
 	if customerEngagementAllocationHandler != nil {
 		mux.HandleFunc("POST /customer-engagements/allocation-events", customerEngagementAllocationHandler.ProcessAllocationEvent)
@@ -2008,14 +2180,15 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	if slaStatusHandler != nil {
 		mux.HandleFunc("GET /sla-status", slaStatusHandler.SearchActiveSLAStatuses)
 		mux.HandleFunc("GET /sla-status/clock-state", slaStatusHandler.GetClockState)
+		mux.HandleFunc("POST /sla-engine/recalculate", slaStatusHandler.RequestRecalculation)
+	}
+	if slaDurationPolicyHandler != nil {
+		mux.HandleFunc("GET /sla-duration-policy", slaDurationPolicyHandler.ListSLADurationPolicy)
 	}
 	if pendingVerificationHandler != nil {
 		mux.HandleFunc("POST /pending-verifications", pendingVerificationHandler.CreatePendingVerification)
 		mux.HandleFunc("POST /pending-verifications/search", pendingVerificationHandler.SearchPendingVerifications)
 		mux.HandleFunc("PATCH /pending-verifications/{id}", pendingVerificationHandler.VerifyPendingVerification)
-	}
-	if slaDurationPolicyHandler != nil {
-		mux.HandleFunc("GET /sla-duration-policy", slaDurationPolicyHandler.ListSLADurationPolicy)
 	}
 	if githubDeliveryHandler != nil {
 		mux.HandleFunc("POST /github/deliveries", githubDeliveryHandler.Handle)
@@ -2098,6 +2271,11 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// assigned to each migration; a customer token must never reach it.
 		mux.HandleFunc("GET /reports/migration-cases", internalOnly(accessSvc, migrationCaseReportHandler.GetMigrationCaseReport))
 	}
+	if longOpenCaseReportHandler != nil {
+		// internalOnly: the report names customers' cases and who is
+		// assigned to each; a customer token must never reach it.
+		mux.HandleFunc("GET /reports/long-open-cases", internalOnly(accessSvc, longOpenCaseReportHandler.GetLongOpenCaseReport))
+	}
 	if productRegressionReportHandler != nil {
 		// internalOnly: the report names customers' cases and deployments; a
 		// customer token must never reach it.
@@ -2110,6 +2288,39 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		mux.HandleFunc("POST /runbooks/import", internalOnly(accessSvc, runbookHandler.ImportRunbooks))
 		mux.HandleFunc("PUT /runbooks/{id}", internalOnly(accessSvc, runbookHandler.UpdateRunbook))
 		mux.HandleFunc("DELETE /runbooks/{id}", internalOnly(accessSvc, runbookHandler.DeleteRunbook))
+	}
+	if productCatalogHandler != nil {
+		// The rest of the products API: the catalogue.
+		mux.HandleFunc("GET /products/{id}", productCatalogHandler.GetProduct)
+		mux.HandleFunc("POST /products", productCatalogHandler.CreateProduct)
+		mux.HandleFunc("PATCH /products/{id}", productCatalogHandler.UpdateProduct)
+		mux.HandleFunc("POST /products/{id}/versions", productCatalogHandler.CreateProductVersions)
+		mux.HandleFunc("POST /product-versions/search", productCatalogHandler.SearchAllProductVersions)
+		mux.HandleFunc("GET /product-versions/{id}", productCatalogHandler.GetProductVersion)
+		mux.HandleFunc("PATCH /product-versions/{id}", productCatalogHandler.UpdateProductVersion)
+		mux.HandleFunc("POST /product-versions/{id}/retire", productCatalogHandler.RetireProductVersion)
+		mux.HandleFunc("GET /release-lines", productCatalogHandler.ListReleaseLines)
+		mux.HandleFunc("POST /release-lines", productCatalogHandler.CreateReleaseLine)
+		mux.HandleFunc("PATCH /release-lines/{id}", productCatalogHandler.UpdateReleaseLine)
+		mux.HandleFunc("POST /release-lines/{id}/retire", productCatalogHandler.RetireReleaseLine)
+		mux.HandleFunc("GET /carbon-platform-history", productCatalogHandler.ListCarbonPlatformHistory)
+		mux.HandleFunc("GET /carbon-kernel-releases", productCatalogHandler.ListCarbonKernelReleases)
+	}
+	if standardChangeHandler != nil {
+		// Standard changes (Operations > Change requests > Standard changes): internal callers only.
+		mux.HandleFunc("POST /standard-change-templates/search", internalOnly(accessSvc, standardChangeHandler.SearchTemplates))
+		mux.HandleFunc("GET /standard-change-templates/{id}", internalOnly(accessSvc, standardChangeHandler.GetTemplate))
+		mux.HandleFunc("GET /standard-change-templates/{id}/versions/{versionId}", internalOnly(accessSvc, standardChangeHandler.GetTemplateVersion))
+		mux.HandleFunc("POST /standard-change-templates/{id}/suspend", internalOnly(accessSvc, standardChangeHandler.SuspendTemplate))
+		mux.HandleFunc("POST /standard-change-templates/{id}/resume", internalOnly(accessSvc, standardChangeHandler.ResumeTemplate))
+		mux.HandleFunc("POST /standard-change-templates/{id}/clear-review", internalOnly(accessSvc, standardChangeHandler.ClearTemplateReview))
+		mux.HandleFunc("POST /standard-change-proposals", internalOnly(accessSvc, standardChangeHandler.CreateProposal))
+		mux.HandleFunc("POST /standard-change-proposals/search", internalOnly(accessSvc, standardChangeHandler.SearchProposals))
+		mux.HandleFunc("GET /standard-change-proposals/{id}", internalOnly(accessSvc, standardChangeHandler.GetProposal))
+		mux.HandleFunc("PATCH /standard-change-proposals/{id}", internalOnly(accessSvc, standardChangeHandler.UpdateProposal))
+		mux.HandleFunc("POST /standard-change-proposals/{id}/submit", internalOnly(accessSvc, standardChangeHandler.SubmitProposal))
+		mux.HandleFunc("POST /standard-change-proposals/{id}/withdraw", internalOnly(accessSvc, standardChangeHandler.WithdrawProposal))
+		mux.HandleFunc("POST /standard-change-proposals/{id}/decision", internalOnly(accessSvc, standardChangeHandler.DecideProposal))
 	}
 	if portalBannerHandler != nil {
 		// Banners. GET /banners is the customer portal and always returns that
@@ -2243,6 +2454,29 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		mux.HandleFunc("PATCH /users/me/saved-filter-views", savedFilterViewHandler.Save)
 		mux.HandleFunc("DELETE /users/me/saved-filter-views", savedFilterViewHandler.Delete)
 		mux.HandleFunc("POST /users/me/saved-filter-views/reorder", savedFilterViewHandler.Reorder)
+	}
+	if customDashboardHandler != nil {
+		// The caller's own saved dashboards (CSM portal My Dashboards).
+		mux.HandleFunc("GET /users/me/dashboards", customDashboardHandler.List)
+		mux.HandleFunc("GET /users/me/dashboards/{id}", customDashboardHandler.Get)
+		mux.HandleFunc("PUT /users/me/dashboards/{id}", customDashboardHandler.Save)
+		mux.HandleFunc("DELETE /users/me/dashboards/{id}", customDashboardHandler.Delete)
+	}
+	if customDashboardShareHandler != nil {
+		// Sharing the caller's saved dashboards (owner) and the ones shared
+		// with the caller (recipient, view only).
+		mux.HandleFunc("GET /users/me/dashboards/{id}/shares", customDashboardShareHandler.ListShares)
+		mux.HandleFunc("PUT /users/me/dashboards/{id}/shares/{userId}", customDashboardShareHandler.AddShare)
+		mux.HandleFunc("DELETE /users/me/dashboards/{id}/shares/{userId}", customDashboardShareHandler.RemoveShare)
+		mux.HandleFunc("GET /users/me/shared-dashboards", customDashboardShareHandler.ListSharedWithMe)
+		mux.HandleFunc("GET /users/me/shared-dashboards/{id}", customDashboardShareHandler.GetSharedWithMe)
+	}
+	if customDashboardTeamShareHandler != nil {
+		// Sharing the caller's saved dashboards with teams (owner); the
+		// members read them through the shared-dashboards routes above.
+		mux.HandleFunc("GET /users/me/dashboards/{id}/team-shares", customDashboardTeamShareHandler.ListTeamShares)
+		mux.HandleFunc("PUT /users/me/dashboards/{id}/team-shares/{teamId}", customDashboardTeamShareHandler.AddTeamShare)
+		mux.HandleFunc("DELETE /users/me/dashboards/{id}/team-shares/{teamId}", customDashboardTeamShareHandler.RemoveTeamShare)
 	}
 
 	if membershipRegistrationHandler != nil {
