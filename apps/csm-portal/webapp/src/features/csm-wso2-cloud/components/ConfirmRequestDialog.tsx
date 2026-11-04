@@ -21,21 +21,25 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  TextField,
   Typography,
 } from "@wso2/oxygen-ui";
-import type { JSX } from "react";
+import { useState, type JSX } from "react";
 import { usePostCloudRequest } from "@features/csm-wso2-cloud/api/usePostCloudRequest";
 import type { NewCloudRequest } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
 /**
  * Confirms one danger-zone action and raises it as a request. `request` is
- * null while the dialog is closed.
+ * null while the dialog is closed. With `reasonRequired` the requester must
+ * say why, which the approver sees on the request (the Ops portal asks this
+ * for lock and disable).
  */
 export default function ConfirmRequestDialog({
   request,
   title,
   body,
   confirmLabel,
+  reasonRequired = false,
   onClose,
   onRaised,
 }: {
@@ -43,16 +47,20 @@ export default function ConfirmRequestDialog({
   title: string;
   body: string;
   confirmLabel: string;
+  reasonRequired?: boolean;
   onClose: () => void;
   onRaised: () => void;
 }): JSX.Element {
   const post = usePostCloudRequest();
+  const [reason, setReason] = useState("");
+  const missingReason = reasonRequired && !reason.trim();
 
   const handleConfirm = () => {
-    if (!request) return;
-    post.mutate(request, {
+    if (!request || missingReason) return;
+    post.mutate(reasonRequired ? { ...request, reason } : request, {
       onSuccess: () => {
         post.reset();
+        setReason("");
         onRaised();
       },
     });
@@ -61,6 +69,7 @@ export default function ConfirmRequestDialog({
   const handleClose = () => {
     if (post.isPending) return;
     post.reset();
+    setReason("");
     onClose();
   };
 
@@ -72,13 +81,30 @@ export default function ConfirmRequestDialog({
         <Typography variant="body2" color="text.secondary">
           This raises a request. Nothing changes until it is approved.
         </Typography>
+        {reasonRequired && (
+          <TextField
+            label="Reason"
+            required
+            multiline
+            minRows={3}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            helperText="Shown to the approver with the request."
+            autoFocus
+          />
+        )}
         {post.isError && <Alert severity="error">{post.error.message}</Alert>}
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClose} disabled={post.isPending}>
           Go back
         </Button>
-        <Button variant="contained" color="error" onClick={handleConfirm} disabled={post.isPending}>
+        <Button
+          variant="contained"
+          color="error"
+          onClick={handleConfirm}
+          disabled={post.isPending || missingReason}
+        >
           {confirmLabel}
         </Button>
       </DialogActions>

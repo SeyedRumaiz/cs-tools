@@ -275,6 +275,7 @@ export function createRequest(input: NewCloudRequest, requestedBy: string): Prom
   lastRequestNumber += 1;
   const created: CloudRequest = {
     ...input,
+    reason: input.reason?.trim() || undefined,
     id: `REQ-${String(lastRequestNumber).padStart(4, "0")}`,
     requestedBy,
     requestedOn: new Date().toISOString(),
@@ -373,7 +374,7 @@ function applyApproved(request: CloudRequest): void {
   const user = USERS[index];
   switch (request.type) {
     case "lock_user":
-      USERS[index] = { ...user, locked: true, lockedReason: "Locked by WSO2 support", lastModifiedOn: now };
+      USERS[index] = { ...user, locked: true, lockedReason: request.reason ?? "Locked by WSO2 support", lastModifiedOn: now };
       break;
     case "unlock_user":
       USERS[index] = { ...user, locked: false, lockedReason: undefined, failedLoginAttempts: 0, lastModifiedOn: now };

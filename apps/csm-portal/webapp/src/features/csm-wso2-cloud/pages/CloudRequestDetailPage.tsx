@@ -192,8 +192,15 @@ export default function CloudRequestDetailPage(): JSX.Element {
             </>
           )}
         </MetaGrid>
+        {request.reason && (
+          <MetaCell label="Reason for the request">
+            <Box component="span" sx={{ whiteSpace: "pre-wrap" }}>
+              {request.reason}
+            </Box>
+          </MetaCell>
+        )}
         {request.remark && (
-          <MetaCell label="Reason">
+          <MetaCell label="Reason for rejecting">
             <Box component="span" sx={{ whiteSpace: "pre-wrap" }}>
               {request.remark}
             </Box>

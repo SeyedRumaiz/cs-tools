@@ -39,6 +39,23 @@ describe("resolving a request in the sample data", () => {
     expect((await api.getUser("u-1001"))?.locked).toBe(true);
   });
 
+  it("shows the requester's reason as the user's locked reason once approved", async () => {
+    const api = await load();
+    const request = await api.createRequest(
+      {
+        type: "lock_user",
+        target: { kind: "user", id: "u-1001", label: "jane.doe@example.com" },
+        summary: "Lock jane.doe@example.com",
+        reason: "  Suspicious sign-ins.  ",
+      },
+      "engineer@example.com",
+    );
+    expect(request.reason).toBe("Suspicious sign-ins.");
+
+    await api.resolveRequest(request.id, "approved", "approver@example.com");
+    expect((await api.getUser("u-1001"))?.lockedReason).toBe("Suspicious sign-ins.");
+  });
+
   it("keeps the reason a request was rejected", async () => {
     const api = await load();
     const request = await api.createRequest(

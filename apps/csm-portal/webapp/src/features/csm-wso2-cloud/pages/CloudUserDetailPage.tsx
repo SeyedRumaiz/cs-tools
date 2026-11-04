@@ -44,7 +44,11 @@ interface PendingAction {
   title: string;
   body: string;
   confirmLabel: string;
+  reasonRequired: boolean;
 }
+
+/** As in the Ops portal, locking or disabling someone needs a reason. */
+const REASON_REQUIRED: ReadonlySet<CloudRequestType> = new Set(["lock_user", "disable_user"]);
 
 function userAction(
   user: CloudUser,
@@ -62,6 +66,7 @@ function userAction(
     title,
     body,
     confirmLabel,
+    reasonRequired: REASON_REQUIRED.has(type),
   };
 }
 
@@ -243,6 +248,7 @@ export default function CloudUserDetailPage(): JSX.Element {
         title={action?.title ?? ""}
         body={action?.body ?? ""}
         confirmLabel={action?.confirmLabel ?? ""}
+        reasonRequired={action?.reasonRequired ?? false}
         onClose={() => setAction(null)}
         onRaised={() => {
           setAction(null);

@@ -54,6 +54,9 @@ describe("CloudUserDetailPage", () => {
 
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText(/Nothing changes until it is approved/)).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Reason/ }), {
+      target: { value: "Customer asked us to." },
+    });
     fireEvent.click(within(dialog).getByRole("button", { name: "Request disable" }));
 
     expect(await screen.findByText(/Request raised/)).toBeInTheDocument();
@@ -75,11 +78,38 @@ describe("CloudUserDetailPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Lock" }));
 
     const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /Reason/ }), {
+      target: { value: "Suspicious sign-ins." },
+    });
     fireEvent.click(within(dialog).getByRole("button", { name: "Request lock" }));
 
     expect(
       await within(dialog).findByText(/already has a pending lock user request/),
     ).toBeInTheDocument();
+  });
+
+  it("needs a reason before a lock or disable can be requested", async () => {
+    renderPage("u-1001");
+    fireEvent.click(await screen.findByRole("button", { name: "Lock" }));
+
+    const dialog = await screen.findByRole("dialog");
+    const request = within(dialog).getByRole("button", { name: "Request lock" });
+    expect(request).toBeDisabled();
+
+    const reason = within(dialog).getByRole("textbox", { name: /Reason/ });
+    fireEvent.change(reason, { target: { value: "   " } });
+    expect(request).toBeDisabled();
+    fireEvent.change(reason, { target: { value: "Suspicious sign-ins." } });
+    expect(request).toBeEnabled();
+  });
+
+  it("does not ask for a reason to delete", async () => {
+    renderPage("u-1001");
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByRole("textbox", { name: /Reason/ })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Request deletion" })).toBeEnabled();
   });
 
   it("says so when there is no such user", async () => {

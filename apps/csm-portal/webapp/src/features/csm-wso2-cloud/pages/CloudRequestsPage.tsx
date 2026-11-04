@@ -223,6 +223,17 @@ function RequestRow({
         <Typography variant="body2" noWrap title={r.summary}>
           {r.summary}
         </Typography>
+        {r.reason && (
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            noWrap
+            title={r.reason}
+            sx={{ display: "block", mt: 0.5 }}
+          >
+            {r.reason}
+          </Typography>
+        )}
       </TableCell>
       <TableCell sx={{ maxWidth: 220 }}>
         <Typography variant="body2" noWrap title={r.requestedBy}>

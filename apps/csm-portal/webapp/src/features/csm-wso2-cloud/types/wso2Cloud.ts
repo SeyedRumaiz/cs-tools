@@ -132,6 +132,11 @@ export interface CloudRequest {
   target: CloudRequestTarget;
   /** One line saying what changes, e.g. "Free → Enterprise". */
   summary: string;
+  /**
+   * Why the requester raised it. Lock and disable ask for one, as in the Ops
+   * portal; an approved lock shows it as the user's locked reason.
+   */
+  reason?: string;
   /** Present on an upgrade request: the limits asked for. */
   limits?: CloudOrganizationLimits;
   tier?: CloudTier;
@@ -154,6 +159,7 @@ export interface NewCloudRequest {
   type: CloudRequestType;
   target: CloudRequestTarget;
   summary: string;
+  reason?: string;
   limits?: CloudOrganizationLimits;
   tier?: CloudTier;
   previousTier?: CloudTier;
