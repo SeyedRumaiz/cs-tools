@@ -533,6 +533,32 @@ from a template for another customer's project (or none), or a PATCH moving it t
 400 `standard_change_template_other_customer`, echoed with its message and code by `mapUpstreamError`
 (`standard_change_customer_test.go`).
 
+## WSO2 Cloud requests (`internal/handler/wso2_cloud_requests.go`, `internal/wso2cloud`)
+
+The WSO2 Cloud tab's requests (upgrade or delete an organization; lock, unlock, disable, enable or
+delete a user), stored by entity-service (`/wso2-cloud-requests`, migration 0278). Same paths here:
+
+| Route | Permission | Notes |
+|---|---|---|
+| `POST /wso2-cloud-requests` | `PermWrite` | requester taken from the token by entity-service |
+| `POST /wso2-cloud-requests/search`, `GET /wso2-cloud-requests/{id}` | `PermViewOperations` | |
+| `POST /wso2-cloud-requests/{id}/resolve` | `PermApproveWso2CloudRequest` | `wso2_cloud_approver` (`AUTH_WSO2_CLOUD_APPROVER_ROLES`) or admin; not cs_engineer |
+| `DELETE /wso2-cloud-requests/{id}` | `PermWrite` | the requester or an admin (`PermAdmin`), checked in the handler; a nil guard lets only the requester |
+
+- **An approval is applied before it is recorded.** The handler reads the request, refuses (409) one that
+  is not pending and (403) the requester's own, then calls `wso2cloud.Applier.Apply`, and only when that
+  worked posts `/resolve`. A failed apply leaves the request pending: 503 when WSO2 Cloud is not connected,
+  502 otherwise. A resolve that fails after the apply is logged at ERROR ("change applied but the approval
+  was not recorded") for a person to put right. Two approvers racing can both apply; the second resolve is
+  a 409. A rejection is forwarded straight away.
+- **`WSO2_CLOUD_APPLY_MODE`**: empty (default) is `NotConnected`, which refuses every approval; `dry_run`
+  records approvals without changing anything (local and test stacks only, warned at startup); anything
+  else fails startup. The WSO2 Cloud API is not available yet; a real client replaces the Applier.
+- Refusals from entity-service (400, 403, 404, 409) keep their message and `errorCode`, as for standard
+  changes; a 5xx is the generic fallback.
+- `wso2_cloud_approver` grants nothing else (no read): an approver needs a viewing role too. An unset
+  variable is not a lockout (admin holds the permission), so startup does not warn.
+
 ## Change request tags go through the case tag routes
 
 `GET /change-requests/{id}` is a raw pass-through, so the `tags` array the

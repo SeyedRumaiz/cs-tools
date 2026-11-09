@@ -48,6 +48,7 @@ func testAccessConfig() AccessConfig {
 		OnboardingLead:        []string{"test-onboarding-lead"},
 		ProductCatalogManager: []string{"test-product-catalog-manager"},
 		SecurityTeam:          []string{"test-security-team"},
+		Wso2CloudApprover:     []string{"test-wso2-cloud-approver"},
 	}
 }
 
@@ -596,7 +597,7 @@ func TestAccessGuard_SecurityReportCasesAlsoAllowsViewer(t *testing.T) {
 
 func TestAccessGuard_UnconfiguredRolesAreHeldByNobody(t *testing.T) {
 	g := NewAccessGuard(AccessConfig{})
-	for _, perm := range []Permission{PermView, PermViewOperations, PermTimeCardsAndUpdates, PermViewUpdates, PermEscalate, PermDownloadAttachment, PermWrite, PermAdmin, PermViewSecurityCenter, PermViewSecurityReportCases, PermApproveTimeCard, PermUsePlg, PermManagePlaybooks, PermCreateWorkNote, PermCreateAnnouncement, PermUpdateDeleteComment, PermManageOnboarding, PermUpdateProject, PermManageProductCatalog} {
+	for _, perm := range []Permission{PermView, PermViewOperations, PermTimeCardsAndUpdates, PermViewUpdates, PermEscalate, PermDownloadAttachment, PermWrite, PermAdmin, PermViewSecurityCenter, PermViewSecurityReportCases, PermApproveTimeCard, PermUsePlg, PermManagePlaybooks, PermCreateWorkNote, PermCreateAnnouncement, PermUpdateDeleteComment, PermManageOnboarding, PermUpdateProject, PermManageProductCatalog, PermApproveWso2CloudRequest} {
 		if status, _ := serveWithRoles(g, perm, []string{"test-admin", "test-viewer", ""}); status != http.StatusForbidden {
 			t.Errorf("permission %d with no roles configured: status = %d, want 403", perm, status)
 		}

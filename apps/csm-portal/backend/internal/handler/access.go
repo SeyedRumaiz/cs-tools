@@ -324,6 +324,13 @@ const (
 	// viewing role separately to see the catalogue at all. entity-service
 	// re-checks the same role on every change.
 	PermManageProductCatalog
+	// PermApproveWso2CloudRequest is approving or rejecting a request raised
+	// from the WSO2 Cloud tab (upgrade or delete an organization; lock, unlock,
+	// disable, enable or delete a user): POST /wso2-cloud-requests/{id}/resolve.
+	// Held ONLY by the wso2_cloud_approver role and admin -- NOT the CS
+	// engineer, who raises requests (PermWrite) but must not approve them. It
+	// grants no read access: a holder needs a viewing role separately.
+	PermApproveWso2CloudRequest
 )
 
 // AccessConfig names, per portal role, the role names on the token that grant
@@ -387,6 +394,10 @@ type AccessConfig struct {
 	// onboarding_lead, an unset variable is not a lockout: admin already holds
 	// PermManageProductCatalog regardless.
 	ProductCatalogManager []string
+	// Wso2CloudApprover grants PermApproveWso2CloudRequest (see that
+	// permission's own doc comment) and nothing else. Like onboarding_lead, an
+	// unset variable is not a lockout: admin already holds the permission.
+	Wso2CloudApprover []string
 	// SecurityTeam grants PermView, PermViewOperations,
 	// PermViewSecurityCenter and PermViewSecurityReportCases -- the
 	// dedicated role for security-team staff who need to see the Operations
@@ -486,7 +497,8 @@ type portalRole struct {
 // PermManageOnboarding and the PermUpdateProject route floor -- no View, no
 // PermWrite -- and admin alone also holds PermManageOnboarding; cs_engineer
 // deliberately does not. product_catalog_manager is the same shape: it implies
-// only PermManageProductCatalog, which admin alone also holds.
+// only PermManageProductCatalog, which admin alone also holds, and
+// wso2_cloud_approver only PermApproveWso2CloudRequest.
 func NewAccessGuard(cfg AccessConfig) *AccessGuard {
 	build := func(lists ...[]string) map[string]struct{} {
 		set := make(map[string]struct{})
@@ -513,6 +525,7 @@ func NewAccessGuard(cfg AccessConfig) *AccessGuard {
 			{key: "comment_updater", names: build(cfg.CommentUpdater)},
 			{key: "onboarding_lead", names: build(cfg.OnboardingLead)},
 			{key: "product_catalog_manager", names: build(cfg.ProductCatalogManager)},
+			{key: "wso2_cloud_approver", names: build(cfg.Wso2CloudApprover)},
 			{key: "security_team", names: build(cfg.SecurityTeam)},
 		},
 		allowed: map[Permission]map[string]struct{}{
@@ -586,6 +599,10 @@ func NewAccessGuard(cfg AccessConfig) *AccessGuard {
 			// deliberately does NOT hold it. See PermManageProductCatalog's
 			// own doc comment.
 			PermManageProductCatalog: build(cfg.ProductCatalogManager, cfg.Admin),
+			// wso2_cloud_approver and admin only -- cs_engineer deliberately
+			// does NOT hold it. See PermApproveWso2CloudRequest's own doc
+			// comment.
+			PermApproveWso2CloudRequest: build(cfg.Wso2CloudApprover, cfg.Admin),
 		},
 	}
 }

@@ -1294,6 +1294,13 @@ func (c *CustomerEntityClient) StandardChangeCall(ctx context.Context, method, p
 	return c.do(ctx, method, path, body)
 }
 
+// Wso2CloudRequestCall calls one of entity-service's WSO2 Cloud request routes
+// (/wso2-cloud-requests/...) with the caller's identity. path is built by the
+// handler from validated ids only.
+func (c *CustomerEntityClient) Wso2CloudRequestCall(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	return c.do(ctx, method, path, body)
+}
+
 // ListRunbooks calls GET /runbooks: the alert-name to runbook catalog.
 func (c *CustomerEntityClient) ListRunbooks(ctx context.Context) ([]byte, error) {
 	return c.do(ctx, http.MethodGet, "/runbooks", nil)

@@ -48,6 +48,7 @@ import (
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/risk"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/scim"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/updates"
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/wso2cloud"
 )
 
 // main loads the configuration, builds every upstream client and handler,
@@ -97,6 +98,19 @@ func main() {
 	if err != nil {
 		slog.Error("invalid ASGARDEO_ROLE_GROUP_NAMES", "err", err)
 		os.Exit(1)
+	}
+
+	// How an approved WSO2 Cloud request is applied (WSO2_CLOUD_APPLY_MODE).
+	// Empty: not connected, every approval is refused and the request stays
+	// pending. dry_run: approvals are recorded without changing anything in
+	// WSO2 Cloud (local and test stacks only).
+	wso2CloudApplier, err := wso2cloud.ApplierForMode(os.Getenv("WSO2_CLOUD_APPLY_MODE"))
+	if err != nil {
+		slog.Error("invalid WSO2_CLOUD_APPLY_MODE", "err", err)
+		os.Exit(1)
+	}
+	if _, dryRun := wso2CloudApplier.(wso2cloud.DryRun); dryRun {
+		slog.Warn("WSO2_CLOUD_APPLY_MODE is dry_run: approved WSO2 Cloud requests are recorded without being applied")
 	}
 
 	reqTimeouts, err := loadTimeouts(os.Getenv)
@@ -838,6 +852,19 @@ func main() {
 	route("POST /standard-change-proposals/{id}/withdraw", handler.PermWrite, standardChangeHandler.WithdrawProposal)
 	route("POST /standard-change-proposals/{id}/decision", handler.PermWrite, standardChangeHandler.DecideProposal)
 
+	// WSO2 Cloud > Requests: changes to a WSO2 Cloud organization or user,
+	// raised by one person and approved or rejected by another. Reading is for
+	// staff who see Operations; raising and cancelling (the requester or an
+	// admin, checked in the handler) are PermWrite; approving and rejecting are
+	// the wso2_cloud_approver role or admin. entity-service checks again that a
+	// request is pending and that nobody approves their own.
+	wso2CloudRequestHandler := handler.NewWso2CloudRequestHandler(customerEntityClient, wso2CloudApplier).WithAccessGuard(accessGuard)
+	route("POST /wso2-cloud-requests", handler.PermWrite, wso2CloudRequestHandler.CreateRequest)
+	route("POST /wso2-cloud-requests/search", handler.PermViewOperations, wso2CloudRequestHandler.SearchRequests)
+	route("GET /wso2-cloud-requests/{id}", handler.PermViewOperations, wso2CloudRequestHandler.GetRequest)
+	route("POST /wso2-cloud-requests/{id}/resolve", handler.PermApproveWso2CloudRequest, wso2CloudRequestHandler.ResolveRequest)
+	route("DELETE /wso2-cloud-requests/{id}", handler.PermWrite, wso2CloudRequestHandler.CancelRequest)
+
 	// Operations > Runbooks: the alert-name to runbook catalog new incidents are matched against.
 	runbookHandler := handler.NewRunbookHandler(customerEntityClient)
 	route("GET /runbooks", handler.PermViewOperations, runbookHandler.ListRunbooks)
@@ -1216,8 +1243,9 @@ func loadDirectory() *directory.Directory {
 // nobody can use the portal.
 //
 // AUTH_SALES_SOLUTIONS_ROLES, AUTH_WORKNOTE_CREATOR_ROLES,
-// AUTH_COMMENT_UPDATER_ROLES, AUTH_ONBOARDING_LEAD_ROLES and
-// AUTH_PRODUCT_CATALOG_MANAGER_ROLES are unlike the rest:
+// AUTH_COMMENT_UPDATER_ROLES, AUTH_ONBOARDING_LEAD_ROLES,
+// AUTH_PRODUCT_CATALOG_MANAGER_ROLES and AUTH_WSO2_CLOUD_APPROVER_ROLES are
+// unlike the rest:
 // leaving any of them unset
 // does not warn. sales_solutions is a normal, expected unconfigured state (CS
 // Portal alone still works fine) rather than a misconfiguration nobody can
@@ -1228,8 +1256,9 @@ func loadDirectory() *directory.Directory {
 // AccessConfig.WorknoteCreator's/CommentUpdater's own doc comments), so
 // leaving either empty is purely "this extra role isn't provisioned yet,"
 // never a state that locks anyone out. onboarding_lead is the same: admin
-// already holds PermManageOnboarding regardless; and product_catalog_manager:
-// admin already holds PermManageProductCatalog regardless.
+// already holds PermManageOnboarding regardless; product_catalog_manager:
+// admin already holds PermManageProductCatalog regardless; and
+// wso2_cloud_approver: admin already holds PermApproveWso2CloudRequest.
 func loadAccessConfig() handler.AccessConfig {
 	var unset []string
 	roles := func(name string) []string {
@@ -1263,15 +1292,17 @@ func loadAccessConfig() handler.AccessConfig {
 		SecurityTeam: roles("AUTH_SECURITY_TEAM_ROLES"),
 		// Unlike the roles above, an unset AUTH_SALES_SOLUTIONS_ROLES,
 		// AUTH_WORKNOTE_CREATOR_ROLES, AUTH_COMMENT_UPDATER_ROLES,
-		// AUTH_ONBOARDING_LEAD_ROLES or AUTH_PRODUCT_CATALOG_MANAGER_ROLES is a
-		// normal, supported state (see this function's own doc comment for why
-		// each is), so all five deliberately bypass the roles() helper
+		// AUTH_ONBOARDING_LEAD_ROLES, AUTH_PRODUCT_CATALOG_MANAGER_ROLES or
+		// AUTH_WSO2_CLOUD_APPROVER_ROLES is a normal, supported state (see this
+		// function's own doc comment for why each is), so all six deliberately
+		// bypass the roles() helper
 		// to avoid adding themselves to the unset-variable warning below.
 		SalesSolutions:        splitComma(os.Getenv("AUTH_SALES_SOLUTIONS_ROLES")),
 		WorknoteCreator:       splitComma(os.Getenv("AUTH_WORKNOTE_CREATOR_ROLES")),
 		CommentUpdater:        splitComma(os.Getenv("AUTH_COMMENT_UPDATER_ROLES")),
 		OnboardingLead:        splitComma(os.Getenv("AUTH_ONBOARDING_LEAD_ROLES")),
 		ProductCatalogManager: splitComma(os.Getenv("AUTH_PRODUCT_CATALOG_MANAGER_ROLES")),
+		Wso2CloudApprover:     splitComma(os.Getenv("AUTH_WSO2_CLOUD_APPROVER_ROLES")),
 	}
 	if len(unset) > 0 {
 		slog.Warn("access-control role variables are unset, so no token role grants them", "variables", unset)
