@@ -65,6 +65,8 @@ The server loads `.env` automatically on startup (silently ignored if absent). P
 | `SALES_ENTITY_CLIENT_ID` | no* | — | Choreo connection client id |
 | `SALES_ENTITY_CLIENT_SECRET` | no* | — | Choreo connection client secret |
 | `SALES_ENTITY_SCOPES` | no | — | Optional space-separated OAuth2 scopes for REST `sales/sales-entity-service` |
+| `ATTACHMENT_MAX_BYTES` / `INLINE_IMAGE_MAX_BYTES` | no | 100 MiB / 25 MiB | Largest uploaded file / comment or description image. Provisional. An unparseable or non-positive value falls back to the default |
+| `INLINE_IMAGES_TOTAL_MAX_BYTES` | no | 25 MiB | Total size of all images in ONE comment or description (at most 5 images, `service.MaxInlineImagesPerContent`). Same fallback rule |
 | `CSM_MIGRATION_MEMBERSHIP_REGISTRATION_ENABLED` | no | `false` | Must be `"true"` for `POST /users/me/memberships/register` to be registered at all (see "Membership registration" below). Off = the route 404s and nothing on that path can write to Salesforce |
 | `CSM_MIGRATION_SALESFORCE_MEMBERSHIP_INGEST_ENABLED` | no | `false` | Must be `"true"` for `POST /salesforce/events` to act on `Project_Contact__c`/`Contact` envelopes, the Contact writer included (see "Salesforce membership ingest" and "The Contact writer" below). The Account branch is unaffected |
 | `CSM_MIGRATION_SALESFORCE_ACCOUNT_INGEST_ENABLED` | no | `false` | Must be `"true"` for `POST /salesforce/events` to act on `Account` envelopes; off, they are acknowledged and ignored. Keep it off while the ServiceNow sync still writes `account`. The upsert resolves the row by `sf_id` (not unique since migration 0095), then links a same-`number` row with no `sf_id`, then inserts; the SE-1 columns are kept when Salesforce sends none; see "Salesforce Account ingest" for the full column set |
@@ -91,6 +93,7 @@ The server loads `.env` automatically on startup (silently ignored if absent). P
 | `USER_CACHE_TTL` | no | `10m` | Backstop lifetime of a cached user; an unparseable or non-positive value falls back to `10m` |
 | `PRODUCT_VULNERABILITY_META_CACHE_TTL` | no | `24h` | Backstop lifetime of the cached product/version options of `GET /products/vulnerabilities/meta`; deleted on a successful vulnerability sync; unparseable or non-positive falls back to `24h` |
 | `INCIDENT_EXTRA_ASSIGNMENT_GROUP_IDS` | no | — | Comma-separated `"group"` UUIDs an incident may be created in although they support no service (e.g. the security operations group). Trimmed, empty entries ignored; a non-UUID entry refuses to start. Joins the incident-assignable set (create check + `supportGroupsOnly` picker); never case-alert route options. See "Incident assignment group on create" |
+| `SERVICE_REQUEST_DEFAULT_SEVERITY` | no | `S4` | Internal severity (`S1`..`S4`, case-insensitive) a service request gets when created without one; unset = `S4`; any other value (`S0` included) refuses to start. Internal-only field (customers neither set nor see it), Postgres only, never sent to the backing data source, no SLA or event effect. A customer's or customer-portal-routed caller's explicit severity on create is dropped, on update it is a 403. Set via `PATCH /cases/{id}` `{severity}` by internal users and integration clients only; a case moved to a service request keeps it (`S0` is stored as `S1` with a `SEVERITY_DOWNGRADED` entry in the response's `warnings`; none becomes `S4`) |
 | `INCIDENT_DEFAULT_SERVICE_ID` | no | — | UUID of the service whose support group a new incident gets when no `assignmentGroupId` is sent and its own service has no support group (logged WARN each time). Unset / missing / groupless: such incidents are created unassigned (logged ERROR). A non-UUID refuses to start; checked at startup, log only. See "Incident assignment group on create" |
 | `CR_STRICT_VISIBILITY_FROM` | no | — | RFC 3339 instant **with a zone**: change requests created at or after it are visible to a customer only when designated to them; earlier ones are "legacy" and keep today's visibility. Unset/empty = no cutover, every change request is legacy (the safe default and the rollback; a WARN is logged at startup). An unparsable value refuses to start. Set once per environment at release and never move it — see "Customer visibility and the cutover" |
 | `MIGRATION_CASE_REPORT_HOLD_TAG` | no | `s_mig_hold` | Tag (ignoring case) for the weekly migration scan's "customer requested to hold" table |
@@ -1849,6 +1852,150 @@ response: the case/comment/incident already exists in ServiceNow by that
 point, so a notification-side hiccup must not be reported to the caller as a
 failed
 create.
+
+## Attachment files held by the portal backends (Azure Blob Storage)
+
+Work item, comment-image and deployment attachment files (`work_item_attachment`,
+`comment_attachment`, `deployment_attachment`; `case_attachment` is the older flow: nothing writes it any
+more, existing rows are only listed and moved with their ticket) are read and written by the portal backends (`apps/customer-portal/backend-v2`,
+`apps/csm-portal/backend`) in Azure Blob Storage, through `libs/azblobstore`. **This service never
+touches a file**: it has no file store and needs no storage setting. It keeps the access checks (the
+caller's own row-level security), the three attachment tables, the size and type rules, and the
+storage key layout (`filestore.Key`, the same layout the migrated files use).
+
+Routes, registered only when `db != nil` (otherwise 404): `POST /attachments/upload`,
+`POST /attachments/upload/{id}/authorize`, `POST /attachments/upload/{id}/confirm`,
+`POST /attachments/locate`, `GET /attachments/inline/{id}/location`, `POST /attachments/delete`,
+`POST /attachments/uploads/cleanup` and `POST /attachments/uploads/cleanup/acknowledge`. Code:
+`internal/filestore` (the key layout), `service.StoredAttachmentService` (`stored_attachment_service.go`,
+`stored_attachment_backend.go`), `repository.StoredAttachmentRepository`, `handler.StoredAttachmentHandler`.
+
+**Listing, and what no longer exists.** `POST /attachments/search` (always registered, PostgreSQL only)
+lists metadata for a case, change request, incident, conversation or deployment (`deployment_attachment`);
+it never lists a pending, failed or deleted row. Attachments have no data source switch: the
+`ATTACHMENT_DATA_SOURCE` setting, the ServiceNow attachment dual-write (`caseAttachmentDualWriteService`),
+the ServiceNow attachment calls in `snCaseService`, the legacy routes (`POST /attachments`,
+`POST /attachments/{id}/confirm`, `GET /attachments/{id}`, `GET /attachments/{id}/content`,
+`GET /attachments/{id}/case`, `PATCH /attachments/{id}`, `DELETE /attachments/{id}`) and the base64
+`attachments` array of `POST /cases` were all removed. Every request decoder rejects an unknown field, so
+a client that still sends `attachments` on create-case gets a 400; a case is created without files and
+they are uploaded afterwards. With `DATA_SOURCE=servicenow` the search is answered by PostgreSQL through
+the service's own fallback. A comment image is authorized through `GET /attachments/inline/{id}/location`,
+not through the removed parent-case route. The case activity feed follows `DATA_SOURCE` like every other
+case route.
+
+**The storage key is internal.** `authorize`, `locate` and `inline/{id}/location` return a
+`storageKey`. It is for the portal backend that asked and **must never be sent to a browser**: a
+backend must strip it from anything it forwards. Every response is `Cache-Control: no-store`.
+
+**Access is the caller's own.** The repository holds a `*Scoped`, so reads and the INSERT run
+under the attachment tables' RLS (migration 100026): an external caller needs to be a
+`REGISTERED` member of the parent's project, a parent with no project is internal-only, and an
+attachment of a `WORK_NOTE` comment stays internal because `comment_attachment`'s policy goes
+through `comment`'s. An external INSERT must be `PENDING` with no `storage_key`. UPDATE and DELETE
+are internal-only, which is why confirm runs `MarkComplete`/`MarkFailed` under
+`repository.WithSystemIdentity` after its own checks. There is deliberately no `AccessService`
+in the upload, locate and delete paths. The three tables have no row-level id default except
+`work_item_attachment` (migration 0179), so `InsertPending` generates the id.
+
+**The flow.**
+
+1. `POST /attachments/upload` checks the parent as the caller (a hidden parent is 404), refuses a
+   **closed work item for every caller, internal ones included** (409), checks size and type, inserts a
+   `PENDING` row (`created_by` = the caller's email) and returns `attachmentId`, `number`, `maxBytes`
+   and `expiresAt`. `expiresAt` is when an unconfirmed upload may be cleaned up
+   (`abandonedUploadAge`, 24h). Charged one unit of the per-caller allowance (60 per minute, in
+   memory and per pod).
+2. The backend receives the file from the browser in chunks and, **for every chunk**, calls
+   `POST /attachments/upload/{id}/authorize` (`{type}`). It checks, as the caller, that the upload is
+   theirs, still `PENDING` and its work item still open, and returns `storageKey`, the declared
+   `sizeBytes`/`contentType`, `maxBytes` and `name`. So access removed part-way stops the upload, and
+   the backend never takes a path from the browser. Not charged against the allowance (a 100 MiB file
+   is a handful of calls).
+3. After the last chunk the backend commits the file, then calls
+   `POST /attachments/upload/{id}/confirm` with `{type, sizeBytes, contentType?}`. This service cannot
+   look at the file, so it trusts what the (internal) backend reports but **checks it against the
+   declaration and the limits**: `sizeBytes` is required (400 without it, and that does not fail the
+   upload), must equal the declared size and not exceed the limit, and for a comment image
+   `contentType` (the type the backend found by reading the bytes) must be PNG, JPEG or WebP. A refusal
+   records the row `FAILED` and **the backend must then delete the file it committed**. The row is
+   marked `COMPLETE` with the key from `storageKeyFor`. A repeated confirm answers the same.
+4. Read: `POST /attachments/locate` (`{type, id}`) checks the caller may see the attachment and returns
+   its `storageKey`, or `available: false` with a reason (`NOT_STORED`, `FAILED`, `DELETED`); an
+   attachment the caller cannot see is 404. Charged one unit of the per-caller allowance.
+   `GET /attachments/inline/{id}/location` is the same for an inline image (comment row first, then a
+   migrated work-item image; `410 attachment_removed`). Not charged.
+5. Delete: `POST /attachments/delete` marks the row `DELETED` (soft delete; `deleted_on`/`deleted_by`,
+   migration 0249). Only the person who uploaded it may delete (403 otherwise), never once the work item
+   is closed (409), an image embedded in a comment is not deleted on its own (400), and a repeated
+   delete answers 204. It **does not remove the file**: the backend removes it afterwards, so it
+   should `locate` first to get the key. A `DELETED` attachment has no file to download, and the case
+   attachment lists and the activity feed skip it (`listedStoredAttachmentSQL`, which also hides
+   `FAILED` rows and uploads still in flight). Each delete writes an `attachment deleted` audit line.
+
+**Inline comment images** are uploaded against the work item before the comment exists, so a new image
+is a `comment_attachment` row with `comment_id` NULL and `work_item_id` set (migration 0150), visible
+only to its uploader. The portals upload a pasted image when the comment is sent, and the comment's
+HTML refers to it as `src="/<attachment id>"`. When a comment is created or edited
+(`caseService.createCaseCommentAs`, `commentService.CreateComment`/`UpdateComment`, through
+`InlineImageLinker.LinkFromContent`) entity-service reads those ids out of the content and links each
+image (`comment_id` set), but only if the comment's author uploaded it, it is stored, and it belongs to
+the comment's own work item. That is best effort: a failure is logged and the comment is saved anyway.
+Content that embeds a base64 image is saved as written (this service stores no file), but a NEW comment or a
+record's description typed by a user is held to the same limits (`ValidateEmbeddedImages`: at most 5 images and
+the total size, decoded). A machine caller (no user) and an edit of an existing comment are not checked.
+
+**Limits per comment or description.** One comment or description shows at most 5 images
+(`MaxInlineImagesPerContent`) and at most `INLINE_IMAGES_TOTAL_MAX_BYTES` together; one image is at most
+`INLINE_IMAGE_MAX_BYTES` (25 MiB). Comment create (`commentService.CreateComment`,
+`caseService.createCaseCommentAs`) and edit (`UpdateComment`) call `InlineImageLinker.ValidateCommentImages`
+BEFORE saving and answer a 400 in words; only the author's own images on the comment's work item are counted
+(the same rule `LinkFromContent` links by). The check costs nothing for content with no image reference
+(`mayHaveInlineImages`, one regexp).
+
+**Description images (uploaded before the record exists).** A rich-text description can show inline images
+before its case exists. `POST /attachments/upload` with `type: "comment"` takes `projectId` INSTEAD of
+`parentId` (exactly one; both or neither is a 400): the row is a **draft** (`comment_attachment`:
+`comment_id` and `work_item_id` NULL, `project_id` set, migration 0250). The caller must be a REGISTERED
+member of the project (internal callers unrestricted, an unseen project is 404; `repo.GetProject`, since
+`project` has no RLS); same PNG/JPEG/WebP rule and per-image limit. A draft's storage key is
+`csm/projects/<project>/workitems/drafts/inline_attachments/<number>_<name>` (`storageKeyFor`, `draftFolder`);
+it is stored at confirm and stays valid after linking. Authorize/confirm resolve the parent through
+`parentOf` (the project for a draft). RLS (100027): a draft is visible only to its uploader while a project
+member; a LINKED description image (`comment_id` NULL, `description_image` true, `work_item_id` set) is
+visible to anyone who can see the work item's project, except a CHANGE REQUEST's (internal-only: the customer-visibility rule cannot be restated in RLS); an external INSERT of a draft must be PENDING, no
+`storage_key`, `created_by` = their email, project member. UPDATE/DELETE stay internal-only.
+Every create path with a rich-text description (`caseService.CreateCase`, both plain and dual-write, so all of
+case/service_request/engagement/security_report_analysis/announcement, and `changeRequestService.CreateChangeRequest`)
+calls `validateDescriptionImages` BEFORE creating anything (`ValidateDescriptionImages`: at most 5 distinct
+images, total within the limit, each a COMPLETE draft of that project uploaded by the caller and not linked
+elsewhere, no `src="blob:`; a 400 in words otherwise; unreferenced drafts are ignored) and `linkDescriptionImages`
+right after the record exists (`LinkDescriptionImages`, best effort: one guarded UPDATE as the system that sets
+`work_item_id` and `description_image = true` only while the row is still a draft of that project by that
+email). Both are free for a description without an image reference. `data:image` base64 images are NOT
+refused (other callers still send them) but count against the same 5-image and total-size limits when a
+user typed them (`ValidateEmbeddedImages`; a machine caller is not checked). Incidents and problems have no project on their create request, so
+they take no draft images; the ServiceNow-only data source stores no images.
+`LinkInlineImages` (comments) never takes a `description_image` row.
+
+**Cleanup.** Nothing here deletes a blob, so cleanup is a two-step handoff to a caller that can both
+delete blobs and call this service (internal callers only). `POST /attachments/uploads/cleanup` marks
+uploads still `PENDING` after 24 hours `FAILED` (an upload that was never confirmed leaves nothing in
+storage: uncommitted blocks expire by themselves) and returns the comment images that were never linked
+to a comment or (for drafts) a record's description in `orphans` (`{id, storageKey}`) **without marking them `DELETED`**, so every run lists them again until
+the caller removes the files and then calls `POST /attachments/uploads/cleanup/acknowledge` with their
+ids (at most 200). Only then are they marked `DELETED`. A `DELETED` row is never listed again, so marking
+first would lose the key if the response were lost; this way nothing is lost and a repeated call is safe.
+Acknowledge only marks an id that is still an orphan (re-read from the unlinked list), so it cannot be
+used to delete an arbitrary image; others are counted as `skipped`. An unlinked image with no file is
+marked `DELETED` straight away. A draft description image (no work item, `project_id` set) is abandoned after 24 hours like an unlinked comment image; a LINKED one (`description_image = true`) is never listed (`ListUnlinkedImages` filters `description_image = false`).
+
+**Audit.** Each upload start, link, delete and cleanup writes an `audit: true` line with the
+`callerId` (the user's UUID, else the client id of a machine caller), the `correlationId`, the kind and
+the attachment id. The email is not logged (personal data) and a storage key is never logged.
+
+Verification: unit tests use in-memory fakes; the repository integration test needs
+`STORED_ATTACHMENT_TEST_DSN` (a role that does not bypass RLS, all migrations applied).
 
 ## Portal-driven membership writes
 
@@ -4554,11 +4701,10 @@ old refusal still applies; `DATA_SOURCE=servicenow` is unchanged.
   without the build leaves a window with no owner-type check, and 0211 without the build leaves
   the old build reading the link through `"case"`. The old key was
   also the only thing keeping an attachment off every other kind of work item (the announcement
-  tables' row-level security relies on an announcement never owning one), so the two insert
-  paths (`CreateCaseAttachment`, `CreateCaseAttachmentFromServiceNow`) now check in SQL that the
-  work item is a case, engagement, service request or security report analysis, and answer the
-  same "one or more referenced IDs do not exist" as the key did for anything else. The effect
-  is that the three non-case types can own attachments, which the old target made impossible.
+  tables' row-level security relies on an announcement never owning one). That insert rule
+  went with the old insert paths, which are gone (see "Attachment files held by the portal
+  backends"): nothing writes `case_attachment` any more, so the rows that remain are only moved
+  with their ticket.
 - **A slow or failing ServiceNow call does not decide the outcome by guessing.** The call is
   bounded so about 20 s of the request's deadline remain afterwards. A refusal (400/401/403/
   404/409 from the integration service) is final and rolls back. Anything else (a deadline, a
@@ -4587,41 +4733,10 @@ old refusal still applies; `DATA_SOURCE=servicenow` is unchanged.
   inside the transaction and its refusal leaving nothing, ambiguous ServiceNow failures, SLA per
   direction), `case_type_transfer_repo_integration_test.go` (real Postgres as a non-superuser,
   run with `CASE_STATS_TEST_DSN`; every source type to every target, Incident and Query, carried
-  columns, billable flag, attachments, remote state, rollback, who may own an attachment) and
+  columns, billable flag, attachments, remote state, rollback) and
   `case_type_transfer_production_integration_test.go` (another ticket's related link, linked
   change requests / child cases / watchers / tags / comments untouched, a ticket with thousands
   of comments and time cards, a transferred Migration ticket through its normal life).
-
-## Attachment `created_on` under dual-write is the database's clock, not ServiceNow's
-
-`DATA_SOURCE=postgres-servicenow-dual-write` mirrors an uploaded attachment into
-`case_attachment` after ServiceNow accepts it (`caseAttachmentDualWriteService.CreateCaseAttachment`).
-The ServiceNow create reply carries `createdOn` as a zone-less `YYYY-MM-DD HH:MM:SS`, and that
-value is **not UTC** -- it is rendered in a ServiceNow-side timezone. `snCaseService` parses it with
-`snCreatedOnLayout`, which has no zone and so reads it as UTC. The mirror used to store that value
-unchanged, so an upload from Colombo (UTC+5:30) landed 5h30 in the future and the portal showed
-"uploaded 5h from now" (found on csm-dev, ticket CS0450306: stored 19:42:05 against a real
-14:12 UTC; the same skew also puts the row at the top of the case Activity feed, which orders by
-`created_on`).
-
-`CaseRepository.CreateCaseAttachmentFromServiceNow` therefore takes **no timestamp**: the insert
-leaves `created_on` to the column default (`NOW()`), the same clock the plain-Postgres
-`CreateCaseAttachment` uses, a network round trip after ServiceNow accepted the file. The response's
-`createdOn` is the stored value. Do not put a ServiceNow-supplied time back into this insert; if a
-ServiceNow instant is ever needed it has to come from a source that states its zone (the Table API's
-`sys_created_on` is UTC) and be converted explicitly.
-
-Tests: `TestCaseAttachmentDualWriteService_CreateCaseAttachment_IgnoresZonelessServiceNowCreatedOn`
-(real `snCaseService` against a fake ServiceNow answering with a zone-less createdOn),
-`TestCaseAttachmentSNIntegration_CreateAndReadBackWithNullStorageKey` (real Postgres, asserts
-`created_on` falls inside the database clock's own window around the insert).
-
-**Not verified, same shape:** `CreateDeploymentFromServiceNow`, `CreateDeployedProductFromServiceNow`
-and `CreateCallRequestFromServiceNow` also store a `createdOn` that `time.Parse(snCreatedOnLayout, ...)`
-read from a ServiceNow reply (the call request writes the same value into `updated_on` as well, so
-that column cannot serve as an independent clock there). Whether those replies are zone-skewed too has
-not been checked; compare a freshly created row's `created_on` with the real time of the request on a
-dual-write database before assuming either way.
 
 ## Auto-closure hold (`autocloseHoldUntil`) on the Postgres data sources
 
@@ -4832,6 +4947,85 @@ Tests: `autoclosure_repo_integration_test.go` (repository: selection matrix, cla
 audit count; `CASE_STATS_TEST_DSN`), `autoclosure_integration_test.go` (service end to end over the real case
 service, lifecycle through to the closed row; `ENTITY_TEST_DATABASE_URL`; run as `csm_app` so row-level
 security is in force), `autoclosure_service_test.go` / `autoclosure_close_test.go` (units).
+
+## Incident auto-close (`POST /incidents/autoclose`)
+
+Closes incidents left RESOLVED for 14 days. Postgres had no such job, so every resolved incident stayed RESOLVED
+for ever. The rule was measured on the previous system's data (400 recently auto-closed incidents): 399 closed
+336.1-336.8 h after they were resolved, hourly, with **no comment and no work note**. It is driven by
+`operations/csm-scheduled-tasks`'s `incident_autoclose` task (off until `INCIDENT_AUTOCLOSE_ENABLED=true`; see
+that component's CLAUDE.md).
+
+**It follows the decisions made for "Case auto-closure"** (above) rather than new ones:
+
+- **The close goes through the incident service**, as case auto-closure closes through the case service:
+  `incidentAutocloseService` calls the deployment's `IncidentService.UpdateIncident` with `{state: closed}` for each
+  due incident. So the close, its activity entry, its task cascade and, under
+  `DATA_SOURCE=postgres-servicenow-dual-write`, the write-back to the backing data source (a failure lands in
+  `sn_writeback_failures` and never undoes the close) are exactly those of any incident update. The previous
+  system's own auto-close job still closes its copy until it is retired; whether to switch it off before
+  enabling this under dual-write is the same team decision case auto-closure records. Once it is retired, this is
+  what closes both copies.
+- **The system user is case auto-closure's**: `AUTOCLOSURE_SYSTEM_USER_EMAIL` (optional; empty acts as
+  `domain.AutoclosureDefaultActor`, "System user"). `updated_by`, the activity entry and the task cascade's notes
+  are written as that user, and `closed_by_id` is its user id when it has a `"user"` row, else NULL, as case
+  auto-closure leaves `closed_by_user_id`. `closed_on` is the time of the close (`NOW()`), as for a case.
+- **The exemptions ride an unexported context marker** (`withIncidentAutoclose`, `incident_autoclose_context.go`,
+  the counterpart of `withAutoclosureActor`), so no HTTP request can ask for them. `UpdateIncident` reads it to
+  resolve the actor and to set `IncidentLifecycleUpdate.AutocloseDueDays`, which makes `updateIncidentLifecycleTx`
+  (1) re-check under the row lock that the incident is still due (`incidentAutocloseDue`), returning
+  `repository.ErrIncidentNotDueForAutoclose` and writing nothing when it was re-opened, closed or touched since it
+  was listed, and (2) close without the resolution code and notes a manual close needs.
+- **Internal callers only**, checked twice as case auto-closure does: `internalOnly` on the route, and
+  `RequireInternalCaller` in the service (403) before anything is listed. The scheduler's client id must be in
+  `M2M_CLIENT_IDS`.
+- **An incident with no `resolved_on`** (synced rows can lack it) is measured from `work_item.updated_on`, as case
+  auto-closure's reference time falls back to it. Any later write to the work item pushes it back; review those in
+  the first dry run.
+
+The route takes `{resolvedForDays (required, 1-3650), limit (0/absent = 200, max 1000), dailyLimit (0/absent = no
+cap, max 100000), dryRun}` (unknown fields are a 400) and answers `{dryRun, closed: [{id, number, resolvedOn}],
+failed: [{id, number, error}], more, dailyLimitReached}`. `more` is true when `limit` incidents were selected: the
+caller calls again, unless `dailyLimitReached` (below), when `more` is always false.
+
+**Daily limit.** The first real run would otherwise close every incident Resolved since cutover, so, as case
+auto-closure's `dailyLimit`, a positive `dailyLimit` caps how many incidents may enter CLOSED per UTC day. The
+budget is `dailyLimit` minus the incidents with `closed_on >= 00:00 UTC today` (`CountIncidentsClosedSince`), and it
+counts **every** close today, **manual ones included**, not only auto-closes. That is deliberate: it is the
+conservative reading of a ceiling, needs no schema change, and avoids `closed_by_id`, which is NULL when the system
+user has no `"user"` row, so auto-closes cannot be told apart reliably. A busy day of manual closes therefore
+shrinks the auto-close's allowance. At the start of a call, `remaining <= 0` returns an empty page with
+`dailyLimitReached: true` and nothing is listed; otherwise the page `limit` is clamped to `remaining`. A real run
+re-reads the count before each close (a read, as case auto-closure does), so overlapping runs overshoot by a few at
+most, and stops when it is used up. `dailyLimitReached` is true whenever the budget is used up (before the call, by
+the call, or, in a dry run, by what it would close), and then `more` is false so the scheduler's paging loop ends
+instead of running to its page cap; the scheduler logs it without alerting. A dry run applies the same budget and
+clamp, so its `closed` count is what a real run would close; it returns one page only. The count filters on
+`closed_on`, which has no index: it is one scan of `incident` per read, cheap at the table's current size, and a
+partial index on `closed_on` is the follow-up if the table grows. Under `DATA_SOURCE=servicenow` (or without a
+pool) it is a 503 (`NewUnavailableIncidentAutocloseService`; the reason is logged). A failure lands in `failed` (a
+database error's text is only logged) and does not stop the rest; the incident stays RESOLVED and is selected
+again. A dry run lists what is due as `closed` and changes nothing, so a repeated dry-run call returns the same
+page.
+
+- **Migrations.** 0273 adds `incident.closed_on` and `incident.closed_by_id` (`REFERENCES "user"(id) ON DELETE SET
+  NULL`, as `resolved_by_id` in 0058) under a 5 s `lock_timeout`, as 0249 does; nothing is backfilled.
+  0274 (`closed_by_id`) and 0275 (the partial `ON incident (resolved_on) WHERE state = 'RESOLVED'` the listing
+  reads) build the indexes `CONCURRENTLY`, one per file, as 0263 does. `GetIncidentByID` selects the two columns,
+  so **apply 0273 before deploying this build**.
+- **A manual close records them too** (`updateIncidentLifecycleTx`): entering CLOSED from another state stamps
+  `closed_on = NOW()` and `closed_by_id` = the acting user (NULL for a caller with no user row). Re-sending CLOSED,
+  or re-opening, leaves both as they were. Read back as `closedOn` / `closedBy` on `IncidentView`.
+- **Side effects checked**: `incident_outbox` (0181) records the change; `IncidentReportDrainer` acts only on a
+  move to IN_PROGRESS or RESOLVED or a group change, so it acknowledges this as a no-op. No `incident.*` event is
+  published (a manual close publishes none either).
+- Tests: `incident_autoclose_integration_test.go` (`INCIDENT_AUTOCLOSE_TEST_DSN`: due / not due / NULL
+  `resolved_on` / no close notes / other states, the default system user and one with a row, the task cascade,
+  dry run, limit and `more`, the daily limit (manual closes counted, a second call closes none), the re-check under the lock, no comment rows, the manual close's stamps, and under
+  dual-write, as case auto-closure's `TestAutoclosureIntegration_DualWrite*`: the close is mirrored as exactly
+  `{state: closed}` with no user token, and a failing mirror neither fails the close nor repeats it),
+  `incident_autoclose_service_test.go` (including the 403 for a caller that is not internal),
+  `incident_autoclose_handler_test.go`.
 
 ## Change requests
 

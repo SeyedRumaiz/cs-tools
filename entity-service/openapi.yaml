@@ -343,6 +343,508 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /attachments/upload:
+    post:
+      summary: >-
+        Start an upload. Checks the caller may add a file to the parent (a
+        REGISTERED member of its project, or internal), that the work item is not
+        closed (refused for every caller), and the size and type. Records a
+        PENDING attachment and returns its id: the portal backend holds the file,
+        so the browser sends it there in chunks (the backend calls authorize for
+        each chunk), then the backend confirms. expiresAt is when an unconfirmed
+        upload may be cleaned up. A comment image (type comment) may only be a
+        PNG, JPEG or WebP; it is uploaded against the work item before its
+        comment exists. The response is never cacheable.
+      operationId: initiateAttachmentUpload
+      security:
+        - clientAssertion: []
+          userIdToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitiateAttachmentUploadRequest'
+      responses:
+        "201":
+          description: The upload was started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitiateAttachmentUploadResponse'
+        "400":
+          description: 'Invalid request: type, parentId / projectId (exactly one for a comment image), name, contentType, or sizeBytes over the limit.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: x-user-id-token is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: The parent (or, with projectId, the project) does not exist or the caller may not see it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The work item is closed, so new attachments cannot be added.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: File storage is unavailable; try again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: The caller started too many uploads in a minute (60 per caller per minute); retry shortly.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /attachments/upload/{id}/confirm:
+    post:
+      summary: >-
+        Finish an upload. This service cannot look at the file, so the portal
+        backend that committed it says what it stored (sizeBytes, required, and for
+        a comment image the contentType it found by reading the file). Both are
+        checked against what the upload declared and the limits, and the work item
+        must still be open. The attachment is marked COMPLETE. Only the person who
+        started the upload can confirm it. A rejected upload is recorded FAILED and
+        cannot be confirmed again; the backend then removes the file it committed.
+        Repeating a confirm that already succeeded answers the same.
+      operationId: confirmAttachmentUpload
+      security:
+        - clientAssertion: []
+          userIdToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: The attachmentId returned by the upload start.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmAttachmentUploadRequest'
+      responses:
+        "200":
+          description: The stored attachment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmAttachmentUploadResponse'
+        "400":
+          description: 'The upload was rejected: no file or more than one, wrong size, over the limit, or not an image.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: x-user-id-token is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: "No such attachment, or it is not the caller's upload."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The work item is closed, the upload was already rejected, or it was confirmed concurrently.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: File storage is unavailable; confirm can be retried.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /attachments/upload/{id}/authorize:
+    post:
+      summary: >-
+        Authorize receiving data for a started upload. The portal backends hold the
+        files: the backend calls it for every chunk it receives, so the caller's
+        access is checked again each time. Checks, as the caller, that the upload is theirs,
+        still PENDING and its work item still open, and returns the storage key to
+        write to. The key is internal: it is for the calling backend and must never
+        be sent to a browser. The response is never cacheable.
+      operationId: authorizeAttachmentUpload
+      security:
+        - clientAssertion: []
+          userIdToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: The attachmentId returned by the upload start.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizeAttachmentUploadRequest'
+      responses:
+        "200":
+          description: Where the file is written.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentUploadTarget'
+        "400":
+          description: The type or id is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: x-user-id-token is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such upload, it is not the caller's, its parent is not visible to the caller, or the route is not registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The upload was already confirmed or rejected, or the work item is closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /attachments/locate:
+    post:
+      summary: >-
+        Find where an attachment's file is, for a portal backend that will read it.
+        Checks, as the caller, that they
+        may see the attachment and returns its storage key, or a reason there is no
+        file (available false, reason NOT_STORED, FAILED or DELETED). An attachment
+        the caller cannot see is 404. The key is internal: it is for the calling
+        backend and must never be sent to a browser. Counts against the caller's
+        per-minute allowance (60). The response is never cacheable.
+      operationId: locateAttachment
+      security:
+        - clientAssertion: []
+          userIdToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocateAttachmentRequest'
+      responses:
+        "200":
+          description: The attachment's location, or why it has none.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentLocation'
+        "400":
+          description: The type or id is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: x-user-id-token is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such attachment, or the caller may not see it, or the route is not registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: The caller asked for too many locations in a minute; retry shortly.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /attachments/inline/{id}/location:
+    get:
+      summary: >-
+        Find where a comment's inline image is stored, for a portal backend that
+        will stream it. An image the caller cannot see or that is not stored is 404, one the caller can see that was
+        deleted is 410 (errorCode attachment_removed), and a work item file that is
+        not an image is 404. The key is internal: it is for the calling backend and
+        must never be sent to a browser. Not charged against the caller's
+        allowance. The response is never cacheable.
+      operationId: getInlineImageLocation
+      security:
+        - clientAssertion: []
+          userIdToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Where the image is stored. contentType is only ever one of the four image types, else application/octet-stream.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentLocation'
+        "400":
+          description: The id is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Not found, not visible to the caller, not stored, or the route is not registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "410":
+          description: The image was deleted or removed (errorCode attachment_removed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /attachments/uploads/cleanup:
+    post:
+      summary: >-
+        Clear out uploads that were started and never confirmed. Each upload still
+        PENDING after 24 hours is marked FAILED (lists hide it and a later confirm
+        refuses it), at most 200 per run, and the comment images never linked to a
+        comment are returned in orphans for the caller to remove. Internal callers
+        only. Meant to be called on a schedule.
+      operationId: cleanupAttachmentUploads
+      security:
+        - clientAssertion: []
+          userIdToken: []
+      responses:
+        "200":
+          description: What the run did.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [found, cleaned, failed, imagesRemoved, imagesFailed]
+                properties:
+                  found: {type: integer}
+                  cleaned: {type: integer}
+                  failed: {type: integer}
+                  imagesRemoved:
+                    type: integer
+                    description: Comment images stored but never linked to a comment within 24 hours, removed.
+                  imagesFailed: {type: integer}
+                  orphans:
+                    type: array
+                    description: >-
+                      The unlinked comment images whose files the caller must
+                      remove from storage. They are not
+                      marked DELETED yet, so every run lists them again until the
+                      caller removes the files and acknowledges them with
+                      POST /attachments/uploads/cleanup/acknowledge. The storage
+                      keys are internal and must never reach a browser.
+                    items:
+                      type: object
+                      required: [id, storageKey]
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        storageKey:
+                          type: string
+        "403":
+          description: The caller is not an internal service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Storage is unavailable; try again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /attachments/uploads/cleanup/acknowledge:
+    post:
+      summary: >-
+        Acknowledge orphaned comment images whose files the caller has removed from
+        storage. POST /attachments/uploads/cleanup hands the orphans over without
+        marking them DELETED. An id is marked DELETED only if it is still an orphan (an
+        unlinked comment image past the cleanup age); one that was linked to a
+        comment since, was already acknowledged, or never was an orphan is skipped,
+        so this cannot delete an arbitrary image and repeating a call is safe. Internal
+        callers only. At most 200 ids.
+      operationId: acknowledgeOrphanedImages
+      security:
+        - clientAssertion: []
+          userIdToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              additionalProperties: false
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: string
+                    format: uuid
+      responses:
+        "200":
+          description: What the call did.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [acknowledged, skipped]
+                properties:
+                  acknowledged:
+                    type: integer
+                    description: Images marked DELETED.
+                  skipped:
+                    type: integer
+                    description: Images that are no longer orphans.
+        "400":
+          description: No ids, more than 200, or an id that is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller is not an internal service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /attachments/delete:
+    post:
+      summary: >-
+        Delete an attachment (soft delete). Marks the attachment DELETED; the row
+        stays, with who deleted it and when, and no list includes it afterwards.
+        The file is not removed here: the portal backend removes it. Only the person
+        who uploaded the attachment can delete it, and not once its work item is
+        closed. Repeating a delete that already succeeded answers the same. An image
+        embedded in a comment cannot be deleted on its own.
+      operationId: deleteStoredAttachment
+      security:
+        - clientAssertion: []
+          userIdToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteStoredAttachmentRequest'
+      responses:
+        "204":
+          description: The attachment is deleted.
+        "400":
+          description: Unknown type, a comment image, or an id that is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: x-user-id-token is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: The caller can see the attachment but did not upload it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such attachment, or the caller may not see it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The work item is closed, or the attachment is not stored (still uploading, or its upload failed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: File storage is unavailable; the delete can be retried.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /customer-engagements/allocations/search:
     post:
       summary: Search customer engagement allocations.
@@ -722,6 +1224,87 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /github/service-requests/{owner}/{repository}/{issueNumber}/severity:
+    put:
+      summary: >-
+        Set the severity of the service request a GitHub issue produced, from
+        the issue's Priority field.
+      operationId: setGithubIssueServiceRequestSeverity
+      description: >-
+        Requires an authorized internal client credential, as POST
+        /github/service-requests. Called by the repository's
+        csm_severity_sync.yml. The change is recorded in the activity feed; a
+        value equal to the current one changes nothing and dispatches nothing
+        back to the issue.
+      security:
+        - internalClientCredential: []
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repository
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: issueNumber
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetIssueSeverityRequest'
+      responses:
+        "200":
+          description: The severity was set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetIssueSeverityResponse'
+        "400":
+          description: A severity other than critical, high, medium or low, or a bad issue number.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: The request carried no authorized internal client credential.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: The issue has no service request (yet).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The repository is not mapped, or the issue's record is not a service request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: The configured data source has no service request severity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /github/deliveries:
     post:
       summary: >-
@@ -904,18 +1487,23 @@ paths:
         Change Request flagged as needing formal customer sign-off. Has no
         ServiceNow equivalent — always backed by Postgres. addedBy is never
         accepted from the caller; it is resolved server-side from the
-        caller's own authenticated identity. Two distinct callers hit this
-        endpoint: a customer, manually adding a closed record from its own
-        detail page (addedReason=MANUAL, no previousStatus); and the
-        auto-closure automation — the existing ServiceNow-driven staged
-        closure sequence already tracked on work_item
-        (autoclosure_step/autoclosure_state_on, see CaseView's own
-        AutoclosureStep/AutoclosureStateTime) — which is expected to call
-        this endpoint itself the moment it auto-closes a case out of Awaiting
-        Info or Solution Proposed (addedReason=AUTO_CLOSED, previousStatus
-        set to whichever of the two it closed from). That integration is not
-        part of this feature; this endpoint is simply what it is expected to
-        call once built.
+        caller's own authenticated identity. Three callers hit this endpoint
+        today: a customer, manually adding a closed record from its own
+        detail page (addedReason=MANUAL, no previousStatus); the CSM portal
+        backend, which calls this itself immediately after an engineer
+        closes a case through that portal (addedReason=AUTO_CLOSED,
+        previousStatus set to whichever of Work In Progress/Solution
+        Proposed the case was closed from -- the only two states that
+        portal's own case state machine ever closes a case out of); and the
+        separately-built, not-yet-implemented auto-closure automation — the
+        existing ServiceNow-driven staged closure sequence already tracked
+        on work_item (autoclosure_step/autoclosure_state_on, see CaseView's
+        own AutoclosureStep/AutoclosureStateTime) — which is expected to
+        call this endpoint itself the moment it auto-closes a case out of
+        Awaiting Info or Solution Proposed (addedReason=AUTO_CLOSED,
+        previousStatus set to whichever of the two it closed from). That
+        integration is not part of this feature; this endpoint is simply
+        what it is expected to call once built.
       operationId: createPendingVerification
       requestBody:
         required: true
@@ -6926,6 +7514,11 @@ paths:
         `mostLikelyFixEta`, or `worstCaseFixEta`. `bestCaseFixEta`, `mostLikelyFixEta`, and
         `worstCaseFixEta` are supported only when the ServiceNow data source is active;
         `watchList`, `assigneeEmail`, and `acknowledge` are supported by every data source.
+        `severity` also applies to a service request, where it is an internal field: only internal
+        users and integration clients may set it (403 otherwise), it accepts `critical`, `high`,
+        `medium` or `low` only (`catastrophic` is a 400), it exists in the platform database only
+        (so when the platform database is not the data source it is refused with a 400), and it does not revise SLA
+        clocks or notify anyone.
       operationId: patchCase
       parameters:
         - name: id
@@ -6986,6 +7579,13 @@ paths:
     post:
       summary: Create a new support case.
       operationId: createCase
+      description: >-
+        If the description shows inline images (src="/<attachmentId>") they must
+        be draft images uploaded to the request's project by the caller
+        (POST /attachments/upload with projectId): at most 5, within
+        INLINE_IMAGES_TOTAL_MAX_BYTES together, none still a blob: URL; otherwise
+        a 400 and nothing is created. They are linked to the new record right
+        after it exists. data:image base64 images are still accepted as before.
       requestBody:
         required: true
         content:
@@ -8160,122 +8760,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /attachments:
-    post:
-      summary: Upload a file attachment to a support case.
-      operationId: createCaseAttachment
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateAttachmentRequest'
-      responses:
-        "201":
-          description: Attachment uploaded successfully.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CreateAttachmentResponse'
-        "400":
-          description: Bad request (missing fields, invalid data URI, or file exceeds 10 MB).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "401":
-          description: Unauthorized.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "404":
-          description: Case not found.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: Internal server error.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
 
-  /attachments/{id}/confirm:
-    post:
-      summary: >
-        Confirm a pending CSM-native (Postgres) data source attachment now that its file has
-        finished uploading to SFTPGo.
-      description: >
-        Second half of the two-step upload flow: the caller registers a "pending" row via
-        POST /attachments before minting an SFTPGo upload credential, then calls this once the
-        browser reports the upload succeeded. This closes the gap where a browser upload could
-        succeed in SFTPGo while the metadata-registration call never lands, leaving an
-        untracked orphan file. Only the actor who created the pending row may confirm it.
-        ServiceNow-sourced attachments have no such lifecycle and are rejected with 503.
-      operationId: confirmCaseAttachment
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-          description: Attachment UUID.
-      responses:
-        "200":
-          description: Attachment confirmed successfully; status transitioned to complete.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ConfirmAttachmentResponse'
-        "400":
-          description: Bad request (malformed UUID).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "401":
-          description: Unauthorized.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "403":
-          description: The attachment was not created by the current user.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "404":
-          description: Attachment not found.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "409":
-          description: Attachment exists but is no longer pending (already confirmed).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: Internal server error.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "503":
-          description: Not supported for the ServiceNow data source.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
 
   /attachments/search:
     post:
-      summary: Search attachments linked to a support case.
+      summary: >-
+        Search the attachments of a case, change request, incident, conversation
+        or deployment, most recent first. Deployment attachments are listed from
+        deployment_attachment, scoped to the caller's projects by row-level
+        security; a deleted, failed or still-uploading attachment is not listed.
       operationId: searchCaseAttachments
       requestBody:
         required: true
@@ -8309,242 +8802,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /attachments/{id}/content:
-    get:
-      summary: Download the binary content of a case attachment.
-      operationId: getCaseAttachmentContent
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-          description: Attachment UUID.
-      responses:
-        "200":
-          description: Raw file content. Content-Type reflects the actual file type (e.g. image/png, application/pdf).
-          content:
-            application/octet-stream:
-              schema:
-                type: string
-                format: binary
-        "401":
-          description: Unauthorized.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "404":
-          description: Attachment not found.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: Internal server error.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /attachments/{id}/case:
-    get:
-      summary: Get the case an attachment belongs to, sourced consistently with ATTACHMENT_DATA_SOURCE.
-      description: >
-        Resolves an attachment to its own parent case: looks the attachment up (the same
-        way GET /attachments/{id} does), then its referenceId (the same way GET
-        /cases/{id} does), both through whichever CaseService backs attachment reads (see
-        ATTACHMENT_DATA_SOURCE) rather than the general DATA_SOURCE-selected one. Intended
-        for a caller's own attachment-authorization check, so the attachment and its case
-        are always resolved from the same data source as each other. Exists because
-        ATTACHMENT_DATA_SOURCE=servicenow attachments can have a parent case that only
-        exists in ServiceNow, never synced to Postgres -- looking that case up via the
-        plain GET /cases/{id} (always DATA_SOURCE-scoped) would 404 even though the
-        attachment's own content is reachable. id here is an attachment UUID, matching
-        every other /attachments/{id}... route.
 
 
-        An attachment pasted inline into a comment has that comment's id as its
-        referenceId, not a case id. When the referenceId is not a case, it is resolved as a
-        comment (Postgres comment table, read through the caller's own scope) and that
-        comment's case is returned -- but only if the comment is visible to the caller, not
-        deleted, a customer-visible comment (never a work note or activity entry), and its
-        own case is visible to the caller. Otherwise the response is the original 404.
-      operationId: getAttachmentParentCase
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-          description: Attachment UUID.
-      responses:
-        "200":
-          description: The case the attachment belongs to.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CaseView'
-        "400":
-          description: Bad request — id is not a valid UUID.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "401":
-          description: Unauthorized.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "404":
-          description: Attachment not found, or its parent case not found/not visible under the active attachment data source.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: Internal server error.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /attachments/{id}:
-    get:
-      summary: Get an attachment's metadata and base64-encoded content (ServiceNow data source only).
-      description: >
-        Distinct from GET /attachments/{id}/content, which streams the raw binary. This
-        endpoint returns JSON metadata plus the content as a base64 data URI.
-      operationId: getAttachment
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-          description: Attachment UUID.
-      responses:
-        "200":
-          description: The attachment's metadata and content.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AttachmentDetails'
-        "401":
-          description: Unauthorized.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "404":
-          description: Attachment not found.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: Internal server error.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-    patch:
-      summary: Update an attachment's reference, name, or description (ServiceNow data source only).
-      operationId: updateAttachment
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-          description: Attachment UUID.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateAttachmentRequest'
-      responses:
-        "200":
-          description: Attachment updated successfully.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/UpdateAttachmentResponse'
-        "400":
-          description: >-
-            Bad request — invalid referenceType (only case and deployment are accepted here);
-            for case, name is required and description is not allowed; for deployment, at
-            least one of name or description must be provided.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "401":
-          description: Missing or invalid x-user-id-token header (ServiceNow data source only).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "404":
-          description: Attachment not found.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: Internal server error.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "503":
-          description: Attachments are only supported for the ServiceNow data source.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-    delete:
-      summary: Delete a case attachment (ServiceNow data source only).
-      operationId: deleteCaseAttachment
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-          description: Attachment UUID.
-      responses:
-        "200":
-          description: Attachment deleted successfully.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DeleteAttachmentResponse'
-        "401":
-          description: Unauthorized.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "404":
-          description: Attachment not found.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        "500":
-          description: Internal server error.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
 
   /deployed-products:
     post:
@@ -8916,6 +9175,13 @@ paths:
     post:
       summary: Create a change request.
       operationId: createChangeRequest
+      description: >-
+        If the description shows inline images (src="/<attachmentId>") they must
+        be draft images uploaded to the request's project by the caller
+        (POST /attachments/upload with projectId): at most 5, within
+        INLINE_IMAGES_TOTAL_MAX_BYTES together, none still a blob: URL; otherwise
+        a 400 and nothing is created. They are linked to the new record right
+        after it exists. data:image base64 images are still accepted as before.
       requestBody:
         required: true
         content:
@@ -15814,6 +16080,80 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /incidents/autoclose:
+    post:
+      summary: >-
+        Close the incidents that have been RESOLVED for at least resolvedForDays
+        days (the platform's rule is 14 days after resolution). Each due
+        incident, oldest first, up to limit, is closed by the ordinary incident
+        update in its own transaction, after it is re-checked as still due under
+        its row lock: state CLOSED, closedOn now, closedBy the system user
+        (AUTOCLOSURE_SYSTEM_USER_EMAIL, the user case auto-closure closes as;
+        null when that user has no user record), its open incident tasks closed
+        as on a manual close. No comment or work note is added, and the
+        resolution code and notes are not required. With
+        DATA_SOURCE=postgres-servicenow-dual-write the close is written back to
+        the backing data source like any other incident update. An incident
+        with no resolvedOn is measured from its last update. Internal callers
+        only. Postgres data sources only. An optional dailyLimit caps the closes per
+        UTC day. Backs operations/csm-scheduled-tasks (incident_autoclose).
+      operationId: autocloseIncidents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IncidentAutocloseRequest'
+      responses:
+        "200":
+          description: >-
+            What was closed (or, in a dry run, would be) and what failed. A failed
+            incident stays RESOLVED and is selected again by the next call.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentAutocloseResponse'
+        "400":
+          description: >-
+            resolvedForDays missing or outside 1-3650, limit outside 0-1000,
+            dailyLimit outside 0-100000, or an unknown field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid caller credential (the route is internal-only).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Caller is not internal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Not used; declared for consistency with every writable endpoint.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: >-
+            Incident auto-close is not available on this entity-service
+            (DATA_SOURCE=servicenow or no database); the reason is logged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /incidents:
     post:
       summary: Create a new incident.
@@ -21892,6 +22232,35 @@ components:
         - id
         - created
 
+    SetIssueSeverityRequest:
+      type: object
+      properties:
+        severity:
+          type: string
+          enum: [critical, high, medium, low]
+          description: >-
+            The service request's severity (S1-S4). The repository's workflow
+            maps its Priority field to it: Urgent critical, High high, Medium
+            medium, Low low.
+      required:
+        - severity
+
+    SetIssueSeverityResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        id:
+          type: string
+          description: The service request whose severity was set.
+        severity:
+          type: string
+          enum: [critical, high, medium, low]
+      required:
+        - message
+        - id
+        - severity
+
     GithubWebhookPayload:
       type: object
       description: >-
@@ -24743,6 +25112,8 @@ components:
         exclusive fields above, though.
         The combinable group is supported only for the ServiceNow data source. `watchList`,
         `assigneeEmail`, and `acknowledge` are supported by every data source.
+        When the case is a service request, `severity` is its internal severity (see the
+        `severity` property).
         `resolutionCode`, `cause`, and `closeNotes` are optional and may only be provided alongside
         `state` when the state is `closed` or `solution_proposed`.
         `type` transfers the case to another type and is supported by every data source, for
@@ -24758,6 +25129,13 @@ components:
         Both flavours of `case` can be moved, in either direction: an Incident (severity S0-S3)
         and a Query (severity S4); moving an S4 case out of, or into, `case` re-marks its time
         cards billable or not, as a severity change across the S4 line does.
+        Moving a case to `service_request` keeps its severity (critical, high, medium, low). A
+        `catastrophic` case, which a service request cannot hold, is stored as `critical` and the
+        response carries a `SEVERITY_DOWNGRADED` entry in `warnings`; a source with no severity
+        (including every non-case type) is stored as `low`. The transfer never fails for this.
+        This applies to the PostgreSQL data sources only: when the backing data source is the only
+        data source, a transfer to `service_request` stores no service request severity and adds
+        no warning.
         Its companion fields carry the target type's mandatory data:
         `severity` and `issueType` alongside `type: case`; `engagementType` and
         `engagementPaymentType` alongside `type: engagement`; `catalogId`, `catalogItemId`
@@ -24786,7 +25164,10 @@ components:
         severity:
           type: string
           enum: [catastrophic, critical, high, medium, low]
-          description: The new severity of the case.
+          description: |
+            The new severity of the case. For a service request it is the internal severity:
+            `critical`, `high`, `medium` or `low` only, settable by internal users and integration
+            clients only (403 for anyone else), Postgres data sources only.
         type:
           type: string
           enum: [case, engagement, security_report_analysis, service_request]
@@ -24953,6 +25334,34 @@ components:
           type: string
         case:
           $ref: '#/components/schemas/UpdatedCase'
+        warnings:
+          type: array
+          description: >
+            Non-fatal notices about what the update did; the update succeeded. Absent when there
+            is none.
+          items:
+            $ref: '#/components/schemas/ResponseWarning'
+
+    ResponseWarning:
+      type: object
+      required: [code, message]
+      description: A machine-readable, non-fatal notice attached to a successful response.
+      properties:
+        code:
+          type: string
+          enum: [SEVERITY_DOWNGRADED]
+          description: >
+            `SEVERITY_DOWNGRADED`: a case moved to a service request had a severity a service
+            request cannot hold (`catastrophic`) and was stored one level lower (`critical`).
+        message:
+          type: string
+          description: English text for logs and fallback display.
+        from:
+          type: string
+          description: The value before the change (`catastrophic` for `SEVERITY_DOWNGRADED`).
+        to:
+          type: string
+          description: The value stored (`critical` for `SEVERITY_DOWNGRADED`).
 
     UpdatedCase:
       type: object
@@ -24973,6 +25382,9 @@ components:
         severity:
           type: string
           enum: [catastrophic, critical, high, medium, low]
+          description: >
+            The resulting severity. For a service request it is the internal severity
+            (`critical`, `high`, `medium` or `low`).
         workState:
           type: string
           enum: [ongoing, paused]
@@ -25194,7 +25606,16 @@ components:
         severity:
           type: string
           enum: [catastrophic, critical, high, medium, low]
-          description: Required for `case` type.
+          description: |
+            Required for `case` type. For `service_request` it is optional and internal: honoured
+            only from internal users and integration clients, who may send `critical`, `high`,
+            `medium` or `low` (`catastrophic` is a 400). From any other caller it is ignored. A
+            service request created without one gets the configured default
+            (`SERVICE_REQUEST_DEFAULT_SEVERITY`, `low` when unset). It is never returned to a
+            customer. Ignored for every other type. This handling and the configured default apply
+            to the PostgreSQL data sources only: when the backing data source is the only data
+            source, the severity is dropped for every caller (internal callers included) and the
+            default is not applied.
         issueType:
           type: string
           enum: [error, partial_outage, performance_degradation, question, security_or_compliance, total_outage]
@@ -25217,14 +25638,6 @@ components:
           items:
             $ref: '#/components/schemas/Variable'
           description: Required for `service_request` type.
-        attachments:
-          type: array
-          items:
-            $ref: '#/components/schemas/CaseAttachment'
-          description: >-
-            Optional even for `security_report_analysis` type — the frontend
-            creates the case first, then uploads attachments in separate
-            requests per file, so this may be omitted or empty.
         engagementPaymentType:
           type: string
           enum: [paid, foc]
@@ -25245,7 +25658,6 @@ components:
             Optional initial watch list (ServiceNow only). Each item is a watcher
             email (Customer Portal) or a platform user UUID (CSM); the list must be
             all emails or all UUIDs.
-
     CreateCaseResponse:
       type: object
       properties:
@@ -25296,6 +25708,7 @@ components:
             - creTeam
             - sreTeam
             - accountId
+            - salesRegion
             - resolutionNotes
             - parentId
             - taskSLABusinessElapsedPercent
@@ -25414,6 +25827,14 @@ components:
           an anyOf branch, and not supported by the relational data source
           (accountId+in has no relational-data-source query support today
           either).
+        - **salesRegion** (in): the parent account's sales region (e.g.
+          "EMEA", "APAC"). Matches cases whose account's sales region equals
+          any of the given values, compared case-insensitively after trimming
+          surrounding whitespace; blank values are a validation error. A case
+          with no account, or an account with no sales region, never matches.
+          Supported inside an anyOf branch. Only supported by the relational
+          data source: the other data source rejects it with a validation error
+          rather than ignoring it.
         - **resolutionNotes** (isEmpty): values ignored; matches cases with
           empty resolution notes. isNotEmpty is not supported: false and
           omitted were always treated identically for this filter, so there
@@ -25499,10 +25920,12 @@ components:
             ANDed with filters (if both are present). Only the fields both data
             sources support inside a branch are allowed there: type, state,
             severity, engagementType, issueType, workState, projectId,
-            deploymentId, assignedUserId, escalationLevel, tag. A branch
+            deploymentId, assignedUserId, escalationLevel, tag. salesRegion
+            is also allowed, but only on the relational data source: the other
+            data source rejects it with a validation error. A branch
             containing any other field (e.g. taskSLABusinessElapsedPercent,
-            createdOn) is rejected with a validation error. Supported by both
-            data sources.
+            createdOn) is rejected with a validation error. Otherwise
+            supported by both data sources.
 
     SearchCasesRequest:
       type: object
@@ -26004,7 +26427,12 @@ components:
           type: string
         severity:
           type: string
+          nullable: true
           enum: [catastrophic, critical, high, medium, low]
+          description: >
+            Severity of a case. For a service request it is the internal severity (`critical`,
+            `high`, `medium` or `low`; Postgres data sources), returned to internal callers only
+            and null for a customer caller.
         issueType:
           type: string
           enum: [error, partial_outage, performance_degradation, question, security_or_compliance, total_outage]
@@ -26038,7 +26466,12 @@ components:
           type: string
         severity:
           type: string
+          nullable: true
           enum: [catastrophic, critical, high, medium, low]
+          description: >
+            Severity of a case. For a service request it is the internal severity (`critical`,
+            `high`, `medium` or `low`; Postgres data sources), returned to internal callers only
+            and null for a customer caller.
         issueType:
           type: string
           enum: [error, partial_outage, performance_degradation, question, security_or_compliance, total_outage]
@@ -26256,7 +26689,12 @@ components:
         severity:
           type: string
           nullable: true
-          description: Severity enum value (Postgres) or raw SN label (ServiceNow). Null for non-case types.
+          description: >
+            Severity enum value (Postgres) or raw SN label (ServiceNow). Null for types other than
+            `case` and `service_request`. On a service request (Postgres data sources) it is the
+            internal severity, `critical`, `high`, `medium` or `low`, always present for an internal
+            caller and always null for a customer caller (including internal users acting through
+            the customer portal).
         catalog:
           nullable: true
           $ref: '#/components/schemas/EntityRef'
@@ -26706,111 +27144,15 @@ components:
         hasMore:
           type: boolean
 
-    CreateAttachmentRequest:
-      type: object
-      description: >
-        The two data sources populate mutually exclusive fields. ServiceNow requires file
-        (a base64 data URI) and computes sizeBytes from the decoded bytes. The CSM-native
-        (Postgres) data source instead requires storageKey (the file was already uploaded to
-        SFTPGo out of band, referenced by this key) and sizeBytes, since this service never
-        sees the file bytes for that data source -- there is no base64-payload alternative
-        there.
-      required: [referenceId, referenceType, name, type]
-      properties:
-        referenceId:
-          type: string
-          format: uuid
-          description: UUID of the reference entity (case, change request, etc.)
-        referenceType:
-          $ref: '#/components/schemas/ReferenceType'
-        name:
-          type: string
-          description: File name including extension.
-        type:
-          type: string
-          description: MIME type of the file (e.g. image/png, application/pdf).
-        file:
-          type: string
-          description: >
-            Base64 data URI of the file content (e.g. data:image/png;base64,...). Maximum
-            decoded size is 10 MB. Required for the ServiceNow data source; not accepted by
-            the CSM-native (Postgres) data source.
-        description:
-          type: string
-          nullable: true
-        storageKey:
-          type: string
-          description: >
-            Reference to file bytes already uploaded to SFTPGo. Required for the CSM-native
-            (Postgres) data source; not accepted by ServiceNow.
-        sizeBytes:
-          type: integer
-          description: >
-            File size in bytes. Required for the CSM-native (Postgres) data source (this
-            service cannot compute it there); ignored for ServiceNow, which computes it from
-            the decoded file payload.
-        status:
-          $ref: '#/components/schemas/AttachmentStatus'
 
     AttachmentStatus:
       type: string
       enum:
-        - pending
         - complete
       description: >
-        Upload lifecycle state for a CSM-native (Postgres) data source attachment. Meaningful
-        for that data source only -- ServiceNow's /attachments API only ever returns
-        fully-uploaded files, so ServiceNow-sourced attachments are always "complete". On
-        create, omitted/empty defaults to "complete" (today's behavior, preserved for every
-        existing caller); pass "pending" to register the row before the file has finished
-        uploading to SFTPGo, then confirm it via POST /attachments/{id}/confirm.
-
-    AttachmentDetail:
-      type: object
-      properties:
-        id:
-          type: string
-          format: uuid
-        sizeBytes:
-          type: integer
-        createdOn:
-          type: string
-          format: date-time
-        createdBy:
-          type: string
-        downloadUrl:
-          type: string
-          nullable: true
-          description: >
-            Null for a CSM-native (Postgres) data source attachment: this service holds no
-            download location for it, only its storageKey. Always set for ServiceNow-sourced
-            attachments.
-        storageKey:
-          type: string
-          nullable: true
-          description: Set only for CSM-native (Postgres) data source attachments. See Attachment.storageKey.
-        status:
-          $ref: '#/components/schemas/AttachmentStatus'
-
-    CreateAttachmentResponse:
-      type: object
-      properties:
-        message:
-          type: string
-        attachment:
-          $ref: '#/components/schemas/AttachmentDetail'
-
-    ConfirmAttachmentResponse:
-      type: object
-      description: >
-        Response for POST /attachments/{id}/confirm. Same shape as CreateAttachmentResponse --
-        confirming is the second half of the CSM-native (Postgres) data source's two-step
-        (pending -> complete) upload flow.
-      properties:
-        message:
-          type: string
-        attachment:
-          $ref: '#/components/schemas/AttachmentDetail'
+        Lifecycle state of a listed attachment. Only complete attachments are listed: a
+        pending (still uploading), failed or deleted one is not returned by
+        POST /attachments/search.
 
     Attachment:
       type: object
@@ -26847,9 +27189,8 @@ components:
           type: string
           nullable: true
           description: >
-            Reference to the file's location in external object storage (SFTPGo), set only for
-            CSM-native (Postgres) data source attachments. Null for ServiceNow-sourced
-            attachments, whose bytes are held by ServiceNow itself.
+            Reference to the file's location in Azure Blob Storage. Null for a row with no file of
+            its own recorded. Entity-service never reads the file; the portal backends do.
         status:
           $ref: '#/components/schemas/AttachmentStatus'
 
@@ -26891,11 +27232,6 @@ components:
         hasMore:
           type: boolean
 
-    DeleteAttachmentResponse:
-      type: object
-      properties:
-        message:
-          type: string
 
     ChangeRequestBranchFilter:
       type: object
@@ -27765,16 +28101,6 @@ components:
           type: string
           description: Answer/value for the variable.
 
-    CaseAttachment:
-      type: object
-      required: [name, file]
-      properties:
-        name:
-          type: string
-          description: File name including extension.
-        file:
-          type: string
-          description: Base64-encoded file content.
 
     CatalogItem:
       type: object
@@ -35038,6 +35364,21 @@ components:
           type: string
           nullable: true
           description: Timestamp when the incident was resolved. Populated for resolved/closed ServiceNow incidents; null otherwise.
+        closedOn:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the incident entered Closed (Postgres data sources, migration
+            0255). Null for an incident closed before that migration, and when
+            incidents are not read from Postgres (DATA_SOURCE=servicenow).
+        closedBy:
+          type: string
+          nullable: true
+          description: >-
+            Name of the user the close is attributed to: the closer on a manual
+            close, the auto-close's system user on an auto-close. Null when
+            unknown, and on an auto-close whose system user has no user record.
         resolvedWithParent:
           type: boolean
           readOnly: true
@@ -37421,112 +37762,9 @@ components:
         feedback:
           $ref: '#/components/schemas/CaseFeedbackResult'
 
-    AttachmentDetails:
-      type: object
-      description: >
-        The response for GET /attachments/{id}. Distinct from GET /attachments/{id}/content,
-        which streams the raw binary — this endpoint returns JSON metadata plus the content
-        as a base64 data URI. For a CSM-native (Postgres) data source attachment, content is
-        always "" and storageKey is populated instead: this service holds no bytes for that
-        data source, so content must be resolved externally via storageKey.
-      required: [id, referenceId, referenceType, name, type, sizeBytes, createdBy, createdOn, content]
-      properties:
-        id:
-          type: string
-          format: uuid
-        referenceId:
-          type: string
-          format: uuid
-        referenceType:
-          type: string
-          nullable: true
-          enum:
-            - case
-            - conversation
-            - change_request
-            - deployment
-            - incident
-          description: >
-            The entity type referenceId points at. Always populated for CSM-native
-            (Postgres) data source attachments; null when the backing data source's
-            attachment-details lookup does not report a reference type. Callers
-            authorizing access per referenced resource must treat a null value as
-            unknown and fail closed.
-        name:
-          type: string
-        type:
-          type: string
-        sizeBytes:
-          type: integer
-        description:
-          type: string
-          nullable: true
-        createdBy:
-          type: string
-        createdOn:
-          type: string
-          format: date-time
-        downloadUrl:
-          type: string
-          nullable: true
-        previewUrl:
-          type: string
-          nullable: true
-        content:
-          type: string
-          nullable: true
-          description: >
-            Base64 data URI of the attachment content (e.g. data:image/png;base64,...). Null
-            for a CSM-native (Postgres) data source attachment: this service holds no bytes for
-            it, only its storageKey. Always set for ServiceNow-sourced attachments.
-        storageKey:
-          type: string
-          nullable: true
-          description: Set only for CSM-native (Postgres) data source attachments. See Attachment.storageKey.
-        status:
-          $ref: '#/components/schemas/AttachmentStatus'
 
-    UpdateAttachmentRequest:
-      type: object
-      description: >
-        referenceType accepts only case and deployment (the broader ReferenceType enum also
-        has conversation, change_request, and incident, but this endpoint rejects those). For
-        case, name is required and description is not allowed; for deployment, at least one
-        of name or description must be provided.
-      required: [referenceId, referenceType]
-      properties:
-        referenceId:
-          type: string
-          format: uuid
-        referenceType:
-          type: string
-          enum: [case, deployment]
-        name:
-          type: string
-        description:
-          type: string
 
-    UpdatedAttachment:
-      type: object
-      required: [id, updatedOn, updatedBy]
-      properties:
-        id:
-          type: string
-          format: uuid
-        updatedOn:
-          type: string
-          format: date-time
-        updatedBy:
-          type: string
 
-    UpdateAttachmentResponse:
-      type: object
-      required: [message, attachment]
-      properties:
-        message:
-          type: string
-        attachment:
-          $ref: '#/components/schemas/UpdatedAttachment'
 
     DeployedProductMetricsRequest:
       type: object
@@ -38841,13 +39079,15 @@ components:
           type: string
           enum: [AUTO_CLOSED, MANUAL]
           description: >-
-            MANUAL = added by a customer; AUTO_CLOSED = added by the
-            auto-closure automation when it closed this case itself — see
+            MANUAL = added by a customer; AUTO_CLOSED = added by the CSM
+            portal backend when an engineer closes the case through that
+            portal, or by the (separately built, not-yet-implemented)
+            auto-closure automation — see
             CreatePendingVerificationRequest.addedReason for the full
             caller-side contract.
         previousStatus:
           type: string
-          enum: [SOLUTION_PROPOSED, AWAITING_INFO]
+          enum: [SOLUTION_PROPOSED, AWAITING_INFO, WORK_IN_PROGRESS]
           nullable: true
           description: Set iff addedReason is AUTO_CLOSED — the state the case was auto-closed from.
         addedOn:
@@ -38879,19 +39119,25 @@ components:
           type: string
           enum: [AUTO_CLOSED, MANUAL]
           description: >-
-            MANUAL is a customer adding a closed record themselves. AUTO_CLOSED
-            is the auto-closure automation (ServiceNow's existing staged
-            closure sequence, work_item.autoclosure_step/autoclosure_state_on)
-            calling this endpoint itself at the moment it auto-closes a case —
-            that caller is not part of this feature, this is just the
-            contract it is expected to call.
+            MANUAL is a customer adding a closed record themselves.
+            AUTO_CLOSED is the CSM portal backend calling this endpoint
+            itself immediately after an engineer closes a case through that
+            portal, or (separately built, not yet implemented) the
+            auto-closure automation (ServiceNow's existing staged closure
+            sequence, work_item.autoclosure_step/autoclosure_state_on)
+            calling this endpoint itself at the moment it auto-closes a
+            case.
         previousStatus:
           type: string
-          enum: [SOLUTION_PROPOSED, AWAITING_INFO]
+          enum: [SOLUTION_PROPOSED, AWAITING_INFO, WORK_IN_PROGRESS]
           description: >-
             Required iff addedReason is AUTO_CLOSED, must be omitted when
             MANUAL. The state the case was auto-closed from, so the
-            Pending Verification entry's history shows why it needed sign-off.
+            Pending Verification entry's history shows why it needed
+            sign-off. WORK_IN_PROGRESS covers the CSM portal's own close
+            flow (its case state machine only ever reaches Closed from Work
+            In Progress or Solution Proposed); Awaiting Info is specific to
+            the auto-closure automation above.
         note:
           type: string
 
@@ -40182,6 +40428,91 @@ components:
     AutoclosureStage:
       type: string
       enum: [release_hold, first_reminder, second_reminder, close]
+    IncidentAutocloseRequest:
+      type: object
+      additionalProperties: false
+      required: [resolvedForDays]
+      properties:
+        resolvedForDays:
+          type: integer
+          minimum: 1
+          maximum: 3650
+          description: How many days an incident must have been RESOLVED (the platform uses 14).
+        limit:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          default: 200
+          description: Most incidents one call selects, oldest first. 0 or absent means 200.
+        dailyLimit:
+          type: integer
+          minimum: 0
+          maximum: 100000
+          default: 0
+          description: >-
+            Most incidents that may enter CLOSED per UTC day. 0 or absent means
+            no cap. The budget is dailyLimit minus the incidents closed since
+            00:00 UTC today, counting every close (manual ones included, not
+            only auto-closes), and the page is clamped to it. Once it is used
+            up the call returns an empty page with dailyLimitReached true. A
+            dry run applies the same budget.
+        dryRun:
+          type: boolean
+          default: false
+          description: >-
+            Select and return what is due as "closed" without changing anything.
+            Calling again returns the same page.
+    IncidentAutocloseClosed:
+      type: object
+      required: [id, number, resolvedOn]
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: string
+        resolvedOn:
+          type: string
+          format: date-time
+          nullable: true
+          description: The stored resolvedOn; null when the incident had none and was due by its last update.
+    IncidentAutocloseFailed:
+      type: object
+      required: [id, number, error]
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: string
+        error:
+          type: string
+          description: Why it was not closed. Database errors are only logged and reported generically.
+    IncidentAutocloseResponse:
+      type: object
+      required: [dryRun, closed, failed, more, dailyLimitReached]
+      properties:
+        dryRun:
+          type: boolean
+        closed:
+          type: array
+          items:
+            $ref: '#/components/schemas/IncidentAutocloseClosed'
+        failed:
+          type: array
+          items:
+            $ref: '#/components/schemas/IncidentAutocloseFailed'
+        more:
+          type: boolean
+          description: >-
+            True when the call selected limit incidents, so more may be due;
+            call again. Always false when dailyLimitReached is true.
+        dailyLimitReached:
+          type: boolean
+          description: >-
+            True when the request's dailyLimit is used up: before the call, by
+            the call, or, in a dry run, by what the run would close. Never true
+            without a dailyLimit.
     ACPReopenCheckRequest:
       type: object
       additionalProperties: false
@@ -41959,6 +42290,218 @@ components:
           type: string
           description: Why it could not be landed. Required and must not be empty.
 
+    StoredAttachmentKind:
+      type: string
+      enum: [work_item, comment, deployment]
+      description: >-
+        Which attachment table: work_item (work_item_attachment), comment (the
+        images embedded in a comment, comment_attachment) or deployment
+        (deployment_attachment).
+
+    InitiateAttachmentUploadRequest:
+      type: object
+      required: [type, name, sizeBytes]
+      additionalProperties: false
+      description: >-
+        Send parentId, except for a comment image that is a draft for the
+        description of a record that does not exist yet: then send projectId
+        instead. For type comment exactly one of parentId and projectId is
+        required (both or neither is a 400); for the other types parentId is
+        required and projectId is refused.
+      properties:
+        type:
+          $ref: '#/components/schemas/StoredAttachmentKind'
+        parentId:
+          type: string
+          format: uuid
+          description: >-
+            The work item (types work_item and comment) or the deployment (type
+            deployment) the file belongs to.
+        projectId:
+          type: string
+          format: uuid
+          description: >-
+            Type comment only, instead of parentId. The project the draft
+            description image is uploaded to. The caller must be a REGISTERED
+            member of it (internal callers are unrestricted); a project the
+            caller cannot see is a 404. The image is private to its uploader
+            until the record is created: the create request's description then
+            refers to it as src="/<attachmentId>" and entity-service links it
+            (work_item_id set, description_image true) when the record exists.
+            Its storage key is csm/projects/<project>/workitems/drafts/inline_attachments/...
+            and stays valid after linking. Draft images never linked within 24
+            hours are removed by the upload cleanup; linked ones never are.
+        name:
+          type: string
+          maxLength: 255
+        contentType:
+          type: string
+          description: >-
+            Required for type comment, where it must be image/png, image/jpeg
+            or image/webp. Defaults to application/octet-stream otherwise.
+        sizeBytes:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >-
+            The file's size. Checked against ATTACHMENT_MAX_BYTES (type comment:
+            INLINE_IMAGE_MAX_BYTES, default 25 MiB), and the uploaded file must
+            match it. One comment or description may show at most 5 images and
+            at most INLINE_IMAGES_TOTAL_MAX_BYTES (default 25 MiB) together; a
+            comment (create or edit) or a record whose description exceeds
+            either is a 400 and nothing is saved.
+
+    InitiateAttachmentUploadResponse:
+      type: object
+      required: [attachmentId, number, expiresAt, maxBytes]
+      properties:
+        attachmentId:
+          type: string
+          format: uuid
+        number:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+          description: When an unconfirmed upload may be cleaned up.
+        maxBytes:
+          type: integer
+          format: int64
+
+    DeleteStoredAttachmentRequest:
+      type: object
+      required: [type, id]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum: [work_item, deployment]
+          description: An image embedded in a comment (type comment) is not deleted on its own.
+        id:
+          type: string
+          format: uuid
+          description: The attachment's id.
+
+    ConfirmAttachmentUploadRequest:
+      type: object
+      required: [type]
+      additionalProperties: false
+      properties:
+        type:
+          $ref: '#/components/schemas/StoredAttachmentKind'
+        sizeBytes:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >-
+            Required: the size of the file the portal backend committed.
+        contentType:
+          type: string
+          description: >-
+            For type comment: the type the portal backend found by reading the
+            file's leading bytes; it must be image/png, image/jpeg or image/webp.
+
+    AuthorizeAttachmentUploadRequest:
+      type: object
+      required: [type]
+      additionalProperties: false
+      properties:
+        type:
+          $ref: '#/components/schemas/StoredAttachmentKind'
+
+    AttachmentUploadTarget:
+      type: object
+      required: [attachmentId, number, name, contentType, sizeBytes, maxBytes, storageKey]
+      description: >-
+        Where the portal backend may write an upload it has been authorized to
+        receive. storageKey is internal: it must never be sent to a browser.
+      properties:
+        attachmentId:
+          type: string
+          format: uuid
+        number:
+          type: string
+        name:
+          type: string
+        contentType:
+          type: string
+          description: The type declared when the upload started.
+        sizeBytes:
+          type: integer
+          format: int64
+          description: The size declared when the upload started.
+        maxBytes:
+          type: integer
+          format: int64
+          description: The most a file of this kind may be.
+        storageKey:
+          type: string
+          description: Where to write the file, for example csm/projects/<project>/workitems/<n>/attachments/<number>_<name>.
+
+    LocateAttachmentRequest:
+      type: object
+      required: [type, id]
+      additionalProperties: false
+      properties:
+        type:
+          $ref: '#/components/schemas/StoredAttachmentKind'
+        id:
+          type: string
+          format: uuid
+          description: The attachment's id.
+
+    AttachmentLocation:
+      type: object
+      required: [id, number, name, available]
+      description: >-
+        Where an attachment's file is, once the caller's access has been checked.
+        storageKey is internal: it must never be sent to a browser.
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: string
+        name:
+          type: string
+        contentType:
+          type: string
+          nullable: true
+        sizeBytes:
+          type: integer
+          format: int64
+          nullable: true
+        available:
+          type: boolean
+          description: True when storageKey names a file that can be read.
+        reason:
+          type: string
+          enum: [NOT_STORED, FAILED, DELETED]
+          description: Why there is no file when available is false.
+        storageKey:
+          type: string
+          description: Where the file is stored. Absent when available is false.
+
+    ConfirmAttachmentUploadResponse:
+      type: object
+      required: [id, number, name, sizeBytes, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: string
+        name:
+          type: string
+        contentType:
+          type: string
+          nullable: true
+        sizeBytes:
+          type: integer
+          format: int64
+        status:
+          type: string
+          example: COMPLETE
     SkillLevel:
       type: object
       required: [id, name]

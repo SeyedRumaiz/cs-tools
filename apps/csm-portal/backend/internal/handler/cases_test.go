@@ -2016,6 +2016,241 @@ func TestPatchCase(t *testing.T) {
 	})
 }
 
+// ----- PatchCase: closing a case sends it to Pending Verification -----
+
+func TestPatchCase_PendingVerification(t *testing.T) {
+	const testCaseID = "11111111-1111-1111-1111-111111111111"
+	const closePayload = `{"state":"closed"}`
+
+	t.Run("closing from work_in_progress adds it as auto-closed with that previous status", func(t *testing.T) {
+		var body []byte
+		called := make(chan struct{})
+		client := &mockEntityCaseClient{
+			getCaseFn: func(_ context.Context, _ string) ([]byte, error) {
+				return []byte(`{"id":"` + testCaseID + `","state":"work_in_progress"}`), nil
+			},
+			patchCaseFn: func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+				return []byte(`{"id":"` + testCaseID + `","state":"closed"}`), nil
+			},
+			createPendingVerificationFn: func(_ context.Context, b []byte) ([]byte, error) {
+				body = b
+				close(called)
+				return []byte(`{"id":"pv-1"}`), nil
+			},
+		}
+		h := NewCaseHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/cases/"+testCaseID, strings.NewReader(closePayload)))
+		r.SetPathValue("id", testCaseID)
+		w := httptest.NewRecorder()
+		h.PatchCase(w, r)
+		assertStatus(t, w, http.StatusOK)
+
+		select {
+		case <-called:
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected CreatePendingVerification to be called after closing the case")
+		}
+
+		var req struct {
+			WorkItemID     string `json:"workItemId"`
+			AddedReason    string `json:"addedReason"`
+			PreviousStatus string `json:"previousStatus"`
+			Note           string `json:"note"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("decode pending verification body: %v; raw: %s", err, body)
+		}
+		if req.WorkItemID != testCaseID {
+			t.Errorf("workItemId = %q, want %q", req.WorkItemID, testCaseID)
+		}
+		if req.AddedReason != "AUTO_CLOSED" {
+			t.Errorf("addedReason = %q, want %q", req.AddedReason, "AUTO_CLOSED")
+		}
+		if req.PreviousStatus != "WORK_IN_PROGRESS" {
+			t.Errorf("previousStatus = %q, want %q", req.PreviousStatus, "WORK_IN_PROGRESS")
+		}
+		wantNote := "Automatically added for verification — case closed by WSO2 Support."
+		if req.Note != wantNote {
+			t.Errorf("note = %q, want %q", req.Note, wantNote)
+		}
+	})
+
+	t.Run("closing from solution_proposed adds it as auto-closed with that previous status", func(t *testing.T) {
+		var body []byte
+		called := make(chan struct{})
+		client := &mockEntityCaseClient{
+			getCaseFn: func(_ context.Context, _ string) ([]byte, error) {
+				return []byte(`{"id":"` + testCaseID + `","state":"solution_proposed"}`), nil
+			},
+			patchCaseFn: func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+				return []byte(`{"id":"` + testCaseID + `","state":"closed"}`), nil
+			},
+			createPendingVerificationFn: func(_ context.Context, b []byte) ([]byte, error) {
+				body = b
+				close(called)
+				return []byte(`{"id":"pv-1"}`), nil
+			},
+		}
+		h := NewCaseHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/cases/"+testCaseID, strings.NewReader(closePayload)))
+		r.SetPathValue("id", testCaseID)
+		w := httptest.NewRecorder()
+		h.PatchCase(w, r)
+		assertStatus(t, w, http.StatusOK)
+
+		select {
+		case <-called:
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected CreatePendingVerification to be called after closing the case")
+		}
+
+		var req struct {
+			AddedReason    string `json:"addedReason"`
+			PreviousStatus string `json:"previousStatus"`
+			Note           string `json:"note"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("decode pending verification body: %v; raw: %s", err, body)
+		}
+		if req.AddedReason != "AUTO_CLOSED" {
+			t.Errorf("addedReason = %q, want %q", req.AddedReason, "AUTO_CLOSED")
+		}
+		if req.PreviousStatus != "SOLUTION_PROPOSED" {
+			t.Errorf("previousStatus = %q, want %q", req.PreviousStatus, "SOLUTION_PROPOSED")
+		}
+		wantNote := "Automatically added for verification — case closed by WSO2 Support."
+		if req.Note != wantNote {
+			t.Errorf("note = %q, want %q", req.Note, wantNote)
+		}
+	})
+
+	t.Run("falls back to manual with the previous state folded into the note for a state the auto-closed mapping doesn't cover", func(t *testing.T) {
+		// Exercises recordPendingVerificationEntry directly rather than through
+		// PatchCase: state.go's own isValidStateTransition would reject any
+		// close whose previous state isn't work_in_progress or
+		// solution_proposed before this hook ever ran, so there is no way to
+		// reach this fallback branch through the full HTTP handler. It should
+		// never happen in practice; this only guards the fallback itself.
+		var body []byte
+		client := &mockEntityCaseClient{
+			createPendingVerificationFn: func(_ context.Context, b []byte) ([]byte, error) {
+				body = b
+				return []byte(`{"id":"pv-1"}`), nil
+			},
+		}
+		h := NewCaseHandler(client)
+		h.recordPendingVerificationEntry(context.Background(), &middleware.UserInfo{UserID: "u-1"}, testCaseID, caseStateOpen)
+
+		var req struct {
+			AddedReason    string `json:"addedReason"`
+			PreviousStatus string `json:"previousStatus"`
+			Note           string `json:"note"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("decode pending verification body: %v; raw: %s", err, body)
+		}
+		if req.AddedReason != "MANUAL" {
+			t.Errorf("addedReason = %q, want %q", req.AddedReason, "MANUAL")
+		}
+		if req.PreviousStatus != "" {
+			t.Errorf("previousStatus = %q, want empty (MANUAL forbids it)", req.PreviousStatus)
+		}
+		wantNote := "Automatically added for verification — case closed by WSO2 Support. Previous status: Open."
+		if req.Note != wantNote {
+			t.Errorf("note = %q, want %q", req.Note, wantNote)
+		}
+	})
+
+	t.Run("still succeeds when the pending verification call fails", func(t *testing.T) {
+		// Covers the common, expected failures too: Pending Verification disabled
+		// for the project (entity-service 403s) and an already-unverified entry
+		// from an earlier round (409) — both must never fail the close response.
+		client := &mockEntityCaseClient{
+			getCaseFn: func(_ context.Context, _ string) ([]byte, error) {
+				return []byte(`{"id":"` + testCaseID + `","state":"work_in_progress"}`), nil
+			},
+			patchCaseFn: func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+				return []byte(`{"id":"` + testCaseID + `","state":"closed"}`), nil
+			},
+			createPendingVerificationFn: func(_ context.Context, _ []byte) ([]byte, error) {
+				return nil, errors.New("pending verification is not enabled for this project")
+			},
+		}
+		h := NewCaseHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/cases/"+testCaseID, strings.NewReader(closePayload)))
+		r.SetPathValue("id", testCaseID)
+		w := httptest.NewRecorder()
+		h.PatchCase(w, r)
+		assertStatus(t, w, http.StatusOK)
+		assertContentType(t, w, "application/json")
+	})
+
+	t.Run("PATCH that does not close the case does not call CreatePendingVerification", func(t *testing.T) {
+		var pvCalled atomic.Bool
+		client := &mockEntityCaseClient{
+			getCaseFn: func(_ context.Context, _ string) ([]byte, error) {
+				return []byte(`{"id":"` + testCaseID + `","state":"open"}`), nil
+			},
+			patchCaseFn: func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+				return []byte(`{"id":"` + testCaseID + `","state":"work_in_progress"}`), nil
+			},
+			createPendingVerificationFn: func(_ context.Context, _ []byte) ([]byte, error) {
+				pvCalled.Store(true)
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewCaseHandler(client)
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/cases/"+testCaseID, strings.NewReader(`{"state":"work_in_progress"}`)))
+		r.SetPathValue("id", testCaseID)
+		w := httptest.NewRecorder()
+		h.PatchCase(w, r)
+		assertStatus(t, w, http.StatusOK)
+
+		// No signal to wait on here (nothing should fire); a short grace period
+		// gives an incorrect async call a chance to land before asserting absence.
+		time.Sleep(100 * time.Millisecond)
+		if pvCalled.Load() {
+			t.Error("CreatePendingVerification was called for a PATCH that did not close the case")
+		}
+	})
+
+	t.Run("pending verification call survives the request context being canceled after the handler returns", func(t *testing.T) {
+		ctxDone := make(chan struct{})
+		var gotErr error
+		client := &mockEntityCaseClient{
+			getCaseFn: func(_ context.Context, _ string) ([]byte, error) {
+				return []byte(`{"id":"` + testCaseID + `","state":"work_in_progress"}`), nil
+			},
+			patchCaseFn: func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+				return []byte(`{"id":"` + testCaseID + `","state":"closed"}`), nil
+			},
+			createPendingVerificationFn: func(ctx context.Context, _ []byte) ([]byte, error) {
+				gotErr = ctx.Err()
+				close(ctxDone)
+				return []byte(`{}`), nil
+			},
+		}
+		h := NewCaseHandler(client)
+		reqCtx, cancel := context.WithCancel(context.Background())
+		r := withUser(httptest.NewRequest(http.MethodPatch, "/cases/"+testCaseID, strings.NewReader(closePayload)).WithContext(reqCtx))
+		r.SetPathValue("id", testCaseID)
+		w := httptest.NewRecorder()
+		h.PatchCase(w, r)
+		assertStatus(t, w, http.StatusOK)
+
+		cancel()
+
+		select {
+		case <-ctxDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected CreatePendingVerification to be called")
+		}
+		if gotErr != nil {
+			t.Errorf("pending-verification context was already canceled (%v) once the request context was — it must be detached", gotErr)
+		}
+	})
+}
+
 // ----- GetCase -----
 
 func TestGetCase(t *testing.T) {
@@ -2936,112 +3171,6 @@ func TestCreateCaseEscalation_ActionDependentAuthorization(t *testing.T) {
 	})
 }
 
-// ----- CreateCaseAttachment -----
-
-func TestCreateCaseAttachment(t *testing.T) {
-	const (
-		testCaseID   = "11111111-1111-1111-1111-111111111111"
-		validPayload = `{"name":"screenshot.png","type":"image/png","file":"data:image/png;base64,aGVsbG8="}`
-	)
-
-	t.Run("requires authenticated user", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := httptest.NewRequest(http.MethodPost, "/attachments", strings.NewReader(validPayload))
-		w := httptest.NewRecorder()
-		h.CreateCaseAttachment(w, r)
-		assertStatus(t, w, http.StatusUnauthorized)
-		assertErrorMessage(t, w, ErrMsgUnauthorized)
-	})
-
-	t.Run("rejects body exceeding 15 MiB", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := withUser(httptest.NewRequest(http.MethodPost, "/attachments", strings.NewReader(strings.Repeat("x", maxAttachmentBodyBytes+1))))
-		w := httptest.NewRecorder()
-		h.CreateCaseAttachment(w, r)
-		assertStatus(t, w, http.StatusRequestEntityTooLarge)
-		assertErrorMessage(t, w, ErrMsgTooLarge)
-	})
-
-	t.Run("rejects invalid JSON body", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := withUser(httptest.NewRequest(http.MethodPost, "/attachments", strings.NewReader(`not-json`)))
-		w := httptest.NewRecorder()
-		h.CreateCaseAttachment(w, r)
-		assertStatus(t, w, http.StatusBadRequest)
-		assertErrorMessage(t, w, ErrMsgBadRequest)
-	})
-
-	t.Run("returns 201 on success", func(t *testing.T) {
-		t.Parallel()
-		want := `{"message":"uploaded","attachment":{"id":"` + testCaseID + `"}}`
-		client := &mockEntityCaseClient{
-			createCaseAttachmentFn: func(_ context.Context, _ []byte) ([]byte, error) {
-				return []byte(want), nil
-			},
-		}
-		h := NewCaseHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodPost, "/attachments", strings.NewReader(validPayload)))
-		w := httptest.NewRecorder()
-		h.CreateCaseAttachment(w, r)
-		assertStatus(t, w, http.StatusCreated)
-		assertContentType(t, w, "application/json")
-	})
-
-	t.Run("maps upstream errors", func(t *testing.T) {
-		for _, tc := range upstreamErrorsGeneric("Failed to create case attachment.") {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				client := &mockEntityCaseClient{
-					createCaseAttachmentFn: func(_ context.Context, _ []byte) ([]byte, error) {
-						return nil, tc.err
-					},
-				}
-				h := NewCaseHandler(client)
-				r := withUser(httptest.NewRequest(http.MethodPost, "/attachments", strings.NewReader(validPayload)))
-				w := httptest.NewRecorder()
-				h.CreateCaseAttachment(w, r)
-				assertStatus(t, w, tc.wantCode)
-				assertErrorMessage(t, w, tc.wantMsg)
-				assertContentType(t, w, "application/json")
-			})
-		}
-	})
-
-	t.Run("blocks attachment upload on closed case", func(t *testing.T) {
-		t.Parallel()
-		casePayload := `{"referenceId":"` + testCaseID + `","referenceType":"case","name":"file.png","type":"image/png","file":"data:image/png;base64,aGVsbG8="}`
-		client := &mockEntityCaseClient{
-			getCaseFn: func(_ context.Context, _ string) ([]byte, error) {
-				return []byte(`{"state":"closed"}`), nil
-			},
-		}
-		h := NewCaseHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodPost, "/attachments", strings.NewReader(casePayload)))
-		w := httptest.NewRecorder()
-		h.CreateCaseAttachment(w, r)
-		assertStatus(t, w, http.StatusConflict)
-		assertErrorMessage(t, w, ErrMsgAttachmentOnClosedCase)
-	})
-
-	t.Run("allows attachment upload on open case", func(t *testing.T) {
-		t.Parallel()
-		casePayload := `{"referenceId":"` + testCaseID + `","referenceType":"case","name":"file.png","type":"image/png","file":"data:image/png;base64,aGVsbG8="}`
-		client := &mockEntityCaseClient{
-			getCaseFn: func(_ context.Context, _ string) ([]byte, error) {
-				return []byte(`{"state":"work_in_progress"}`), nil
-			},
-			createCaseAttachmentFn: func(_ context.Context, _ []byte) ([]byte, error) {
-				return []byte(`{"id":"att-1"}`), nil
-			},
-		}
-		h := NewCaseHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodPost, "/attachments", strings.NewReader(casePayload)))
-		w := httptest.NewRecorder()
-		h.CreateCaseAttachment(w, r)
-		assertStatus(t, w, http.StatusCreated)
-	})
-}
-
 // ----- SearchCaseAttachments -----
 
 func TestSearchCaseAttachments(t *testing.T) {
@@ -3083,334 +3212,6 @@ func TestSearchCaseAttachments(t *testing.T) {
 				r := withUser(httptest.NewRequest(http.MethodPost, "/attachments/search", strings.NewReader(validPayload)))
 				w := httptest.NewRecorder()
 				h.SearchCaseAttachments(w, r)
-				assertStatus(t, w, tc.wantCode)
-				assertErrorMessage(t, w, tc.wantMsg)
-				assertContentType(t, w, "application/json")
-			})
-		}
-	})
-}
-
-// ----- GetCaseAttachmentContent -----
-
-func TestGetCaseAttachmentContent(t *testing.T) {
-	const (
-		testCaseID       = "11111111-1111-1111-1111-111111111111"
-		testAttachmentID = "22222222-2222-2222-2222-222222222222"
-	)
-
-	t.Run("requires authenticated user", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := httptest.NewRequest(http.MethodGet, "/attachments/"+testAttachmentID+"/content", nil)
-		r.SetPathValue("id", testAttachmentID)
-		w := httptest.NewRecorder()
-		h.GetCaseAttachmentContent(w, r)
-		assertStatus(t, w, http.StatusUnauthorized)
-		assertErrorMessage(t, w, ErrMsgUnauthorized)
-	})
-
-	t.Run("rejects invalid attachment UUID", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := withUser(httptest.NewRequest(http.MethodGet, "/attachments/not-a-uuid/content", nil))
-		r.SetPathValue("id", "not-a-uuid")
-		w := httptest.NewRecorder()
-		h.GetCaseAttachmentContent(w, r)
-		assertStatus(t, w, http.StatusBadRequest)
-		assertErrorMessage(t, w, ErrMsgInvalidUUID)
-	})
-
-	t.Run("streams binary content with upstream Content-Type", func(t *testing.T) {
-		t.Parallel()
-		client := &mockEntityCaseClient{
-			getCaseAttachmentContentFn: func(_ context.Context, attachmentID string) ([]byte, string, error) {
-				if attachmentID != testAttachmentID {
-					t.Errorf("attachmentID = %q, want %q", attachmentID, testAttachmentID)
-				}
-				return []byte("PNG_BYTES"), "image/png", nil
-			},
-		}
-		h := NewCaseHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodGet, "/attachments/"+testAttachmentID+"/content", nil))
-		r.SetPathValue("id", testAttachmentID)
-		w := httptest.NewRecorder()
-		h.GetCaseAttachmentContent(w, r)
-		assertStatus(t, w, http.StatusOK)
-		assertContentType(t, w, "image/png")
-		if w.Body.String() != "PNG_BYTES" {
-			t.Errorf("body = %q, want %q", w.Body.String(), "PNG_BYTES")
-		}
-		if w.Header().Get("Content-Disposition") != "attachment" {
-			t.Errorf("Content-Disposition = %q, want %q", w.Header().Get("Content-Disposition"), "attachment")
-		}
-	})
-
-	t.Run("coerces unsafe Content-Type to octet-stream", func(t *testing.T) {
-		t.Parallel()
-		client := &mockEntityCaseClient{
-			getCaseAttachmentContentFn: func(_ context.Context, _ string) ([]byte, string, error) {
-				return []byte("<script>alert(1)</script>"), "text/html; charset=utf-8", nil
-			},
-		}
-		h := NewCaseHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodGet, "/attachments/"+testAttachmentID+"/content", nil))
-		r.SetPathValue("id", testAttachmentID)
-		w := httptest.NewRecorder()
-		h.GetCaseAttachmentContent(w, r)
-		assertStatus(t, w, http.StatusOK)
-		assertContentType(t, w, "application/octet-stream")
-	})
-
-	t.Run("maps upstream errors", func(t *testing.T) {
-		for _, tc := range upstreamErrorsGeneric("Failed to retrieve attachment content.") {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				client := &mockEntityCaseClient{
-					getCaseAttachmentContentFn: func(_ context.Context, _ string) ([]byte, string, error) {
-						return nil, "", tc.err
-					},
-				}
-				h := NewCaseHandler(client)
-				r := withUser(httptest.NewRequest(http.MethodGet, "/attachments/"+testAttachmentID+"/content", nil))
-				r.SetPathValue("id", testAttachmentID)
-				w := httptest.NewRecorder()
-				h.GetCaseAttachmentContent(w, r)
-				assertStatus(t, w, tc.wantCode)
-				assertErrorMessage(t, w, tc.wantMsg)
-				assertContentType(t, w, "application/json")
-			})
-		}
-	})
-}
-
-// ----- GetAttachment -----
-
-func TestGetAttachment(t *testing.T) {
-	const testAttachmentID = "22222222-2222-2222-2222-222222222222"
-
-	t.Run("requires authenticated user", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := httptest.NewRequest(http.MethodGet, "/attachments/"+testAttachmentID, nil)
-		r.SetPathValue("id", testAttachmentID)
-		w := httptest.NewRecorder()
-		h.GetAttachment(w, r)
-		assertStatus(t, w, http.StatusUnauthorized)
-		assertErrorMessage(t, w, ErrMsgUnauthorized)
-		assertContentType(t, w, "application/json")
-	})
-
-	t.Run("rejects empty attachment ID", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := withUser(httptest.NewRequest(http.MethodGet, "/attachments/", nil))
-		w := httptest.NewRecorder()
-		h.GetAttachment(w, r)
-		assertStatus(t, w, http.StatusBadRequest)
-		assertErrorMessage(t, w, ErrMsgInvalidUUID)
-		assertContentType(t, w, "application/json")
-	})
-
-	t.Run("rejects non-UUID attachment ID", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := withUser(httptest.NewRequest(http.MethodGet, "/attachments/not-a-uuid", nil))
-		r.SetPathValue("id", "not-a-uuid")
-		w := httptest.NewRecorder()
-		h.GetAttachment(w, r)
-		assertStatus(t, w, http.StatusBadRequest)
-		assertErrorMessage(t, w, ErrMsgInvalidUUID)
-		assertContentType(t, w, "application/json")
-	})
-
-	t.Run("forwards attachment ID and returns upstream metadata", func(t *testing.T) {
-		const upstreamResp = `{"id":"` + testAttachmentID + `","name":"screenshot.png","description":"a screenshot"}`
-		var capturedID string
-		client := &mockEntityCaseClient{
-			getAttachmentFn: func(_ context.Context, attachmentID string) ([]byte, error) {
-				capturedID = attachmentID
-				return []byte(upstreamResp), nil
-			},
-		}
-		h := NewCaseHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodGet, "/attachments/"+testAttachmentID, nil))
-		r.SetPathValue("id", testAttachmentID)
-		w := httptest.NewRecorder()
-		h.GetAttachment(w, r)
-
-		assertStatus(t, w, http.StatusOK)
-		assertContentType(t, w, "application/json")
-		if capturedID != testAttachmentID {
-			t.Errorf("upstream received attachmentID %q, want %q", capturedID, testAttachmentID)
-		}
-		if w.Body.String() != upstreamResp {
-			t.Errorf("body = %q, want %q", w.Body.String(), upstreamResp)
-		}
-	})
-
-	t.Run("maps upstream errors", func(t *testing.T) {
-		for _, tc := range upstreamErrorsGeneric("Failed to retrieve attachment.") {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				client := &mockEntityCaseClient{
-					getAttachmentFn: func(_ context.Context, _ string) ([]byte, error) {
-						return nil, tc.err
-					},
-				}
-				h := NewCaseHandler(client)
-				r := withUser(httptest.NewRequest(http.MethodGet, "/attachments/"+testAttachmentID, nil))
-				r.SetPathValue("id", testAttachmentID)
-				w := httptest.NewRecorder()
-				h.GetAttachment(w, r)
-				assertStatus(t, w, tc.wantCode)
-				assertErrorMessage(t, w, tc.wantMsg)
-				assertContentType(t, w, "application/json")
-			})
-		}
-	})
-}
-
-// ----- UpdateAttachment -----
-
-func TestUpdateAttachment(t *testing.T) {
-	const testAttachmentID = "22222222-2222-2222-2222-222222222222"
-	const validPayload = `{"referenceId":"11111111-1111-1111-1111-111111111111","referenceType":"case","name":"renamed.png"}`
-
-	t.Run("requires authenticated user", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := httptest.NewRequest(http.MethodPatch, "/attachments/"+testAttachmentID, strings.NewReader(validPayload))
-		r.SetPathValue("id", testAttachmentID)
-		w := httptest.NewRecorder()
-		h.UpdateAttachment(w, r)
-		assertStatus(t, w, http.StatusUnauthorized)
-		assertErrorMessage(t, w, ErrMsgUnauthorized)
-		assertContentType(t, w, "application/json")
-	})
-
-	t.Run("rejects empty attachment ID", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := withUser(httptest.NewRequest(http.MethodPatch, "/attachments/", strings.NewReader(validPayload)))
-		w := httptest.NewRecorder()
-		h.UpdateAttachment(w, r)
-		assertStatus(t, w, http.StatusBadRequest)
-		assertErrorMessage(t, w, ErrMsgInvalidUUID)
-		assertContentType(t, w, "application/json")
-	})
-
-	t.Run("rejects non-UUID attachment ID", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := withUser(httptest.NewRequest(http.MethodPatch, "/attachments/not-a-uuid", strings.NewReader(validPayload)))
-		r.SetPathValue("id", "not-a-uuid")
-		w := httptest.NewRecorder()
-		h.UpdateAttachment(w, r)
-		assertStatus(t, w, http.StatusBadRequest)
-		assertErrorMessage(t, w, ErrMsgInvalidUUID)
-		assertContentType(t, w, "application/json")
-	})
-
-	t.Run("rejects body exceeding 1 MiB", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := withUser(httptest.NewRequest(http.MethodPatch, "/attachments/"+testAttachmentID, strings.NewReader(strings.Repeat("x", maxRequestBodyBytes+1))))
-		r.SetPathValue("id", testAttachmentID)
-		w := httptest.NewRecorder()
-		h.UpdateAttachment(w, r)
-		assertStatus(t, w, http.StatusRequestEntityTooLarge)
-		assertErrorMessage(t, w, ErrMsgTooLarge)
-		assertContentType(t, w, "application/json")
-	})
-
-	t.Run("rejects invalid JSON body", func(t *testing.T) {
-		h := NewCaseHandler(&mockEntityCaseClient{})
-		r := withUser(httptest.NewRequest(http.MethodPatch, "/attachments/"+testAttachmentID, strings.NewReader(`not-json`)))
-		r.SetPathValue("id", testAttachmentID)
-		w := httptest.NewRecorder()
-		h.UpdateAttachment(w, r)
-		assertStatus(t, w, http.StatusBadRequest)
-		assertErrorMessage(t, w, ErrMsgBadRequest)
-		assertContentType(t, w, "application/json")
-	})
-
-	invalidBodies := []struct {
-		name string
-		body string
-	}{
-		{"null body", `null`},
-		{"array body", `[]`},
-		{"empty object", `{}`},
-		{"missing referenceId", `{"referenceType":"case","name":"renamed.png"}`},
-		{"invalid referenceId", `{"referenceId":"not-a-uuid","referenceType":"case","name":"renamed.png"}`},
-		{"invalid referenceType", `{"referenceId":"11111111-1111-1111-1111-111111111111","referenceType":"bogus","name":"renamed.png"}`},
-		{"neither name nor description", `{"referenceId":"11111111-1111-1111-1111-111111111111","referenceType":"case"}`},
-		{"unknown field", `{"referenceId":"11111111-1111-1111-1111-111111111111","referenceType":"case","name":"renamed.png","extra":"nope"}`},
-	}
-	for _, tc := range invalidBodies {
-		t.Run("rejects "+tc.name, func(t *testing.T) {
-			h := NewCaseHandler(&mockEntityCaseClient{})
-			r := withUser(httptest.NewRequest(http.MethodPatch, "/attachments/"+testAttachmentID, strings.NewReader(tc.body)))
-			r.SetPathValue("id", testAttachmentID)
-			w := httptest.NewRecorder()
-			h.UpdateAttachment(w, r)
-			assertStatus(t, w, http.StatusBadRequest)
-			assertErrorMessage(t, w, ErrMsgBadRequest)
-			assertContentType(t, w, "application/json")
-		})
-	}
-
-	t.Run("accepts description-only update with explicit null (clear)", func(t *testing.T) {
-		const payload = `{"referenceId":"11111111-1111-1111-1111-111111111111","referenceType":"deployment","description":null}`
-		client := &mockEntityCaseClient{
-			updateAttachmentFn: func(_ context.Context, _ string, _ []byte) ([]byte, error) {
-				return []byte(`{}`), nil
-			},
-		}
-		h := NewCaseHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodPatch, "/attachments/"+testAttachmentID, strings.NewReader(payload)))
-		r.SetPathValue("id", testAttachmentID)
-		w := httptest.NewRecorder()
-		h.UpdateAttachment(w, r)
-		assertStatus(t, w, http.StatusOK)
-	})
-
-	t.Run("forwards attachment ID and body, returns 200 with upstream response", func(t *testing.T) {
-		var capturedID string
-		var capturedBody []byte
-		const upstreamResp = `{"id":"` + testAttachmentID + `","name":"renamed.png"}`
-		client := &mockEntityCaseClient{
-			updateAttachmentFn: func(_ context.Context, attachmentID string, body []byte) ([]byte, error) {
-				capturedID = attachmentID
-				capturedBody = body
-				return []byte(upstreamResp), nil
-			},
-		}
-		h := NewCaseHandler(client)
-		r := withUser(httptest.NewRequest(http.MethodPatch, "/attachments/"+testAttachmentID, strings.NewReader(validPayload)))
-		r.SetPathValue("id", testAttachmentID)
-		w := httptest.NewRecorder()
-		h.UpdateAttachment(w, r)
-
-		assertStatus(t, w, http.StatusOK)
-		assertContentType(t, w, "application/json")
-		if capturedID != testAttachmentID {
-			t.Errorf("upstream received attachmentID %q, want %q", capturedID, testAttachmentID)
-		}
-		if string(capturedBody) != validPayload {
-			t.Errorf("upstream received body %q, want %q", capturedBody, validPayload)
-		}
-		if w.Body.String() != upstreamResp {
-			t.Errorf("body = %q, want %q", w.Body.String(), upstreamResp)
-		}
-	})
-
-	t.Run("maps upstream errors", func(t *testing.T) {
-		for _, tc := range upstreamErrorsGeneric("Failed to update attachment.") {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				client := &mockEntityCaseClient{
-					updateAttachmentFn: func(_ context.Context, _ string, _ []byte) ([]byte, error) {
-						return nil, tc.err
-					},
-				}
-				h := NewCaseHandler(client)
-				r := withUser(httptest.NewRequest(http.MethodPatch, "/attachments/"+testAttachmentID, strings.NewReader(validPayload)))
-				r.SetPathValue("id", testAttachmentID)
-				w := httptest.NewRecorder()
-				h.UpdateAttachment(w, r)
 				assertStatus(t, w, tc.wantCode)
 				assertErrorMessage(t, w, tc.wantMsg)
 				assertContentType(t, w, "application/json")
@@ -3768,6 +3569,35 @@ func TestSearchCasesForwardsTagsFilter(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 	if string(capturedBody) != reqBody {
 		t.Errorf("upstream received body %s, want %s (must forward verbatim)", capturedBody, reqBody)
+	}
+}
+
+func TestSearchCasesForwardsSalesRegionFilter(t *testing.T) {
+	// The salesRegion field filter is forwarded through SearchCases verbatim,
+	// at the top level and inside an anyOf branch: no BFF-side whitelist.
+	bodies := map[string]string{
+		"top level": `{"filters":{"filters":[{"field":"type","op":"in","values":["engagement"]},{"field":"salesRegion","op":"in","values":["EMEA","APAC"]}]}}`,
+		"anyOf":     `{"filters":{"anyOf":[{"filters":[{"field":"salesRegion","op":"in","values":["EMEA"]}]},{"filters":[{"field":"salesRegion","op":"in","values":["APAC"]}]}]}}`,
+	}
+	for name, reqBody := range bodies {
+		t.Run(name, func(t *testing.T) {
+			var capturedBody []byte
+			client := &mockEntityCaseClient{
+				searchCasesFn: func(_ context.Context, body []byte) ([]byte, error) {
+					capturedBody = body
+					return []byte(`{"cases":[],"total":0}`), nil
+				},
+			}
+			h := NewCaseHandler(client)
+			r := withUser(httptest.NewRequest(http.MethodPost, "/cases/search", strings.NewReader(reqBody)))
+			w := httptest.NewRecorder()
+			h.SearchCases(w, r)
+
+			assertStatus(t, w, http.StatusOK)
+			if string(capturedBody) != reqBody {
+				t.Errorf("upstream received body %s, want %s (must forward verbatim)", capturedBody, reqBody)
+			}
+		})
 	}
 }
 

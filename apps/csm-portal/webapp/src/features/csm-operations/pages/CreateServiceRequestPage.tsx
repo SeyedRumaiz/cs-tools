@@ -33,12 +33,12 @@ import { useEffect, useMemo, useRef, useState, type JSX } from "react";
 import { useLocation, useSearchParams } from "react-router";
 
 import { BackendApiError } from "@api/backend/client";
+import { priorityFromSeverity } from "@api/backend/mappers";
 import type { BeProject } from "@api/backend/types";
+import type { Severity } from "@features/csm-dashboard/types/abtDashboard";
+import { SEVERITY_LABEL } from "@features/csm-dashboard/utils/abtDashboard";
 import AttachmentsField from "@components/attachments/AttachmentsField";
-import {
-  POST_CREATE_ATTACHMENTS_MAX_ENCODED_BYTES,
-  type EncodedAttachment,
-} from "@components/attachments/encodeAttachment";
+import type { PendingAttachment } from "@components/attachments/pendingAttachment";
 import { useErrorBanner } from "@context/error-banner/ErrorBannerContext";
 import { useNewServiceRequestDraft } from "@context/new-service-request-draft/NewServiceRequestDraftContext";
 import ProjectSelectionField from "@features/csm-cases/components/ProjectSelectionField";
@@ -48,7 +48,7 @@ import { useProjectMetadata } from "@features/csm-projects/api/useProjectMetadat
 import { useDeployedProductOptions } from "@features/csm-cases/api/useDeployedProductOptions";
 import { usePostCsmCase } from "@features/csm-cases/api/usePostCsmCase";
 import { usePostCsmCaseAttachment } from "@features/csm-cases/api/useCsmCaseAttachments";
-import { uploadAttachmentsToCase } from "@features/csm-cases/api/uploadAttachmentsToCase";
+import { failedUploadsMessage, uploadAttachmentsToCase } from "@features/csm-cases/api/uploadAttachmentsToCase";
 import { useEngineerDisplayName } from "@hooks/useEngineerDisplayName";
 import { useSearchCatalogs } from "@features/csm-operations/api/useSearchCatalogs";
 import { useCatalogItemVariables } from "@features/csm-operations/api/useCatalogItemVariables";
@@ -65,6 +65,10 @@ import {
 } from "@features/csm-operations/utils/catalogVariables";
 import { canRaiseServiceRequests } from "@features/csm-projects/utils/subscriptionType";
 import type { CreateServiceRequestFromCaseNavState } from "@features/csm-cases/types/csmCases";
+
+// A service request never carries S0, so the picker offers S1-S4 only.
+type ServiceRequestSeverity = Exclude<Severity, "S0">;
+const SERVICE_REQUEST_SEVERITIES: ServiceRequestSeverity[] = ["S1", "S2", "S3", "S4"];
 
 // Managed-cloud and Cloud Support projects are offered in the project picker
 // (see `canRaiseServiceRequests`). Per-project eligibility is still decided
@@ -138,11 +142,13 @@ export default function CreateServiceRequestPage(): JSX.Element {
   );
   const [catalogId, setCatalogId] = useState(restored?.catalogId ?? "");
   const [catalogItemId, setCatalogItemId] = useState(restored?.catalogItemId ?? "");
+  // "" means untouched: the field is left out of the payload and the server
+  // applies its configured default. It is deliberately not preset to a value.
+  const [severity, setSeverity] = useState<ServiceRequestSeverity | "">(restored?.severity ?? "");
   // Variable answers, keyed by variable id.
   const [answers, setAnswers] = useState<Record<string, string>>(restored?.answers ?? {});
-  const [attachments, setAttachments] = useState<EncodedAttachment[]>(
-    restored?.attachments ?? [],
-  );
+  // Files are not kept in the draft (they cannot be stored); they are chosen again.
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
 
   // `hasSr` is precomputed by the backing data source, so an ineligible
   // project is caught before the engineer fills out the rest of the form
@@ -221,8 +227,8 @@ export default function CreateServiceRequestPage(): JSX.Element {
       deployedProductId,
       catalogId,
       catalogItemId,
+      severity,
       answers,
-      attachments,
     });
   }, [
     draftStore,
@@ -233,8 +239,8 @@ export default function CreateServiceRequestPage(): JSX.Element {
     deployedProductId,
     catalogId,
     catalogItemId,
+    severity,
     answers,
-    attachments,
     submitting,
   ]);
 
@@ -389,6 +395,8 @@ export default function CreateServiceRequestPage(): JSX.Element {
         catalogId,
         catalogItemId,
         variables: variablePayload,
+        // Only sent when the engineer picked one; otherwise the server default applies.
+        ...(severity ? { severity: priorityFromSeverity(severity) } : {}),
         relatedCaseId,
       });
       // The draft was cleared when this create started and nothing has saved one
@@ -396,19 +404,15 @@ export default function CreateServiceRequestPage(): JSX.Element {
       // submission is left to clear. Clearing again here would discard a draft
       // that a form reopened mid-create has started since.
       submitted.current = true;
-      // The create endpoint doesn't attach files for service requests, so upload
-      // them to the new case afterwards. A partial failure still lands the case.
+      // Files are uploaded to the new case afterwards. A partial failure still
+      // lands the case.
       const failed = await uploadAttachmentsToCase(
         postAttachment.mutateAsync,
         created.id,
         attachments,
         uploadedBy,
       );
-      if (failed > 0) {
-        showError(
-          `The service request was created, but ${failed} attachment${failed === 1 ? "" : "s"} failed to upload. You can add ${failed === 1 ? "it" : "them"} from the case page.`,
-        );
-      }
+      if (failed.length > 0) showError(failedUploadsMessage("service request", failed));
       navigate(`/cases/${created.id}`, { state: { from: backTarget } });
     } catch (err) {
       setSubmitting(false);
@@ -632,6 +636,34 @@ export default function CreateServiceRequestPage(): JSX.Element {
             </FormControl>
           </Grid>
 
+          <Grid size={{ xs: 12, md: 4 }}>
+            <FormControl fullWidth size="small">
+              <InputLabel id="sr-severity-label" shrink sx={{ top: "0px !important" }}>
+                Severity
+              </InputLabel>
+              <Select
+                labelId="sr-severity-label"
+                label="Severity"
+                value={severity}
+                displayEmpty
+                notched
+                onChange={(e) => setSeverity(e.target.value as ServiceRequestSeverity | "")}
+                disabled={submitting}
+              >
+                <MenuItem value="">Default</MenuItem>
+                {SERVICE_REQUEST_SEVERITIES.map((s) => (
+                  <MenuItem key={s} value={s}>
+                    {s} · {SEVERITY_LABEL[s]}
+                  </MenuItem>
+                ))}
+              </Select>
+              <FormHelperText>
+                Internal only, never shown to the customer. Leave as Default to use the standard
+                severity.
+              </FormHelperText>
+            </FormControl>
+          </Grid>
+
           {/* Dynamic variable form for the chosen catalog item. */}
           {catalogItemId && (
             <Grid size={{ xs: 12 }}>
@@ -677,7 +709,6 @@ export default function CreateServiceRequestPage(): JSX.Element {
                 attachments={attachments}
                 onChange={setAttachments}
                 onError={showError}
-                maxEncodedBytes={POST_CREATE_ATTACHMENTS_MAX_ENCODED_BYTES}
               />
             </Grid>
           )}

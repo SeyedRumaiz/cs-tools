@@ -58,10 +58,6 @@ vi.mock("@features/csm-cases/api/usePostCsmCase", () => ({
 }));
 vi.mock("@features/csm-cases/api/useCsmCaseAttachments", () => ({
   usePostCsmCaseAttachment: () => ({ mutateAsync: vi.fn(), uploadProgress: null }),
-  // AttachmentsField (rendered once a catalog item is selected, per the
-  // read-access gating tests below driving selection that far) reads this
-  // constant directly, not through the hook.
-  MAX_ATTACHMENT_SIZE_BYTES: 10 * 1024 * 1024,
 }));
 vi.mock("@hooks/useEngineerDisplayName", () => ({
   useEngineerDisplayName: () => "Test Engineer",
@@ -357,6 +353,49 @@ describe("CreateServiceRequestPage — at least one answered question", () => {
         catalogItemId: "item-1",
         variables: [{ id: "var-1", value: "api-gateway" }],
       }),
+    );
+  });
+});
+
+describe("CreateServiceRequestPage — severity", () => {
+  beforeEach(() => {
+    navigateMock.mockReset();
+    postCaseMutateAsyncMock.mockReset();
+    showErrorMock.mockReset();
+    projectMetadataResult = { data: undefined, isLoading: false, isError: false };
+    catalogItemVariables = [SERVICE_NAME_VARIABLE];
+    postCaseMutateAsyncMock.mockReturnValue(new Promise(() => {}));
+  });
+
+  it("omits severity from the payload when the engineer leaves it at Default", () => {
+    render(<CreateServiceRequestPage />);
+    selectFullFlow();
+    expect(screen.getByRole("combobox", { name: /severity/i })).toHaveTextContent("Default");
+    fireEvent.click(screen.getByRole("button", { name: /create service request/i }));
+
+    expect(postCaseMutateAsyncMock).toHaveBeenCalledTimes(1);
+    expect(postCaseMutateAsyncMock.mock.calls[0][0]).not.toHaveProperty("severity");
+  });
+
+  it("offers Default plus S1-S4 and no S0", () => {
+    render(<CreateServiceRequestPage />);
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /severity/i }));
+    const options = screen.getAllByRole("option").map((o) => o.textContent ?? "");
+    expect(options).toHaveLength(5);
+    expect(options[0]).toBe("Default");
+    expect(options.slice(1).map((o) => o.slice(0, 2))).toEqual(["S1", "S2", "S3", "S4"]);
+    expect(options.some((o) => o.startsWith("S0"))).toBe(false);
+  });
+
+  it("sends the wire value of the picked severity", () => {
+    render(<CreateServiceRequestPage />);
+    selectFullFlow();
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /severity/i }));
+    fireEvent.click(screen.getByRole("option", { name: /^S2/ }));
+    fireEvent.click(screen.getByRole("button", { name: /create service request/i }));
+
+    expect(postCaseMutateAsyncMock).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "service_request", severity: "high" }),
     );
   });
 });

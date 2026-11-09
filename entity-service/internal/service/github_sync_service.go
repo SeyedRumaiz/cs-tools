@@ -45,6 +45,8 @@ type GithubSyncService interface {
 	// than wait for a webhook -- as servicenow_create_case.yml calls
 	// ServiceNow today -- uses this.
 	CreateServiceRequestFromIssue(ctx context.Context, req domain.CreateServiceRequestFromIssueRequest) (domain.CreateServiceRequestFromIssueResponse, error)
+	// SetServiceRequestSeverityFromIssue sets the severity of the service request an issue produced.
+	SetServiceRequestSeverityFromIssue(ctx context.Context, owner, repository string, issueNumber int, severity domain.CaseSeverity) (domain.SetIssueSeverityResponse, error)
 }
 
 // Delivery is one webhook, already authenticated.
@@ -192,6 +194,8 @@ type githubSyncService struct {
 	srNotices srNotifier
 	// caseStates moves a case that is Awaiting Info to Waiting on WSO2 once a GitHub comment lands on it. Set with WithGithubCaseStates.
 	caseStates githubCaseStateMover
+	// severities sets a service request's severity from the issue's Priority field. Set with WithGithubSeverity.
+	severities githubSeveritySetter
 	// integrationLogin is our own GitHub account. Events it sent are our own
 	// writes coming back and are dropped -- identity, not string-matching the
 	// comment body the way the case webhook does.
@@ -203,6 +207,8 @@ type githubSyncService struct {
 	// repoConfigs reads each repository's own mapping file. Nil (the
 	// default) leaves account_github_repo the only source, as before.
 	repoConfigs *githubRepoConfigs
+	// issueTemplates reads each repository's issue form labels. Set with WithGithubRepoConfig; nil splits on every ### heading.
+	issueTemplates *githubIssueTemplates
 	// snCases creates a service request in ServiceNow first, under
 	// dual-write, so it takes ServiceNow's CS number and WSO2 Case ID as a
 	// portal-created one does (github_sn_case.go). Nil writes Postgres only
@@ -274,6 +280,23 @@ func WithGithubCaseStates(svc GithubSyncService, cases CaseService) GithubSyncSe
 	}
 	if m, ok := cases.(githubCaseStateMover); ok {
 		s.caseStates = m
+	}
+	return svc
+}
+
+// githubSeveritySetter is the part of the case service the issue's Priority field needs.
+type githubSeveritySetter interface {
+	SetServiceRequestSeverity(ctx context.Context, id string, severity domain.CaseSeverity) (domain.UpdateCaseResponse, error)
+}
+
+// WithGithubSeverity lets the issue's Priority field set its service request's severity. A no-op unless cases is the Postgres service.
+func WithGithubSeverity(svc GithubSyncService, cases CaseService) GithubSyncService {
+	s, ok := svc.(*githubSyncService)
+	if !ok {
+		return svc
+	}
+	if m, ok := cases.(githubSeveritySetter); ok {
+		s.severities = m
 	}
 	return svc
 }
@@ -416,6 +439,7 @@ func (s *githubSyncService) handleIssue(ctx context.Context, p IssuePayload, map
 		return Outcome{Action: "creation_prepared"}, nil
 	}
 	issue := snGithubIssueOf(p)
+	issue.Headings = s.issueHeadingsFor(ctx, p.Repository.Owner.Login, p.Repository.Name)
 	if existing != "" {
 		// The issue already produced a record. Its text is the source of
 		// truth, so an edit overwrites -- servicenow_update_case.yml re-sends
@@ -426,10 +450,10 @@ func (s *githubSyncService) handleIssue(ctx context.Context, p IssuePayload, map
 			GitReference: p.Issue.HTMLURL,
 			Catalog:      catalog,
 			SRType:       srType,
-			Fields:       ExtractTemplateFields(p.Issue.Body),
+			Fields:       extractTemplateFields(p.Issue.Body, issue.Headings),
 		}
 		if s.snCases != nil {
-			update.ServiceNowDescription = snGithubCaseDescription(extractSNIssueFields(p.Issue.Body), issue)
+			update.ServiceNowDescription = snGithubCaseDescription(extractSNIssueFields(p.Issue.Body, issue.Headings), issue)
 		}
 		if err := s.mutate.UpdateFromIssue(ctx, existing, update); err != nil {
 			return Outcome{}, err
@@ -458,9 +482,10 @@ func (s *githubSyncService) handleIssue(ctx context.Context, p IssuePayload, map
 		Repository:   p.Repository.Name,
 		Catalog:      catalog,
 		SRType:       srType,
-		Fields:       ExtractTemplateFields(p.Issue.Body),
+		Fields:       extractTemplateFields(p.Issue.Body, issue.Headings),
 		CreatedBy:    p.Issue.User.Login,
 	}
+	in.Severity = githubTemplateSeverity(in.Fields["u_priority"])
 	// ServiceNow first, as a portal-created record under dual-write: the
 	// record takes ServiceNow's sys_id, CS number and WSO2 Case ID. A
 	// repository mapped without a project (account_github_repo) cannot be, as
@@ -486,7 +511,7 @@ func (s *githubSyncService) handleIssue(ctx context.Context, p IssuePayload, map
 		in.ServiceNowWSO2ID = res.WSO2CaseID
 		// The same text ServiceNow holds, so both stores read alike and the
 		// portal renders it as it renders every ServiceNow-numbered record.
-		in.Description = snGithubCaseDescription(extractSNIssueFields(p.Issue.Body), issue)
+		in.Description = snGithubCaseDescription(extractSNIssueFields(p.Issue.Body, issue.Headings), issue)
 	}
 
 	id, number, err := s.mutate.CreateServiceRequestFromIssue(ctx, in)

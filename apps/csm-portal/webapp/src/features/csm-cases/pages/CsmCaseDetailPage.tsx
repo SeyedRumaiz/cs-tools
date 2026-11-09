@@ -51,6 +51,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
 import { useLocation } from "react-router";
 import { ApiQueryKeys } from "@constants/apiConstants";
+import { releaseInlineImages } from "@features/csm-cases/api/inlineImageUploads";
 import { useGetCsmCaseDetail } from "@features/csm-cases/api/useGetCsmCaseDetail";
 import { useCurrentUser } from "@context/current-user/CurrentUserContext";
 import { usePortalAccess } from "@context/current-user/usePortalAccess";
@@ -92,6 +93,7 @@ import {
 import CsmCaseCommentInput, {
   type CommentAttachmentDraft,
 } from "@features/csm-cases/components/CsmCaseCommentInput";
+import { sendCommentWithAttachments } from "@features/csm-cases/utils/sendCommentWithAttachments";
 import CaseActionBar, {
   canAcknowledge,
 } from "@features/csm-cases/components/CaseActionBar";
@@ -102,10 +104,14 @@ import ChangeCaseTypeDialog, {
   type CaseTypeTransferSubmission,
 } from "@features/csm-cases/components/ChangeCaseTypeDialog";
 import {
+  hasCommentContent,
   hasPublicComment,
   isGithubRaisedCaseNumber,
 } from "@features/csm-cases/utils/commentContent";
-import { caseTypeTransferLabel } from "@features/csm-cases/utils/caseTypeTransfer";
+import {
+  caseTypeTransferLabel,
+  describeTransferWarnings,
+} from "@features/csm-cases/utils/caseTypeTransfer";
 import SetAutocloseHoldDialog from "@features/csm-cases/components/SetAutocloseHoldDialog";
 import EditCaseDetailsDialog, {
   type FieldSaveResult,
@@ -200,7 +206,7 @@ import { useSuccessBanner } from "@context/success-banner/SuccessBannerContext";
 import QueryErrorState from "@components/QueryErrorState";
 import RelativeTime from "@components/RelativeTime";
 import EscalationLevelChip from "@components/EscalationLevelChip";
-import SeverityChip from "@components/SeverityChip";
+import CaseSeverityChip from "@features/csm-cases/components/CaseSeverityChip";
 import StateChip from "@components/StateChip";
 import { CASE_TYPE_LABEL } from "@features/csm-cases/utils/caseType";
 import type {
@@ -749,7 +755,15 @@ export default function CsmCaseDetailPage(): JSX.Element {
   >([]);
   const [draftInternal, setDraftInternal] = useState(false);
   const [draftSourceMode, setDraftSourceMode] = useState(false);
+  // Read by clearComposerDraft, which must not depend on the draft itself.
+  const draftHtmlRef = useRef(draftHtml);
+  useEffect(() => {
+    draftHtmlRef.current = draftHtml;
+  }, [draftHtml]);
   const clearComposerDraft = useCallback(() => {
+    // Free the draft's image previews and forget their running uploads, so a
+    // late result cannot come back for a draft that no longer exists.
+    releaseInlineImages(draftHtmlRef.current);
     setDraftHtml("");
     setDraftAttachments([]);
     setDraftInternal(false);
@@ -1744,11 +1758,14 @@ export default function CsmCaseDetailPage(): JSX.Element {
                   issueType: submission.issueType,
                 },
         {
-          onSuccess: () => {
+          onSuccess: (res) => {
             setChangeCaseTypeOpen(false);
+            // The transfer succeeded either way; a warning (e.g. an S0 case
+            // stored as S1 on a service request) is shown with the result.
+            const warning = describeTransferWarnings(res?.warnings);
             setFeedback({
-              message: `Case type changed to ${caseTypeTransferLabel(submission.targetType)}.`,
-              severity: "success",
+              message: `Case type changed to ${caseTypeTransferLabel(submission.targetType)}.${warning ? ` ${warning}` : ""}`,
+              severity: warning ? "warning" : "success",
               sticky: true,
             });
           },
@@ -2239,6 +2256,19 @@ export default function CsmCaseDetailPage(): JSX.Element {
     })();
   }, [attachmentList, downloadAttachment, showError]);
 
+  // Only the person who uploaded a file may delete it, and not once the case is
+  // closed. The backend enforces the rule; this only hides a button that would
+  // fail.
+  const canDeleteAttachmentRow = useCallback(
+    (a: CaseAttachment): boolean => {
+      if (data?.state === "closed") return false;
+      const mine = (currentUser?.email || currentUserEmail)?.trim().toLowerCase();
+      const uploader = (a.uploadedByUser?.email || a.uploadedByEmail)?.trim().toLowerCase();
+      return !!mine && mine === uploader;
+    },
+    [currentUser?.email, currentUserEmail, data?.state],
+  );
+
   const onConfirmDeleteAttachment = useCallback(() => {
     if (!caseId || !pendingDelete) return;
     const target = pendingDelete;
@@ -2481,12 +2511,14 @@ export default function CsmCaseDetailPage(): JSX.Element {
                 sx={{ fontWeight: 600 }}
               />
             )}
-            {!isAnnouncement &&
-              !isServiceRequest &&
-              !isSecurityReport &&
-              !isEngagement && (
-                <SeverityChip severity={c.severity} withLabel />
-              )}
+            {!isAnnouncement && !isSecurityReport && !isEngagement && (
+              <CaseSeverityChip
+                caseType={c.caseType}
+                severity={c.severity}
+                withLabel
+                emptyFallback={null}
+              />
+            )}
             {!isAnnouncement && <StateChip state={c.state} />}
             {!isAnnouncement && !isEscalationLevelUnset(currentEscalationLevel) && (
               <EscalationLevelChip level={currentEscalationLevel as string} short />
@@ -2739,6 +2771,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
                 </Button>
               </Box>
               <CsmCaseCommentInput
+                imageUploadParentId={caseId}
                 disabled={!caseId || isClosed}
                 publicCommentDisabledReason={publicReplyGateReason}
                 canResumeToUnlockPublicReply={canWrite && canResumeToUnlockPublicReply}
@@ -2756,33 +2789,16 @@ export default function CsmCaseDetailPage(): JSX.Element {
                 onDraftSourceModeChange={setDraftSourceMode}
                 onSubmit={async (bodyHtml, internal, commentAttachments) => {
                   if (!caseId) return;
-                  // Post the comment only when there's text; an attachment-only
-                  // send skips the comment endpoint and just uploads the files.
-                  const hasText =
-                    bodyHtml
-                      .replace(/<[^>]*>/g, "")
-                      .replace(/&nbsp;/g, " ")
-                      .trim().length > 0;
-                  if (hasText) {
-                    await postComment.mutateAsync({
-                      caseId,
-                      bodyHtml,
-                      authorName: engineerName,
-                      internal,
-                    });
-                  }
-                  // Attachments are case-level (no comment linkage on the BE);
-                  // upload each sequentially so a failure surfaces clearly.
-                  for (const { file, name } of commentAttachments) {
-                    await postAttachment.mutateAsync({
-                      caseId,
-                      file,
-                      name,
-                      uploadedBy: engineerName,
-                    });
-                  }
-                  // Collapse and clear the draft only on success; on error the
-                  // input keeps its draft + files and surfaces the failure.
+                  // Comment and files are separate requests, sent together.
+                  await sendCommentWithAttachments({
+                    hasComment: hasCommentContent(bodyHtml),
+                    postComment: () =>
+                      postComment.mutateAsync({ caseId, bodyHtml, authorName: engineerName, internal }),
+                    attachments: commentAttachments,
+                    uploadAttachment: ({ file, name }) =>
+                      postAttachment.mutateAsync({ caseId, file, name, uploadedBy: engineerName }),
+                  });
+                  // Collapse and clear the draft only when everything went through.
                   setComposerOpen(false);
                   clearComposerDraft();
                 }}
@@ -3171,6 +3187,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
             refreshedAt={attachmentsUpdatedAt}
             uploading={isUploadingForThisCase}
             uploadProgress={isUploadingForThisCase ? postAttachment.uploadProgress : null}
+            onCancelUpload={isUploadingForThisCase ? postAttachment.cancelUpload : undefined}
             uploadError={
               postAttachment.isError &&
               postAttachment.variables?.caseId === caseId
@@ -3182,6 +3199,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
             onDownloadAll={canDownloadAttachment ? onDownloadAllAttachments : undefined}
             onDownload={canDownloadAttachment ? onDownloadAttachment : undefined}
             onDelete={canWrite ? setPendingDelete : undefined}
+            canDeleteAttachment={canDeleteAttachmentRow}
             deletingId={deleteAttachment.isPending ? pendingDelete?.id : null}
             preview={
               canDownloadAttachment
@@ -3290,6 +3308,7 @@ export default function CsmCaseDetailPage(): JSX.Element {
           // CsmCaseCreatePage.tsx) — caseProject is the same project fetch
           // already used for the Customer card above.
           isManagedCloud={caseProject?.subscriptionType === "managed_cloud_subscription"}
+          isServiceRequest={c.caseType === "service_request"}
           isChanging={patchCase.isPending}
           onClose={() => setSeverityOpen(false)}
           onChange={onChangeSeverity}

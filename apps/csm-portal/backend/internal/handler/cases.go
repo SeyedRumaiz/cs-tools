@@ -93,19 +93,7 @@ type entityCaseClient interface {
 	// service. Filing a Git issue reads one deployment's deployed products for the
 	// product's abbreviation and version.
 	SearchDeployedProducts(ctx context.Context, body []byte) ([]byte, error)
-	CreateCaseAttachment(ctx context.Context, body []byte) ([]byte, error)
 	SearchCaseAttachments(ctx context.Context, body []byte) ([]byte, error)
-	GetCaseAttachmentContent(ctx context.Context, attachmentID string) ([]byte, string, error)
-	DeleteCaseAttachment(ctx context.Context, attachmentID string) ([]byte, error)
-	// GetCaseAttachment resolves a single attachment's metadata — used by the
-	// SFTPGo-backed share-creation path; see AttachmentStorageHandler.
-	GetCaseAttachment(ctx context.Context, attachmentID string) ([]byte, error)
-	// ConfirmCaseAttachment transitions a 'pending' attachment row (created by
-	// CreateCaseAttachment with status "pending") to 'complete' — used by the
-	// SFTPGo-backed upload-confirm path; see AttachmentStorageHandler.
-	ConfirmCaseAttachment(ctx context.Context, attachmentID string) ([]byte, error)
-	GetAttachment(ctx context.Context, attachmentID string) ([]byte, error)
-	UpdateAttachment(ctx context.Context, attachmentID string, body []byte) ([]byte, error)
 	CreateCallRequest(ctx context.Context, body []byte) ([]byte, error)
 	SearchCallRequests(ctx context.Context, body []byte) ([]byte, error)
 	SearchAllCallRequests(ctx context.Context, body []byte) ([]byte, error)
@@ -123,18 +111,16 @@ type entityCaseClient interface {
 	// comment) to provision a worknote_creator-/escalator-only caller who
 	// has no "user" row yet.
 	CreateUser(ctx context.Context, body []byte) ([]byte, error)
+	// CreatePendingVerification calls POST /pending-verifications on the
+	// entity service — used by recordPendingVerificationEntry to add every
+	// case closed through this portal to the Pending Verification list.
+	CreatePendingVerification(ctx context.Context, body []byte) ([]byte, error)
 }
 
 // CaseHandler handles HTTP requests for case operations, delegating to the
 // entity service for data access.
 type CaseHandler struct {
 	entity entityCaseClient
-	// inlineImages enables server-side inline-image extraction on
-	// CreateCaseComment when non-nil — see WithInlineImageProcessor. nil on
-	// every existing call site (including every test), which keeps
-	// CreateCaseComment's behavior completely unchanged from before this
-	// feature existed.
-	inlineImages *InlineImageProcessor
 	// engineering, when non-nil, files GitHub issues from a case instead of
 	// the entity service — see WithEngineeringClient.
 	engineering engineeringGitIssueClient
@@ -174,20 +160,6 @@ func NewCaseHandler(entity entityCaseClient) *CaseHandler {
 // type data either data source), not this BFF layer.
 func (h *CaseHandler) WithAccessGuard(g *AccessGuard) *CaseHandler {
 	h.access = g
-	return h
-}
-
-// WithInlineImageProcessor enables server-side inline-image extraction on
-// CreateCaseComment: a base64 data: URI embedded in a comment's rich-text
-// HTML is extracted, uploaded as a real SFTPGo-backed attachment, and the
-// HTML is rewritten to a ".iix" reference — mirroring ServiceNow's own
-// RichTextUtils.processInlineImages for SN-backed comments. Only wired up in
-// cmd/server/main.go when SFTPGO_ATTACHMENT_STORAGE_ENABLED is on; SN-backed
-// comment creation is untouched either way, since SN's own scripted API
-// already performs the equivalent extraction itself. Returns h for chaining
-// at the construction site.
-func (h *CaseHandler) WithInlineImageProcessor(p *InlineImageProcessor) *CaseHandler {
-	h.inlineImages = p
 	return h
 }
 
@@ -361,35 +333,11 @@ const maxRequestBodyBytes = 1 << 20
 // maxCaseBodyBytes caps case-create bodies at 10 MiB to accommodate rich descriptions.
 const maxCaseBodyBytes = 10 << 20
 
-// maxCommentBodyBytes caps comment-create bodies at 10 MiB. Comments can carry
-// inline images as base64 data URIs, which inflate raw image size by ~33%, so
-// a 1 MiB global cap rejects images well under ServiceNow's own limit.
+// maxCommentBodyBytes caps comment-create bodies at 10 MiB. A pasted image is
+// uploaded as an attachment before the comment is sent, so a comment normally
+// carries only a reference; the larger cap is kept for content that still
+// embeds a base64 data URI.
 const maxCommentBodyBytes = 10 << 20
-
-// maxAttachmentBodyBytes caps attachment-create bodies at 15 MiB. The entity
-// service enforces a 10 MB decoded file limit; base64 encoding inflates that
-// to ~13.3 MB of encoded data plus JSON overhead.
-const maxAttachmentBodyBytes = 15 << 20
-
-// safeAttachmentTypes is the allowlist of Content-Type values that may be
-// served inline. Anything not in this set is coerced to application/octet-stream
-// to prevent a stored-XSS attack via a crafted upstream Content-Type (e.g.
-// text/html). All responses also carry Content-Disposition: attachment and
-// X-Content-Type-Options: nosniff regardless of type.
-var safeAttachmentTypes = map[string]bool{
-	"image/png":                    true,
-	"image/jpeg":                   true,
-	"image/gif":                    true,
-	"image/webp":                   true,
-	"application/pdf":              true,
-	"text/plain":                   true,
-	"application/zip":              true,
-	"application/x-zip-compressed": true,
-	"application/msword":           true,
-	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
-	"application/vnd.ms-excel": true,
-	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": true,
-}
 
 // CreateCase handles POST /cases.
 func (h *CaseHandler) CreateCase(w http.ResponseWriter, r *http.Request) {
@@ -612,21 +560,6 @@ func (h *CaseHandler) CreateCaseComment(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusConflict, ErrMsgWorkNoteOnClosedCase)
 			return
 		}
-	}
-
-	// Extract any base64 inline image embedded in the comment's rich-text
-	// HTML into a real SFTPGo-backed attachment before forwarding to the
-	// entity service — mirrors ServiceNow's own RichTextUtils processing for
-	// SN-backed comments (that path is untouched: it already runs inside the
-	// SN scripted API, not here). Only active when
-	// SFTPGO_ATTACHMENT_STORAGE_ENABLED is on; see WithInlineImageProcessor.
-	if h.inlineImages != nil {
-		newBody, ierr := h.processCommentInlineImages(r, user, caseID, body)
-		if ierr != nil {
-			ierr.write(w)
-			return
-		}
-		body = newBody
 	}
 
 	result, err := h.entity.CreateCaseComment(r.Context(), caseID, body)
@@ -1084,67 +1017,6 @@ func (h *CaseHandler) AggregateFeedback(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, result)
 }
 
-// CreateCaseAttachment handles POST /attachments.
-func (h *CaseHandler) CreateCaseAttachment(w http.ResponseWriter, r *http.Request) {
-	user := middleware.UserInfoFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, maxAttachmentBodyBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if _, ok := err.(*http.MaxBytesError); ok {
-			writeError(w, http.StatusRequestEntityTooLarge, ErrMsgTooLarge)
-			return
-		}
-		writeError(w, http.StatusBadRequest, errMsgReadBody)
-		return
-	}
-
-	if !json.Valid(body) {
-		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
-		return
-	}
-
-	// Block attachment uploads on closed cases.
-	var attachMeta struct {
-		ReferenceID   string `json:"referenceId"`
-		ReferenceType string `json:"referenceType"`
-	}
-	_ = json.Unmarshal(body, &attachMeta) // body is already validated JSON
-	if attachMeta.ReferenceType == "case" && attachMeta.ReferenceID != "" {
-		current, err := h.entity.GetCase(r.Context(), attachMeta.ReferenceID)
-		if err != nil {
-			slog.ErrorContext(r.Context(), "entity GetCase failed during attachment closed guard", "userID", user.UserID, "caseID", attachMeta.ReferenceID, "err", err)
-			mapUpstreamErrorGeneric(w, err, "Failed to create case attachment.")
-			return
-		}
-		var currentCase struct {
-			State string `json:"state"`
-		}
-		if err := json.Unmarshal(current, &currentCase); err != nil {
-			slog.ErrorContext(r.Context(), "failed to parse case state for attachment guard", "userID", user.UserID, "caseID", attachMeta.ReferenceID, "err", err)
-			writeError(w, http.StatusInternalServerError, ErrMsgInternal)
-			return
-		}
-		if currentCase.State == "closed" {
-			writeError(w, http.StatusConflict, ErrMsgAttachmentOnClosedCase)
-			return
-		}
-	}
-
-	result, err := h.entity.CreateCaseAttachment(r.Context(), body)
-	if err != nil {
-		slog.ErrorContext(r.Context(), "entity CreateCaseAttachment failed", "userID", user.UserID, "err", err)
-		mapUpstreamErrorGeneric(w, err, "Failed to create case attachment.")
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, result)
-}
-
 // SearchCaseAttachments handles POST /attachments/search.
 func (h *CaseHandler) SearchCaseAttachments(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserInfoFromContext(r.Context())
@@ -1173,188 +1045,6 @@ func (h *CaseHandler) SearchCaseAttachments(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		slog.ErrorContext(r.Context(), "entity SearchCaseAttachments failed", "userID", user.UserID, "err", err)
 		mapUpstreamErrorGeneric(w, err, "Failed to search case attachments.")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, result)
-}
-
-// GetCaseAttachmentContent handles GET /attachments/{id}/content.
-func (h *CaseHandler) GetCaseAttachmentContent(w http.ResponseWriter, r *http.Request) {
-	user := middleware.UserInfoFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
-		return
-	}
-
-	attachmentID := r.PathValue("id")
-	if attachmentID == "" || !uuidRe.MatchString(attachmentID) {
-		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
-		return
-	}
-
-	content, contentType, err := h.entity.GetCaseAttachmentContent(r.Context(), attachmentID)
-	if err != nil {
-		slog.ErrorContext(r.Context(), "entity GetCaseAttachmentContent failed", "userID", user.UserID, "attachmentID", attachmentID, "err", err)
-		mapUpstreamErrorGeneric(w, err, "Failed to retrieve attachment content.")
-		return
-	}
-
-	// Strip Content-Type parameters (e.g. charset) before the allowlist check.
-	ct := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
-	if !safeAttachmentTypes[ct] {
-		ct = "application/octet-stream"
-	}
-	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Content-Disposition", "attachment")
-	_, _ = w.Write(content) // #nosec G705 -- Content-Type is allowlisted above; Content-Disposition: attachment prevents inline rendering
-}
-
-// DeleteCaseAttachment handles DELETE /attachments/{id}.
-func (h *CaseHandler) DeleteCaseAttachment(w http.ResponseWriter, r *http.Request) {
-	user := middleware.UserInfoFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
-		return
-	}
-
-	attachmentID := r.PathValue("id")
-	if attachmentID == "" || !uuidRe.MatchString(attachmentID) {
-		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
-		return
-	}
-
-	result, err := h.entity.DeleteCaseAttachment(r.Context(), attachmentID)
-	if err != nil {
-		slog.ErrorContext(r.Context(), "entity DeleteCaseAttachment failed", "userID", user.UserID, "attachmentID", attachmentID, "err", err)
-		mapUpstreamErrorGeneric(w, err, "Failed to delete case attachment.")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, result)
-}
-
-// GetAttachment handles GET /attachments/{id}.
-// Returns the attachment's metadata as JSON; for the binary file contents, see
-// GetCaseAttachmentContent (GET /attachments/{id}/content).
-func (h *CaseHandler) GetAttachment(w http.ResponseWriter, r *http.Request) {
-	user := middleware.UserInfoFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
-		return
-	}
-
-	attachmentID := r.PathValue("id")
-	if attachmentID == "" || !uuidRe.MatchString(attachmentID) {
-		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
-		return
-	}
-
-	result, err := h.entity.GetAttachment(r.Context(), attachmentID)
-	if err != nil {
-		slog.ErrorContext(r.Context(), "entity GetAttachment failed", "userID", user.UserID, "attachmentID", attachmentID, "err", err)
-		mapUpstreamErrorGeneric(w, err, "Failed to retrieve attachment.")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, result)
-}
-
-// validAttachmentReferenceTypes mirrors the entity service's own
-// validReferenceTypes allowlist for attachment operations (sn_case_service.go),
-// so an obviously invalid referenceType is rejected at this boundary instead
-// of reaching the entity service.
-var validAttachmentReferenceTypes = map[string]bool{
-	"case":           true,
-	"conversation":   true,
-	"change_request": true,
-	"deployment":     true,
-	"incident":       true,
-}
-
-// updateAttachmentRequest mirrors the entity service's domain.UpdateAttachmentRequest
-// shape. Description uses json.RawMessage (rather than *string) so an explicit
-// JSON null (clear the description) can be distinguished from an absent field,
-// matching the entity service's own tri-state semantics for this field.
-type updateAttachmentRequest struct {
-	ReferenceID   string          `json:"referenceId"`
-	ReferenceType string          `json:"referenceType"`
-	Name          *string         `json:"name,omitempty"`
-	Description   json.RawMessage `json:"description,omitempty"`
-}
-
-// validateUpdateAttachmentBody rejects a non-object body (including null and
-// arrays), a missing/invalid referenceId, an invalid referenceType, and a body
-// where neither name nor description is present, so obviously invalid requests
-// are rejected before reaching the entity service.
-func validateUpdateAttachmentBody(body []byte) bool {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(body, &fields); err != nil {
-		return false
-	}
-	if len(fields) == 0 {
-		return false
-	}
-
-	var req updateAttachmentRequest
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		return false
-	}
-	if req.ReferenceID == "" || !uuidRe.MatchString(req.ReferenceID) {
-		return false
-	}
-	if !validAttachmentReferenceTypes[req.ReferenceType] {
-		return false
-	}
-	if req.Name == nil && len(req.Description) == 0 {
-		return false
-	}
-	return true
-}
-
-// UpdateAttachment handles PATCH /attachments/{id}.
-// Accepts referenceId, referenceType, and optionally name/description; the body
-// is forwarded verbatim once validated.
-func (h *CaseHandler) UpdateAttachment(w http.ResponseWriter, r *http.Request) {
-	user := middleware.UserInfoFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
-		return
-	}
-
-	attachmentID := r.PathValue("id")
-	if attachmentID == "" || !uuidRe.MatchString(attachmentID) {
-		writeError(w, http.StatusBadRequest, ErrMsgInvalidUUID)
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if _, ok := err.(*http.MaxBytesError); ok {
-			writeError(w, http.StatusRequestEntityTooLarge, ErrMsgTooLarge)
-			return
-		}
-		writeError(w, http.StatusBadRequest, errMsgReadBody)
-		return
-	}
-
-	if !json.Valid(body) {
-		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
-		return
-	}
-
-	if !validateUpdateAttachmentBody(body) {
-		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
-		return
-	}
-
-	result, err := h.entity.UpdateAttachment(r.Context(), attachmentID, body)
-	if err != nil {
-		slog.ErrorContext(r.Context(), "entity UpdateAttachment failed", "userID", user.UserID, "attachmentID", attachmentID, "err", err)
-		mapUpstreamErrorGeneric(w, err, "Failed to update attachment.")
 		return
 	}
 
@@ -1572,6 +1262,11 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 		WorstCaseFixEta    *string `json:"worstCaseFixEta"`
 	}
 	patchErr := json.Unmarshal(body, &patch)
+	// previousCaseState is the case's state immediately before this PATCH,
+	// read below purely for transition validation; recordPendingVerificationEntry
+	// (closing branch, below) reuses it so closing a case doesn't need a
+	// second GetCase round trip just to know what state it's leaving.
+	var previousCaseState string
 	if patchErr == nil && (patch.State != nil || patch.WorkState != nil) {
 		current, err := h.entity.GetCase(r.Context(), caseID)
 		if err != nil {
@@ -1587,6 +1282,7 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, ErrMsgInternal)
 			return
 		}
+		previousCaseState = currentCase.State
 		if patch.State != nil && !isValidStateTransition(currentCase.State, *patch.State) {
 			writeError(w, http.StatusBadRequest, ErrMsgInvalidTransition)
 			return
@@ -1659,7 +1355,94 @@ func (h *CaseHandler) PatchCase(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
+	// Every case closed through the CSM portal is sent to the Pending
+	// Verification list, so a customer eventually gets a chance to confirm the
+	// fix holds. addedReason is AUTO_CLOSED, recording the case's real
+	// previous state in previousStatus — entity-service's
+	// pending_verification_previous_status_enum originally only covered
+	// SOLUTION_PROPOSED/AWAITING_INFO, neither of which fit work_in_progress
+	// (the state most CSM-portal closes actually come from — see state.go's
+	// own transition table: closed is only reachable from work_in_progress or
+	// solution_proposed), so migration 0269 added WORK_IN_PROGRESS
+	// specifically for this. recordPendingVerificationEntry falls back to
+	// MANUAL only for a previous state that still isn't representable (should
+	// never happen given that transition table). Best-effort and
+	// fire-and-forget, same reasoning as the two notes above: the close PATCH
+	// already succeeded, so this must not delay the response or fail the
+	// request if it errors — including the common, expected case where
+	// Pending Verification is simply disabled for this project (entity-service
+	// 403s) or the case already has an unverified entry from an earlier round
+	// (409).
+	if patchErr == nil && patch.State != nil && *patch.State == caseStateClosed {
+		detached := context.WithoutCancel(r.Context())
+		go func() {
+			ctx, cancel := context.WithTimeout(detached, 15*time.Second)
+			defer cancel()
+			h.recordPendingVerificationEntry(ctx, user, caseID, previousCaseState)
+		}()
+	}
+
 	writeJSON(w, http.StatusOK, result)
+}
+
+// pendingVerificationPreviousStatus maps this handler's own lowercase
+// case-state wire values to entity-service's PendingVerificationPreviousStatus
+// enum (pending_verification_previous_status_enum). Only the two states
+// state.go's own transition table allows immediately before "closed" are
+// listed here — recordPendingVerificationEntry falls back to addedReason
+// MANUAL for anything else, which should never actually happen.
+var pendingVerificationPreviousStatus = map[string]string{
+	caseStateWorkInProgress:   "WORK_IN_PROGRESS",
+	caseStateSolutionProposed: "SOLUTION_PROPOSED",
+}
+
+// recordPendingVerificationEntry adds this case to the Pending Verification
+// list (POST /pending-verifications on the entity service) immediately after
+// the CSM portal closes it. addedReason is AUTO_CLOSED whenever previousState
+// maps to a legal previousStatus value (see pendingVerificationPreviousStatus
+// above) — which, per state.go's own transition table, is always, since
+// "closed" is only ever reached from "work_in_progress" or
+// "solution_proposed" — falling back to MANUAL (with the state folded into
+// the note instead) only as a last resort, so this call can never send
+// entity-service a combination its own chk_previous_status_matches_reason
+// CHECK constraint would reject outright. Best-effort: failures (including
+// the project simply not having Pending Verification enabled, or the case
+// already carrying an unverified entry) are logged, never surfaced to the
+// caller, since the primary close PATCH already succeeded by the time this
+// runs.
+func (h *CaseHandler) recordPendingVerificationEntry(ctx context.Context, user *middleware.UserInfo, caseID, previousState string) {
+	req := map[string]string{
+		"workItemId": caseID,
+		"note":       "Automatically added for verification — case closed by WSO2 Support.",
+	}
+	if status, ok := pendingVerificationPreviousStatus[previousState]; ok {
+		// previousStatus is its own structured field here, and the webapp
+		// already renders it as its own "From <state>" chip (isAutoClosed &&
+		// record.previousStatus in PendingVerificationCard.tsx) -- repeating
+		// it in the note text would just be redundant.
+		req["addedReason"] = "AUTO_CLOSED"
+		req["previousStatus"] = status
+	} else {
+		// Should never happen (see pendingVerificationPreviousStatus's own doc
+		// comment) -- MANUAL forbids previousStatus, so this is the only
+		// place left to record the case's real prior state.
+		label, ok := caseStateToDisplay[previousState]
+		if !ok {
+			label = previousState
+		}
+		req["addedReason"] = "MANUAL"
+		req["note"] += " Previous status: " + label + "."
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to build pending verification request body", "userID", user.UserID, "caseID", caseID, "err", err)
+		return
+	}
+
+	if _, err := h.entity.CreatePendingVerification(ctx, body); err != nil {
+		slog.WarnContext(ctx, "failed to add case to pending verification on close", "userID", user.UserID, "caseID", caseID, "err", err)
+	}
 }
 
 // formatHoldDate renders an auto-closure hold timestamp (RFC3339, as sent by the
