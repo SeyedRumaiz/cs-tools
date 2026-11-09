@@ -209,6 +209,17 @@ type RunbookService interface {
 	Import(ctx context.Context, req domain.ImportRunbooksRequest) (domain.ImportRunbooksResponse, error)
 }
 
+// WSO2CloudRequestService stores the requests raised from the CSM portal's WSO2 Cloud tab (upgrade or delete an
+// organization; lock, unlock, disable, enable or delete a user). Internal callers only. It records requests and their
+// outcome; the CSM backend decides who may raise, resolve and cancel them, and applies an approved change in WSO2 Cloud.
+type WSO2CloudRequestService interface {
+	Create(ctx context.Context, req domain.CreateWSO2CloudRequestRequest) (domain.WSO2CloudRequest, error)
+	Get(ctx context.Context, id string) (domain.WSO2CloudRequest, error)
+	Search(ctx context.Context, req domain.SearchWSO2CloudRequestsRequest) (domain.SearchWSO2CloudRequestsResponse, error)
+	Resolve(ctx context.Context, id string, req domain.ResolveWSO2CloudRequestRequest) (domain.WSO2CloudRequest, error)
+	Delete(ctx context.Context, id string) error
+}
+
 // StandardChangeService serves the standard change catalogue (templates and their
 // CAB-approved versions) and the proposals that create, modify or retire them.
 // Internal (WSO2) callers only.

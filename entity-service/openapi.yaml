@@ -13906,6 +13906,274 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /wso2-cloud-requests:
+    post:
+      summary: Raise a WSO2 Cloud request.
+      description: >
+        Stores a pending request raised from the CSM portal's WSO2 Cloud tab. The requester
+        is the caller, read from the x-user-id-token (required). A reason is required for
+        lock_user and disable_user; tier is required for upgrade_organization and refused
+        for every other type. 409 when a request of the same type for the same target is
+        already pending. This only records the request: nothing changes in WSO2 Cloud.
+        Internal callers only.
+      operationId: createWSO2CloudRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWSO2CloudRequestRequest'
+      responses:
+        "201":
+          description: The request, pending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WSO2CloudRequest'
+        "400":
+          description: Invalid or incomplete request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Not available on this deployment (it has no database).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: A request of this type for this target is already pending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid token, or no user token where a person must act.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /wso2-cloud-requests/search:
+    post:
+      summary: Search WSO2 Cloud requests.
+      description: Requests matching every filter given, newest first. Internal callers only.
+      operationId: searchWSO2CloudRequests
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchWSO2CloudRequestsRequest'
+      responses:
+        "200":
+          description: A page of requests.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchWSO2CloudRequestsResponse'
+        "400":
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Not available on this deployment (it has no database).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid token, or no user token where a person must act.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /wso2-cloud-requests/{id}:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+    get:
+      summary: Get a WSO2 Cloud request.
+      description: Internal callers only.
+      operationId: getWSO2CloudRequest
+      responses:
+        "200":
+          description: The request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WSO2CloudRequest'
+        "400":
+          description: Invalid id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid token, or no user token where a person must act.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Cancel a pending WSO2 Cloud request.
+      description: >
+        Deletes a pending request; its number is not given out again. Who may cancel
+        (the requester, an admin) is decided by the CSM backend. Internal callers only.
+      operationId: deleteWSO2CloudRequest
+      responses:
+        "204":
+          description: Cancelled.
+        "400":
+          description: Invalid id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The request is no longer pending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid token, or no user token where a person must act.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /wso2-cloud-requests/{id}/resolve:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+    post:
+      summary: Approve or reject a pending WSO2 Cloud request.
+      description: >
+        Records the decision; the approver is the caller, read from the x-user-id-token
+        (required). A remark is required to reject. The requester cannot resolve their own
+        request (403). A request is resolved once: 409 when it is no longer pending. The
+        caller applies an approved change in WSO2 Cloud before recording it here.
+        Internal callers only.
+      operationId: resolveWSO2CloudRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveWSO2CloudRequestRequest'
+      responses:
+        "200":
+          description: The resolved request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WSO2CloudRequest'
+        "400":
+          description: Invalid id, status or remark.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The request is no longer pending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid token, or no user token where a person must act.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /runbooks:
     get:
       summary: List the runbook catalog.
@@ -33638,6 +33906,157 @@ components:
                         properties:
                           id: { type: string }
                           key: { type: string }
+    WSO2CloudRequestType:
+      type: string
+      enum: [upgrade_organization, delete_organization, lock_user, unlock_user, disable_user, enable_user, delete_user]
+    WSO2CloudRequestStatus:
+      type: string
+      enum: [pending, approved, rejected]
+      description: A cancelled request is deleted, so there is no cancelled status.
+    WSO2CloudTier:
+      type: string
+      enum: [free, payg, enterprise]
+    WSO2CloudRequest:
+      type: object
+      required: [id, number, type, targetId, targetLabel, reason, customerConsent, tier, limits, previousTier, previousLimits, status, requestedBy, requestedOn, resolvedBy, resolvedOn, remark]
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: string
+          description: The request's own number (WCR0000001), never reused. Numbers can have gaps.
+        type:
+          $ref: '#/components/schemas/WSO2CloudRequestType'
+        targetId:
+          type: string
+          description: The organization's UUID or the user's SCIM id in WSO2 Cloud.
+        targetLabel:
+          type: string
+          description: The organization's handle or the user's email, as it was when the request was raised.
+        reason:
+          type: string
+          nullable: true
+          description: The requester's reason; always present for lock_user and disable_user.
+        customerConsent:
+          type: string
+          nullable: true
+          description: The subject of the customer's consent email, when one was given.
+        tier:
+          allOf:
+            - $ref: '#/components/schemas/WSO2CloudTier'
+          nullable: true
+          description: What an upgrade asks for; null for every other type.
+        limits:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: The limits an upgrade asks for, as the CSM portal sends them.
+        previousTier:
+          allOf:
+            - $ref: '#/components/schemas/WSO2CloudTier'
+          nullable: true
+          description: What the organization had when the upgrade was raised.
+        previousLimits:
+          type: object
+          nullable: true
+          additionalProperties: true
+        status:
+          $ref: '#/components/schemas/WSO2CloudRequestStatus'
+        requestedBy:
+          type: string
+        requestedOn:
+          type: string
+          format: date-time
+        resolvedBy:
+          type: string
+          nullable: true
+        resolvedOn:
+          type: string
+          format: date-time
+          nullable: true
+        remark:
+          type: string
+          nullable: true
+          description: The approver's comment; always present on a rejected request.
+    CreateWSO2CloudRequestRequest:
+      type: object
+      additionalProperties: false
+      required: [type, targetId, targetLabel]
+      properties:
+        type:
+          $ref: '#/components/schemas/WSO2CloudRequestType'
+        targetId:
+          type: string
+          maxLength: 255
+        targetLabel:
+          type: string
+          maxLength: 320
+        reason:
+          type: string
+          maxLength: 2000
+        customerConsent:
+          type: string
+          maxLength: 1000
+        tier:
+          $ref: '#/components/schemas/WSO2CloudTier'
+        limits:
+          type: object
+          additionalProperties: true
+        previousTier:
+          $ref: '#/components/schemas/WSO2CloudTier'
+        previousLimits:
+          type: object
+          additionalProperties: true
+    ResolveWSO2CloudRequestRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [approved, rejected]
+        remark:
+          type: string
+          maxLength: 2000
+          description: Required to reject.
+    SearchWSO2CloudRequestsRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        filters:
+          type: object
+          additionalProperties: false
+          properties:
+            statuses:
+              type: array
+              items:
+                $ref: '#/components/schemas/WSO2CloudRequestStatus'
+            types:
+              type: array
+              items:
+                $ref: '#/components/schemas/WSO2CloudRequestType'
+            targetId:
+              type: string
+            requestedBy:
+              type: string
+              description: Matched ignoring case.
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+    SearchWSO2CloudRequestsResponse:
+      type: object
+      required: [requests, total, limit, offset]
+      properties:
+        requests:
+          type: array
+          items:
+            $ref: '#/components/schemas/WSO2CloudRequest'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
     Runbook:
       type: object
       required: [id, number, name, runbookUrl, alerts, createdOn, createdBy, updatedOn, updatedBy]

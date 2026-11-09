@@ -371,6 +371,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 	var migrationCaseReportHandler *handler.MigrationCaseReportHandler
 	var longOpenCaseReportHandler *handler.LongOpenCaseReportHandler
 	var runbookHandler *handler.RunbookHandler
+	var wso2CloudRequestHandler *handler.WSO2CloudRequestHandler
 	// standardChangeHandler serves the standard change catalogue and its proposals
 	// (migration 0252); Postgres only. standardChangeRepo is also what the change
 	// request create and PATCH use to apply a template.
@@ -1674,6 +1675,9 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// Runbooks: the alert-name to runbook catalog, matched against every new incident's subject.
 		runbookRepo = repository.NewRunbookRepository(db)
 		runbookHandler = handler.NewRunbookHandler(service.NewRunbookService(runbookRepo))
+		// WSO2 Cloud tab requests: internal callers only (migration 0278).
+		wso2CloudRequestHandler = handler.NewWSO2CloudRequestHandler(
+			service.NewWSO2CloudRequestService(repository.NewWSO2CloudRequestRepository(db), accessSvc))
 		// Standard change templates and the proposals that create, modify or
 		// retire them: internal callers only.
 		standardChangeRepo = repository.NewStandardChangeRepository(repository.NewScoped(db))
@@ -2220,6 +2224,14 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// internalOnly: the report names customers' cases and deployments; a
 		// customer token must never reach it.
 		mux.HandleFunc("GET /reports/product-regressions", internalOnly(accessSvc, productRegressionReportHandler.GetProductRegressionReport))
+	}
+	if wso2CloudRequestHandler != nil {
+		// WSO2 Cloud tab requests (CSM portal): internal callers only.
+		mux.HandleFunc("POST /wso2-cloud-requests", internalOnly(accessSvc, wso2CloudRequestHandler.CreateWSO2CloudRequest))
+		mux.HandleFunc("POST /wso2-cloud-requests/search", internalOnly(accessSvc, wso2CloudRequestHandler.SearchWSO2CloudRequests))
+		mux.HandleFunc("GET /wso2-cloud-requests/{id}", internalOnly(accessSvc, wso2CloudRequestHandler.GetWSO2CloudRequest))
+		mux.HandleFunc("POST /wso2-cloud-requests/{id}/resolve", internalOnly(accessSvc, wso2CloudRequestHandler.ResolveWSO2CloudRequest))
+		mux.HandleFunc("DELETE /wso2-cloud-requests/{id}", internalOnly(accessSvc, wso2CloudRequestHandler.DeleteWSO2CloudRequest))
 	}
 	if runbookHandler != nil {
 		// Runbooks (Operations > Runbooks): internal callers only.
