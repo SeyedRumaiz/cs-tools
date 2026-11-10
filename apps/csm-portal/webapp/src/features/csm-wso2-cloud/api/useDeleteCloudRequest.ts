@@ -15,16 +15,16 @@
 // under the License.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { cancelRequest } from "@features/csm-wso2-cloud/api/sampleData";
+import { useBackendApi } from "@api/backend/client";
+import { cancelCloudRequest } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
 import { WSO2_CLOUD_QUERY_KEY } from "@features/csm-wso2-cloud/api/queryKeys";
-import { useIdTokenClaims } from "@hooks/useIdTokenClaims";
 
-/** Cancels one of the caller's own pending requests. */
+/** Cancels a pending request (the requester's own, or any for an admin). */
 export function useDeleteCloudRequest() {
+  const api = useBackendApi();
   const queryClient = useQueryClient();
-  const email = useIdTokenClaims()?.email ?? "you";
   return useMutation<void, Error, string>({
-    mutationFn: (id) => cancelRequest(id, email),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY, "requests"] }),
+    mutationFn: (id) => cancelCloudRequest(api, id),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY, "requests"] }),
   });
 }

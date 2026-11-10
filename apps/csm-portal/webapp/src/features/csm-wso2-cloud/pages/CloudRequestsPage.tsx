@@ -203,7 +203,7 @@ function RequestRow({
           to={`${WSO2_CLOUD_BASE}/requests/${r.id}`}
           state={{ from: `${location.pathname}${location.search}` }}
         >
-          {r.id}
+          {r.number}
         </Link>
       </TableCell>
       <TableCell>{CLOUD_REQUEST_TYPE_LABELS[r.type]}</TableCell>

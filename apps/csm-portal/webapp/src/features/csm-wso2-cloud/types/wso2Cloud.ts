@@ -18,10 +18,11 @@
  * Shapes for the WSO2 Cloud section: the organisation and user management that
  * used to live in the separate Ops portal.
  *
- * These are the frontend's own types. The backend routes they will come from
- * do not exist yet, so the hooks in `../api` serve sample data in this shape;
- * when the real API is known, map its responses onto these types rather than
- * changing the pages.
+ * These are the frontend's own types. Requests come from the portal backend
+ * (`../api/cloudRequestsApi.ts` maps them onto these types). Organisations and
+ * users have no backend yet (the WSO2 Cloud API is still to come), so their
+ * hooks serve sample data in this shape; when the real API is known, map its
+ * responses onto these types rather than changing the pages.
  */
 
 export type CloudTier = "free" | "payg" | "enterprise";
@@ -128,15 +129,19 @@ export interface CloudRequestTarget {
 
 export interface CloudRequest {
   id: string;
+  /** WCR0000001: what people see and quote; never reused. */
+  number: string;
   type: CloudRequestType;
   target: CloudRequestTarget;
-  /** One line saying what changes, e.g. "Free → Enterprise". */
+  /** One line saying what changes, e.g. "Free → Enterprise" (derived, not stored). */
   summary: string;
   /**
    * Why the requester raised it. Lock and disable ask for one, as in the Ops
    * portal; an approved lock shows it as the user's locked reason.
    */
   reason?: string;
+  /** The subject of the customer's consent email, when one was given (deletions). */
+  customerConsent?: string;
   /** Present on an upgrade request: the limits asked for. */
   limits?: CloudOrganizationLimits;
   tier?: CloudTier;
@@ -158,8 +163,8 @@ export interface CloudRequest {
 export interface NewCloudRequest {
   type: CloudRequestType;
   target: CloudRequestTarget;
-  summary: string;
   reason?: string;
+  customerConsent?: string;
   limits?: CloudOrganizationLimits;
   tier?: CloudTier;
   previousTier?: CloudTier;

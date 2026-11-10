@@ -32,6 +32,7 @@ import { useState, type JSX } from "react";
 import { Link as RouterLink, useLocation, useParams } from "react-router";
 import { useNavTransition } from "@hooks/useNavTransition";
 import { useIdTokenClaims } from "@hooks/useIdTokenClaims";
+import { usePortalAccess } from "@context/current-user/usePortalAccess";
 import { useGetCloudRequest } from "@features/csm-wso2-cloud/api/useGetCloudRequest";
 import { usePatchCloudRequest } from "@features/csm-wso2-cloud/api/usePatchCloudRequest";
 import CancelRequestDialog from "@features/csm-wso2-cloud/components/CancelRequestDialog";
@@ -79,6 +80,7 @@ export default function CloudRequestDetailPage(): JSX.Element {
     (location.state as { from?: string } | undefined)?.from ?? `${WSO2_CLOUD_BASE}/requests`;
   const here = `${location.pathname}${location.search}`;
   const me = useIdTokenClaims()?.email ?? "you";
+  const { isAdmin } = usePortalAccess();
 
   const { data: request, isLoading } = useGetCloudRequest(requestId);
   const resolve = usePatchCloudRequest();
@@ -131,7 +133,7 @@ export default function CloudRequestDetailPage(): JSX.Element {
       >
         <Box>
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
-            <Typography variant="h5">{request.id}</Typography>
+            <Typography variant="h5">{request.number}</Typography>
             <RequestStatusChip status={request.status} />
           </Box>
           <Typography variant="body2" color="text.secondary">
@@ -140,7 +142,8 @@ export default function CloudRequestDetailPage(): JSX.Element {
         </Box>
         {pending && (
           <Box sx={{ display: "flex", gap: 1 }}>
-            {request.requestedBy === me && (
+            {/* The requester or an admin; the backend enforces the same rule. */}
+            {(request.requestedBy.toLowerCase() === me.toLowerCase() || isAdmin) && (
               <Button color="error" onClick={() => setCancelling(request)}>
                 Cancel request
               </Button>

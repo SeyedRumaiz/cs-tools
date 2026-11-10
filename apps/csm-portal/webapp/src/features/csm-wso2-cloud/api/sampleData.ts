@@ -15,26 +15,18 @@
 // under the License.
 
 /**
- * In-memory sample data for the WSO2 Cloud section.
+ * In-memory sample organisations and users for the WSO2 Cloud section.
  *
- * The pages are built before the backend exists: which API the Ops portal
- * calls for organisation search, upgrade, delete and user locking is still to
- * be confirmed with the cloud team. Every hook in this folder goes through the
- * functions below, so swapping in the real backend means changing the hooks'
- * `queryFn`/`mutationFn` and deleting this file, not touching the pages.
+ * The WSO2 Cloud API the Ops portal calls for organisation search and user
+ * lookups is still to be confirmed with the cloud team. The organisation and
+ * user hooks go through the functions below, so swapping in the real API means
+ * changing those hooks' `queryFn` and deleting this file, not touching the
+ * pages. Requests are real: they come from the portal backend
+ * (`cloudRequestsApi.ts`), and approving one does not change anything here.
  *
- * Everything here is made up. Requests created while the page is open, and
- * the changes approving them makes, live only in this module and are gone on
- * reload.
+ * Everything here is made up.
  */
-import {
-  CLOUD_REQUEST_TYPE_LABELS,
-  type CloudOrganization,
-  type CloudRequest,
-  type CloudRequestStatus,
-  type CloudUser,
-  type NewCloudRequest,
-} from "@features/csm-wso2-cloud/types/wso2Cloud";
+import type { CloudOrganization, CloudUser } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
 const SAMPLE_DELAY_MS = 300;
 
@@ -147,61 +139,6 @@ const USERS: CloudUser[] = [
   },
 ];
 
-let requests: CloudRequest[] = [
-  {
-    id: "REQ-0003",
-    type: "upgrade_organization",
-    target: { kind: "organization", id: ORGANIZATIONS[3].id, label: "initech" },
-    summary: "Free → Enterprise",
-    tier: "enterprise",
-    limits: {
-      monthlyActiveUsers: 50000,
-      serviceProviders: 50,
-      identityProviders: 10,
-      subOrganizations: 20,
-      supportLevel: "premium",
-    },
-    previousTier: "free",
-    previousLimits: ORGANIZATIONS[3].limits,
-    requestedBy: "sam.taylor@example.com",
-    requestedOn: "2026-10-27T09:00:00Z",
-    status: "pending",
-  },
-  {
-    id: "REQ-0002",
-    type: "unlock_user",
-    target: { kind: "user", id: "u-1002", label: "john.smith@example.com" },
-    summary: "Unlock after failed sign-in attempts",
-    requestedBy: "sam.taylor@example.com",
-    requestedOn: "2026-10-20T13:30:00Z",
-    status: "rejected",
-    resolvedBy: "pat.morgan@example.com",
-    resolvedOn: "2026-10-21T08:00:00Z",
-    remark: "The lock clears on its own after the lockout period.",
-  },
-  {
-    id: "REQ-0001",
-    type: "upgrade_organization",
-    target: { kind: "organization", id: ORGANIZATIONS[2].id, label: "globex" },
-    summary: "Pay as you go → Enterprise",
-    tier: "enterprise",
-    limits: ORGANIZATIONS[2].limits,
-    previousTier: "payg",
-    previousLimits: {
-      monthlyActiveUsers: 15000,
-      serviceProviders: 20,
-      identityProviders: 5,
-      subOrganizations: 10,
-      supportLevel: "community",
-    },
-    requestedBy: "sam.taylor@example.com",
-    requestedOn: "2026-09-02T10:00:00Z",
-    status: "approved",
-    resolvedBy: "pat.morgan@example.com",
-    resolvedOn: "2026-09-03T09:15:00Z",
-  },
-];
-
 /**
  * Matches an organisation on its handle, name or id, or on its owner's email.
  * An exact handle or id match comes back alone, so the search page can open
@@ -238,162 +175,4 @@ export function searchUsers(query: string): Promise<CloudUser[]> {
 
 export function getUser(id: string): Promise<CloudUser | null> {
   return delay(USERS.find((u) => u.id === id) ?? null);
-}
-
-export function listRequests(): Promise<CloudRequest[]> {
-  return delay([...requests]);
-}
-
-export function getRequest(id: string): Promise<CloudRequest | null> {
-  return delay(requests.find((r) => r.id === id) ?? null);
-}
-
-// Counted, not derived from the list's length: a cancelled request leaves the
-// list, and its number must not be handed out again.
-let lastRequestNumber = requests.length;
-
-/**
- * Raises a request. As in the Ops portal, an organisation or user can have only
- * one pending request of each type: a second upgrade or deletion waits for the
- * first to be decided or cancelled.
- */
-export function createRequest(input: NewCloudRequest, requestedBy: string): Promise<CloudRequest> {
-  const waiting = requests.find(
-    (r) =>
-      r.status === "pending" &&
-      r.type === input.type &&
-      r.target.kind === input.target.kind &&
-      r.target.id === input.target.id,
-  );
-  if (waiting) {
-    return Promise.reject(
-      new Error(
-        `${input.target.label} already has a pending ${CLOUD_REQUEST_TYPE_LABELS[input.type].toLowerCase()} request (${waiting.id}). It has to be approved, rejected or cancelled before another one is raised.`,
-      ),
-    );
-  }
-  lastRequestNumber += 1;
-  const created: CloudRequest = {
-    ...input,
-    reason: input.reason?.trim() || undefined,
-    id: `REQ-${String(lastRequestNumber).padStart(4, "0")}`,
-    requestedBy,
-    requestedOn: new Date().toISOString(),
-    status: "pending",
-  };
-  requests = [created, ...requests];
-  return delay(created);
-}
-
-/**
- * Withdraws a request before anyone has decided it. As in the Ops portal, only
- * the person who raised it can, only while it is pending, and the request is
- * removed rather than kept with a status of its own.
- */
-export function cancelRequest(id: string, cancelledBy: string): Promise<void> {
-  const request = requests.find((r) => r.id === id);
-  if (!request) return Promise.reject(new Error(`${id} no longer exists.`));
-  if (request.requestedBy !== cancelledBy) {
-    return Promise.reject(new Error("Only the person who raised a request can cancel it."));
-  }
-  if (request.status !== "pending") {
-    return Promise.reject(new Error(`${id} has already been ${request.status}.`));
-  }
-  requests = requests.filter((r) => r.id !== id);
-  return delay(undefined);
-}
-
-/**
- * Approves or rejects a pending request. As in the Ops portal, an approval
- * carries out the change first and is recorded only once that succeeds: if it
- * fails, the request stays pending and the error says why, so the approver can
- * reject it instead.
- */
-export function resolveRequest(
-  id: string,
-  status: Exclude<CloudRequestStatus, "pending">,
-  resolvedBy: string,
-  remark?: string,
-): Promise<CloudRequest> {
-  const request = requests.find((r) => r.id === id);
-  if (!request) return Promise.reject(new Error(`${id} no longer exists.`));
-  if (request.status !== "pending") {
-    return Promise.reject(new Error(`${id} has already been ${request.status}.`));
-  }
-  if (status === "approved") {
-    try {
-      applyApproved(request);
-    } catch (e) {
-      return Promise.reject(e);
-    }
-  }
-  const resolved: CloudRequest = {
-    ...request,
-    status,
-    resolvedBy,
-    resolvedOn: new Date().toISOString(),
-    remark: remark?.trim() || undefined,
-  };
-  requests = requests.map((r) => (r.id === id ? resolved : r));
-  return delay(resolved);
-}
-
-/**
- * Carries out an approved request, standing in for the call the backend will
- * make to WSO2 Cloud once the real API is wired in. Throws when it cannot,
- * which leaves the request pending. Records are replaced, not mutated, so a
- * cached copy is never changed under a page that holds it.
- */
-function applyApproved(request: CloudRequest): void {
-  const now = new Date().toISOString();
-  const { id } = request.target;
-
-  if (request.target.kind === "organization") {
-    const index = ORGANIZATIONS.findIndex((o) => o.id === id);
-    if (index < 0) throw targetGone(request);
-    if (request.type === "upgrade_organization") {
-      const org = ORGANIZATIONS[index];
-      ORGANIZATIONS[index] = {
-        ...org,
-        tier: request.tier ?? org.tier,
-        limits: request.limits ?? org.limits,
-      };
-    } else if (request.type === "delete_organization") {
-      ORGANIZATIONS.splice(index, 1);
-      USERS.forEach((u, i) => {
-        if (u.organizations.some((o) => o.id === id)) {
-          USERS[i] = { ...u, organizations: u.organizations.filter((o) => o.id !== id) };
-        }
-      });
-    }
-    return;
-  }
-
-  const index = USERS.findIndex((u) => u.id === id);
-  if (index < 0) throw targetGone(request);
-  const user = USERS[index];
-  switch (request.type) {
-    case "lock_user":
-      USERS[index] = { ...user, locked: true, lockedReason: request.reason ?? "Locked by WSO2 support", lastModifiedOn: now };
-      break;
-    case "unlock_user":
-      USERS[index] = { ...user, locked: false, lockedReason: undefined, failedLoginAttempts: 0, lastModifiedOn: now };
-      break;
-    case "disable_user":
-      USERS[index] = { ...user, disabled: true, lastModifiedOn: now };
-      break;
-    case "enable_user":
-      USERS[index] = { ...user, disabled: false, lastModifiedOn: now };
-      break;
-    case "delete_user":
-      USERS.splice(index, 1);
-      break;
-  }
-}
-
-function targetGone(request: CloudRequest): Error {
-  const what = request.target.kind === "organization" ? "organisation" : "user";
-  return new Error(
-    `${request.id} could not be applied: the ${what} ${request.target.label} no longer exists. It is still pending; reject it instead.`,
-  );
 }

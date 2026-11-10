@@ -15,9 +15,9 @@
 // under the License.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createRequest } from "@features/csm-wso2-cloud/api/sampleData";
+import { useBackendApi } from "@api/backend/client";
+import { createCloudRequest } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
 import { WSO2_CLOUD_QUERY_KEY } from "@features/csm-wso2-cloud/api/queryKeys";
-import { useIdTokenClaims } from "@hooks/useIdTokenClaims";
 import type { CloudRequest, NewCloudRequest } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
 /**
@@ -25,10 +25,10 @@ import type { CloudRequest, NewCloudRequest } from "@features/csm-wso2-cloud/typ
  * changes on the organisation or user until it is approved.
  */
 export function usePostCloudRequest() {
+  const api = useBackendApi();
   const queryClient = useQueryClient();
-  const email = useIdTokenClaims()?.email ?? "you";
   return useMutation<CloudRequest, Error, NewCloudRequest>({
-    mutationFn: (input) => createRequest(input, email),
+    mutationFn: (input) => createCloudRequest(api, input),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY, "requests"] }),
   });
 }

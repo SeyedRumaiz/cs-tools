@@ -65,7 +65,7 @@ export default function CancelRequestDialog({
 
   return (
     <Dialog open={request !== null} onClose={handleClose} maxWidth="xs" fullWidth>
-      <DialogTitle>Cancel {request?.id}?</DialogTitle>
+      <DialogTitle>Cancel {request?.number}?</DialogTitle>
       <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
         {request && (
           <Typography variant="body2">

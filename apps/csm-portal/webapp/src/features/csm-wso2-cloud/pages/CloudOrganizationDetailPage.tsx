@@ -182,7 +182,6 @@ export default function CloudOrganizationDetailPage(): JSX.Element {
               setDeleteRequest({
                 type: "delete_organization",
                 target: { kind: "organization", id: org.id, label: org.handle },
-                summary: `Delete ${org.handle}`,
               }),
           },
         ]}

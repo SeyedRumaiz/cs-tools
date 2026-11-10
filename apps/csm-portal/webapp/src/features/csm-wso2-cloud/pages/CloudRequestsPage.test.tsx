@@ -18,11 +18,14 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
-import { describe, expect, it, vi } from "vitest";
-import { createRequest, resolveRequest } from "@features/csm-wso2-cloud/api/sampleData";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeCloudBackend } from "@features/csm-wso2-cloud/test/fakeCloudRequestsBackend";
 import CloudRequestsPage from "./CloudRequestsPage";
 
-vi.mock("@config/apiConfig", () => ({ apiConfig: { backendUrl: "https://example.test" } }));
+vi.mock("@api/backend/client", async () => {
+  const { fakeCloudBackend } = await import("@features/csm-wso2-cloud/test/fakeCloudRequestsBackend");
+  return { useBackendApi: () => fakeCloudBackend.api };
+});
 vi.mock("@hooks/useIdTokenClaims", () => ({
   useIdTokenClaims: () => ({ email: "engineer@example.com" }),
 }));
@@ -41,18 +44,18 @@ function renderPage(tab: string) {
 }
 
 describe("CloudRequestsPage", () => {
+  beforeEach(() => fakeCloudBackend.reset());
+
   it("cancels one of your own pending requests from My requests", async () => {
-    const request = await createRequest(
-      {
-        type: "disable_user",
-        target: { kind: "user", id: "u-1003", label: "alex.lee@example.org" },
-        summary: "Disable alex.lee@example.org",
-      },
-      "engineer@example.com",
-    );
+    const request = fakeCloudBackend.raise({
+      type: "disable_user",
+      targetId: "u-1003",
+      targetLabel: "alex.lee@example.org",
+      reason: "Customer asked us to.",
+    });
     renderPage("mine");
 
-    const row = (await screen.findByText(request.id)).closest("tr");
+    const row = (await screen.findByText(request.number)).closest("tr");
     if (!row) throw new Error("request row not rendered");
     fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
 
@@ -63,17 +66,13 @@ describe("CloudRequestsPage", () => {
   });
 
   it("asks for a reason before rejecting, and shows it with the decision", async () => {
-    const request = await createRequest(
-      {
-        type: "lock_user",
-        target: { kind: "user", id: "u-1001", label: "jane.doe@example.com" },
-        summary: "Lock jane.doe@example.com",
-      },
+    const request = fakeCloudBackend.raise(
+      { type: "lock_user", targetId: "u-1001", targetLabel: "jane.doe@example.com", reason: "Suspicious sign-ins." },
       "someone@example.com",
     );
     renderPage("pending");
 
-    const row = (await screen.findByText(request.id)).closest("tr");
+    const row = (await screen.findByText(request.number)).closest("tr");
     if (!row) throw new Error("request row not rendered");
     fireEvent.click(within(row).getByRole("button", { name: "Reject" }));
 
@@ -87,35 +86,28 @@ describe("CloudRequestsPage", () => {
     fireEvent.click(confirm);
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(screen.queryByText(request.id)).not.toBeInTheDocument();
+    expect(screen.queryByText(request.number)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
 
-    const resolved = (await screen.findByText(request.id)).closest("tr");
+    const resolved = (await screen.findByText(request.number)).closest("tr");
     if (!resolved) throw new Error("resolved row not rendered");
     expect(within(resolved).getByText("Rejected")).toBeInTheDocument();
     expect(within(resolved).getByText("Raised for the wrong account.")).toBeInTheDocument();
   });
 
   it("keeps an approval that could not be applied pending and says why", async () => {
-    const target = { kind: "user" as const, id: "u-1002", label: "john.smith@example.com" };
-    const lock = await createRequest(
-      { type: "lock_user", target, summary: "Lock john.smith@example.com" },
+    const lock = fakeCloudBackend.raise(
+      { type: "lock_user", targetId: "u-1002", targetLabel: "john.smith@example.com", reason: "Suspicious sign-ins." },
       "someone@example.com",
     );
-    const remove = await createRequest(
-      { type: "delete_user", target, summary: "Delete john.smith@example.com" },
-      "someone@example.com",
-    );
-    await resolveRequest(remove.id, "approved", "approver@example.com");
+    fakeCloudBackend.applyError = "WSO2 Cloud is not connected yet, so the change cannot be applied. The request stays pending.";
     renderPage("pending");
 
-    const row = (await screen.findByText(lock.id)).closest("tr");
+    const row = (await screen.findByText(lock.number)).closest("tr");
     if (!row) throw new Error("request row not rendered");
     fireEvent.click(within(row).getByRole("button", { name: "Approve" }));
 
-    expect(
-      await screen.findByText(/the user john.smith@example.com no longer exists/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/WSO2 Cloud is not connected yet/)).toBeInTheDocument();
     expect(within(row).getByText("Pending")).toBeInTheDocument();
   });
 });

@@ -15,9 +15,9 @@
 // under the License.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { resolveRequest } from "@features/csm-wso2-cloud/api/sampleData";
+import { useBackendApi } from "@api/backend/client";
+import { resolveCloudRequest } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
 import { WSO2_CLOUD_QUERY_KEY } from "@features/csm-wso2-cloud/api/queryKeys";
-import { useIdTokenClaims } from "@hooks/useIdTokenClaims";
 import type { CloudRequest } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
 interface ResolveInput {
@@ -30,13 +30,14 @@ interface ResolveInput {
 /**
  * Approves or rejects a pending request. An approval changes the organisation
  * or user it targets, so every cached WSO2 Cloud query is refreshed, not only
- * the request lists.
+ * the request lists. A refused or failed approval refreshes them too: the
+ * request may have been decided by someone else in the meantime.
  */
 export function usePatchCloudRequest() {
+  const api = useBackendApi();
   const queryClient = useQueryClient();
-  const email = useIdTokenClaims()?.email ?? "you";
   return useMutation<CloudRequest, Error, ResolveInput>({
-    mutationFn: ({ id, status, remark }) => resolveRequest(id, status, email, remark),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY] }),
+    mutationFn: ({ id, status, remark }) => resolveCloudRequest(api, id, status, remark),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY] }),
   });
 }

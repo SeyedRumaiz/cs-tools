@@ -15,7 +15,8 @@
 // under the License.
 
 import { useQuery } from "@tanstack/react-query";
-import { getRequest } from "@features/csm-wso2-cloud/api/sampleData";
+import { useBackendApi } from "@api/backend/client";
+import { getCloudRequest } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
 import { WSO2_CLOUD_QUERY_KEY } from "@features/csm-wso2-cloud/api/queryKeys";
 import type { CloudRequest } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
@@ -24,9 +25,10 @@ import type { CloudRequest } from "@features/csm-wso2-cloud/types/wso2Cloud";
  * cancelled). Keyed under the request lists, so every request write refreshes it.
  */
 export function useGetCloudRequest(id: string | undefined) {
+  const api = useBackendApi();
   return useQuery<CloudRequest | null, Error>({
     queryKey: [WSO2_CLOUD_QUERY_KEY, "requests", id],
-    queryFn: () => getRequest(id as string),
+    queryFn: () => getCloudRequest(api, id as string),
     enabled: !!id,
   });
 }

@@ -15,14 +15,16 @@
 // under the License.
 
 import { useQuery } from "@tanstack/react-query";
-import { listRequests } from "@features/csm-wso2-cloud/api/sampleData";
+import { useBackendApi } from "@api/backend/client";
+import { listCloudRequests } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
 import { WSO2_CLOUD_QUERY_KEY } from "@features/csm-wso2-cloud/api/queryKeys";
 import type { CloudRequest } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
 /** Every request, newest first. The Requests page splits them into its three tabs. */
 export function useGetCloudRequests() {
+  const api = useBackendApi();
   return useQuery<CloudRequest[], Error>({
     queryKey: [WSO2_CLOUD_QUERY_KEY, "requests"],
-    queryFn: listRequests,
+    queryFn: () => listCloudRequests(api),
   });
 }

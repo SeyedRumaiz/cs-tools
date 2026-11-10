@@ -61,7 +61,6 @@ function userAction(
     request: {
       type,
       target: { kind: "user", id: user.id, label: user.email },
-      summary: `${CLOUD_REQUEST_TYPE_LABELS[type]} ${user.email}`,
     },
     title,
     body,

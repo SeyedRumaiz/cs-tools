@@ -68,7 +68,7 @@ export default function RejectRequestDialog({
 
   return (
     <Dialog open={request !== null} onClose={handleClose} maxWidth="xs" fullWidth>
-      <DialogTitle>Reject {request?.id}?</DialogTitle>
+      <DialogTitle>Reject {request?.number}?</DialogTitle>
       <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
         {request && (
           <Typography variant="body2">

@@ -19,10 +19,16 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { JSX } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
-import { describe, expect, it, vi } from "vitest";
-import { createRequest } from "@features/csm-wso2-cloud/api/sampleData";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { SEEDED, fakeCloudBackend } from "@features/csm-wso2-cloud/test/fakeCloudRequestsBackend";
 import CloudRequestDetailPage from "./CloudRequestDetailPage";
 
+vi.mock("@api/backend/client", async () => {
+  const { fakeCloudBackend } = await import("@features/csm-wso2-cloud/test/fakeCloudRequestsBackend");
+  return { useBackendApi: () => fakeCloudBackend.api };
+});
+const access = vi.hoisted(() => ({ isAdmin: false }));
+vi.mock("@context/current-user/usePortalAccess", () => ({ usePortalAccess: () => access }));
 vi.mock("@hooks/useIdTokenClaims", () => ({
   useIdTokenClaims: () => ({ email: "engineer@example.com" }),
 }));
@@ -60,10 +66,15 @@ function rowFor(label: string): HTMLElement {
 }
 
 describe("CloudRequestDetailPage", () => {
-  it("shows an upgrade's tier and limits before and after", async () => {
-    renderPage("REQ-0003");
+  beforeEach(() => {
+    fakeCloudBackend.reset();
+    access.isAdmin = false;
+  });
 
-    expect(await screen.findByRole("heading", { name: "REQ-0003" })).toBeInTheDocument();
+  it("shows an upgrade's tier and limits before and after", async () => {
+    renderPage(SEEDED.pendingUpgrade);
+
+    expect(await screen.findByRole("heading", { name: "WCR0000003" })).toBeInTheDocument();
     expect(screen.getByText("What changes when approved")).toBeInTheDocument();
 
     const tier = rowFor("Tier");
@@ -77,7 +88,7 @@ describe("CloudRequestDetailPage", () => {
   });
 
   it("shows who rejected a request and why, with nothing left to decide", async () => {
-    renderPage("REQ-0002");
+    renderPage(SEEDED.rejectedUnlock);
 
     expect(await screen.findByText("Rejected by")).toBeInTheDocument();
     expect(screen.getByText("pat.morgan@example.com")).toBeInTheDocument();
@@ -86,14 +97,11 @@ describe("CloudRequestDetailPage", () => {
   });
 
   it("lets the requester cancel it, then goes back", async () => {
-    const request = await createRequest(
-      {
-        type: "enable_user",
-        target: { kind: "user", id: "u-1001", label: "jane.doe@example.com" },
-        summary: "Enable jane.doe@example.com",
-      },
-      "engineer@example.com",
-    );
+    const request = fakeCloudBackend.raise({
+      type: "enable_user",
+      targetId: "u-1001",
+      targetLabel: "jane.doe@example.com",
+    });
     renderPage(request.id);
 
     expect(await screen.findByText("The user can access the system again.")).toBeInTheDocument();
@@ -105,14 +113,36 @@ describe("CloudRequestDetailPage", () => {
   });
 
   it("offers no Cancel on someone else's request", async () => {
-    renderPage("REQ-0003");
+    renderPage(SEEDED.pendingUpgrade);
 
     expect(await screen.findByRole("button", { name: "Approve" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel request" })).not.toBeInTheDocument();
   });
 
+  it("lets an admin cancel someone else's request", async () => {
+    access.isAdmin = true;
+    fakeCloudBackend.isAdmin = true;
+    renderPage(SEEDED.pendingUpgrade);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel request" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel request" }));
+
+    expect(await screen.findByText("at /wso2-cloud/requests?tab=mine")).toBeInTheDocument();
+    expect(fakeCloudBackend.requests.some((r) => r.id === SEEDED.pendingUpgrade)).toBe(false);
+  });
+
+  it("shows why the backend refuses an approval of your own request", async () => {
+    const own = fakeCloudBackend.raise({ type: "enable_user", targetId: "u-1001", targetLabel: "jane.doe@example.com" });
+    renderPage(own.id);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+    expect(await screen.findByText("You cannot approve a request you raised.")).toBeInTheDocument();
+    expect(fakeCloudBackend.requests.find((r) => r.id === own.id)?.status).toBe("pending");
+  });
+
   it("says so when the request does not exist", async () => {
-    renderPage("REQ-9999");
+    renderPage("00000000-0000-4000-8000-000000009999");
     expect(await screen.findByText("Request not found")).toBeInTheDocument();
   });
 });

@@ -18,10 +18,14 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
-import { describe, expect, it, vi } from "vitest";
-import { createRequest } from "@features/csm-wso2-cloud/api/sampleData";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeCloudBackend } from "@features/csm-wso2-cloud/test/fakeCloudRequestsBackend";
 import CloudUserDetailPage from "./CloudUserDetailPage";
 
+vi.mock("@api/backend/client", async () => {
+  const { fakeCloudBackend } = await import("@features/csm-wso2-cloud/test/fakeCloudRequestsBackend");
+  return { useBackendApi: () => fakeCloudBackend.api };
+});
 vi.mock("@hooks/useIdTokenClaims", () => ({
   useIdTokenClaims: () => ({ email: "engineer@example.com" }),
 }));
@@ -40,6 +44,8 @@ function renderPage(userId: string) {
 }
 
 describe("CloudUserDetailPage", () => {
+  beforeEach(() => fakeCloudBackend.reset());
+
   it("offers Unlock, not Lock, for a locked user", async () => {
     renderPage("u-1002");
 
@@ -66,12 +72,8 @@ describe("CloudUserDetailPage", () => {
   });
 
   it("says why when the same request is already waiting", async () => {
-    await createRequest(
-      {
-        type: "lock_user",
-        target: { kind: "user", id: "u-1003", label: "alex.lee@example.org" },
-        summary: "Lock alex.lee@example.org",
-      },
+    fakeCloudBackend.raise(
+      { type: "lock_user", targetId: "u-1003", targetLabel: "alex.lee@example.org", reason: "Suspicious sign-ins." },
       "someone@example.com",
     );
     renderPage("u-1003");
@@ -84,7 +86,7 @@ describe("CloudUserDetailPage", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Request lock" }));
 
     expect(
-      await within(dialog).findByText(/already has a pending lock user request/),
+      await within(dialog).findByText(/lock user request for this target is already pending/),
     ).toBeInTheDocument();
   });
 

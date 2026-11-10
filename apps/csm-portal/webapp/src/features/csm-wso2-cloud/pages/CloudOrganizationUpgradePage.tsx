@@ -122,10 +122,6 @@ function UpgradeForm({
       {
         type: "upgrade_organization",
         target: { kind: "organization", id: org.id, label: org.handle },
-        summary:
-          tier === org.tier
-            ? `Limits change on ${CLOUD_TIER_LABELS[tier]}`
-            : `${CLOUD_TIER_LABELS[org.tier]} → ${CLOUD_TIER_LABELS[tier]}`,
         tier,
         limits,
         previousTier: org.tier,
