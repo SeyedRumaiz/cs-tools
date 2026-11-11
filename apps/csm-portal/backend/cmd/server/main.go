@@ -103,14 +103,25 @@ func main() {
 	// How an approved WSO2 Cloud request is applied (WSO2_CLOUD_APPLY_MODE).
 	// Empty: not connected, every approval is refused and the request stays
 	// pending. dry_run: approvals are recorded without changing anything in
-	// WSO2 Cloud (local and test stacks only).
-	wso2CloudApplier, err := wso2cloud.ApplierForMode(os.Getenv("WSO2_CLOUD_APPLY_MODE"))
+	// WSO2 Cloud, with sample subscriptions (local and test stacks only).
+	// billing_api: upgrades go through WSO2 Cloud's billing admin API
+	// (WSO2_CLOUD_BILLING_BASE_URL, WSO2_CLOUD_TOKEN_URL, WSO2_CLOUD_CLIENT_ID,
+	// WSO2_CLOUD_CLIENT_SECRET; WSO2_CLOUD_SCOPES and WSO2_CLOUD_TOKEN_AUDIENCE
+	// optional).
+	wso2Cloud, err := wso2cloud.FromEnv(os.Getenv)
 	if err != nil {
-		slog.Error("invalid WSO2_CLOUD_APPLY_MODE", "err", err)
+		slog.Error("invalid WSO2 Cloud configuration", "err", err)
 		os.Exit(1)
 	}
-	if _, dryRun := wso2CloudApplier.(wso2cloud.DryRun); dryRun {
+	if wso2Cloud.Mode == wso2cloud.ModeDryRun {
 		slog.Warn("WSO2_CLOUD_APPLY_MODE is dry_run: approved WSO2 Cloud requests are recorded without being applied")
+	}
+	// The Enterprise plans an upgrade may ask for, per product. WSO2 Cloud has
+	// no endpoint that lists them.
+	wso2CloudPlans, err := wso2cloud.ParsePlans(os.Getenv("WSO2_CLOUD_ENTERPRISE_PLANS"))
+	if err != nil {
+		slog.Error("invalid WSO2_CLOUD_ENTERPRISE_PLANS", "err", err)
+		os.Exit(1)
 	}
 
 	reqTimeouts, err := loadTimeouts(os.Getenv)
@@ -858,12 +869,17 @@ func main() {
 	// admin, checked in the handler) are PermWrite; approving and rejecting are
 	// the wso2_cloud_approver role or admin. entity-service checks again that a
 	// request is pending and that nobody approves their own.
-	wso2CloudRequestHandler := handler.NewWso2CloudRequestHandler(customerEntityClient, wso2CloudApplier).WithAccessGuard(accessGuard)
+	wso2CloudRequestHandler := handler.NewWso2CloudRequestHandler(customerEntityClient, wso2Cloud.Applier).
+		WithAccessGuard(accessGuard).WithSubscriptions(wso2Cloud.Subscriptions).WithPlans(wso2CloudPlans)
 	route("POST /wso2-cloud-requests", handler.PermWrite, wso2CloudRequestHandler.CreateRequest)
 	route("POST /wso2-cloud-requests/search", handler.PermViewOperations, wso2CloudRequestHandler.SearchRequests)
 	route("GET /wso2-cloud-requests/{id}", handler.PermViewOperations, wso2CloudRequestHandler.GetRequest)
 	route("POST /wso2-cloud-requests/{id}/resolve", handler.PermApproveWso2CloudRequest, wso2CloudRequestHandler.ResolveRequest)
 	route("DELETE /wso2-cloud-requests/{id}", handler.PermWrite, wso2CloudRequestHandler.CancelRequest)
+	// What an upgrade request can name: the organization's subscriptions (read
+	// from WSO2 Cloud) and the configured Enterprise plans.
+	route("GET /wso2-cloud/organizations/{orgId}/subscriptions", handler.PermViewOperations, wso2CloudRequestHandler.ListSubscriptions)
+	route("GET /wso2-cloud/plans", handler.PermViewOperations, wso2CloudRequestHandler.ListPlans)
 
 	// Operations > Runbooks: the alert-name to runbook catalog new incidents are matched against.
 	runbookHandler := handler.NewRunbookHandler(customerEntityClient)

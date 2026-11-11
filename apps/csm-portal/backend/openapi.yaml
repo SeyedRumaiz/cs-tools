@@ -15628,7 +15628,11 @@ paths:
         Forwarded to the entity service, which takes the requester from the
         caller's token and refuses a second pending request of the same type for
         the same target (409). Its refusal (400, 403, 404, 409) is returned with
-        its own message and errorCode.
+        its own message and errorCode. An upgrade_organization request names the
+        subscription it moves (subscriptionId, product) and the Enterprise plan
+        (planCode), with an optional billingPeriod (monthly or annual),
+        notifyCustomer and previousPlanCode; a planCode that is not one of the
+        plans GET /wso2-cloud/plans lists for the product is refused here (400).
       requestBody:
         required: true
         content:
@@ -15863,10 +15867,15 @@ paths:
       description: >
         Body {status: approved|rejected, remark?}; a rejection needs a remark.
         A rejection is recorded at once. An approval is first applied in WSO2
-        Cloud and recorded only once that worked: 503 when WSO2 Cloud is not
-        connected and 502 when the change could not be applied, the request
-        staying pending either way. 403 for the request's own requester, 409 when
-        it is no longer pending.
+        Cloud and recorded only once that worked; the request stays pending
+        whenever it is not. An upgrade creates a wire billing account in WSO2
+        Cloud (recorded on the request, so a retry reuses it) and then changes
+        the subscription's plan. 503 when WSO2 Cloud is not connected or offers
+        no API for the request's type yet; 409 with errorCode wso2_cloud_refused
+        and WSO2 Cloud's own reason when it refused the change (a suspended
+        subscription, usage over the plan's limits, ...); 502 when the CSM portal
+        was not authorized or the change could not be applied for another reason.
+        403 for the request's own requester, 409 when it is no longer pending.
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
       requestBody:
@@ -15934,6 +15943,123 @@ paths:
                 $ref: '#/components/schemas/ErrorPayload'
         "503":
           description: Service unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+  /wso2-cloud/organizations/{orgId}/subscriptions:
+    get:
+      summary: An organization's product subscriptions in WSO2 Cloud.
+      operationId: listWso2CloudSubscriptions
+      description: >
+        Read from WSO2 Cloud's billing admin API, so an upgrade request can name
+        the subscription it moves. In dry_run mode every organization gets the
+        same sample subscriptions. 503 when WSO2 Cloud is not connected.
+      parameters:
+        - {name: orgId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Ok.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subscriptions]
+                properties:
+                  subscriptions:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, product, planCode, status]
+                      properties:
+                        id: {type: string}
+                        product: {type: string}
+                        planCode: {type: string}
+                        status: {type: string}
+                        trialEnd: {type: string}
+        "400":
+          description: The organization id is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: WSO2 Cloud has no such organization.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "502":
+          description: WSO2 Cloud could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "503":
+          description: WSO2 Cloud is not connected.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+  /wso2-cloud/plans:
+    get:
+      summary: The Enterprise plans an upgrade request can ask for, per product.
+      operationId: listWso2CloudPlans
+      description: >
+        From WSO2_CLOUD_ENTERPRISE_PLANS; WSO2 Cloud has no endpoint that lists
+        its plans. Empty when none are configured, and then no upgrade can be
+        raised.
+      responses:
+        "200":
+          description: Ok.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [plans]
+                properties:
+                  plans:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items:
+                        type: object
+                        required: [code, label]
+                        properties:
+                          code: {type: string}
+                          label: {type: string}
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: Internal server error.
           content:
             application/json:
               schema:

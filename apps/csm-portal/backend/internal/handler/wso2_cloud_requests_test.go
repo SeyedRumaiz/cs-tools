@@ -19,6 +19,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -64,11 +65,30 @@ func (f *fakeWso2CloudRequestClient) called(method string) bool {
 type fakeApplier struct {
 	err     error
 	applied []wso2cloud.Request
+	// record, when set, is passed to the recorder before Apply returns.
+	record string
 }
 
-func (a *fakeApplier) Apply(_ context.Context, req wso2cloud.Request) error {
+func (a *fakeApplier) Apply(ctx context.Context, req wso2cloud.Request, rec wso2cloud.Recorder) error {
 	a.applied = append(a.applied, req)
+	if a.record != "" {
+		if err := rec.RecordBillingAccount(ctx, a.record); err != nil {
+			return err
+		}
+	}
 	return a.err
+}
+
+// fakeSubscriptions answers ListSubscriptions with subs or err.
+type fakeSubscriptions struct {
+	subs  []wso2cloud.Subscription
+	err   error
+	orgID string
+}
+
+func (f *fakeSubscriptions) ListSubscriptions(_ context.Context, orgID string) ([]wso2cloud.Subscription, error) {
+	f.orgID = orgID
+	return f.subs, f.err
 }
 
 func pendingWcr(requestedBy string) string {
@@ -164,6 +184,50 @@ func TestWso2CloudRequestHandler_Resolve(t *testing.T) {
 			t.Fatalf("status %d, calls %+v; want 502 and no resolve", w.Code, fake.calls)
 		}
 	})
+
+	t.Run("the billing account is recorded on the request", func(t *testing.T) {
+		fake := &fakeWso2CloudRequestClient{stored: pendingWcr("engineer@wso2.com")}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, &fakeApplier{record: "ba-1"}).ResolveRequest(w, wcrRequest(http.MethodPost, `{"status":"approved"}`, wcrApprover))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", w.Code, w.Body)
+		}
+		var recorded *wcrCall
+		for i := range fake.calls {
+			if fake.calls[i].path == "/wso2-cloud-requests/"+wcrID+"/billing-account" {
+				recorded = &fake.calls[i]
+			}
+		}
+		if recorded == nil || recorded.method != http.MethodPost || recorded.body != `{"billingAccountId":"ba-1"}` {
+			t.Fatalf("billing account call = %+v (calls %+v)", recorded, fake.calls)
+		}
+	})
+
+	applyErrors := []struct {
+		name     string
+		err      error
+		status   int
+		contains string
+		code     string
+	}{
+		{"not available", wso2cloud.ErrNotAvailable, http.StatusServiceUnavailable, "does not offer this kind of change", ""},
+		{"not authorized", fmt.Errorf("create billing account: %w", wso2cloud.ErrNotAuthorized), http.StatusBadGateway, "did not allow", ""},
+		{"refused by WSO2 Cloud", fmt.Errorf("change plan: %w", &wso2cloud.APIError{Status: http.StatusConflict, Message: "the subscription is suspended"}),
+			http.StatusConflict, "WSO2 Cloud refused the change: the subscription is suspended The request stays pending.", errorCodeWso2CloudRefused},
+	}
+	for _, tc := range applyErrors {
+		t.Run("apply error: "+tc.name, func(t *testing.T) {
+			fake := &fakeWso2CloudRequestClient{stored: pendingWcr("engineer@wso2.com")}
+			w := httptest.NewRecorder()
+			NewWso2CloudRequestHandler(fake, &fakeApplier{err: tc.err}).ResolveRequest(w, wcrRequest(http.MethodPost, `{"status":"approved"}`, wcrApprover))
+			if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.contains) || fake.called(http.MethodPost) {
+				t.Fatalf("status %d, body %s, calls %+v", w.Code, w.Body, fake.calls)
+			}
+			if tc.code != "" && !strings.Contains(w.Body.String(), `"errorCode":"`+tc.code+`"`) {
+				t.Errorf("no errorCode in %s", w.Body)
+			}
+		})
+	}
 
 	t.Run("own request: refused before applying", func(t *testing.T) {
 		fake := &fakeWso2CloudRequestClient{stored: pendingWcr("APPROVER@wso2.com")}
@@ -276,5 +340,91 @@ func TestAccessGuard_Wso2CloudApproverPermission(t *testing.T) {
 	}
 	if got := g.RolesFor([]string{"test-wso2-cloud-approver"}); len(got) != 1 || got[0] != "wso2_cloud_approver" {
 		t.Errorf("RolesFor = %v, want [wso2_cloud_approver]", got)
+	}
+}
+
+func TestWso2CloudRequestHandler_CreateChecksThePlan(t *testing.T) {
+	plans, err := wso2cloud.ParsePlans(`{"identity":[{"code":"identity-enterprise","label":"Enterprise"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		body    string
+		wantFwd bool
+	}{
+		{"a configured plan", `{"type":"upgrade_organization","product":"identity","planCode":"identity-enterprise","subscriptionId":"s1"}`, true},
+		{"an unknown plan", `{"type":"upgrade_organization","product":"identity","planCode":"identity-gold","subscriptionId":"s1"}`, false},
+		{"a plan of another product", `{"type":"upgrade_organization","product":"integration","planCode":"identity-enterprise"}`, false},
+		{"no product", `{"type":"upgrade_organization","planCode":"identity-enterprise"}`, false},
+		{"a respelt key is read too", `{"type":"upgrade_organization","product":"identity","PLANCODE":"identity-gold"}`, false},
+		{"no plan: entity-service says what is missing", `{"type":"upgrade_organization","product":"identity"}`, true},
+		{"not an upgrade", `{"type":"lock_user","reason":"x"}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeWso2CloudRequestClient{}
+			w := httptest.NewRecorder()
+			NewWso2CloudRequestHandler(fake, nil).WithPlans(plans).CreateRequest(w, wcrRequest(http.MethodPost, tc.body, testCsEngineerUser))
+			if forwarded := len(fake.calls) == 1; forwarded != tc.wantFwd {
+				t.Fatalf("forwarded %v (status %d, %s), want %v", forwarded, w.Code, w.Body, tc.wantFwd)
+			}
+			if !tc.wantFwd && w.Code != http.StatusBadRequest {
+				t.Fatalf("status %d, want 400", w.Code)
+			}
+		})
+	}
+}
+
+func TestWso2CloudRequestHandler_ListSubscriptions(t *testing.T) {
+	const orgID = "0F6C1A52-5B1E-4C39-9A51-2D7E1F3B8A01"
+	req := func(id string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/x", nil)
+		r = r.WithContext(middleware.WithUserInfo(r.Context(), testCsEngineerUser))
+		r.SetPathValue("orgId", id)
+		return r
+	}
+	t.Run("lists them", func(t *testing.T) {
+		subs := &fakeSubscriptions{subs: []wso2cloud.Subscription{{ID: "sub-1", Product: "identity", PlanCode: "identity-payg", Status: "active"}}}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(&fakeWso2CloudRequestClient{}, nil).WithSubscriptions(subs).ListSubscriptions(w, req(orgID))
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"planCode":"identity-payg"`) || subs.orgID != strings.ToLower(orgID) {
+			t.Fatalf("status %d, body %s, org %q", w.Code, w.Body, subs.orgID)
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		subs   *fakeSubscriptions
+		id     string
+		status int
+	}{
+		{"not connected", &fakeSubscriptions{err: wso2cloud.ErrNotConnected}, orgID, http.StatusServiceUnavailable},
+		{"no lister", nil, orgID, http.StatusServiceUnavailable},
+		{"unknown organization", &fakeSubscriptions{err: &wso2cloud.APIError{Status: http.StatusNotFound, Message: "x"}}, orgID, http.StatusNotFound},
+		{"other failure", &fakeSubscriptions{err: errors.New("boom")}, orgID, http.StatusBadGateway},
+		{"bad id", &fakeSubscriptions{}, "org-1", http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewWso2CloudRequestHandler(&fakeWso2CloudRequestClient{}, nil)
+			if tc.subs != nil {
+				h.WithSubscriptions(tc.subs)
+			}
+			w := httptest.NewRecorder()
+			h.ListSubscriptions(w, req(tc.id))
+			if w.Code != tc.status {
+				t.Fatalf("status %d, want %d: %s", w.Code, tc.status, w.Body)
+			}
+		})
+	}
+}
+
+func TestWso2CloudRequestHandler_ListPlans(t *testing.T) {
+	plans, _ := wso2cloud.ParsePlans(`{"identity":[{"code":"identity-enterprise","label":"Enterprise"}]}`)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/x", nil)
+	r = r.WithContext(middleware.WithUserInfo(r.Context(), testCsEngineerUser))
+	NewWso2CloudRequestHandler(&fakeWso2CloudRequestClient{}, nil).WithPlans(plans).ListPlans(w, r)
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != `{"plans":{"identity":[{"code":"identity-enterprise","label":"Enterprise"}]}}` {
+		t.Fatalf("status %d, body %q", w.Code, w.Body)
 	}
 }

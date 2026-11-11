@@ -536,24 +536,52 @@ from a template for another customer's project (or none), or a PATCH moving it t
 ## WSO2 Cloud requests (`internal/handler/wso2_cloud_requests.go`, `internal/wso2cloud`)
 
 The WSO2 Cloud tab's requests (upgrade or delete an organization; lock, unlock, disable, enable or
-delete a user), stored by entity-service (`/wso2-cloud-requests`, migration 0278). Same paths here:
+delete a user), stored by entity-service (`/wso2-cloud-requests`, migration 0287). Same paths here:
 
 | Route | Permission | Notes |
 |---|---|---|
-| `POST /wso2-cloud-requests` | `PermWrite` | requester taken from the token by entity-service |
+| `POST /wso2-cloud-requests` | `PermWrite` | requester taken from the token by entity-service; an upgrade's `planCode` must be a configured plan of its `product` (400 here) |
 | `POST /wso2-cloud-requests/search`, `GET /wso2-cloud-requests/{id}` | `PermViewOperations` | |
 | `POST /wso2-cloud-requests/{id}/resolve` | `PermApproveWso2CloudRequest` | `wso2_cloud_approver` (`AUTH_WSO2_CLOUD_APPROVER_ROLES`) or admin; not cs_engineer |
 | `DELETE /wso2-cloud-requests/{id}` | `PermWrite` | the requester or an admin (`PermAdmin`), checked in the handler; a nil guard lets only the requester |
+| `GET /wso2-cloud/organizations/{orgId}/subscriptions` | `PermViewOperations` | the org's product subscriptions, from WSO2 Cloud; 503 when not connected |
+| `GET /wso2-cloud/plans` | `PermViewOperations` | `WSO2_CLOUD_ENTERPRISE_PLANS`, product to `[{code, label}]` |
 
+- **An upgrade follows WSO2 Cloud's billing admin API** (base path `/admin/api/v1`): it moves one
+  subscription to an Enterprise plan billed by wire transfer. The request names `subscriptionId`,
+  `product`, `planCode`, and optionally `billingPeriod`, `notifyCustomer`, `previousPlanCode`; `reason`
+  goes to WSO2 Cloud as the plan change's notes ("CSM portal request WCR…: <reason>").
 - **An approval is applied before it is recorded.** The handler reads the request, refuses (409) one that
   is not pending and (403) the requester's own, then calls `wso2cloud.Applier.Apply`, and only when that
-  worked posts `/resolve`. A failed apply leaves the request pending: 503 when WSO2 Cloud is not connected,
-  502 otherwise. A resolve that fails after the apply is logged at ERROR ("change applied but the approval
-  was not recorded") for a person to put right. Two approvers racing can both apply; the second resolve is
-  a 409. A rejection is forwarded straight away.
-- **`WSO2_CLOUD_APPLY_MODE`**: empty (default) is `NotConnected`, which refuses every approval; `dry_run`
-  records approvals without changing anything (local and test stacks only, warned at startup); anything
-  else fails startup. The WSO2 Cloud API is not available yet; a real client replaces the Applier.
+  worked posts `/resolve`. For an upgrade `BillingApplier` creates the wire billing account (unless the
+  request already has one), records it on the request through entity-service's
+  `POST /wso2-cloud-requests/{id}/billing-account` (`billingAccountRecorder`), then changes the plan. A
+  plan change is safe to repeat and a recorded account is reused, so a failed approval can be approved
+  again. An account created but not recorded is logged at ERROR with its id. A resolve that fails after
+  the apply is logged at ERROR ("change applied but the approval was not recorded") for a person to put
+  right. Two approvers racing can both apply; the second resolve is a 409. A rejection is forwarded
+  straight away.
+- **A failed apply leaves the request pending** (`writeApplyError`): 503 when WSO2 Cloud is not
+  connected or has no API for the type (only upgrades have one: `ErrNotAvailable`); 409 with
+  `errorCode: wso2_cloud_refused` and WSO2 Cloud's own reason when it refused (a suspended subscription,
+  usage over the plan's limits, a change not allowed mid-period); 502 when it did not authorize the CSM
+  backend (`ErrNotAuthorized`: a missing scope, a configuration problem) or for anything else.
+- **`WSO2_CLOUD_APPLY_MODE`** (`wso2cloud.FromEnv`): empty (default) is `NotConnected`, which refuses every
+  approval and every subscription lookup; `dry_run` records approvals without changing anything and gives
+  every organization two sample subscriptions (local and test stacks only, warned at startup);
+  `billing_api` uses `BillingClient` and needs `WSO2_CLOUD_BILLING_BASE_URL`, `WSO2_CLOUD_TOKEN_URL`,
+  `WSO2_CLOUD_CLIENT_ID`, `WSO2_CLOUD_CLIENT_SECRET` (`WSO2_CLOUD_SCOPES`, `WSO2_CLOUD_TOKEN_AUDIENCE`,
+  default `urn:wso2:cloud:billing`, optional); anything else, or `billing_api` without its settings,
+  fails startup. **WSO2 Cloud is still changing how this API is authorized**: everything about the token is
+  in `NewBillingClient` (a `client_credentials` token with the audience as an endpoint param), so that
+  change stays there. The client never logs the token or secret.
+- **The subscription shape is provisional.** The guide names `subscription_id`, `plan_code` and
+  `trial_end`; `parseSubscriptions` also accepts `id`, `product_code` and a nested `plan.code`, and a bare
+  array or one under `data`/`subscriptions`/`items`, because the full schema
+  (`billing-admin-api.v1.yaml` in the `wso2cloud` repo) was not readable when this was written. Tighten it
+  once it is.
+- **Not done yet** (not open to clients in WSO2 Cloud): payment confirmation, trial extension, limit
+  overrides. Organization search/details and the user operations are not part of this API either.
 - Refusals from entity-service (400, 403, 404, 409) keep their message and `errorCode`, as for standard
   changes; a 5xx is the generic fallback.
 - `wso2_cloud_approver` grants nothing else (no read): an approver needs a viewing role too. An unset
