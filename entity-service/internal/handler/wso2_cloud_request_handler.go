@@ -92,6 +92,20 @@ func (h *WSO2CloudRequestHandler) ResolveWSO2CloudRequest(w http.ResponseWriter,
 	writeWSO2CloudRequestJSON(w, http.StatusOK, out)
 }
 
+// SetWSO2CloudRequestBillingAccount handles POST /wso2-cloud-requests/{id}/billing-account.
+func (h *WSO2CloudRequestHandler) SetWSO2CloudRequestBillingAccount(w http.ResponseWriter, r *http.Request) {
+	var req domain.SetWSO2CloudBillingAccountRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	out, err := h.svc.SetBillingAccount(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeWSO2CloudRequestJSON(w, http.StatusOK, out)
+}
+
 // DeleteWSO2CloudRequest handles DELETE /wso2-cloud-requests/{id}: cancels a pending request.
 func (h *WSO2CloudRequestHandler) DeleteWSO2CloudRequest(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Delete(r.Context(), r.PathValue("id")); err != nil {

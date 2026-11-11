@@ -18,7 +18,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -39,6 +38,9 @@ type fakeWCRRepo struct {
 	resolveNil  bool
 	deleteOK    bool
 	searched    *domain.SearchWSO2CloudRequestsRequest
+	// setAccount is what SetBillingAccount returns; setArgs what it was called with.
+	setAccount *domain.WSO2CloudRequest
+	setArgs    []string
 }
 
 func (f *fakeWCRRepo) Create(_ context.Context, by string, req domain.CreateWSO2CloudRequestRequest) (domain.WSO2CloudRequest, error) {
@@ -69,13 +71,30 @@ func (f *fakeWCRRepo) Resolve(_ context.Context, id string, status domain.WSO2Cl
 
 func (f *fakeWCRRepo) Delete(context.Context, string) (bool, error) { return f.deleteOK, nil }
 
+func (f *fakeWCRRepo) SetBillingAccount(_ context.Context, id, accountID string) (*domain.WSO2CloudRequest, error) {
+	f.setArgs = []string{id, accountID}
+	return f.setAccount, nil
+}
+
 func wcrUserCtx(email string) context.Context {
 	return auth.WithIdentity(context.Background(), auth.Identity{Validated: true, UserEmail: email})
 }
 
+func periodp(p domain.WSO2CloudBillingPeriod) *domain.WSO2CloudBillingPeriod { return &p }
 
+// wcrUpgrade is a complete upgrade request; tests change one field at a time.
+func wcrUpgrade() domain.CreateWSO2CloudRequestRequest {
+	return domain.CreateWSO2CloudRequestRequest{
+		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "o1", TargetLabel: "acme",
+		Product: strp("identity"), SubscriptionID: strp("sub-1"), PlanCode: strp("enterprise-identity"),
+	}
+}
 
-func tierp(t domain.WSO2CloudTier) *domain.WSO2CloudTier { return &t }
+func withUpgrade(change func(*domain.CreateWSO2CloudRequestRequest)) domain.CreateWSO2CloudRequestRequest {
+	r := wcrUpgrade()
+	change(&r)
+	return r
+}
 
 func TestWSO2CloudRequestService_CreateValidation(t *testing.T) {
 	cases := []struct {
@@ -88,10 +107,13 @@ func TestWSO2CloudRequestService_CreateValidation(t *testing.T) {
 		{"no target label", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestUnlockUser, TargetID: "u1"}, "targetLabel is required"},
 		{"lock needs a reason", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestLockUser, TargetID: "u1", TargetLabel: "a@b.c", Reason: strp("   ")}, "reason is required for a lock user request"},
 		{"disable needs a reason", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestDisableUser, TargetID: "u1", TargetLabel: "a@b.c"}, "reason is required for a disable user request"},
-		{"upgrade needs a tier", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "o1", TargetLabel: "acme"}, "tier is required"},
-		{"unknown tier", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "o1", TargetLabel: "acme", Tier: tierp("gold")}, "not a valid WSO2 Cloud tier"},
-		{"limits must be an object", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "o1", TargetLabel: "acme", Tier: tierp("enterprise"), Limits: json.RawMessage(`[1,2]`)}, "limits must be a JSON object"},
-		{"tier only on an upgrade", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestDeleteOrganization, TargetID: "o1", TargetLabel: "acme", Tier: tierp("free")}, "only accepted on an upgrade_organization request"},
+		{"upgrade needs a subscription", withUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.SubscriptionID = strp(" ") }), "subscriptionId is required"},
+		{"upgrade needs a plan", withUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.PlanCode = nil }), "planCode is required"},
+		{"unknown billing period", withUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.BillingPeriod = periodp("weekly") }), "not a valid billing period"},
+		{"plan already held", withUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.PreviousPlanCode = strp("enterprise-identity") }), "already on"},
+		{"long plan code", withUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.PlanCode = strp(strings.Repeat("p", 101)) }), "planCode must be at most 100 characters"},
+		{"plan only on an upgrade", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestDeleteOrganization, TargetID: "o1", TargetLabel: "acme", PlanCode: strp("x")}, "only accepted on an upgrade_organization request"},
+		{"notify only on an upgrade", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestDeleteOrganization, TargetID: "o1", TargetLabel: "acme", NotifyCustomer: true}, "only accepted on an upgrade_organization request"},
 		{"long reason", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestLockUser, TargetID: "u1", TargetLabel: "a@b.c", Reason: strp(strings.Repeat("x", 2001))}, "reason must be at most 2000 characters"},
 	}
 	for _, tc := range cases {
@@ -115,8 +137,8 @@ func TestWSO2CloudRequestService_CreateNormalisesAndUsesTheToken(t *testing.T) {
 	svc := NewWSO2CloudRequestService(repo, internalAccess{})
 	_, err := svc.Create(wcrUserCtx("engineer@wso2.com"), domain.CreateWSO2CloudRequestRequest{
 		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: " o1 ", TargetLabel: " acme ",
-		Reason: strp("  "), Tier: tierp("enterprise"), Limits: json.RawMessage(` {"monthlyActiveUsers": 50000} `),
-		PreviousLimits: json.RawMessage(`null`),
+		Reason: strp("  "), Product: strp(" identity "), SubscriptionID: strp(" sub-1 "), PlanCode: strp(" enterprise-identity "),
+		PreviousPlanCode: strp(""), BillingPeriod: periodp(domain.WSO2CloudBillingAnnual), NotifyCustomer: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -125,8 +147,11 @@ func TestWSO2CloudRequestService_CreateNormalisesAndUsesTheToken(t *testing.T) {
 	if got.TargetID != "o1" || got.TargetLabel != "acme" || got.Reason != nil {
 		t.Fatalf("not normalised: %+v", got)
 	}
-	if string(got.Limits) != `{"monthlyActiveUsers": 50000}` || got.PreviousLimits != nil {
-		t.Fatalf("limits: %q / %q", got.Limits, got.PreviousLimits)
+	if *got.Product != "identity" || *got.SubscriptionID != "sub-1" || *got.PlanCode != "enterprise-identity" || got.PreviousPlanCode != nil {
+		t.Fatalf("plan fields: %+v", got)
+	}
+	if *got.BillingPeriod != domain.WSO2CloudBillingAnnual || !got.NotifyCustomer {
+		t.Fatalf("period / notify: %+v", got)
 	}
 	if repo.createdBy != "engineer@wso2.com" {
 		t.Fatalf("requested by %q, want the token's email", repo.createdBy)
@@ -269,4 +294,60 @@ func TestWSO2CloudRequestService_SearchValidatesFilters(t *testing.T) {
 	if repo.searched.Filters.TargetID != nil || out.Limit != defaultLimit {
 		t.Fatalf("blank target id kept or no default limit: %+v / %+v", repo.searched.Filters, out)
 	}
+}
+
+func TestWSO2CloudRequestService_SetBillingAccount(t *testing.T) {
+	pendingUpgrade := func(account *string) *domain.WSO2CloudRequest {
+		return &domain.WSO2CloudRequest{ID: testWCRID, Type: domain.WSO2CloudRequestUpgradeOrganization,
+			Status: domain.WSO2CloudRequestPending, BillingAccountID: account}
+	}
+	t.Run("records a trimmed id", func(t *testing.T) {
+		repo := &fakeWCRRepo{setAccount: pendingUpgrade(strp("ba-1"))}
+		svc := NewWSO2CloudRequestService(repo, internalAccess{})
+		got, err := svc.SetBillingAccount(wcrUserCtx("approver@wso2.com"), testWCRID, domain.SetWSO2CloudBillingAccountRequest{BillingAccountID: " ba-1 "})
+		if err != nil || *got.BillingAccountID != "ba-1" {
+			t.Fatalf("got %+v, %v", got, err)
+		}
+		if repo.setArgs[1] != "ba-1" {
+			t.Fatalf("repository got %q", repo.setArgs[1])
+		}
+	})
+	t.Run("the same id again is accepted", func(t *testing.T) {
+		repo := &fakeWCRRepo{stored: pendingUpgrade(strp("ba-1"))}
+		svc := NewWSO2CloudRequestService(repo, internalAccess{})
+		if _, err := svc.SetBillingAccount(wcrUserCtx("approver@wso2.com"), testWCRID, domain.SetWSO2CloudBillingAccountRequest{BillingAccountID: "ba-1"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	cases := []struct {
+		name   string
+		stored *domain.WSO2CloudRequest
+		body   string
+		check  func(error) bool
+	}{
+		{"blank id", nil, " ", func(err error) bool { var ve *apierror.ValidationError; return errors.As(err, &ve) }},
+		{"not found", nil, "ba-1", func(err error) bool { var ne *apierror.NotFoundError; return errors.As(err, &ne) }},
+		{"a different id", pendingUpgrade(strp("ba-0")), "ba-1", func(err error) bool { var ce *apierror.ConflictError; return errors.As(err, &ce) }},
+		{"not an upgrade", &domain.WSO2CloudRequest{ID: testWCRID, Type: domain.WSO2CloudRequestLockUser, Status: domain.WSO2CloudRequestPending}, "ba-1",
+			func(err error) bool { var ve *apierror.ValidationError; return errors.As(err, &ve) }},
+		{"already resolved", &domain.WSO2CloudRequest{ID: testWCRID, Type: domain.WSO2CloudRequestUpgradeOrganization, Status: domain.WSO2CloudRequestRejected}, "ba-1",
+			func(err error) bool { var ce *apierror.ConflictError; return errors.As(err, &ce) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: tc.stored}, internalAccess{})
+			_, err := svc.SetBillingAccount(wcrUserCtx("approver@wso2.com"), testWCRID, domain.SetWSO2CloudBillingAccountRequest{BillingAccountID: tc.body})
+			if !tc.check(err) {
+				t.Fatalf("unexpected error %v", err)
+			}
+		})
+	}
+	t.Run("needs a user token", func(t *testing.T) {
+		svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{})
+		_, err := svc.SetBillingAccount(context.Background(), testWCRID, domain.SetWSO2CloudBillingAccountRequest{BillingAccountID: "ba-1"})
+		var ue *apierror.UnauthorizedError
+		if !errors.As(err, &ue) {
+			t.Fatalf("got %v", err)
+		}
+	})
 }

@@ -1675,7 +1675,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		// Runbooks: the alert-name to runbook catalog, matched against every new incident's subject.
 		runbookRepo = repository.NewRunbookRepository(db)
 		runbookHandler = handler.NewRunbookHandler(service.NewRunbookService(runbookRepo))
-		// WSO2 Cloud tab requests: internal callers only (migration 0278).
+		// WSO2 Cloud tab requests: internal callers only (migration 0287).
 		wso2CloudRequestHandler = handler.NewWSO2CloudRequestHandler(
 			service.NewWSO2CloudRequestService(repository.NewWSO2CloudRequestRepository(db), accessSvc))
 		// Standard change templates and the proposals that create, modify or
@@ -2231,6 +2231,7 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		mux.HandleFunc("POST /wso2-cloud-requests/search", internalOnly(accessSvc, wso2CloudRequestHandler.SearchWSO2CloudRequests))
 		mux.HandleFunc("GET /wso2-cloud-requests/{id}", internalOnly(accessSvc, wso2CloudRequestHandler.GetWSO2CloudRequest))
 		mux.HandleFunc("POST /wso2-cloud-requests/{id}/resolve", internalOnly(accessSvc, wso2CloudRequestHandler.ResolveWSO2CloudRequest))
+		mux.HandleFunc("POST /wso2-cloud-requests/{id}/billing-account", internalOnly(accessSvc, wso2CloudRequestHandler.SetWSO2CloudRequestBillingAccount))
 		mux.HandleFunc("DELETE /wso2-cloud-requests/{id}", internalOnly(accessSvc, wso2CloudRequestHandler.DeleteWSO2CloudRequest))
 	}
 	if runbookHandler != nil {

@@ -217,6 +217,7 @@ type WSO2CloudRequestService interface {
 	Get(ctx context.Context, id string) (domain.WSO2CloudRequest, error)
 	Search(ctx context.Context, req domain.SearchWSO2CloudRequestsRequest) (domain.SearchWSO2CloudRequestsResponse, error)
 	Resolve(ctx context.Context, id string, req domain.ResolveWSO2CloudRequestRequest) (domain.WSO2CloudRequest, error)
+	SetBillingAccount(ctx context.Context, id string, req domain.SetWSO2CloudBillingAccountRequest) (domain.WSO2CloudRequest, error)
 	Delete(ctx context.Context, id string) error
 }
 

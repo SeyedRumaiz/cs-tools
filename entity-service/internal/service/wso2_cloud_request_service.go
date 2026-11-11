@@ -17,9 +17,7 @@
 package service
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -36,6 +34,10 @@ const (
 	maxWSO2CloudReasonLength      = 2000
 	maxWSO2CloudConsentLength     = 1000
 	maxWSO2CloudRemarkLength      = 2000
+	maxWSO2CloudProductLength     = 100
+	maxWSO2CloudPlanCodeLength    = 100
+	maxWSO2CloudSubscriptionIDLen = 255
+	maxWSO2CloudBillingAccountLen = 255
 )
 
 var validWSO2CloudRequestType = map[domain.WSO2CloudRequestType]bool{
@@ -54,10 +56,9 @@ var validWSO2CloudRequestStatus = map[domain.WSO2CloudRequestStatus]bool{
 	domain.WSO2CloudRequestRejected: true,
 }
 
-var validWSO2CloudTier = map[domain.WSO2CloudTier]bool{
-	domain.WSO2CloudTierFree:       true,
-	domain.WSO2CloudTierPayg:       true,
-	domain.WSO2CloudTierEnterprise: true,
+var validWSO2CloudBillingPeriod = map[domain.WSO2CloudBillingPeriod]bool{
+	domain.WSO2CloudBillingMonthly: true,
+	domain.WSO2CloudBillingAnnual:  true,
 }
 
 // wso2CloudRequestNeedsReason lists the types whose requester must say why.
@@ -223,9 +224,56 @@ func (s *wso2CloudRequestService) Delete(ctx context.Context, id string) error {
 	return &apierror.ConflictError{Msg: "only a pending request can be cancelled; this one has been " + string(current.Status)}
 }
 
+// SetBillingAccount records the wire billing account the CSM backend created in WSO2 Cloud while approving an
+// upgrade, so an approval that is retried reuses it. Only a pending upgrade takes one, and only once: the same id
+// again is accepted unchanged, a different one is a ConflictError.
+func (s *wso2CloudRequestService) SetBillingAccount(ctx context.Context, id string, req domain.SetWSO2CloudBillingAccountRequest) (domain.WSO2CloudRequest, error) {
+	if err := RequireInternalCaller(ctx, s.access, wso2CloudRequestForbiddenMsg); err != nil {
+		return domain.WSO2CloudRequest{}, err
+	}
+	if _, err := wso2CloudCallerEmail(ctx); err != nil {
+		return domain.WSO2CloudRequest{}, err
+	}
+	if err := validateUUIDs("id", []string{id}); err != nil {
+		return domain.WSO2CloudRequest{}, err
+	}
+	accountID := strings.TrimSpace(req.BillingAccountID)
+	if accountID == "" {
+		return domain.WSO2CloudRequest{}, &apierror.ValidationError{Msg: "billingAccountId is required"}
+	}
+	if utf8.RuneCountInString(accountID) > maxWSO2CloudBillingAccountLen {
+		return domain.WSO2CloudRequest{}, &apierror.ValidationError{Msg: fmt.Sprintf("billingAccountId must be at most %d characters", maxWSO2CloudBillingAccountLen)}
+	}
+	updated, err := s.repo.SetBillingAccount(ctx, id, accountID)
+	if err != nil {
+		return domain.WSO2CloudRequest{}, err
+	}
+	if updated != nil {
+		return *updated, nil
+	}
+	// Nothing was written: say why.
+	current, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return domain.WSO2CloudRequest{}, err
+	}
+	switch {
+	case current == nil:
+		return domain.WSO2CloudRequest{}, &apierror.NotFoundError{Msg: "WSO2 Cloud request not found"}
+	case current.Type != domain.WSO2CloudRequestUpgradeOrganization:
+		return domain.WSO2CloudRequest{}, &apierror.ValidationError{Msg: "only an upgrade_organization request has a billing account"}
+	case current.BillingAccountID != nil && *current.BillingAccountID == accountID:
+		return *current, nil
+	case current.BillingAccountID != nil:
+		return domain.WSO2CloudRequest{}, &apierror.ConflictError{Msg: "this request already has a different billing account"}
+	default:
+		return domain.WSO2CloudRequest{}, &apierror.ConflictError{Msg: "this request has already been " + string(current.Status)}
+	}
+}
+
 // normalizeWSO2CloudRequest trims every text field, turns blank optional text into nil, and checks the request is
-// complete for its type: an upgrade carries a tier (and may carry limits and what the organization had before), no
-// other type carries any of those, and lock or disable needs a reason.
+// complete for its type: an upgrade names a subscription and an Enterprise plan (and may name the product, the plan it
+// had, a billing period and whether to tell the customer), no other type carries any of those, and lock or disable
+// needs a reason.
 func normalizeWSO2CloudRequest(req domain.CreateWSO2CloudRequestRequest) (domain.CreateWSO2CloudRequestRequest, error) {
 	if !validWSO2CloudRequestType[req.Type] {
 		return req, apierror.InvalidValue("type", string(req.Type), "WSO2 Cloud request type", wso2CloudRequestTypeNames())
@@ -259,45 +307,46 @@ func normalizeWSO2CloudRequest(req domain.CreateWSO2CloudRequestRequest) (domain
 		return req, &apierror.ValidationError{Msg: fmt.Sprintf("customerConsent must be at most %d characters", maxWSO2CloudConsentLength)}
 	}
 
+	product := trimmedOrNil(req.Product)
+	subscriptionID := trimmedOrNil(req.SubscriptionID)
+	planCode := trimmedOrNil(req.PlanCode)
+	previousPlanCode := trimmedOrNil(req.PreviousPlanCode)
 	if req.Type != domain.WSO2CloudRequestUpgradeOrganization {
-		if req.Tier != nil || len(req.Limits) > 0 || req.PreviousTier != nil || len(req.PreviousLimits) > 0 {
-			return req, &apierror.ValidationError{Msg: "tier, limits, previousTier and previousLimits are only accepted on an upgrade_organization request"}
+		if product != nil || subscriptionID != nil || planCode != nil || previousPlanCode != nil || req.BillingPeriod != nil || req.NotifyCustomer {
+			return req, &apierror.ValidationError{Msg: "product, subscriptionId, planCode, previousPlanCode, billingPeriod and notifyCustomer are only accepted on an upgrade_organization request"}
 		}
 		return out, nil
 	}
-	if req.Tier == nil {
-		return req, &apierror.ValidationError{Msg: "tier is required for an upgrade_organization request"}
+	if subscriptionID == nil {
+		return req, &apierror.ValidationError{Msg: "subscriptionId is required for an upgrade_organization request"}
 	}
-	if !validWSO2CloudTier[*req.Tier] {
-		return req, apierror.InvalidValue("tier", string(*req.Tier), "WSO2 Cloud tier", wso2CloudTierNames())
+	if planCode == nil {
+		return req, &apierror.ValidationError{Msg: "planCode is required for an upgrade_organization request"}
 	}
-	if req.PreviousTier != nil && !validWSO2CloudTier[*req.PreviousTier] {
-		return req, apierror.InvalidValue("previousTier", string(*req.PreviousTier), "WSO2 Cloud tier", wso2CloudTierNames())
+	for _, f := range []struct {
+		name  string
+		value *string
+		max   int
+	}{
+		{"product", product, maxWSO2CloudProductLength},
+		{"subscriptionId", subscriptionID, maxWSO2CloudSubscriptionIDLen},
+		{"planCode", planCode, maxWSO2CloudPlanCodeLength},
+		{"previousPlanCode", previousPlanCode, maxWSO2CloudPlanCodeLength},
+	} {
+		if f.value != nil && utf8.RuneCountInString(*f.value) > f.max {
+			return req, &apierror.ValidationError{Msg: fmt.Sprintf("%s must be at most %d characters", f.name, f.max)}
+		}
 	}
-	limits, err := jsonObjectOrNil("limits", req.Limits)
-	if err != nil {
-		return req, err
+	if previousPlanCode != nil && *previousPlanCode == *planCode {
+		return req, &apierror.ValidationError{Msg: "planCode is the plan the subscription is already on"}
 	}
-	previousLimits, err := jsonObjectOrNil("previousLimits", req.PreviousLimits)
-	if err != nil {
-		return req, err
+	if req.BillingPeriod != nil && !validWSO2CloudBillingPeriod[*req.BillingPeriod] {
+		return req, apierror.InvalidValue("billingPeriod", string(*req.BillingPeriod), "billing period",
+			[]string{string(domain.WSO2CloudBillingMonthly), string(domain.WSO2CloudBillingAnnual)})
 	}
-	out.Tier, out.Limits, out.PreviousTier, out.PreviousLimits = req.Tier, limits, req.PreviousTier, previousLimits
+	out.Product, out.SubscriptionID, out.PlanCode, out.PreviousPlanCode = product, subscriptionID, planCode, previousPlanCode
+	out.BillingPeriod, out.NotifyCustomer = req.BillingPeriod, req.NotifyCustomer
 	return out, nil
-}
-
-// jsonObjectOrNil accepts a JSON object; absent or null is nil, anything else (an array, a string, a number) is a
-// ValidationError.
-func jsonObjectOrNil(field string, raw json.RawMessage) (json.RawMessage, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return nil, nil
-	}
-	var obj map[string]json.RawMessage
-	if trimmed[0] != '{' || json.Unmarshal(trimmed, &obj) != nil {
-		return nil, &apierror.ValidationError{Msg: field + " must be a JSON object"}
-	}
-	return json.RawMessage(trimmed), nil
 }
 
 func wso2CloudRequestTypeNames() []string {
@@ -307,8 +356,4 @@ func wso2CloudRequestTypeNames() []string {
 		string(domain.WSO2CloudRequestDisableUser), string(domain.WSO2CloudRequestEnableUser),
 		string(domain.WSO2CloudRequestDeleteUser),
 	}
-}
-
-func wso2CloudTierNames() []string {
-	return []string{string(domain.WSO2CloudTierFree), string(domain.WSO2CloudTierPayg), string(domain.WSO2CloudTierEnterprise)}
 }

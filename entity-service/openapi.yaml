@@ -13912,8 +13912,8 @@ paths:
       description: >
         Stores a pending request raised from the CSM portal's WSO2 Cloud tab. The requester
         is the caller, read from the x-user-id-token (required). A reason is required for
-        lock_user and disable_user; tier is required for upgrade_organization and refused
-        for every other type. 409 when a request of the same type for the same target is
+        lock_user and disable_user. subscriptionId and planCode are required for
+        upgrade_organization, and the upgrade fields are refused for every other type. 409 when a request of the same type for the same target is
         already pending. This only records the request: nothing changes in WSO2 Cloud.
         Internal callers only.
       operationId: createWSO2CloudRequest
@@ -14164,6 +14164,72 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         "403":
           description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /wso2-cloud-requests/{id}/billing-account:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+    post:
+      summary: Record the billing account created while approving an upgrade.
+      description: >
+        The CSM backend creates a wire billing account in WSO2 Cloud while approving an
+        upgrade_organization request and records it here before changing the plan, so an
+        approval retried after a failure reuses it. Only a pending upgrade takes one, and
+        only once: the same id again is accepted unchanged, a different one is a 409.
+        Needs a user token. Internal callers only.
+      operationId: setWSO2CloudRequestBillingAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetWSO2CloudBillingAccountRequest'
+      responses:
+        "200":
+          description: The request with its billing account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WSO2CloudRequest'
+        "400":
+          description: Invalid id or billing account id, or not an upgrade.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid token, or no user token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The request is no longer pending, or already has a different billing account.
           content:
             application/json:
               schema:
@@ -33913,12 +33979,12 @@ components:
       type: string
       enum: [pending, approved, rejected]
       description: A cancelled request is deleted, so there is no cancelled status.
-    WSO2CloudTier:
+    WSO2CloudBillingPeriod:
       type: string
-      enum: [free, payg, enterprise]
+      enum: [monthly, annual]
     WSO2CloudRequest:
       type: object
-      required: [id, number, type, targetId, targetLabel, reason, customerConsent, tier, limits, previousTier, previousLimits, status, requestedBy, requestedOn, resolvedBy, resolvedOn, remark]
+      required: [id, number, type, targetId, targetLabel, reason, customerConsent, product, subscriptionId, planCode, previousPlanCode, billingPeriod, notifyCustomer, billingAccountId, status, requestedBy, requestedOn, resolvedBy, resolvedOn, remark]
       properties:
         id:
           type: string
@@ -33942,25 +34008,33 @@ components:
           type: string
           nullable: true
           description: The subject of the customer's consent email, when one was given.
-        tier:
+        product:
+          type: string
+          nullable: true
+          description: The product whose subscription an upgrade moves; null for every other type.
+        subscriptionId:
+          type: string
+          nullable: true
+          description: The WSO2 Cloud subscription an upgrade moves to an Enterprise plan.
+        planCode:
+          type: string
+          nullable: true
+          description: The Enterprise plan an upgrade asks for (WSO2 Cloud's plan_code).
+        previousPlanCode:
+          type: string
+          nullable: true
+          description: The plan the subscription had when the upgrade was raised.
+        billingPeriod:
           allOf:
-            - $ref: '#/components/schemas/WSO2CloudTier'
+            - $ref: '#/components/schemas/WSO2CloudBillingPeriod'
           nullable: true
-          description: What an upgrade asks for; null for every other type.
-        limits:
-          type: object
+        notifyCustomer:
+          type: boolean
+          description: Whether WSO2 Cloud emails the customer about the plan change. False for every other type.
+        billingAccountId:
+          type: string
           nullable: true
-          additionalProperties: true
-          description: The limits an upgrade asks for, as the CSM portal sends them.
-        previousTier:
-          allOf:
-            - $ref: '#/components/schemas/WSO2CloudTier'
-          nullable: true
-          description: What the organization had when the upgrade was raised.
-        previousLimits:
-          type: object
-          nullable: true
-          additionalProperties: true
+          description: The wire billing account created in WSO2 Cloud while the upgrade was approved.
         status:
           $ref: '#/components/schemas/WSO2CloudRequestStatus'
         requestedBy:
@@ -33998,16 +34072,32 @@ components:
         customerConsent:
           type: string
           maxLength: 1000
-        tier:
-          $ref: '#/components/schemas/WSO2CloudTier'
-        limits:
-          type: object
-          additionalProperties: true
-        previousTier:
-          $ref: '#/components/schemas/WSO2CloudTier'
-        previousLimits:
-          type: object
-          additionalProperties: true
+        product:
+          type: string
+          maxLength: 100
+        subscriptionId:
+          type: string
+          maxLength: 255
+          description: Required for upgrade_organization.
+        planCode:
+          type: string
+          maxLength: 100
+          description: Required for upgrade_organization; not the subscription's current plan.
+        previousPlanCode:
+          type: string
+          maxLength: 100
+        billingPeriod:
+          $ref: '#/components/schemas/WSO2CloudBillingPeriod'
+        notifyCustomer:
+          type: boolean
+    SetWSO2CloudBillingAccountRequest:
+      type: object
+      additionalProperties: false
+      required: [billingAccountId]
+      properties:
+        billingAccountId:
+          type: string
+          maxLength: 255
     ResolveWSO2CloudRequestRequest:
       type: object
       additionalProperties: false

@@ -14,7 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// This is an integration test: it applies migration 0278 (with 0180's number series) in a private schema and runs
+// This is an integration test: it applies migration 0287 (with 0180's number series) in a private schema and runs
 // WSO2CloudRequestRepository against it. Skipped without a DSN:
 //
 //	WSO2_CLOUD_REQUEST_TEST_DSN=postgres://... go test ./internal/repository/ -run WSO2CloudRequest
@@ -23,7 +23,6 @@ package repository_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -66,7 +65,7 @@ func wso2CloudRequestTestPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 
-	// 0180's number_series table and next_series_number function, which 0278's number default needs.
+	// 0180's number_series table and next_series_number function, which 0287's number default needs.
 	numbering, err := os.ReadFile("../../migrations/0180_native_number_series.sql")
 	if err != nil {
 		t.Fatalf("read 0180: %v", err)
@@ -88,14 +87,14 @@ func wso2CloudRequestTestPool(t *testing.T) *pgxpool.Pool {
 			t.Fatalf("apply 0180 part %q: %v", part.from, err)
 		}
 	}
-	migration, err := os.ReadFile("../../migrations/0278_wso2_cloud_request.sql")
+	migration, err := os.ReadFile("../../migrations/0287_wso2_cloud_request.sql")
 	if err != nil {
-		t.Fatalf("read 0278: %v", err)
+		t.Fatalf("read 0287: %v", err)
 	}
 	// Twice: the migration must be safe to re-run.
 	for i := 0; i < 2; i++ {
 		if _, err := pool.Exec(ctx, string(migration)); err != nil {
-			t.Fatalf("apply 0278 (run %d): %v", i+1, err)
+			t.Fatalf("apply 0287 (run %d): %v", i+1, err)
 		}
 	}
 	return pool
@@ -106,30 +105,37 @@ func TestWSO2CloudRequestIntegration_Lifecycle(t *testing.T) {
 	repo := repository.NewWSO2CloudRequestRepository(pool)
 	ctx := context.Background()
 
-	enterprise, free := domain.WSO2CloudTierEnterprise, domain.WSO2CloudTierFree
-	upgrade, err := repo.Create(ctx, "engineer@wso2.com", domain.CreateWSO2CloudRequestRequest{
+	product, sub, plan, prevPlan := "identity", "sub-1", "enterprise-identity", "payg-identity"
+	annual := domain.WSO2CloudBillingAnnual
+	upgradeReq := domain.CreateWSO2CloudRequestRequest{
 		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "org-1", TargetLabel: "acme",
-		Tier: &enterprise, Limits: json.RawMessage(`{"monthlyActiveUsers": 50000}`),
-		PreviousTier: &free, PreviousLimits: json.RawMessage(`{"monthlyActiveUsers": 1000}`),
-	})
+		Product: &product, SubscriptionID: &sub, PlanCode: &plan,
+	}
+	full := upgradeReq
+	full.PreviousPlanCode, full.BillingPeriod, full.NotifyCustomer = &prevPlan, &annual, true
+	upgrade, err := repo.Create(ctx, "engineer@wso2.com", full)
 	if err != nil {
 		t.Fatalf("create upgrade: %v", err)
 	}
 	if upgrade.Number != "WCR0000001" || upgrade.Status != domain.WSO2CloudRequestPending || upgrade.RequestedBy != "engineer@wso2.com" {
 		t.Fatalf("created %+v", upgrade)
 	}
-	if upgrade.Tier == nil || *upgrade.Tier != enterprise || upgrade.PreviousTier == nil || *upgrade.PreviousTier != free {
-		t.Fatalf("tiers %v / %v", upgrade.Tier, upgrade.PreviousTier)
+	if *upgrade.Product != product || *upgrade.SubscriptionID != sub || *upgrade.PlanCode != plan || *upgrade.PreviousPlanCode != prevPlan ||
+		*upgrade.BillingPeriod != annual || !upgrade.NotifyCustomer || upgrade.BillingAccountID != nil {
+		t.Fatalf("upgrade fields %+v", upgrade)
 	}
-	var limits map[string]int
-	if err := json.Unmarshal(upgrade.Limits, &limits); err != nil || limits["monthlyActiveUsers"] != 50000 {
-		t.Fatalf("limits %s: %v", upgrade.Limits, err)
+
+	// The billing account is set once: a second write (same or different id) changes nothing.
+	withAccount, err := repo.SetBillingAccount(ctx, upgrade.ID, "ba-1")
+	if err != nil || withAccount == nil || *withAccount.BillingAccountID != "ba-1" {
+		t.Fatalf("set billing account: %v / %v", withAccount, err)
+	}
+	if again, err := repo.SetBillingAccount(ctx, upgrade.ID, "ba-2"); err != nil || again != nil {
+		t.Fatalf("second billing account write: %v / %v", again, err)
 	}
 
 	// One pending request per type and target.
-	_, err = repo.Create(ctx, "other@wso2.com", domain.CreateWSO2CloudRequestRequest{
-		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "org-1", TargetLabel: "acme", Tier: &enterprise,
-	})
+	_, err = repo.Create(ctx, "other@wso2.com", upgradeReq)
 	var conflict *apierror.ConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("second pending upgrade: got %v, want ConflictError", err)
@@ -142,15 +148,24 @@ func TestWSO2CloudRequestIntegration_Lifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create lock: %v", err)
 	}
-	if lock.Number <= upgrade.Number || lock.Tier != nil || lock.Limits != nil {
+	if lock.Number <= upgrade.Number || lock.PlanCode != nil || lock.SubscriptionID != nil {
 		t.Fatalf("lock %+v", lock)
 	}
+	// A billing account belongs to an upgrade only.
+	if got, err := repo.SetBillingAccount(ctx, lock.ID, "ba-3"); err != nil || got != nil {
+		t.Fatalf("billing account on a lock: %v / %v", got, err)
+	}
 
-	// The database refuses a tier on a non-upgrade, even if the service were bypassed.
+	// The database refuses a plan on a non-upgrade, and an upgrade without one, even if the service were bypassed.
 	if _, err := repo.Create(ctx, "engineer@wso2.com", domain.CreateWSO2CloudRequestRequest{
-		Type: domain.WSO2CloudRequestDeleteUser, TargetID: "scim-2", TargetLabel: "x@acme.com", Tier: &free,
+		Type: domain.WSO2CloudRequestDeleteUser, TargetID: "scim-2", TargetLabel: "x@acme.com", PlanCode: &plan, SubscriptionID: &sub,
 	}); err == nil {
-		t.Fatalf("a delete_user request with a tier was stored")
+		t.Fatalf("a delete_user request with a plan was stored")
+	}
+	if _, err := repo.Create(ctx, "engineer@wso2.com", domain.CreateWSO2CloudRequestRequest{
+		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "org-9", TargetLabel: "beta", SubscriptionID: &sub,
+	}); err == nil {
+		t.Fatalf("an upgrade without a plan was stored")
 	}
 
 	// Resolve once; a second resolve finds nothing pending.
@@ -168,10 +183,12 @@ func TestWSO2CloudRequestIntegration_Lifecycle(t *testing.T) {
 		t.Fatalf("second resolve: %v / %v", again, err)
 	}
 
+	if got, err := repo.SetBillingAccount(ctx, upgrade.ID, "ba-1"); err != nil || got != nil {
+		t.Fatalf("billing account on a resolved request: %v / %v", got, err)
+	}
+
 	// Once resolved, the same target can be asked about again.
-	if _, err := repo.Create(ctx, "engineer@wso2.com", domain.CreateWSO2CloudRequestRequest{
-		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "org-1", TargetLabel: "acme", Tier: &enterprise,
-	}); err != nil {
+	if _, err := repo.Create(ctx, "engineer@wso2.com", upgradeReq); err != nil {
 		t.Fatalf("new upgrade after the first was resolved: %v", err)
 	}
 
