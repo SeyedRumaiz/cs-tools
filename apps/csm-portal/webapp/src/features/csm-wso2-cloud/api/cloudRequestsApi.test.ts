@@ -22,7 +22,9 @@ import {
   createCloudRequest,
   describeCloudRequest,
   getCloudRequest,
+  listCloudPlans,
   listCloudRequests,
+  listCloudSubscriptions,
   resolveCloudRequest,
   toCloudRequest,
 } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
@@ -38,10 +40,13 @@ function be(overrides: Partial<BeCloudRequest> = {}): BeCloudRequest {
     targetLabel: "jane@example.com",
     reason: "Suspicious sign-ins.",
     customerConsent: null,
-    tier: null,
-    limits: null,
-    previousTier: null,
-    previousLimits: null,
+    product: null,
+    subscriptionId: null,
+    planCode: null,
+    previousPlanCode: null,
+    billingPeriod: null,
+    notifyCustomer: false,
+    billingAccountId: null,
     status: "pending",
     requestedBy: "engineer@example.com",
     requestedOn: "2026-11-09T10:00:00Z",
@@ -67,25 +72,47 @@ describe("toCloudRequest", () => {
       reason: "Suspicious sign-ins.",
       status: "pending",
     });
-    expect(r.tier).toBeUndefined();
+    expect(r.upgrade).toBeUndefined();
     expect(r.resolvedBy).toBeUndefined();
   });
 
-  it("maps an upgrade with its tiers and limits", () => {
-    const limits = { monthlyActiveUsers: 5, serviceProviders: 1, identityProviders: 1, subOrganizations: 0, supportLevel: "standard" as const };
+  it("maps an upgrade with its subscription and plans", () => {
     const r = toCloudRequest(
-      be({ type: "upgrade_organization", targetId: "org-1", targetLabel: "acme", reason: null, tier: "enterprise", previousTier: "free", limits }),
+      be({
+        type: "upgrade_organization",
+        targetId: "org-1",
+        targetLabel: "acme",
+        reason: null,
+        product: "identity",
+        subscriptionId: "sub-1",
+        planCode: "identity-enterprise",
+        previousPlanCode: "identity-payg",
+        billingPeriod: "annual",
+        notifyCustomer: true,
+        billingAccountId: "ba-1",
+      }),
     );
     expect(r.target.kind).toBe("organization");
-    expect(r.summary).toBe("Free → Enterprise");
-    expect(r.limits).toEqual(limits);
+    expect(r.summary).toBe("Upgrade identity to identity-enterprise");
+    expect(r.upgrade).toEqual({
+      product: "identity",
+      subscriptionId: "sub-1",
+      planCode: "identity-enterprise",
+      previousPlanCode: "identity-payg",
+      billingPeriod: "annual",
+      notifyCustomer: true,
+      billingAccountId: "ba-1",
+    });
   });
 });
 
 describe("describeCloudRequest", () => {
   it("names the change", () => {
-    expect(describeCloudRequest("upgrade_organization", "acme", "payg", "payg")).toBe("Limits change on Pay as you go");
-    expect(describeCloudRequest("upgrade_organization", "acme", "enterprise")).toBe("Upgrade to Enterprise");
+    expect(describeCloudRequest("upgrade_organization", "acme", "identity-enterprise", "identity")).toBe(
+      "Upgrade identity to identity-enterprise",
+    );
+    expect(describeCloudRequest("upgrade_organization", "acme", "identity-enterprise")).toBe("Upgrade acme to identity-enterprise");
+    expect(describeCloudRequest("upgrade_organization", "acme")).toBe("Upgrade acme");
     expect(describeCloudRequest("delete_organization", "acme")).toBe("Delete acme");
     expect(describeCloudRequest("unlock_user", "jane@example.com")).toBe("Unlock user jane@example.com");
   });
@@ -135,6 +162,39 @@ describe("the single-request calls", () => {
     });
   });
 
+  it("raises an upgrade with its plan, leaving out what is not set", async () => {
+    const post = vi.fn().mockResolvedValue(be({ type: "upgrade_organization" }));
+    await createCloudRequest(api({ post }), {
+      type: "upgrade_organization",
+      target: { kind: "organization", id: "org-1", label: "acme" },
+      upgrade: { product: "identity", subscriptionId: "sub-1", planCode: "identity-enterprise", notifyCustomer: false },
+    });
+    expect(post).toHaveBeenCalledWith("/wso2-cloud-requests", {
+      type: "upgrade_organization",
+      targetId: "org-1",
+      targetLabel: "acme",
+      product: "identity",
+      subscriptionId: "sub-1",
+      planCode: "identity-enterprise",
+    });
+    await createCloudRequest(api({ post }), {
+      type: "upgrade_organization",
+      target: { kind: "organization", id: "org-1", label: "acme" },
+      upgrade: {
+        product: "identity",
+        subscriptionId: "sub-1",
+        planCode: "identity-enterprise",
+        previousPlanCode: "identity-payg",
+        billingPeriod: "monthly",
+        notifyCustomer: true,
+      },
+    });
+    expect(post).toHaveBeenLastCalledWith(
+      "/wso2-cloud-requests",
+      expect.objectContaining({ previousPlanCode: "identity-payg", billingPeriod: "monthly", notifyCustomer: true }),
+    );
+  });
+
   it("resolves, sending a remark only when there is one", async () => {
     const post = vi.fn().mockResolvedValue(be({ status: "approved" }));
     await resolveCloudRequest(api({ post }), ID, "approved");
@@ -147,5 +207,23 @@ describe("the single-request calls", () => {
     const del = vi.fn().mockResolvedValue(undefined);
     await cancelCloudRequest(api({ delete: del }), ID);
     expect(del).toHaveBeenCalledWith(`/wso2-cloud-requests/${ID}`);
+  });
+});
+
+describe("the upgrade form's reads", () => {
+  it("lists an organisation's subscriptions, empty when there are none", async () => {
+    const subs = [{ id: "sub-1", product: "identity", planCode: "identity-payg", status: "active" }];
+    const get = vi.fn().mockResolvedValueOnce({ subscriptions: subs }).mockResolvedValueOnce({ subscriptions: null });
+    expect(await listCloudSubscriptions(api({ get }), "org 1")).toEqual(subs);
+    expect(get).toHaveBeenCalledWith("/wso2-cloud/organizations/org%201/subscriptions");
+    expect(await listCloudSubscriptions(api({ get }), "org-1")).toEqual([]);
+  });
+
+  it("lists the configured plans", async () => {
+    const plans = { identity: [{ code: "identity-enterprise", label: "Enterprise" }] };
+    const get = vi.fn().mockResolvedValueOnce({ plans }).mockResolvedValueOnce(null);
+    expect(await listCloudPlans(api({ get }))).toEqual(plans);
+    expect(get).toHaveBeenCalledWith("/wso2-cloud/plans");
+    expect(await listCloudPlans(api({ get }))).toEqual({});
   });
 });

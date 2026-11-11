@@ -20,7 +20,8 @@
  * words: one pending request per type and target, a reason to lock or
  * disable, a remark to reject, nobody approves their own request, only the
  * requester or an admin cancels, and an approval WSO2 Cloud cannot apply
- * leaves the request pending.
+ * leaves the request pending. It also serves the two reads the upgrade form
+ * needs (an organisation's subscriptions, the configured Enterprise plans).
  *
  * Use it by mocking the client:
  *
@@ -31,6 +32,7 @@
  */
 import type { BackendApi } from "@api/backend/client";
 import type { BeCloudRequest } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
+import type { CloudPlansByProduct, CloudSubscription } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
 /** A refusal, shaped like `BackendApiError` where the pages read it. */
 export class FakeBackendError extends Error {
@@ -56,10 +58,13 @@ function seeded(): BeCloudRequest[] {
   const empty = {
     reason: null,
     customerConsent: null,
-    tier: null,
-    limits: null,
-    previousTier: null,
-    previousLimits: null,
+    product: null,
+    subscriptionId: null,
+    planCode: null,
+    previousPlanCode: null,
+    billingPeriod: null,
+    notifyCustomer: false,
+    billingAccountId: null,
     resolvedBy: null,
     resolvedOn: null,
     remark: null,
@@ -72,10 +77,12 @@ function seeded(): BeCloudRequest[] {
       type: "upgrade_organization",
       targetId: "org-initech",
       targetLabel: "initech",
-      tier: "enterprise",
-      limits: { monthlyActiveUsers: 50000, serviceProviders: 50, identityProviders: 10, subOrganizations: 20, supportLevel: "premium" },
-      previousTier: "free",
-      previousLimits: { monthlyActiveUsers: 1000, serviceProviders: 5, identityProviders: 2, subOrganizations: 0, supportLevel: "community" },
+      product: "identity",
+      subscriptionId: "sub-initech-identity",
+      planCode: "identity-enterprise",
+      previousPlanCode: "identity-free",
+      billingPeriod: "annual",
+      notifyCustomer: true,
       status: "pending",
       requestedBy: "sam.taylor@example.com",
       requestedOn: "2026-10-27T09:00:00Z",
@@ -101,8 +108,11 @@ function seeded(): BeCloudRequest[] {
       type: "upgrade_organization",
       targetId: "org-globex",
       targetLabel: "globex",
-      tier: "enterprise",
-      previousTier: "payg",
+      product: "identity",
+      subscriptionId: "sub-globex-identity",
+      planCode: "identity-enterprise",
+      previousPlanCode: "identity-payg",
+      billingAccountId: "ba-globex",
       status: "approved",
       requestedBy: "sam.taylor@example.com",
       requestedOn: "2026-09-01T10:00:00Z",
@@ -112,6 +122,22 @@ function seeded(): BeCloudRequest[] {
   ];
 }
 
+function defaultSubscriptions(): CloudSubscription[] {
+  return [
+    { id: "sub-identity", product: "identity", planCode: "identity-payg", status: "active" },
+    { id: "sub-integration", product: "integration", planCode: "integration-free", status: "suspended" },
+  ];
+}
+
+function defaultPlans(): CloudPlansByProduct {
+  return {
+    identity: [
+      { code: "identity-enterprise", label: "Enterprise" },
+      { code: "identity-payg", label: "Pay as you go" },
+    ],
+  };
+}
+
 class FakeCloudBackend {
   requests: BeCloudRequest[] = seeded();
   /** The signed-in user, as the token says. */
@@ -119,6 +145,9 @@ class FakeCloudBackend {
   isAdmin = false;
   /** When set, an approval cannot be applied in WSO2 Cloud and fails with this message. */
   applyError: string | null = null;
+  /** Every organisation's subscriptions; null answers 503 (WSO2 Cloud not connected). */
+  subscriptions: CloudSubscription[] | null = defaultSubscriptions();
+  plans: CloudPlansByProduct = defaultPlans();
   private seq = 3;
 
   reset(): void {
@@ -126,6 +155,8 @@ class FakeCloudBackend {
     this.me = "engineer@example.com";
     this.isAdmin = false;
     this.applyError = null;
+    this.subscriptions = defaultSubscriptions();
+    this.plans = defaultPlans();
     this.seq = 3;
   }
 
@@ -134,6 +165,9 @@ class FakeCloudBackend {
     if (REASON_REQUIRED.has(body.type) && !body.reason?.trim()) {
       throw new FakeBackendError(400, "reason is required to lock or disable a user");
     }
+    if (body.type === "upgrade_organization" && body.planCode && !(this.plans[body.product ?? ""] ?? []).some((p) => p.code === body.planCode)) {
+      throw new FakeBackendError(400, "planCode is not one of the Enterprise plans configured for this product.");
+    }
     if (this.requests.some((r) => r.status === "pending" && r.type === body.type && r.targetId === body.targetId)) {
       throw new FakeBackendError(409, `a ${body.type.replaceAll("_", " ")} request for this target is already pending`);
     }
@@ -141,10 +175,13 @@ class FakeCloudBackend {
     const created: BeCloudRequest = {
       reason: null,
       customerConsent: null,
-      tier: null,
-      limits: null,
-      previousTier: null,
-      previousLimits: null,
+      product: null,
+      subscriptionId: null,
+      planCode: null,
+      previousPlanCode: null,
+      billingPeriod: null,
+      notifyCustomer: false,
+      billingAccountId: null,
       ...body,
       id: `00000000-0000-4000-8000-${String(this.seq).padStart(12, "0")}`,
       number: `WCR${String(this.seq).padStart(7, "0")}`,
@@ -199,6 +236,13 @@ class FakeCloudBackend {
 
   readonly api = {
     get: async <T>(path: string): Promise<T | null> => {
+      if (path === "/wso2-cloud/plans") return { plans: this.plans } as T;
+      if (/^\/wso2-cloud\/organizations\/[^/]+\/subscriptions$/.test(path)) {
+        if (this.subscriptions === null) {
+          throw new FakeBackendError(503, "WSO2 Cloud is not connected yet, so the organization's subscriptions cannot be loaded.");
+        }
+        return { subscriptions: this.subscriptions } as T;
+      }
       const id = path.slice(BASE.length + 1);
       return (this.requests.find((r) => r.id === id) ?? null) as T | null;
     },

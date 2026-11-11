@@ -71,20 +71,29 @@ describe("CloudRequestDetailPage", () => {
     access.isAdmin = false;
   });
 
-  it("shows an upgrade's tier and limits before and after", async () => {
+  it("shows the subscription an upgrade moves and its plan before and after", async () => {
     renderPage(SEEDED.pendingUpgrade);
 
     expect(await screen.findByRole("heading", { name: "WCR0000003" })).toBeInTheDocument();
     expect(screen.getByText("What changes when approved")).toBeInTheDocument();
 
-    const tier = rowFor("Tier");
-    expect(within(tier).getByText("Free")).toBeInTheDocument();
-    expect(within(tier).getByText("Enterprise")).toBeInTheDocument();
-    expect(within(tier).getByText("changed")).toBeInTheDocument();
+    expect(within(rowFor("Subscription")).getByText("sub-initech-identity")).toBeInTheDocument();
+    const plan = rowFor("Plan");
+    expect(within(plan).getByText("identity-free")).toBeInTheDocument();
+    expect(within(plan).getByText("identity-enterprise")).toBeInTheDocument();
+    expect(within(plan).getByText("changed")).toBeInTheDocument();
+    expect(within(rowFor("Billing")).getByText("Wire transfer, annual")).toBeInTheDocument();
+    expect(within(rowFor("Notify the customer")).getByText("Yes")).toBeInTheDocument();
+    // The account is created by the approval.
+    expect(within(rowFor("Billing account")).getByText("Created when approved")).toBeInTheDocument();
+  });
 
-    const mau = rowFor("Monthly active users");
-    expect(within(mau).getByText("1,000")).toBeInTheDocument();
-    expect(within(mau).getByText("50,000")).toBeInTheDocument();
+  it("shows the billing account an approved upgrade created", async () => {
+    renderPage(SEEDED.approvedUpgrade);
+
+    expect(await screen.findByRole("heading", { name: "WCR0000001" })).toBeInTheDocument();
+    expect(within(rowFor("Billing account")).getByText("ba-globex")).toBeInTheDocument();
+    expect(within(rowFor("Billing")).getByText("Wire transfer")).toBeInTheDocument();
   });
 
   it("shows who rejected a request and why, with nothing left to decide", async () => {

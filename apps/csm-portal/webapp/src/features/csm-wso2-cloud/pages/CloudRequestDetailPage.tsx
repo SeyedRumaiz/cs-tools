@@ -44,15 +44,12 @@ import {
   RequestStatusChip,
   SampleDataNotice,
   SectionCard,
-  TierChip,
 } from "@features/csm-wso2-cloud/components/Wso2CloudCommon";
 import { formatDateTime } from "@features/csm-wso2-cloud/utils/format";
 import { WSO2_CLOUD_BASE } from "@features/csm-wso2-cloud/config/wso2CloudNavItems";
 import {
-  CLOUD_LIMIT_LABELS,
+  CLOUD_BILLING_PERIOD_LABELS,
   CLOUD_REQUEST_TYPE_LABELS,
-  CLOUD_SUPPORT_LEVEL_LABELS,
-  type CloudOrganizationLimits,
   type CloudRequest,
   type CloudRequestType,
 } from "@features/csm-wso2-cloud/types/wso2Cloud";
@@ -213,7 +210,7 @@ export default function CloudRequestDetailPage(): JSX.Element {
 
       <SectionCard title={pending ? "What changes when approved" : "What it changed"}>
         {request.type === "upgrade_organization" ? (
-          <UpgradeComparison request={request} />
+          <UpgradeDetails request={request} />
         ) : (
           <Typography variant="body2">{REQUEST_EFFECTS[request.type]}</Typography>
         )}
@@ -229,23 +226,32 @@ export default function CloudRequestDetailPage(): JSX.Element {
   );
 }
 
-function formatLimit(
-  limits: CloudOrganizationLimits | undefined,
-  key: keyof CloudOrganizationLimits,
-): string {
-  if (!limits) return "—";
-  return key === "supportLevel"
-    ? CLOUD_SUPPORT_LEVEL_LABELS[limits.supportLevel]
-    : limits[key].toLocaleString();
-}
-
 /**
- * The tier and limits before and after, one row each; the rows that change are
- * marked. "Before" is what the organisation had when the request was raised.
+ * What an upgrade asks WSO2 Cloud for: the subscription it moves, the plan
+ * before and after, and how it is billed. "Before" is the plan the
+ * subscription had when the request was raised. The billing account is
+ * created by the approval, so it shows only once there is one.
  */
-function UpgradeComparison({ request }: { request: CloudRequest }): JSX.Element {
-  const keys = Object.keys(CLOUD_LIMIT_LABELS) as (keyof CloudOrganizationLimits)[];
-  const tierChanged = request.previousTier !== request.tier;
+function UpgradeDetails({ request }: { request: CloudRequest }): JSX.Element {
+  const upgrade = request.upgrade;
+  if (!upgrade) {
+    return <Typography variant="body2">This upgrade names no subscription or plan.</Typography>;
+  }
+  const planChanged = upgrade.previousPlanCode !== upgrade.planCode;
+  const rows: { label: string; before?: string; value: string; changed?: boolean }[] = [
+    { label: "Product", value: upgrade.product ?? "—" },
+    { label: "Subscription", value: upgrade.subscriptionId },
+    { label: "Plan", before: upgrade.previousPlanCode ?? "—", value: upgrade.planCode, changed: planChanged },
+    {
+      label: "Billing",
+      value: `Wire transfer${upgrade.billingPeriod ? `, ${CLOUD_BILLING_PERIOD_LABELS[upgrade.billingPeriod].toLowerCase()}` : ""}`,
+    },
+    { label: "Notify the customer", value: upgrade.notifyCustomer ? "Yes" : "No" },
+    {
+      label: "Billing account",
+      value: upgrade.billingAccountId ?? (request.status === "pending" ? "Created when approved" : "—"),
+    },
+  ];
 
   return (
     <Box sx={{ border: 1, borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
@@ -259,49 +265,20 @@ function UpgradeComparison({ request }: { request: CloudRequest }): JSX.Element 
             </TableRow>
           </TableHead>
           <TableBody>
-            <TableRow>
-              <TableCell>Tier</TableCell>
-              <TableCell>
-                {request.previousTier ? <TierChip tier={request.previousTier} /> : "—"}
-              </TableCell>
-              <TableCell>
-                {request.tier ? <TierChip tier={request.tier} /> : "—"}
-                {tierChanged && (
-                  <Typography
-                    component="span"
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ ml: 1 }}
-                  >
-                    changed
-                  </Typography>
-                )}
-              </TableCell>
-            </TableRow>
-            {keys.map((key) => {
-              const before = formatLimit(request.previousLimits, key);
-              const after = formatLimit(request.limits, key);
-              const changed = before !== after;
-              return (
-                <TableRow key={key}>
-                  <TableCell>{CLOUD_LIMIT_LABELS[key]}</TableCell>
-                  <TableCell>{before}</TableCell>
-                  <TableCell sx={{ fontWeight: changed ? 600 : undefined }}>
-                    {after}
-                    {changed && (
-                      <Typography
-                        component="span"
-                        variant="caption"
-                        color="text.secondary"
-                        sx={{ ml: 1 }}
-                      >
-                        changed
-                      </Typography>
-                    )}
-                  </TableCell>
-                </TableRow>
-              );
-            })}
+            {rows.map((row) => (
+              <TableRow key={row.label}>
+                <TableCell>{row.label}</TableCell>
+                <TableCell>{row.before ?? ""}</TableCell>
+                <TableCell sx={{ fontWeight: row.changed ? 600 : undefined, overflowWrap: "anywhere" }}>
+                  {row.value}
+                  {row.changed && (
+                    <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                      changed
+                    </Typography>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
           </TableBody>
         </Table>
       </TableContainer>

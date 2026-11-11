@@ -133,7 +133,7 @@ export interface CloudRequest {
   number: string;
   type: CloudRequestType;
   target: CloudRequestTarget;
-  /** One line saying what changes, e.g. "Free → Enterprise" (derived, not stored). */
+  /** One line saying what changes, e.g. "Upgrade identity to identity-enterprise" (derived, not stored). */
   summary: string;
   /**
    * Why the requester raised it. Lock and disable ask for one, as in the Ops
@@ -142,15 +142,12 @@ export interface CloudRequest {
   reason?: string;
   /** The subject of the customer's consent email, when one was given (deletions). */
   customerConsent?: string;
-  /** Present on an upgrade request: the limits asked for. */
-  limits?: CloudOrganizationLimits;
-  tier?: CloudTier;
   /**
-   * Present on an upgrade request: the tier and limits when it was raised, so
-   * an approver sees the change rather than only its result.
+   * Present on an upgrade request. An upgrade moves one subscription (one
+   * product of the organisation) to an Enterprise plan billed by wire transfer,
+   * through WSO2 Cloud's billing admin API.
    */
-  previousTier?: CloudTier;
-  previousLimits?: CloudOrganizationLimits;
+  upgrade?: CloudUpgrade;
   requestedBy: string;
   requestedOn: string;
   status: CloudRequestStatus;
@@ -165,8 +162,50 @@ export interface NewCloudRequest {
   target: CloudRequestTarget;
   reason?: string;
   customerConsent?: string;
-  limits?: CloudOrganizationLimits;
-  tier?: CloudTier;
-  previousTier?: CloudTier;
-  previousLimits?: CloudOrganizationLimits;
+  upgrade?: NewCloudUpgrade;
 }
+
+export type CloudBillingPeriod = "monthly" | "annual";
+
+export const CLOUD_BILLING_PERIOD_LABELS: Record<CloudBillingPeriod, string> = {
+  monthly: "Monthly",
+  annual: "Annual",
+};
+
+/** What an upgrade asks for, as it is raised. */
+export interface NewCloudUpgrade {
+  product: string;
+  subscriptionId: string;
+  planCode: string;
+  /** The plan the subscription had when the upgrade was raised. */
+  previousPlanCode?: string;
+  billingPeriod?: CloudBillingPeriod;
+  /** Whether WSO2 Cloud emails the customer about the plan change. */
+  notifyCustomer: boolean;
+}
+
+/** An upgrade as stored. */
+export interface CloudUpgrade extends Omit<NewCloudUpgrade, "product"> {
+  product?: string;
+  /** The wire billing account created in WSO2 Cloud while the upgrade was approved. */
+  billingAccountId?: string;
+}
+
+/** One product subscription of an organisation in WSO2 Cloud. */
+export interface CloudSubscription {
+  id: string;
+  product: string;
+  planCode: string;
+  /** WSO2 Cloud's own status, e.g. active, trial, suspended, cancelled. */
+  status: string;
+  trialEnd?: string;
+}
+
+/** An Enterprise plan an upgrade can ask for. */
+export interface CloudPlan {
+  code: string;
+  label: string;
+}
+
+/** The configured Enterprise plans, per product. */
+export type CloudPlansByProduct = Record<string, CloudPlan[]>;

@@ -28,12 +28,12 @@
 import type { BackendApi } from "@api/backend/client";
 import {
   CLOUD_REQUEST_TYPE_LABELS,
-  CLOUD_TIER_LABELS,
-  type CloudOrganizationLimits,
+  type CloudBillingPeriod,
+  type CloudPlansByProduct,
   type CloudRequest,
   type CloudRequestStatus,
   type CloudRequestType,
-  type CloudTier,
+  type CloudSubscription,
   type NewCloudRequest,
 } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
@@ -56,10 +56,14 @@ export interface BeCloudRequest {
   targetLabel: string;
   reason: string | null;
   customerConsent: string | null;
-  tier: CloudTier | null;
-  limits: CloudOrganizationLimits | null;
-  previousTier: CloudTier | null;
-  previousLimits: CloudOrganizationLimits | null;
+  /** The upgrade fields: null (notifyCustomer false) for every other type. */
+  product: string | null;
+  subscriptionId: string | null;
+  planCode: string | null;
+  previousPlanCode: string | null;
+  billingPeriod: CloudBillingPeriod | null;
+  notifyCustomer: boolean;
+  billingAccountId: string | null;
   status: CloudRequestStatus;
   requestedBy: string;
   requestedOn: string;
@@ -84,24 +88,24 @@ interface BeCreateCloudRequestBody {
   targetLabel: string;
   reason?: string;
   customerConsent?: string;
-  tier?: CloudTier;
-  limits?: CloudOrganizationLimits;
-  previousTier?: CloudTier;
-  previousLimits?: CloudOrganizationLimits;
+  product?: string;
+  subscriptionId?: string;
+  planCode?: string;
+  previousPlanCode?: string;
+  billingPeriod?: CloudBillingPeriod;
+  notifyCustomer?: boolean;
 }
 
-/** One line saying what a request changes, e.g. "Free → Enterprise". */
+/** One line saying what a request changes, e.g. "Upgrade identity to identity-enterprise". */
 export function describeCloudRequest(
   type: CloudRequestType,
   label: string,
-  tier?: CloudTier,
-  previousTier?: CloudTier,
+  planCode?: string,
+  product?: string,
 ): string {
   if (type === "upgrade_organization") {
-    if (!tier) return `Upgrade ${label}`;
-    if (!previousTier) return `Upgrade to ${CLOUD_TIER_LABELS[tier]}`;
-    if (previousTier === tier) return `Limits change on ${CLOUD_TIER_LABELS[tier]}`;
-    return `${CLOUD_TIER_LABELS[previousTier]} → ${CLOUD_TIER_LABELS[tier]}`;
+    if (!planCode) return `Upgrade ${label}`;
+    return `Upgrade ${product ?? label} to ${planCode}`;
   }
   if (type === "delete_organization") return `Delete ${label}`;
   return `${CLOUD_REQUEST_TYPE_LABELS[type]} ${label}`;
@@ -111,8 +115,18 @@ const isUserRequest = (type: CloudRequestType) => type.endsWith("_user");
 
 /** Maps the backend's record onto the frontend's own shape. */
 export function toCloudRequest(be: BeCloudRequest): CloudRequest {
-  const tier = be.tier ?? undefined;
-  const previousTier = be.previousTier ?? undefined;
+  const upgrade =
+    be.type === "upgrade_organization" && be.subscriptionId && be.planCode
+      ? {
+          product: be.product ?? undefined,
+          subscriptionId: be.subscriptionId,
+          planCode: be.planCode,
+          previousPlanCode: be.previousPlanCode ?? undefined,
+          billingPeriod: be.billingPeriod ?? undefined,
+          notifyCustomer: be.notifyCustomer,
+          billingAccountId: be.billingAccountId ?? undefined,
+        }
+      : undefined;
   return {
     id: be.id,
     number: be.number,
@@ -122,13 +136,10 @@ export function toCloudRequest(be: BeCloudRequest): CloudRequest {
       id: be.targetId,
       label: be.targetLabel,
     },
-    summary: describeCloudRequest(be.type, be.targetLabel, tier, previousTier),
+    summary: describeCloudRequest(be.type, be.targetLabel, upgrade?.planCode, upgrade?.product),
     reason: be.reason ?? undefined,
     customerConsent: be.customerConsent ?? undefined,
-    tier,
-    limits: be.limits ?? undefined,
-    previousTier,
-    previousLimits: be.previousLimits ?? undefined,
+    upgrade,
     requestedBy: be.requestedBy,
     requestedOn: be.requestedOn,
     status: be.status,
@@ -170,10 +181,15 @@ export async function createCloudRequest(api: BackendApi, input: NewCloudRequest
   if (reason) body.reason = reason;
   const consent = input.customerConsent?.trim();
   if (consent) body.customerConsent = consent;
-  if (input.tier) body.tier = input.tier;
-  if (input.limits) body.limits = input.limits;
-  if (input.previousTier) body.previousTier = input.previousTier;
-  if (input.previousLimits) body.previousLimits = input.previousLimits;
+  const upgrade = input.upgrade;
+  if (upgrade) {
+    body.product = upgrade.product;
+    body.subscriptionId = upgrade.subscriptionId;
+    body.planCode = upgrade.planCode;
+    if (upgrade.previousPlanCode) body.previousPlanCode = upgrade.previousPlanCode;
+    if (upgrade.billingPeriod) body.billingPeriod = upgrade.billingPeriod;
+    if (upgrade.notifyCustomer) body.notifyCustomer = true;
+  }
   const be = await api.post<BeCreateCloudRequestBody, BeCloudRequest>(BASE, body);
   return toCloudRequest(be);
 }
@@ -200,4 +216,21 @@ export async function resolveCloudRequest(
 /** Withdraws a pending request (its requester, or an admin). */
 export async function cancelCloudRequest(api: BackendApi, id: string): Promise<void> {
   await api.delete(`${BASE}/${encodeURIComponent(id)}`);
+}
+
+/**
+ * An organisation's product subscriptions in WSO2 Cloud, so an upgrade can name
+ * the one it moves. The backend answers 503 when WSO2 Cloud is not connected.
+ */
+export async function listCloudSubscriptions(api: BackendApi, organizationId: string): Promise<CloudSubscription[]> {
+  const res = await api.get<{ subscriptions: CloudSubscription[] | null }>(
+    `/wso2-cloud/organizations/${encodeURIComponent(organizationId)}/subscriptions`,
+  );
+  return res?.subscriptions ?? [];
+}
+
+/** The Enterprise plans an upgrade can ask for, per product (configured on the backend). */
+export async function listCloudPlans(api: BackendApi): Promise<CloudPlansByProduct> {
+  const res = await api.get<{ plans: CloudPlansByProduct | null }>("/wso2-cloud/plans");
+  return res?.plans ?? {};
 }

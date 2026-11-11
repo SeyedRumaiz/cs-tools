@@ -18,6 +18,8 @@ import {
   Alert,
   Box,
   Button,
+  Checkbox,
+  FormControlLabel,
   MenuItem,
   Skeleton,
   TextField,
@@ -27,6 +29,8 @@ import { useState, type JSX } from "react";
 import { useLocation, useParams } from "react-router";
 import { useNavTransition } from "@hooks/useNavTransition";
 import { useGetCloudOrganization } from "@features/csm-wso2-cloud/api/useGetCloudOrganization";
+import { useGetCloudPlans } from "@features/csm-wso2-cloud/api/useGetCloudPlans";
+import { useGetCloudSubscriptions } from "@features/csm-wso2-cloud/api/useGetCloudSubscriptions";
 import { usePostCloudRequest } from "@features/csm-wso2-cloud/api/usePostCloudRequest";
 import {
   BackButton,
@@ -35,28 +39,24 @@ import {
   TierChip,
 } from "@features/csm-wso2-cloud/components/Wso2CloudCommon";
 import { WSO2_CLOUD_BASE } from "@features/csm-wso2-cloud/config/wso2CloudNavItems";
+import { subscriptionBlockedReason } from "@features/csm-wso2-cloud/utils/subscriptions";
 import {
-  CLOUD_LIMIT_LABELS,
-  CLOUD_SUPPORT_LEVEL_LABELS,
-  CLOUD_TIER_LABELS,
+  CLOUD_BILLING_PERIOD_LABELS,
+  type CloudBillingPeriod,
   type CloudOrganization,
-  type CloudOrganizationLimits,
-  type CloudSupportLevel,
-  type CloudTier,
 } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
-type NumericLimit = Exclude<keyof CloudOrganizationLimits, "supportLevel">;
-
-const NUMERIC_LIMITS: { key: NumericLimit; help: string }[] = [
-  { key: "monthlyActiveUsers", help: "Users who sign in at least once a month." },
-  { key: "serviceProviders", help: "Applications registered." },
-  { key: "identityProviders", help: "External IdPs connected." },
-  { key: "subOrganizations", help: "Child organizations allowed." },
-];
+/** The status read by a backend error, or undefined for any other error. */
+function errorStatus(error: unknown): number | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" ? status : undefined;
+}
 
 /**
- * Upgrade one organisation's tier and limits. Submitting raises a request for
- * approval; the organisation keeps its current subscription until then.
+ * Upgrade one of an organisation's subscriptions to an Enterprise plan billed
+ * by wire transfer. Submitting raises a request for approval; nothing changes
+ * in WSO2 Cloud until it is approved, when the backend creates the billing
+ * account and changes the plan.
  *
  * The Salesforce step (checking for a valid subscription and linking the
  * organisation to the right account) belongs at the bottom of this form. It is
@@ -90,7 +90,7 @@ export default function CloudOrganizationUpgradePage(): JSX.Element {
     );
   }
 
-  // Keyed on the organisation so the form starts from its current values.
+  // Keyed on the organisation so the form starts empty for each one.
   return <UpgradeForm key={org.id} org={org} back={back} backPath={backPath} />;
 }
 
@@ -105,27 +105,43 @@ function UpgradeForm({
 }): JSX.Element {
   const navigate = useNavTransition();
   const post = usePostCloudRequest();
-  const [tier, setTier] = useState<CloudTier>("enterprise");
-  const [limits, setLimits] = useState<CloudOrganizationLimits>(org.limits);
+  const subscriptions = useGetCloudSubscriptions(org.id);
+  const plans = useGetCloudPlans();
+  const [subscriptionId, setSubscriptionId] = useState("");
+  const [planCode, setPlanCode] = useState("");
+  const [billingPeriod, setBillingPeriod] = useState<CloudBillingPeriod | "">("");
+  const [notifyCustomer, setNotifyCustomer] = useState(false);
+  const [reason, setReason] = useState("");
 
-  const invalid = NUMERIC_LIMITS.some(
-    ({ key }) => !Number.isInteger(limits[key]) || limits[key] < 0,
-  );
-  const unchanged =
-    tier === org.tier &&
-    (Object.keys(limits) as (keyof CloudOrganizationLimits)[]).every(
-      (k) => limits[k] === org.limits[k],
-    );
+  const notConnected = errorStatus(subscriptions.error) === 503;
+  const subs = subscriptions.data ?? [];
+  const subscription = subs.find((s) => s.id === subscriptionId);
+  // The plans of the chosen subscription's product, without the one it is already on.
+  const productPlans = subscription
+    ? (plans.data?.[subscription.product] ?? []).filter((p) => p.code !== subscription.planCode)
+    : [];
+  const canSubmit = !!subscription && !subscriptionBlockedReason(subscription) && !!planCode && !post.isPending;
+
+  const chooseSubscription = (id: string) => {
+    setSubscriptionId(id);
+    setPlanCode("");
+  };
 
   const handleSubmit = () => {
+    if (!subscription) return;
     post.mutate(
       {
         type: "upgrade_organization",
         target: { kind: "organization", id: org.id, label: org.handle },
-        tier,
-        limits,
-        previousTier: org.tier,
-        previousLimits: org.limits,
+        reason,
+        upgrade: {
+          product: subscription.product,
+          subscriptionId: subscription.id,
+          planCode,
+          previousPlanCode: subscription.planCode || undefined,
+          billingPeriod: billingPeriod || undefined,
+          notifyCustomer,
+        },
       },
       { onSuccess: () => navigate(`${WSO2_CLOUD_BASE}/requests?tab=mine`) },
     );
@@ -147,58 +163,97 @@ function UpgradeForm({
       </Box>
 
       <SectionCard title="Subscription">
-        <TextField
-          select
-          size="small"
-          label="New tier"
-          value={tier}
-          onChange={(e) => setTier(e.target.value as CloudTier)}
-          sx={{ maxWidth: 320 }}
-        >
-          {(Object.keys(CLOUD_TIER_LABELS) as CloudTier[]).map((t) => (
-            <MenuItem key={t} value={t}>
-              {CLOUD_TIER_LABELS[t]}
-              {t === org.tier ? " (current)" : ""}
-            </MenuItem>
-          ))}
-        </TextField>
-
-        <Box
-          sx={{
-            display: "grid",
-            gap: 2,
-            gridTemplateColumns: { xs: "1fr", sm: "repeat(2, minmax(0, 1fr))" },
-          }}
-        >
-          {NUMERIC_LIMITS.map(({ key, help }) => (
+        <Typography variant="body2" color="text.secondary">
+          Moves one product subscription to an Enterprise plan billed by wire transfer. Nothing changes in
+          WSO2 Cloud until another person approves the request.
+        </Typography>
+        {subscriptions.isLoading ? (
+          <Skeleton variant="rounded" height={40} sx={{ maxWidth: 480 }} />
+        ) : notConnected ? (
+          <Alert severity="info" variant="outlined">
+            WSO2 Cloud is not connected yet, so this organization's subscriptions cannot be loaded and no
+            upgrade can be raised.
+          </Alert>
+        ) : subscriptions.isError ? (
+          <Alert severity="error">Could not load this organization's subscriptions. Try again later.</Alert>
+        ) : subs.length === 0 ? (
+          <Alert severity="info" variant="outlined">
+            This organization has no subscriptions to upgrade.
+          </Alert>
+        ) : (
+          <>
             <TextField
-              key={key}
+              select
+              required
               size="small"
-              type="number"
-              label={CLOUD_LIMIT_LABELS[key]}
-              value={Number.isNaN(limits[key]) ? "" : limits[key]}
-              onChange={(e) => setLimits({ ...limits, [key]: parseInt(e.target.value, 10) })}
-              helperText={`${help} Current: ${org.limits[key].toLocaleString()}`}
-              slotProps={{ htmlInput: { min: 0, step: 1 } }}
+              label="Subscription"
+              value={subscriptionId}
+              onChange={(e) => chooseSubscription(e.target.value)}
+              helperText={subscription ? (subscriptionBlockedReason(subscription) ?? " ") : " "}
+              error={!!subscription && !!subscriptionBlockedReason(subscription)}
+              sx={{ maxWidth: 480 }}
+            >
+              {subs.map((s) => (
+                <MenuItem key={s.id} value={s.id}>
+                  {s.product}: {s.planCode || "no plan"} ({s.status})
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              select
+              required
+              size="small"
+              label="Enterprise plan"
+              value={planCode}
+              onChange={(e) => setPlanCode(e.target.value)}
+              disabled={!subscription || productPlans.length === 0}
+              helperText={
+                subscription && !plans.isLoading && productPlans.length === 0
+                  ? `No Enterprise plans are configured for ${subscription.product}.`
+                  : " "
+              }
+              sx={{ maxWidth: 480 }}
+            >
+              {productPlans.map((p) => (
+                <MenuItem key={p.code} value={p.code}>
+                  {p.label === p.code ? p.code : `${p.label} (${p.code})`}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              select
+              size="small"
+              label="Billing period"
+              value={billingPeriod}
+              onChange={(e) => setBillingPeriod(e.target.value as CloudBillingPeriod | "")}
+              helperText="Leave as is to use the plan's own period."
+              sx={{ maxWidth: 320 }}
+            >
+              <MenuItem value="">Plan default</MenuItem>
+              {(Object.keys(CLOUD_BILLING_PERIOD_LABELS) as CloudBillingPeriod[]).map((p) => (
+                <MenuItem key={p} value={p}>
+                  {CLOUD_BILLING_PERIOD_LABELS[p]}
+                </MenuItem>
+              ))}
+            </TextField>
+            <FormControlLabel
+              control={
+                <Checkbox checked={notifyCustomer} onChange={(e) => setNotifyCustomer(e.target.checked)} />
+              }
+              label="Email the customer about the plan change"
             />
-          ))}
-          <TextField
-            select
-            size="small"
-            label={CLOUD_LIMIT_LABELS.supportLevel}
-            value={limits.supportLevel}
-            onChange={(e) =>
-              setLimits({ ...limits, supportLevel: e.target.value as CloudSupportLevel })
-            }
-            helperText={`Current: ${CLOUD_SUPPORT_LEVEL_LABELS[org.limits.supportLevel]}`}
-          >
-            {(Object.keys(CLOUD_SUPPORT_LEVEL_LABELS) as CloudSupportLevel[]).map((s) => (
-              <MenuItem key={s} value={s}>
-                {CLOUD_SUPPORT_LEVEL_LABELS[s]}
-              </MenuItem>
-            ))}
-          </TextField>
-        </Box>
+            <TextField
+              size="small"
+              label="Reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              multiline
+              minRows={2}
+              helperText="Sent to WSO2 Cloud as the plan change's notes, with this request's number."
+              slotProps={{ htmlInput: { maxLength: 2000 } }}
+            />
+          </>
+        )}
       </SectionCard>
 
       <SectionCard title="Salesforce">
@@ -214,11 +269,7 @@ function UpgradeForm({
         <Button onClick={() => navigate(backPath)} disabled={post.isPending}>
           Cancel
         </Button>
-        <Button
-          variant="contained"
-          onClick={handleSubmit}
-          disabled={unchanged || invalid || post.isPending}
-        >
+        <Button variant="contained" onClick={handleSubmit} disabled={!canSubmit}>
           Submit for approval
         </Button>
       </Box>
