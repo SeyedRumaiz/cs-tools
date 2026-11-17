@@ -107,23 +107,37 @@ import {
   $isHeadingNode,
   $isQuoteNode,
 } from "@lexical/rich-text";
-import { $createParagraphNode } from "lexical";
+import { $createParagraphNode, type LexicalCommand } from "lexical";
+import {
+  $caretOnRootIntoBlock,
+  $splitSelectedLinesIntoParagraphs,
+} from "@components/rich-text-editor/splitLineBreakLines";
 
 export type ToolbarVariant = "full" | "describeIssue";
 
 const Toolbar = ({
   onAttachmentClick,
+  attachDisabledReason,
   disabled = false,
   variant = "full",
   showKeyboardHint = false,
   enterToSubmit = false,
+  enterInsertsLineBreak = false,
   imageUploader,
 }: {
   onAttachmentClick?: () => void;
+  /** Why attaching is off (the form is full): the button is disabled and says so. */
+  attachDisabledReason?: string;
   disabled?: boolean;
   variant?: ToolbarVariant;
   showKeyboardHint?: boolean;
   enterToSubmit?: boolean;
+  /**
+   * Enter inserts a `<br>` (see Editor): a list or heading conversion first
+   * splits the selected `<br>`-separated lines into paragraphs, so each line
+   * becomes its own item/heading.
+   */
+  enterInsertsLineBreak?: boolean;
   /** Stores a picked image instead of embedding it as base64; see {@link ImageUploadHandler}. */
   imageUploader?: ImageUploadHandler;
 }) => {
@@ -253,9 +267,29 @@ const Toolbar = ({
     editor.dispatchCommand(FORMAT_TEXT_COMMAND, format);
   };
 
+  /**
+   * Indent / Outdent / alignment. In the reply box (`enterInsertsLineBreak`) they apply
+   * to the selected lines only, like a list or heading conversion: the selected
+   * `<br>`-separated lines become paragraphs of their own first (blank lines kept), in
+   * the same update so undo is one step. Elsewhere the command runs as it always did.
+   */
+  const dispatchPerLine = <P,>(command: LexicalCommand<P>, payload: P) => {
+    editor.update(() => {
+      // A caret on the root (a click into an empty editor) has no block to indent/align.
+      $caretOnRootIntoBlock();
+      if (!enterInsertsLineBreak) {
+        editor.dispatchCommand(command, payload);
+        return;
+      }
+      const selection = $getSelection();
+      if ($isRangeSelection(selection)) $splitSelectedLinesIntoParagraphs(selection);
+      editor.dispatchCommand(command, payload);
+    });
+  };
+
   const onFormatAlign = (format: ElementFormatType) => {
     focusEditor();
-    editor.dispatchCommand(FORMAT_ELEMENT_COMMAND, format);
+    dispatchPerLine(FORMAT_ELEMENT_COMMAND, format);
   };
 
   const imageInputRef = useRef<HTMLInputElement | null>(null);
@@ -307,9 +341,32 @@ const Toolbar = ({
     }
   };
 
+  /**
+   * See `enterInsertsLineBreak`: one list item per selected line, not one holding
+   * `<br>`s, and the selected blank lines are dropped rather than made empty
+   * items. Split and conversion share one update, so undo is a single step.
+   */
+  const insertListFromLines = (command: LexicalCommand<void>) => {
+    if (!enterInsertsLineBreak) {
+      editor.dispatchCommand(command, undefined);
+      return;
+    }
+    editor.update(() => {
+      // Chrome leaves a click into an empty editor as a caret on the root: put it in a
+      // paragraph first so the split and the list command both see a usable selection.
+      $caretOnRootIntoBlock();
+      const selection = $getSelection();
+      if ($isRangeSelection(selection)) {
+        $splitSelectedLinesIntoParagraphs(selection, { dropBlankLines: true });
+      }
+      editor.dispatchCommand(command, undefined);
+    });
+  };
+
   const onFormatCode = () => {
     focusEditor();
     editor.update(() => {
+      $caretOnRootIntoBlock();
       const selection = $getSelection();
       if ($isRangeSelection(selection)) {
         if (isCode) {
@@ -321,38 +378,42 @@ const Toolbar = ({
     });
   };
 
+  /**
+   * `$setBlocksType` replaces the selected blocks and leaves a fresh selection; the
+   * object read before it points at removed nodes (`$patchStyleText` then throws "no
+   * common ancestor" over 2+ blocks and the whole update is dropped), so re-read it.
+   */
+  const $patchConverted = (style: Record<string, string | null>) => {
+    const converted = $getSelection();
+    if ($isRangeSelection(converted)) $patchStyleText(converted, style);
+  };
+
   const onBlockChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     focusEditor();
     const blockType = e.target.value;
     setBlockVariant(blockType);
     editor.update(() => {
+      // A truly empty editor has its caret on the root; convert a paragraph, not the root.
+      $caretOnRootIntoBlock();
       const selection = $getSelection();
-      if ($isRangeSelection(selection)) {
-        if (blockType.startsWith("h")) {
-          const level = parseInt(blockType.substring(1)) as
-            | 1
-            | 2
-            | 3
-            | 4
-            | 5
-            | 6;
-          $setBlocksType(selection, () =>
-            $createHeadingNode(
-              `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6",
-            ),
-          );
-          $patchStyleText(selection, { "font-size": null });
-        } else if (blockType === "quote") {
-          $setBlocksType(selection, () => $createQuoteNode());
-          $patchStyleText(selection, { "font-size": null });
-        } else {
-          $setBlocksType(selection, () => $createParagraphNode());
-          const typo = theme.typography[
-            blockType as keyof typeof theme.typography
-          ] as { fontSize?: string | number };
-          const fontSize = typo?.fontSize ?? theme.typography.body1.fontSize;
-          $patchStyleText(selection, { "font-size": String(fontSize) });
-        }
+      if (!$isRangeSelection(selection)) return;
+      if (blockType.startsWith("h")) {
+        if (enterInsertsLineBreak) $splitSelectedLinesIntoParagraphs(selection);
+        const level = parseInt(blockType.substring(1));
+        $setBlocksType(selection, () =>
+          $createHeadingNode(`h${level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6"),
+        );
+        $patchConverted({ "font-size": null });
+      } else if (blockType === "quote") {
+        $setBlocksType(selection, () => $createQuoteNode());
+        $patchConverted({ "font-size": null });
+      } else {
+        $setBlocksType(selection, () => $createParagraphNode());
+        const typo = theme.typography[blockType as keyof typeof theme.typography] as {
+          fontSize?: string | number;
+        };
+        const fontSize = typo?.fontSize ?? theme.typography.body1.fontSize;
+        $patchConverted({ "font-size": String(fontSize) });
       }
     });
   };
@@ -363,10 +424,12 @@ const Toolbar = ({
       editor.dispatchCommand(TOGGLE_LINK_COMMAND, null);
     } else {
       setLinkAnchorEl(event.currentTarget as HTMLButtonElement);
-      const selection = editor.getEditorState().read(() => $getSelection());
-      if ($isRangeSelection(selection)) {
-        setLinkText(selection.getTextContent());
-      }
+      // getTextContent needs an active editor state, so read inside the editor.
+      const selectedText = editor.getEditorState().read(() => {
+        const selection = $getSelection();
+        return $isRangeSelection(selection) ? selection.getTextContent() : null;
+      });
+      if (selectedText !== null) setLinkText(selectedText);
     }
   };
 
@@ -675,7 +738,7 @@ const Toolbar = ({
               value="indent"
               onClick={() => {
                 focusEditor();
-                editor.dispatchCommand(INDENT_CONTENT_COMMAND, undefined);
+                dispatchPerLine(INDENT_CONTENT_COMMAND, undefined);
               }}
             >
               <Indent size={16} />
@@ -688,7 +751,7 @@ const Toolbar = ({
               value="outdent"
               onClick={() => {
                 focusEditor();
-                editor.dispatchCommand(OUTDENT_CONTENT_COMMAND, undefined);
+                dispatchPerLine(OUTDENT_CONTENT_COMMAND, undefined);
               }}
             >
               <Outdent size={16} />
@@ -707,10 +770,7 @@ const Toolbar = ({
                 if (listType === "bullet") {
                   editor.dispatchCommand(REMOVE_LIST_COMMAND, undefined);
                 } else {
-                  editor.dispatchCommand(
-                    INSERT_UNORDERED_LIST_COMMAND,
-                    undefined,
-                  );
+                  insertListFromLines(INSERT_UNORDERED_LIST_COMMAND);
                 }
               }}
             >
@@ -728,10 +788,7 @@ const Toolbar = ({
                 if (listType === "number") {
                   editor.dispatchCommand(REMOVE_LIST_COMMAND, undefined);
                 } else {
-                  editor.dispatchCommand(
-                    INSERT_ORDERED_LIST_COMMAND,
-                    undefined,
-                  );
+                  insertListFromLines(INSERT_ORDERED_LIST_COMMAND);
                 }
               }}
             >
@@ -848,17 +905,21 @@ const Toolbar = ({
               )}
 
               {onAttachmentClick && (
-                <Tooltip title="Attach File">
-                  <ToggleButton
-                    size="small"
-                    value="attachment"
-                    onClick={() => {
-                      focusEditor();
-                      onAttachmentClick();
-                    }}
-                  >
-                    <Paperclip size={16} />
-                  </ToggleButton>
+                <Tooltip title={attachDisabledReason ?? "Attach File"}>
+                  <span>
+                    <ToggleButton
+                      size="small"
+                      value="attachment"
+                      disabled={!!attachDisabledReason}
+                      aria-label={attachDisabledReason ?? "Attach File"}
+                      onClick={() => {
+                        focusEditor();
+                        onAttachmentClick();
+                      }}
+                    >
+                      <Paperclip size={16} />
+                    </ToggleButton>
+                  </span>
                 </Tooltip>
               )}
             </>

@@ -31,6 +31,21 @@ func (h *PlgOrganizationHandler) SearchOrganizations(w http.ResponseWriter, r *h
 	writeOK(w, result)
 }
 
+// AggregateOrganizations serves POST /plg/organizations/aggregate: the
+// organisations the search's filters match, counted per owner.
+func (h *PlgOrganizationHandler) AggregateOrganizations(w http.ResponseWriter, r *http.Request) {
+	var req domain.AggregateOrganizationsRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	result, err := h.svc.Aggregate(r.Context(), req)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeOK(w, result)
+}
+
 // GetOrganization serves GET /plg/organizations/{organizationId}.
 func (h *PlgOrganizationHandler) GetOrganization(w http.ResponseWriter, r *http.Request) {
 	org, err := h.svc.Get(r.Context(), r.PathValue("organizationId"))
@@ -68,4 +83,18 @@ func (h *PlgOrganizationHandler) PatchOrganization(w http.ResponseWriter, r *htt
 		return
 	}
 	writeOK(w, org)
+}
+
+// Identities serves POST /plg/organizations/identities, for the reveal.
+func (h *PlgOrganizationHandler) Identities(w http.ResponseWriter, r *http.Request) {
+	var req domain.OrganizationIdentitiesRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	res, err := h.svc.Identities(r.Context(), req)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeOK(w, res)
 }

@@ -14,6 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+import type { CommentUploadProgress } from "@features/csm-cases/utils/commentUploadProgress";
 import {
   Box,
   Button,
@@ -46,7 +47,11 @@ import Editor from "@components/rich-text-editor/Editor";
 import { formatBytes } from "@utils/formatBytes";
 import { useBackendApi } from "@api/backend/client";
 import { imagePasteRefusalMessage, type ImagePasteRefusal } from "@components/rich-text-editor/inlineImageLimits";
-import { entityAttachmentMaxBytes } from "@config/attachmentLimitsConfig";
+import {
+  attachmentLimitMessage,
+  COMMENT_MAX_ATTACHMENTS,
+  entityAttachmentMaxBytes,
+} from "@config/attachmentLimitsConfig";
 import {
   dropFailedImages,
   hasBlobSource,
@@ -58,7 +63,7 @@ import {
   useInlineImageStatus,
 } from "@features/csm-cases/api/inlineImageUploads";
 import { PartialSendError } from "@features/csm-cases/utils/sendCommentWithAttachments";
-import { hasCommentContent } from "@features/csm-cases/utils/commentContent";
+import { hasCommentContent, trimTrailingLineBreaks } from "@features/csm-cases/utils/commentContent";
 import CsmUploadAttachmentModal from "@features/csm-cases/components/CsmUploadAttachmentModal";
 
 /** A file staged for upload, with the display name chosen in the modal. */
@@ -67,11 +72,24 @@ export interface CommentAttachmentDraft {
   name: string;
 }
 
+/**
+ * What a sender tells the composer while it sends, so the composer can empty
+ * itself once the comment is posted instead of holding its text and files until
+ * the last upload ends (the upload progress shows under it meanwhile).
+ */
+export interface CommentSendControls {
+  /** The comment is posted, or there is none: empty the editor now. */
+  commentSettled: () => void;
+  /** How many files are queued behind the one uploading. */
+  waiting: (waiting: number) => void;
+}
+
 interface CsmCaseCommentInputProps {
   onSubmit: (
     html: string,
     internal: boolean,
     attachments: CommentAttachmentDraft[],
+    controls: CommentSendControls,
   ) => Promise<unknown> | void;
   disabled?: boolean;
   /**
@@ -133,6 +151,11 @@ interface CsmCaseCommentInputProps {
   onDraftInternalChange?: (internal: boolean) => void;
   draftSourceMode?: boolean;
   onDraftSourceModeChange?: (sourceMode: boolean) => void;
+  /**
+   * The file being uploaded while the comment is sent (name and 0-100), shown as
+   * a bar under the editor; `null`/omitted when none is.
+   */
+  uploadProgress?: CommentUploadProgress | null;
 }
 
 /** Stable identity for an attached File, used to dedupe re-picked files. */
@@ -236,6 +259,7 @@ export default function CsmCaseCommentInput({
   onDraftInternalChange,
   draftSourceMode,
   onDraftSourceModeChange,
+  uploadProgress = null,
 }: CsmCaseCommentInputProps): JSX.Element {
   const [html, setHtml] = useDraftState(draftHtml, onDraftHtmlChange, "");
   const api = useBackendApi();
@@ -247,6 +271,8 @@ export default function CsmCaseCommentInput({
   const imageStatus = useInlineImageStatus(html);
   const uploadingImages = imageStatus.pending > 0;
   const [submitting, setSubmitting] = useState(false);
+  // Files of a sent comment still queued behind the one uploading now.
+  const [waitingUploads, setWaitingUploads] = useState(0);
   const [error, setError] = useState<string | null>(null);
   // The draft for which the failed-image notice was shown (see the send handler).
   const failedWarnedHtmlRef = useRef<string | null>(null);
@@ -271,9 +297,18 @@ export default function CsmCaseCommentInput({
   );
   const [attachModalOpen, setAttachModalOpen] = useState(false);
 
-  const onAttachmentClick = useCallback(() => setAttachModalOpen(true), []);
+  const onAttachmentClick = useCallback(() => {
+    // A reply takes one attachment: say so instead of opening a picker whose
+    // file would be refused.
+    if (attachments.length >= COMMENT_MAX_ATTACHMENTS) {
+      setError(attachmentLimitMessage(COMMENT_MAX_ATTACHMENTS));
+      return;
+    }
+    setAttachModalOpen(true);
+  }, [attachments.length]);
   const onSelectAttachment = useCallback((file: File, name: string) => {
     setAttachments((prev) => {
+      if (prev.length >= COMMENT_MAX_ATTACHMENTS) return prev;
       // Dedupe re-picked files by identity (the chosen name may still differ).
       if (prev.some((a) => fileSignature(a.file) === fileSignature(file))) {
         return prev;
@@ -345,10 +380,21 @@ export default function CsmCaseCommentInput({
     const tooLarge = incoming.find((f) => f.size > maxBytes);
     const accepted = incoming.filter((f) => f.size <= maxBytes);
 
-    if (accepted.length > 0) {
+    // A reply takes one attachment, so a drop adds only what there is room for
+    // (a file already attached is not a new one).
+    const fresh = accepted.filter(
+      (file, i) =>
+        !attachments.some((a) => fileSignature(a.file) === fileSignature(file)) &&
+        accepted.findIndex((f) => fileSignature(f) === fileSignature(file)) === i,
+    );
+    const room = Math.max(0, COMMENT_MAX_ATTACHMENTS - attachments.length);
+    const overLimit = fresh.length > room;
+    const taken = fresh.slice(0, room);
+    if (taken.length > 0) {
       setAttachments((prev) => {
         const next = [...prev];
-        for (const file of accepted) {
+        for (const file of taken) {
+          if (next.length >= COMMENT_MAX_ATTACHMENTS) break;
           // Same dedupe rule as the modal-driven path.
           if (next.some((a) => fileSignature(a.file) === fileSignature(file))) continue;
           next.push({ file, name: file.name });
@@ -361,9 +407,11 @@ export default function CsmCaseCommentInput({
         ? `"${tooLarge.name}" is too large. The maximum attachment size is ${formatBytes(
             maxBytes,
           )}.`
-        : null,
+        : overLimit
+          ? attachmentLimitMessage(COMMENT_MAX_ATTACHMENTS)
+          : null,
     );
-  }, [setAttachments]);
+  }, [attachments, setAttachments]);
 
   const onDrop = useCallback(
     (e: DragEvent) => {
@@ -472,15 +520,21 @@ export default function CsmCaseCommentInput({
       setError("An image in the comment could not be uploaded. Remove it and add it again.");
       return;
     }
-    const body = resolveInlineImageSources(sendHtml);
+    const body = resolveInlineImageSources(trimTrailingLineBreaks(sendHtml));
     if (hasBlobSource(body)) {
       setError("An image in the comment could not be uploaded. Remove it and add it again.");
       return;
     }
     setError(null);
     setSubmitting(true);
-    try {
-      await onSubmit(body, internal, attachments);
+    const sentAttachments = attachments;
+    let emptied = false;
+    // The one way the editor and its file list are emptied, once the comment is
+    // posted (called early by the sender, or here after a send that went through).
+    // Safe to call twice. A file that fails to upload is put back below.
+    const emptyEditor = () => {
+      if (emptied) return;
+      emptied = true;
       releaseInlineImages(html);
       failedWarnedHtmlRef.current = null;
       setHtml("");
@@ -488,21 +542,30 @@ export default function CsmCaseCommentInput({
       resetTriggerRef.current += 1;
       setResetTrigger(resetTriggerRef.current);
       setEditorMountKey((k) => k + 1);
+    };
+    try {
+      await onSubmit(body, internal, sentAttachments, {
+        commentSettled: emptyEditor,
+        waiting: setWaitingUploads,
+      });
+      // Everything went through. A sender that never said the comment was posted
+      // has not emptied the editor yet; emptyEditor does nothing the second time.
+      emptyEditor();
     } catch (e) {
       if (e instanceof PartialSendError) {
-        if (e.commentPosted) {
-          releaseInlineImages(html);
-          failedWarnedHtmlRef.current = null;
-          setHtml("");
-          resetTriggerRef.current += 1;
-          setResetTrigger(resetTriggerRef.current);
-          setEditorMountKey((k) => k + 1);
-        }
-        setAttachments((prev) => prev.filter((a) => !e.uploaded.includes(a)));
+        if (e.commentPosted) emptyEditor();
+        // The files that did not upload stay (or come back, when the editor was
+        // already emptied), so pressing Send again repeats only them.
+        const failed = sentAttachments.filter((a) => !e.uploaded.includes(a));
+        setAttachments((prev) => [
+          ...failed.filter((f) => !prev.includes(f)),
+          ...prev.filter((a) => !sentAttachments.includes(a) || failed.includes(a)),
+        ]);
       }
       setError(e instanceof Error ? e.message : "Failed to post comment.");
     } finally {
       setSubmitting(false);
+      setWaitingUploads(0);
     }
   }, [
     disabled,
@@ -729,8 +792,13 @@ export default function CsmCaseCommentInput({
           showKeyboardHint
           autoFocus={autoFocus}
           enterToSubmit={false}
+          enterInsertsLineBreak
+          markdownPaste
           onAttachmentClick={attachmentsDisabled ? undefined : onAttachmentClick}
           attachments={attachments.map((a) => a.file)}
+          maxAttachments={COMMENT_MAX_ATTACHMENTS}
+          uploads={uploadProgress ? [uploadProgress] : []}
+          uploadsWaiting={waitingUploads}
           onAttachmentRemove={onAttachmentRemove}
           onSubmitKeyDown={() => {
             void submit();

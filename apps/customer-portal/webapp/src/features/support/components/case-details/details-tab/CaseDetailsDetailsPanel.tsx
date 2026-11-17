@@ -237,7 +237,7 @@ export default function CaseDetailsDetailsPanel({
           </Box>
           {data?.internalId ? (
             <Box>
-              <Typography {...labelSx}>WSO2 Case ID</Typography>
+              <Typography {...labelSx}>Sequence ID</Typography>
               <Typography {...valueSx}>
                 {formatValue(data.internalId)}
               </Typography>
@@ -469,6 +469,8 @@ export default function CaseDetailsDetailsPanel({
                 color: "text.primary",
                 "& p": { mb: 0.5 },
                 "& p:last-child": { mb: 0 },
+                // Lexical wrapper <li> that only holds a sub-list: no marker (else an empty bullet).
+                "& li.editor-list-item-nested": { listStyleType: "none" },
                 "& code": {
                   display: "block",
                   p: 1,

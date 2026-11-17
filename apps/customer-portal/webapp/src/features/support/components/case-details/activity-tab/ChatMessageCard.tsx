@@ -252,6 +252,9 @@ export default function ChatMessageCard({
           "& li": {
             mb: 0.5,
           },
+          // Lexical exports a nested list as a wrapper <li class="editor-list-item-nested"> holding only the sub-list;
+          // its marker would be a stray empty bullet (CSM portal does the same).
+          "& li.editor-list-item-nested": { listStyleType: "none" },
           "& p": {
             margin: "0 0 0.25em 0",
             whiteSpace: "pre-wrap",
@@ -284,12 +287,18 @@ export default function ChatMessageCard({
             fontSize: "0.8125rem",
             verticalAlign: "top",
           },
+          // Same thumbnail size as the CSM portal; a click opens the full image.
+          // The editor exports each image with an inline `max-width: 100%`, which
+          // beats a stylesheet rule, so the cap has to be `!important`.
           "& img": {
             display: "block",
-            maxWidth: "100%",
-            maxHeight: 320,
+            maxWidth: "min(100%, 360px) !important",
+            maxHeight: 240,
+            width: "auto",
             height: "auto",
             objectFit: "contain",
+            borderRadius: 1,
+            cursor: "zoom-in",
             mt: 0.5,
             mb: 0.5,
           },

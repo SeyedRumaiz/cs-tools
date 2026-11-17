@@ -105,6 +105,12 @@ func (c *Client) Search(ctx context.Context, req domain.SearchOrganizationsReque
 	return out.Organizations, out.Total, nil
 }
 
+func (c *Client) Aggregate(ctx context.Context, req domain.AggregateOrganizationsRequest) (domain.AggregateResponse, error) {
+	var out domain.AggregateResponse
+	err := c.post(ctx, "/plg/organizations/aggregate", req, &out)
+	return out, err
+}
+
 func (c *Client) Get(ctx context.Context, id string) (*domain.OrganizationDetail, error) {
 	var out domain.OrganizationDetail
 	if err := c.get(ctx, "/plg/organizations/"+esc(id), &out); err != nil {
@@ -263,6 +269,18 @@ func (c *Client) SearchRegistrations(ctx context.Context, req domain.SearchRegis
 	return out.Registrations, out.Total, nil
 }
 
+func (c *Client) RegistrationVolumeTrend(ctx context.Context, req domain.RegistrationVolumeTrendRequest) (domain.VolumeTrendResponse, error) {
+	var out domain.VolumeTrendResponse
+	err := c.post(ctx, "/plg/registrations/volume-trend", req, &out)
+	return out, err
+}
+
+func (c *Client) AggregateRegistrations(ctx context.Context, req domain.AggregateRegistrationsRequest) (domain.AggregateResponse, error) {
+	var out domain.AggregateResponse
+	err := c.post(ctx, "/plg/registrations/aggregate", req, &out)
+	return out, err
+}
+
 func (c *Client) LocatePairing(ctx context.Context, orgPlatformID string) (string, string, error) {
 	var out domain.PairingLocation
 	if err := c.get(ctx, "/plg/pairings/"+esc(orgPlatformID)+"/location", &out); err != nil {
@@ -387,4 +405,14 @@ func (c *Client) WorkQueue(ctx context.Context, f domain.WorkQueueFilters) (*dom
 		return nil, err
 	}
 	return &out, nil
+}
+
+// Identities reads what is stored to identify each organisation; unknown ids are absent.
+func (c *Client) Identities(ctx context.Context, ids []string) ([]domain.OrganizationIdentity, error) {
+	var out domain.OrganizationIdentitiesResponse
+	if err := c.post(ctx, "/plg/organizations/identities",
+		domain.OrganizationIdentitiesRequest{OrganizationIDs: ids}, &out); err != nil {
+		return nil, err
+	}
+	return out.Identities, nil
 }

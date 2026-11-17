@@ -32,6 +32,7 @@ import {
   stripCodeWrapper,
   stripCustomerCommentAddedLabel,
   trimLeadingBr,
+  trimTrailingLineBreaks,
 } from "./commentContent";
 import type { CsmCaseComment } from "@features/csm-cases/types/csmCases";
 
@@ -169,6 +170,19 @@ describe("linkifyBareUrls", () => {
     const input = '<a href="https://example.com">https://example.com</a>';
     const out = linkifyBareUrls(input);
     expect(out).toContain('href="https://example.com"');
+  });
+
+  it("never rewrites a URL inside a tag attribute, e.g. an <img> pasted from a web page", () => {
+    const input =
+      '<p><img src="https://png.pngtree.com/a.png" alt="Emoji | Pngtree" style="max-width: 100%; display: block;"></p>';
+    expect(linkifyBareUrls(input)).toBe(input);
+  });
+
+  it("still links a bare URL that sits next to such an image", () => {
+    const out = linkifyBareUrls('<img src="https://a.test/x.png"> source: https://a.test/page');
+    expect(out).toContain('<img src="https://a.test/x.png">');
+    expect(out).toContain('<a href="https://a.test/page"');
+    expect((out.match(/<a /g) ?? []).length).toBe(1);
   });
 
   it("does not produce a nested anchor when the URL is already an anchor's visible text", () => {
@@ -413,5 +427,66 @@ describe("hasCommentContent", () => {
     expect(hasCommentContent("")).toBe(false);
     expect(hasCommentContent("<p>&nbsp;</p><br>")).toBe(false);
     expect(hasCommentContent("<p> </p>")).toBe(false);
+  });
+});
+
+describe("trimTrailingLineBreaks", () => {
+  it("edge cases: uppercase, empty trailing paragraph, table, only breaks", () => {
+    expect(trimTrailingLineBreaks("<p>a<BR/></p>")).toBe("<p>a</p>");
+    expect(trimTrailingLineBreaks("<p>a<br><br></p>")).toBe("<p>a</p>");
+    expect(trimTrailingLineBreaks("<p>a<br>b</p>")).toBe("<p>a<br>b</p>");
+    expect(trimTrailingLineBreaks("<table><tbody><tr><td><p>a<br></p></td></tr></tbody></table>")).toBe(
+      "<table><tbody><tr><td><p>a<br></p></td></tr></tbody></table>",
+    );
+    // A reply that is only breaks must stay "empty" for the send button.
+    expect(hasCommentContent(trimTrailingLineBreaks("<p><br><br></p>"))).toBe(false);
+  });
+
+  it("never empties a paragraph: a last paragraph of only breaks is left as it is", () => {
+    expect(trimTrailingLineBreaks("<p>a</p><p><br></p>")).toBe("<p>a</p><p><br></p>");
+    expect(trimTrailingLineBreaks("<p><br></p>")).toBe("<p><br></p>");
+    expect(trimTrailingLineBreaks("<p><br><br></p>")).toBe("<p><br><br></p>");
+  });
+
+  it("drops the <br>s at the end of the last paragraph", () => {
+    expect(trimTrailingLineBreaks("<p>Hi<br><br></p>")).toBe("<p>Hi</p>");
+    expect(trimTrailingLineBreaks("<p>Hi<br /> <br/></p>\n")).toBe("<p>Hi</p>\n");
+  });
+
+  it("keeps breaks inside the text and in earlier paragraphs", () => {
+    expect(trimTrailingLineBreaks("<p>a<br><br>b</p>")).toBe("<p>a<br><br>b</p>");
+    expect(trimTrailingLineBreaks("<p>a<br></p><p>b</p>")).toBe("<p>a<br></p><p>b</p>");
+  });
+
+  it("leaves other endings alone", () => {
+    expect(trimTrailingLineBreaks("<ul><li>a</li></ul>")).toBe("<ul><li>a</li></ul>");
+    expect(trimTrailingLineBreaks("plain<br>")).toBe("plain<br>");
+  });
+
+  it("keeps the exact semantics around spacing, case and attributes", () => {
+    expect(trimTrailingLineBreaks("<p>a <br> <BR /> <Br/> </P>\n ")).toBe("<p>a </P>\n ");
+    expect(trimTrailingLineBreaks("<p>a<br\n/><br  ></p>")).toBe("<p>a</p>");
+    expect(trimTrailingLineBreaks("<p>a<br / ></p>")).toBe("<p>a<br / ></p>");
+    expect(trimTrailingLineBreaks("<p>a<brx></p>")).toBe("<p>a<brx></p>");
+    expect(trimTrailingLineBreaks("<p>a<br></p >")).toBe("<p>a<br></p >");
+    expect(trimTrailingLineBreaks('<p class="x" style="a>b">a<br></p>')).toBe('<p class="x" style="a>b">a</p>');
+    expect(trimTrailingLineBreaks('<p class="x"><br> <br></p>')).toBe('<p class="x"><br> <br></p>');
+    expect(trimTrailingLineBreaks("<p\n><br></p>")).toBe("<p\n><br></p>");
+    expect(trimTrailingLineBreaks("<p>a</p>  <br></p>")).toBe("<p>a</p>  </p>");
+    expect(trimTrailingLineBreaks("<pre>a<br></p>")).toBe("<pre>a</p>");
+    expect(trimTrailingLineBreaks("<br></p>")).toBe("</p>");
+    expect(trimTrailingLineBreaks("")).toBe("");
+  });
+
+  it("is linear: tens of thousands of <br> are trimmed or left alone fast", () => {
+    const brs = "<br>".repeat(50_000);
+    let started = performance.now();
+    expect(trimTrailingLineBreaks(`<p>a${brs}`)).toBe(`<p>a${brs}`);
+    expect(performance.now() - started).toBeLessThan(100);
+    started = performance.now();
+    expect(trimTrailingLineBreaks(`<p>a${brs}</p>`)).toBe("<p>a</p>");
+    expect(trimTrailingLineBreaks(`<p>${brs}</p>`)).toBe(`<p>${brs}</p>`);
+    expect(trimTrailingLineBreaks(`${"<br >".repeat(50_000)} x`)).toBe(`${"<br >".repeat(50_000)} x`);
+    expect(performance.now() - started).toBeLessThan(300);
   });
 });

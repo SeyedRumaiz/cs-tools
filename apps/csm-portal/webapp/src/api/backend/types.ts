@@ -598,9 +598,10 @@ export interface BeServiceRequestCreatePayload {
 
 /**
  * Security report analysis (`type: "security_report_analysis"`). ServiceNow-only;
- * requires a subject and description. Files are not part of the create request:
- * the report is created first and its files are uploaded afterwards (see
- * `CreateSecurityReportPage.tsx`).
+ * requires a subject, a description and at least one report file. The file bytes
+ * are not part of the request: they are uploaded first as drafts of the project
+ * and named in `attachmentIds`, which the backend links to the report it creates
+ * and refuses the request without (see `CreateSecurityReportPage.tsx`).
  */
 export interface BeSecurityReportCreatePayload {
   type: "security_report_analysis";
@@ -609,6 +610,8 @@ export interface BeSecurityReportCreatePayload {
   deployedProductId: string;
   subject: string;
   description: string;
+  /** Files already uploaded as drafts of `projectId`; at least one is required. */
+  attachmentIds: string[];
 }
 
 /**
@@ -1084,7 +1087,13 @@ export type BeCaseFieldFilterField =
   /** `eq` `"true"`/`"false"`: the case's account has an active escalation.
    * Only the ServiceNow data source can answer it; a Postgres-backed
    * entity-service rejects the request, so the cases list never offers it. */
-  | "accountEscalationActive";
+  | "accountEscalationActive"
+  /** `in` case states: the case's logged state history has a change into one
+   * of them ("moved to Waiting on WSO2"), whatever its state is now. */
+  | "stateEntered"
+  /** `gte` / `lte` one date: when that change was logged. Only with a
+   * `stateEntered`. */
+  | "stateEnteredOn";
 
 /**
  * `op` enum accepted by {@link BeCaseFieldFilter}, independent of `field` —
@@ -1171,6 +1180,13 @@ export interface BeCaseSearchPayload {
    */
   skipTotal?: boolean;
   /**
+   * Response fields to leave out of each row. Only `"description"` is accepted
+   * (anything else is a 400); an excluded row carries `description: null`.
+   * For list callers that never render the body. Needs an entity service that
+   * declares the field; it rejects unknown request fields.
+   */
+  excludeFields?: "description"[];
+  /**
    * The mirror image of `skipTotal`: skip the page query entirely and return
    * `cases: []`, reading only `total`. For a count or pie/bar dashboard
    * widget, whose only use for a search is `total` -- the page it would
@@ -1197,7 +1213,8 @@ export interface BeCaseSearchView {
    * `GET /cases/{id}` CaseView (the earlier `title` naming inconsistency is gone).
    */
   subject?: string;
-  description?: string;
+  /** `null` when the request excluded it via `excludeFields`. */
+  description?: string | null;
   /** Free-form display string from the backend, e.g. "Low (P4)", "Critical (P1)". */
   severity?: string;
   issueType?: BeCaseIssueType;
@@ -1602,6 +1619,11 @@ export interface BeAttachment {
   createdOn: string;
   downloadUrl?: string | null;
   previewUrl?: string | null;
+  /** `"deleted"` on a deleted attachment, which only an admin's list carries
+   * (with {@link deletedOn} and {@link deletedBy}); `"complete"` otherwise. */
+  status?: string;
+  deletedOn?: string | null;
+  deletedBy?: BeUserReference | null;
 }
 
 /**
@@ -1612,6 +1634,8 @@ export interface BeAttachmentSearchPayload {
   referenceId: string;
   referenceType: BeReferenceType;
   pagination?: BePagination;
+  /** List the deleted attachments instead of the available ones (admin only). */
+  deletedOnly?: boolean;
 }
 
 export interface BeAttachmentSearchResponse extends BeSearchResponseBase {
@@ -4538,7 +4562,9 @@ export type BeWidgetResourceType =
   | "announcement"
   | "engagement"
   | "incident_task"
-  | "case_feedback";
+  | "case_feedback"
+  | "plg_organization"
+  | "plg_registration";
 
 /**
  * How a widget's resolved data should be rendered. `pie` and `bar` both
@@ -4663,13 +4689,25 @@ export interface BeDashboardGroupByConfig {
    * existing widget config is unaffected. Meaningless when `bucket` is set,
    * same as `maxGroups`/`othersLabel`. */
   hideOthers?: boolean;
+  /** What a `time_card` widget's slices show: `"count"` (the default, the
+   * number of cards) or `"hours"` (the time logged on them). Sent to
+   * `POST /time-cards/aggregate` as `"count"` / `"minutes"`, which also
+   * decides which buckets survive `maxGroups`. Backend-enforced to appear
+   * only on a field-grouped `time_card` widget; absent everywhere else. */
+  measure?: BeTimeCardMeasure;
 }
+
+/** `BeDashboardGroupByConfig.measure`'s values. */
+export type BeTimeCardMeasure = "count" | "hours";
 
 /** One bucket of a `POST /{resourceType}/aggregate` response. */
 export interface BeGroupByBucket {
   key: string;
   label: string;
   count: number;
+  /** Time logged on this bucket's cards, in minutes. Only
+   * `POST /time-cards/aggregate` sets it. */
+  totalMinutes?: number;
 }
 
 /** Response shape of `POST /{resourceType}/aggregate`. `othersCount` covers
@@ -4679,6 +4717,10 @@ export interface BeGroupByResponse {
   groups: BeGroupByBucket[];
   othersCount: number;
   totalRecords: number;
+  /** The minutes counterparts of `othersCount` / `totalRecords`. Only
+   * `POST /time-cards/aggregate` sets them. */
+  othersMinutes?: number;
+  totalMinutes?: number;
 }
 
 /**
@@ -4870,13 +4912,45 @@ export interface BeDashboardWidget {
    * endpoint caps this at 90 — a widget configured above that cap fails
    * dashboard-config validation at load time, not at render time. */
   days?: number;
+  /** Only meaningful for shape "line": which of the two lines to draw.
+   * Absent draws both, as every line widget did before this field. The
+   * backend refuses an empty list and an unknown or repeated value. */
+  series?: BeLineSeries[];
+  /** Only meaningful for shape "line": the first and last day (inclusive)
+   * of a fixed window instead of `days`'s trailing one, e.g. "2025-12-01"
+   * to "2025-12-31" for December 2025. Two plain `YYYY-MM-DD` dates or two
+   * relative date placeholders; the backend refuses one without the other,
+   * and either with `days`. */
+  startDate?: string;
+  endDate?: string;
+  /** Only meaningful for shape "line" with `startDate`/`endDate`: one point
+   * per day (the default), per week (Monday to Sunday) or per month. */
+  bucket?: BeLineBucket;
+  /** Only meaningful for shape "line": "bar" draws its points as bars (two
+   * side by side when both series are shown); "line" or absent draws lines,
+   * as every line widget did before this field. Same data and window either
+   * way. */
+  chart?: BeLineChart;
 }
 
-/** One day's point in a `shape: "line"` widget's resolved trend — see
+/** How a `shape: "line"` widget draws its points (`BeDashboardWidget.chart`). */
+export type BeLineChart = "line" | "bar";
+
+/** One of a `shape: "line"` widget's two lines (`BeDashboardWidget.series`). */
+export type BeLineSeries = "opened" | "closed";
+
+/** How a `shape: "line"` widget's fixed window groups its days
+ * (`BeDashboardWidget.bucket`). */
+export type BeLineBucket = "day" | "week" | "month";
+
+/** One point in a `shape: "line"` widget's resolved trend — see
  * {@link BeCaseVolumeTrendResponse}. */
 export interface BeCaseVolumeTrendPoint {
-  /** `YYYY-MM-DD`, UTC. */
+  /** `YYYY-MM-DD`, UTC; a week or month point's first day in the window. */
   date: string;
+  /** A week or month point's last day in the window (`YYYY-MM-DD`, UTC);
+   * absent for a day point. */
+  endDate?: string;
   count: number;
 }
 
@@ -4892,6 +4966,11 @@ export interface BeCaseVolumeTrendSeries {
  * (Opened, then Closed); every series carries the same set of dates. */
 export interface BeCaseVolumeTrendResponse {
   days: number;
+  /** A fixed window's resolved bounds and grouping; absent for the
+   * trailing window. */
+  startDate?: string;
+  endDate?: string;
+  bucket?: BeLineBucket;
   series: BeCaseVolumeTrendSeries[];
 }
 

@@ -107,22 +107,22 @@ func CanMoveStage(from, to LifecycleStage) bool {
 // HealthState is how a pairing is doing, wherever it has got to.
 //
 // The second axis, and the reason the stage list could shrink from nine to six.
-// Set by an engineer, never derived; defaults to HEALTHY. There is no third
-// "unknown" value, because an engineer who has not looked is not the same as a
-// customer in trouble and the work queue should not treat them alike.
+// Set by an engineer, never derived; NONE until an engineer marks it HEALTHY or
+// AT_RISK, and offers the same playbooks as HEALTHY.
 type HealthState string
 
-// The two health states.
+// The health states.
 const (
+	HealthNone    HealthState = "NONE"
 	HealthHealthy HealthState = "HEALTHY"
 	HealthAtRisk  HealthState = "AT_RISK"
 )
 
 // HealthStateOrder is the display order for filters and tiles.
-var HealthStateOrder = []HealthState{HealthHealthy, HealthAtRisk}
+var HealthStateOrder = []HealthState{HealthNone, HealthHealthy, HealthAtRisk}
 
 // ValidHealthState is the allow-list checked in the service layer.
-var ValidHealthState = map[HealthState]bool{HealthHealthy: true, HealthAtRisk: true}
+var ValidHealthState = map[HealthState]bool{HealthNone: true, HealthHealthy: true, HealthAtRisk: true}
 
 // PlaybookType is what a playbook is trying to do.
 type PlaybookType string
@@ -399,6 +399,28 @@ type OrganizationSearchFilters struct {
 	RegisteredFrom    *time.Time         `json:"registeredFrom"`
 	RegisteredTo      *time.Time         `json:"registeredTo"`
 	Unowned           *bool              `json:"unowned"`
+	// The filters below are newer than entity-service's first PLG search and
+	// are left out of the body when unset (omitempty), so a search that does
+	// not use them is the body an entity-service without them accepts (it
+	// refuses unknown fields).
+	//
+	// OwnerEmails matches the organisation's PLG CS owner by email address,
+	// any of them, ignoring case; a registration matches by its
+	// organisation's owner. entity-service checks it.
+	OwnerEmails []string `json:"ownerEmails,omitempty"`
+	// CountryNames matches the organisation's country, any of them, ignoring
+	// case; CountryUnknown true matches the organisations with no country.
+	// A registration matches by its organisation's country. entity-service
+	// checks both.
+	CountryNames   []string `json:"countryNames,omitempty"`
+	CountryUnknown *bool    `json:"countryUnknown,omitempty"`
+	// PlaybookTask names a playbook task by its code; PlaybookAnswers matches
+	// the registrations that answered it with any of these option codes,
+	// PlaybookUnanswered true the ones with no answer. An organisation
+	// matches when any of its registrations does. entity-service checks them.
+	PlaybookTask       string   `json:"playbookTask,omitempty"`
+	PlaybookAnswers    []string `json:"playbookAnswers,omitempty"`
+	PlaybookUnanswered *bool    `json:"playbookUnanswered,omitempty"`
 }
 
 // SearchOrganizationsRequest is the body of POST /organizations/search.
@@ -407,6 +429,49 @@ type SearchOrganizationsRequest struct {
 	Pagination Pagination                `json:"pagination"`
 	SortBy     string                    `json:"sortBy"`
 	SortOrder  string                    `json:"sortOrder"`
+}
+
+// AggregateOrganizationsRequest is the body of POST /organizations/aggregate:
+// the organisations the search's filters select, counted per GroupBy ("owner"
+// or "country"). MaxGroups keeps the largest groups and folds the rest into
+// OthersCount; 0 keeps them all. entity-service checks both.
+type AggregateOrganizationsRequest struct {
+	Filters   OrganizationSearchFilters `json:"filters"`
+	GroupBy   string                    `json:"groupBy"`
+	MaxGroups int                       `json:"maxGroups,omitempty"`
+}
+
+// AggregateGroup is one group of an AggregateResponse. For the owner grouping,
+// Key is the owner's user id (or "unowned") and Label the owner's name; for
+// the country grouping, Key and Label are the country (or "unknown",
+// labelled "Unknown"); for the playbook answer grouping, Key is the option
+// code and Label its label (or "unanswered", labelled "Not answered").
+type AggregateGroup struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	Count int    `json:"count"`
+}
+
+// AggregateRegistrationsRequest is the body of POST /registrations/aggregate:
+// the registrations the search's filters and UnacknowledgedOnly select,
+// counted per GroupBy ("country": the registration's organisation's country;
+// "playbookAnswer": its answer to Filters.PlaybookTask), with MaxGroups as an
+// organisation aggregate takes it. entity-service checks the grouping and its
+// limit.
+type AggregateRegistrationsRequest struct {
+	UnacknowledgedOnly bool                      `json:"unacknowledgedOnly"`
+	Filters            OrganizationSearchFilters `json:"filters"`
+	GroupBy            string                    `json:"groupBy"`
+	MaxGroups          int                       `json:"maxGroups,omitempty"`
+}
+
+// AggregateResponse answers POST /organizations/aggregate, in entity-service's
+// shared aggregate shape: the groups largest first, the folded rest, and every
+// record the filters selected.
+type AggregateResponse struct {
+	Groups       []AggregateGroup `json:"groups"`
+	OthersCount  int              `json:"othersCount"`
+	TotalRecords int              `json:"totalRecords"`
 }
 
 // PlatformStage is one registered platform with its own lifecycle stage — the
@@ -422,10 +487,14 @@ type PlatformStage struct {
 
 // OrganizationSummary is one row of the organisation list — the five columns the
 // requirement names, plus what the row needs to be clickable.
+//
+// OrganizationName and RegisteredEmail are nil for a cloud organisation, here
+// and on every read type.
 type OrganizationSummary struct {
 	ID               string          `json:"id"`
-	OrganizationName string          `json:"organizationName"`
-	RegisteredEmail  string          `json:"registeredEmail"`
+	OrganizationName *string         `json:"organizationName"`
+	MoesifCompanyID  *string         `json:"moesifCompanyId"`
+	RegisteredEmail  *string         `json:"registeredEmail"`
 	RegisteredName   *string         `json:"registeredName"`
 	RegisteredOn     time.Time       `json:"registeredOn"`
 	PlatformStages   []PlatformStage `json:"platformStages"`
@@ -464,18 +533,47 @@ type PlatformCard struct {
 // says when that happened, so the UI can mark them.
 type OrganizationDetail struct {
 	ID                    string    `json:"id"`
-	OrganizationName      string    `json:"organizationName"`
+	OrganizationName      *string   `json:"organizationName"`
 	CreatedOn             time.Time `json:"createdOn"`
-	RegisteredEmail       string    `json:"registeredEmail"`
+	RegisteredEmail       *string   `json:"registeredEmail"`
 	RegisteredName        *string   `json:"registeredName"`
 	Owner                 *UserRef  `json:"owner"`
 	CountryName           *string   `json:"countryName"`
 	CompanyNameFromDomain *string   `json:"companyNameFromDomain"`
 	// MoesifCompanyID is the source's stable id for the company. Kept for
 	// troubleshooting and for whatever later wants to join on it.
-	MoesifCompanyID *string        `json:"moesifCompanyId"`
-	FieldsInherited bool           `json:"fieldsInherited"`
-	PlatformCards   []PlatformCard `json:"platformCards"`
+	MoesifCompanyID *string `json:"moesifCompanyId"`
+	// CloudUserID is the Cloud user id of the organisation's owner.
+	CloudUserID *string `json:"cloudUserId"`
+	// EmailClassification is the owner's email classification from a
+	// registration playbook; nil when unanswered.
+	EmailClassification *string        `json:"emailClassification"`
+	FieldsInherited     bool           `json:"fieldsInherited"`
+	PlatformCards       []PlatformCard `json:"platformCards"`
+}
+
+// ---------------------------------------------------------------------------
+// Identities — the reveal
+// ---------------------------------------------------------------------------
+
+// OrganizationIdentitiesRequest asks what is stored to identify organisations.
+type OrganizationIdentitiesRequest struct {
+	OrganizationIDs []string `json:"organizationIds"`
+}
+
+// OrganizationIdentity is what the database holds to identify one organisation.
+type OrganizationIdentity struct {
+	OrganizationID   string  `json:"organizationId"`
+	MoesifCompanyID  *string `json:"moesifCompanyId"`
+	OrganizationName *string `json:"organizationName"`
+	RegisteredEmail  *string `json:"registeredEmail"`
+	// OwnerUserID resolves a cloud organisation's email.
+	OwnerUserID *string `json:"ownerUserId"`
+}
+
+// OrganizationIdentitiesResponse lists the organisations that exist; unknown ids are absent.
+type OrganizationIdentitiesResponse struct {
+	Identities []OrganizationIdentity `json:"identities"`
 }
 
 // PatchOrganizationRequest is the body of PATCH /organizations/{id}.
@@ -709,7 +807,8 @@ type LifecycleEntry struct {
 type ProductDetail struct {
 	OrgPlatformID    string     `json:"orgPlatformId"`
 	OrganizationID   string     `json:"organizationId"`
-	OrganizationName string     `json:"organizationName"`
+	OrganizationName *string    `json:"organizationName"`
+	MoesifCompanyID  *string    `json:"moesifCompanyId"`
 	Product          ProductRef `json:"product"`
 
 	// The lifecycle diagram — both axes.
@@ -738,7 +837,7 @@ type ProductDetail struct {
 
 	// The registration metadata tile.
 	RegisteredOn    time.Time `json:"registeredOn"`
-	RegisteredEmail string    `json:"registeredEmail"`
+	RegisteredEmail *string   `json:"registeredEmail"`
 
 	// The third axis, with the provenance the other two carry. Nil until
 	// somebody records a tier — there is no subscription feed, so absent means
@@ -842,18 +941,32 @@ type CreateNoteRequest struct {
 // Registrations — the New Registrations panel
 // ---------------------------------------------------------------------------
 
-// RegistrationItem is one pairing awaiting acknowledgement.
+// RegistrationItem is one organisation with registrations awaiting
+// acknowledgement. Platforms lists them, newest first; the top-level pairing
+// fields are the newest one's.
 type RegistrationItem struct {
-	OrgPlatformID    string         `json:"orgPlatformId"`
-	OrganizationID   string         `json:"organizationId"`
-	OrganizationName string         `json:"organizationName"`
-	Product          ProductRef     `json:"product"`
-	RegisteredEmail  string         `json:"registeredEmail"`
-	RegisteredName   *string        `json:"registeredName"`
-	RegisteredOn     time.Time      `json:"registeredOn"`
-	LifecycleStage   LifecycleStage `json:"lifecycleStage"`
-	StageName        string         `json:"stageName"`
-	Owner            *UserRef       `json:"owner"`
+	OrgPlatformID    string                 `json:"orgPlatformId"`
+	OrganizationID   string                 `json:"organizationId"`
+	OrganizationName *string                `json:"organizationName"`
+	MoesifCompanyID  *string                `json:"moesifCompanyId"`
+	Product          ProductRef             `json:"product"`
+	RegisteredEmail  *string                `json:"registeredEmail"`
+	RegisteredName   *string                `json:"registeredName"`
+	RegisteredOn     time.Time              `json:"registeredOn"`
+	LifecycleStage   LifecycleStage         `json:"lifecycleStage"`
+	StageName        string                 `json:"stageName"`
+	Owner            *UserRef               `json:"owner"`
+	Platforms        []RegistrationPlatform `json:"platforms"`
+}
+
+// RegistrationPlatform is one of an organisation's listed registrations.
+type RegistrationPlatform struct {
+	OrgPlatformID  string         `json:"orgPlatformId"`
+	Product        ProductRef     `json:"product"`
+	RegisteredOn   time.Time      `json:"registeredOn"`
+	LifecycleStage LifecycleStage `json:"lifecycleStage"`
+	StageName      string         `json:"stageName"`
+	IsNew          bool           `json:"isNew"`
 }
 
 // SearchRegistrationsRequest is the body of POST /registrations/search.
@@ -869,6 +982,45 @@ type SearchRegistrationsResponse struct {
 	Total         int                `json:"total"`
 	Limit         int                `json:"limit"`
 	Offset        int                `json:"offset"`
+}
+
+// RegistrationVolumeTrendRequest is the body of POST
+// /registrations/volume-trend: the registrations the search's filters select,
+// counted by registration day over a window, the case volume trend's window.
+// Days is the trailing window ending today (30 when nothing is set); StartDate,
+// EndDate and Bucket ("day", "week" or "month") are a fixed one. entity-service
+// checks the window and its limits.
+type RegistrationVolumeTrendRequest struct {
+	UnacknowledgedOnly bool                      `json:"unacknowledgedOnly"`
+	Filters            OrganizationSearchFilters `json:"filters"`
+	Days               int                       `json:"days,omitempty"`
+	StartDate          string                    `json:"startDate,omitempty"`
+	EndDate            string                    `json:"endDate,omitempty"`
+	Bucket             string                    `json:"bucket,omitempty"`
+}
+
+// VolumeTrendPoint is one day, or one bucket from Date to EndDate.
+type VolumeTrendPoint struct {
+	Date    string `json:"date"`
+	EndDate string `json:"endDate,omitempty"`
+	Count   int    `json:"count"`
+}
+
+// VolumeTrendSeries is one named line of a VolumeTrendResponse.
+type VolumeTrendSeries struct {
+	Label  string             `json:"label"`
+	Points []VolumeTrendPoint `json:"points"`
+}
+
+// VolumeTrendResponse answers POST /registrations/volume-trend in the case
+// volume trend's shape, with one series, "Registered". StartDate, EndDate and
+// Bucket echo a fixed window, and are absent for the trailing one.
+type VolumeTrendResponse struct {
+	Days      int                 `json:"days"`
+	StartDate string              `json:"startDate,omitempty"`
+	EndDate   string              `json:"endDate,omitempty"`
+	Bucket    string              `json:"bucket,omitempty"`
+	Series    []VolumeTrendSeries `json:"series"`
 }
 
 // AcknowledgeRequest claims a pairing. Acknowledging also assigns the
@@ -928,7 +1080,8 @@ type WorkQueueItem struct {
 
 	OrgPlatformID    string         `json:"orgPlatformId"`
 	OrganizationID   string         `json:"organizationId"`
-	OrganizationName string         `json:"organizationName"`
+	OrganizationName *string        `json:"organizationName"`
+	MoesifCompanyID  *string        `json:"moesifCompanyId"`
 	Product          ProductRef     `json:"product"`
 	CurrentStage     LifecycleStage `json:"currentStage"`
 	StageName        string         `json:"stageName"`
@@ -1261,4 +1414,41 @@ type RunTaskShape struct {
 type PairingLocation struct {
 	OrganizationID string `json:"organizationId"`
 	ProductCode    string `json:"productCode"`
+}
+
+// ---------------------------------------------------------------------------
+// Company identity — the portal's reveal (BFF only; not mirrored)
+// ---------------------------------------------------------------------------
+
+// IdentitySource says where a revealed name and email came from.
+type IdentitySource string
+
+const (
+	// IdentityFromDatabase is a name and email stored at ingest (Moesif).
+	IdentityFromDatabase IdentitySource = "DATABASE"
+	// IdentityFromCloud is a name and email read from the Cloud API.
+	IdentityFromCloud IdentitySource = "CLOUD"
+	// IdentityUnresolved: no company id, or the cloud has no such organisation.
+	IdentityUnresolved IdentitySource = "UNRESOLVED"
+	// IdentityFailed: the cloud could not be asked; retry.
+	IdentityFailed IdentitySource = "FAILED"
+)
+
+// ResolveCompaniesRequest asks for the identity of up to 50 organisations.
+type ResolveCompaniesRequest struct {
+	OrganizationIDs []string `json:"organizationIds"`
+}
+
+// CompanyIdentity is one organisation's revealed identity.
+type CompanyIdentity struct {
+	OrganizationID   string         `json:"organizationId"`
+	CompanyID        *string        `json:"companyId"`
+	OrganizationName *string        `json:"organizationName"`
+	Email            *string        `json:"email"`
+	Source           IdentitySource `json:"source"`
+}
+
+// ResolveCompaniesResponse lists the organisations that exist; unknown ids are absent.
+type ResolveCompaniesResponse struct {
+	Identities []CompanyIdentity `json:"identities"`
 }

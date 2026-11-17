@@ -639,6 +639,9 @@ export default function CsmCaseCommentBubble({
             "& p": { m: 0 },
             "& p + p": { mt: 0.75 },
             "& ul, & ol": { ml: 3, my: 0.5 },
+            // The editor's wrapper item around a nested list has no marker of its own
+            // (older comments carry only the class, newer ones also an inline style).
+            "& li.editor-list-item-nested": { listStyleType: "none" },
             "& code": {
               bgcolor: "background.default",
               px: 0.5,
@@ -660,7 +663,18 @@ export default function CsmCaseCommentBubble({
               fontSize: "0.85em",
             },
             "& a": { color: "primary.main" },
-            "& img": { maxWidth: "100%", cursor: onImageClick ? "pointer" : "default" },
+            // Same thumbnail size as the customer portal; a click opens the full image.
+            // The editor exports each image with an inline `max-width: 100%`, which
+            // beats a stylesheet rule, so the cap has to be `!important`.
+            "& img": {
+              maxWidth: "min(100%, 360px) !important",
+              maxHeight: 240,
+              width: "auto",
+              height: "auto",
+              objectFit: "contain",
+              borderRadius: 1,
+              cursor: onImageClick ? "zoom-in" : "default",
+            },
             "& br": { display: "block", content: '""', mt: 0.5 },
             "& blockquote": {
               borderLeft: 3,

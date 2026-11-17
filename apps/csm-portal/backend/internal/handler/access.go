@@ -331,6 +331,12 @@ const (
 	// engineer, who raises requests (PermWrite) but must not approve them. It
 	// grants no read access: a holder needs a viewing role separately.
 	PermApproveWso2CloudRequest
+	// PermViewTimeCardTotals is POST /time-cards/aggregate: time card counts
+	// and logged hours per state, user, project or day. Held by the CS
+	// engineer and admin only -- narrower than PermTimeCardsAndUpdates (no
+	// time card approver) while who may see totals per user is still to be
+	// decided; a separate permission so that decision changes one line here.
+	PermViewTimeCardTotals
 )
 
 // AccessConfig names, per portal role, the role names on the token that grant
@@ -603,6 +609,7 @@ func NewAccessGuard(cfg AccessConfig) *AccessGuard {
 			// does NOT hold it. See PermApproveWso2CloudRequest's own doc
 			// comment.
 			PermApproveWso2CloudRequest: build(cfg.Wso2CloudApprover, cfg.Admin),
+			PermViewTimeCardTotals:      build(cfg.CsEngineer, cfg.Admin),
 		},
 	}
 }

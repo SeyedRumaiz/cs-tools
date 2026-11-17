@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/alertcore"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/csmai"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/csmintegration"
 	"github.com/wso2-open-operations/cs-tools/apps/csm-portal/backend/internal/csmnotification"
@@ -225,6 +226,21 @@ func main() {
 	incidentTaskHandler := handler.NewIncidentTaskHandler(customerEntityClient)
 	alertHandler := handler.NewAlertHandler(customerEntityClient)
 	outageHandler := handler.NewOutageHandler(customerEntityClient)
+	alertMuteRuleHandler := handler.NewAlertMuteRuleHandler(customerEntityClient)
+	// Muted alerts live in sre-alert-core-service's database; without both values the route answers 503.
+	var alertCoreClient *alertcore.Client
+	if base, token := strings.TrimSpace(os.Getenv("ALERT_CORE_BASE_URL")), strings.TrimSpace(os.Getenv("ALERT_CORE_API_TOKEN")); base != "" && token != "" {
+		// The bearer token must never travel over plain HTTP.
+		base = mustHTTPSBaseURL("ALERT_CORE_BASE_URL", base)
+		alertCoreClient = alertcore.NewClient(alertcore.Config{BaseURL: base, Token: token})
+	} else {
+		slog.Warn("ALERT_CORE_BASE_URL or ALERT_CORE_API_TOKEN not set; the muted-alerts and alert-field-values routes answer 503")
+	}
+	// Pass an untyped nil rather than a nil *alertcore.Client, so the handler's nil check sees it.
+	alertMuteRuleMutedAlertsHandler := handler.NewAlertMuteRuleMutedAlertsHandler(nil)
+	if alertCoreClient != nil {
+		alertMuteRuleMutedAlertsHandler = handler.NewAlertMuteRuleMutedAlertsHandler(alertCoreClient)
+	}
 	commentHandler := handler.NewCommentHandler(customerEntityClient)
 
 	// Google Chat is not yet configured for every deployment, so its spaces
@@ -407,13 +423,43 @@ func main() {
 	// (CSM_AI_INTEGRATION_SERVICE_BASE_URL); without it, the generate page
 	// answers with a fixed sample. This backend holds no model client.
 	dashboardGenerator := handler.NewSampleDashboardGenerator()
+	// PLG reaches entity-service as csm-portal does (see plg.Mount below).
+	plgEntityDefaults := plgconfig.EntityDefaults{
+		BaseURL:      customerEntityCfg.BaseURL,
+		TokenURL:     oauth2TokenURL,
+		ClientID:     oauth2ClientID,
+		ClientSecret: oauth2ClientSecret,
+		Scope:        os.Getenv("CUSTOMER_ENTITY_SCOPES"),
+	}
 	if aiClient != nil {
 		dashboardGenerator = handler.NewServiceDashboardGenerator(aiClient, dir.TeamResults())
+		// The PLG playbooks' answer fields go with every generate request,
+		// read with PLG's own entity-service configuration (see plg.Mount).
+		playbooks, err := plg.NewPlaybookLister(os.Getenv("PLG_CONFIG_FILE"), plgEntityDefaults)
+		if err != nil {
+			slog.Error("failed to configure the PLG playbook list", "err", err)
+			os.Exit(1)
+		}
+		dashboardGenerator = handler.WithPlaybooks(dashboardGenerator, playbooks)
 	}
 	slog.Info("dashboard generation", "aiIntegrationService", aiClient != nil, "timeout", aiCfg.Timeout)
 	// A team named in a generated dashboard's creTeam / sreTeam filter (its
 	// registry key) becomes the team's group id, once, here.
 	dashboardGenerator = handler.WithDashboardTeams(dashboardGenerator, dir.TeamResults())
+	// A product named in a generated dashboard's product filter ("API
+	// Manager") becomes the product's own name ("WSO2 API Manager"), once,
+	// here: the case search matches product names exactly.
+	dashboardGenerator = handler.WithDashboardProducts(dashboardGenerator, customerEntityClient)
+	// A project named in a generated dashboard's project filter (its key or
+	// name) becomes a projectId filter on the project's id, once, here: the
+	// case search filters projects by id.
+	dashboardGenerator = handler.WithDashboardProjects(dashboardGenerator, customerEntityClient)
+	// Likewise an account (a customer's name or account number) becomes an
+	// accountId filter on the account's id.
+	dashboardGenerator = handler.WithDashboardAccounts(dashboardGenerator, customerEntityClient)
+	// A region filter's values are checked against the regions of the
+	// cases' accounts, and written as an account writes them.
+	dashboardGenerator = handler.WithDashboardRegions(dashboardGenerator, customerEntityClient)
 	dashboardGenerateHandler := handler.NewDashboardGenerateHandler(dashboardGenerator).
 		WithRateLimit(handler.NewGenerateRateLimiter(generateLimits.PerMinute, generateLimits.PerDay))
 	customDashboardHandler := handler.NewCustomDashboardHandler(customerEntityClient).WithTeams(dir.TeamResults())
@@ -490,7 +536,7 @@ func main() {
 	// inline image are streamed through it (so they are PermDownloadAttachment);
 	// upload, confirm and delete are PermWrite.
 	storedAttachmentHandler := handler.NewStoredAttachmentHandler(customerEntityClient)
-	blobAttachmentHandler := handler.NewBlobAttachmentHandler(customerEntityClient, attachmentStore)
+	blobAttachmentHandler := handler.NewBlobAttachmentHandler(customerEntityClient, attachmentStore).WithAccessGuard(accessGuard)
 	route("POST /attachments/upload", handler.PermWrite, storedAttachmentHandler.InitiateUpload)
 	route("PUT /attachments/upload/{id}/chunks/{index}", handler.PermWrite, blobAttachmentHandler.PutChunk)
 	route("GET /attachments/upload/{id}/chunks", handler.PermWrite, blobAttachmentHandler.ListChunks)
@@ -526,6 +572,8 @@ func main() {
 	// Custom Dashboards' generate page. PermWrite (cs_engineer, admin) matches
 	// the webapp's `canWrite` on that menu section. A literal path, so it never
 	// collides with the {dashboardId} wildcard, which is GET only anyway.
+	// A generated dashboard may hold PLG widgets; every PermWrite role also
+	// holds PermUsePlg (TestAccessGuard_DashboardWritersCanReadPlg).
 	route("POST /dashboards/generate", handler.PermWrite, dashboardGenerateHandler.GenerateDashboard)
 	// My Dashboards: the caller's own saved dashboards, stored in entity-service.
 	// Same permission as generating one. "custom" is a literal segment, so it
@@ -543,6 +591,11 @@ func main() {
 	route("GET /dashboards/custom/{id}/team-shares", handler.PermWrite, customDashboardHandler.ListCustomDashboardTeamShares)
 	route("PUT /dashboards/custom/{id}/team-shares/{teamKey}", handler.PermWrite, customDashboardHandler.AddCustomDashboardTeamShare)
 	route("DELETE /dashboards/custom/{id}/team-shares/{teamKey}", handler.PermWrite, customDashboardHandler.RemoveCustomDashboardTeamShare)
+	// Sharing a saved dashboard by link (owner only): anyone internal who
+	// opens the link sees it under Shared Dashboards while it stays on.
+	route("GET /dashboards/custom/{id}/link", handler.PermWrite, customDashboardHandler.GetCustomDashboardLink)
+	route("PUT /dashboards/custom/{id}/link", handler.PermWrite, customDashboardHandler.EnableCustomDashboardLink)
+	route("DELETE /dashboards/custom/{id}/link", handler.PermWrite, customDashboardHandler.DisableCustomDashboardLink)
 	// Dashboards other users shared with the caller, view only. "shared" is a
 	// literal segment, like "custom", so it never collides with {dashboardId}.
 	// PermView, like the system dashboards: anyone a dashboard can be shared
@@ -550,6 +603,9 @@ func main() {
 	// widgets query with the viewer's own permissions.
 	route("GET /dashboards/shared", handler.PermView, customDashboardHandler.ListSharedDashboards)
 	route("GET /dashboards/shared/{id}", handler.PermView, customDashboardHandler.GetSharedDashboard)
+	// Opening a link is PermView like reading a share: anyone a link can
+	// reach (any internal user) can open it. The link id is in the body.
+	route("POST /dashboards/shared/link", handler.PermView, customDashboardHandler.OpenDashboardLink)
 	route("GET /updates/product-update-levels", handler.PermViewUpdates, updatesHandler.GetProductUpdateLevels)
 	route("POST /updates/levels/search", handler.PermViewUpdates, updatesHandler.SearchUpdatesBetweenUpdateLevels)
 	route("GET /users/me", handler.PermAuthenticated, usersHandler.GetMe)
@@ -748,6 +804,12 @@ func main() {
 	route("POST /team-schedule/assignments/search", handler.PermView, scheduleHandler.SearchScheduleAssignments)
 	route("POST /team-schedule/absences/search", handler.PermView, scheduleHandler.SearchScheduleAbsences)
 	route("POST /team-schedule/engagement-allocations/search", handler.PermView, scheduleHandler.SearchScheduleEngagementAllocations)
+	route("POST /team-schedule/public-holidays/search", handler.PermView, scheduleHandler.SearchSchedulePublicHolidays)
+	route("POST /team-schedule/holiday-availability/search", handler.PermView, scheduleHandler.SearchHolidayAvailability)
+	// Confirming a team's holiday availability (CRE): entity-service allows
+	// the team's lead, its rota manager, a CRE rota admin or an admin.
+	route("PUT /team-schedule/holiday-availability/{teamKey}/{date}/confirmation", handler.PermWrite, scheduleHandler.ConfirmHolidayAvailability)
+	route("DELETE /team-schedule/holiday-availability/{teamKey}/{date}/confirmation", handler.PermWrite, scheduleHandler.WithdrawHolidayAvailability)
 	route("GET /team-schedule/on-duty", handler.PermView, scheduleHandler.GetScheduleOnDuty)
 
 	// Lead edit. PermWrite keeps the control away from a caller who could not
@@ -770,6 +832,7 @@ func main() {
 	route("POST /team-schedule/paging-contacts/{userId}/test", handler.PermWrite, scheduleHandler.TestPagingContact)
 	route("POST /team-schedule/assignments/apply", handler.PermWrite, scheduleHandler.ApplyScheduleRange)
 	route("POST /team-schedule/absences/apply", handler.PermWrite, scheduleHandler.ApplyScheduleAbsence)
+	route("POST /team-schedule/engagement-allocations/dismiss", handler.PermWrite, scheduleHandler.DismissScheduleEngagementAllocation)
 	route("DELETE /team-schedule/absences/{id}", handler.PermWrite, scheduleHandler.DeleteScheduleAbsence)
 	route("POST /team-schedule/absence-kinds", handler.PermWrite, scheduleHandler.CreateScheduleAbsenceKind)
 	route("DELETE /team-schedule/absence-kinds/{code}", handler.PermWrite, scheduleHandler.DeleteScheduleAbsenceKind)
@@ -803,6 +866,23 @@ func main() {
 	route("POST /skills/me", handler.PermWrite, skillHandler.AddMySkill)
 	route("PUT /skills/me/{skillId}", handler.PermWrite, skillHandler.SetMySkillLevel)
 	route("DELETE /skills/me/{skillId}", handler.PermWrite, skillHandler.RemoveMySkill)
+	// Skill management: who may use the directory, review requests or manage
+	// the catalogue is entity-service's decision (each is a capability held by
+	// admins plus a configured role list); these floors only keep the routes
+	// from a caller who could use none of them.
+	route("GET /skills/me/capabilities", handler.PermView, skillHandler.GetMySkillCapabilities)
+	route("POST /skills/categories", handler.PermWrite, skillHandler.CreateSkillCategory)
+	route("PATCH /skills/categories/{id}", handler.PermWrite, skillHandler.UpdateSkillCategory)
+	route("POST /skills/requests/check", handler.PermView, skillHandler.CheckSkillRequest)
+	route("POST /skills/requests", handler.PermWrite, skillHandler.CreateSkillRequest)
+	route("GET /skills/requests/mine", handler.PermView, skillHandler.ListMySkillRequests)
+	route("POST /skills/requests/search", handler.PermView, skillHandler.SearchSkillRequests)
+	route("POST /skills/requests/{id}/withdraw", handler.PermWrite, skillHandler.WithdrawSkillRequest)
+	route("POST /skills/requests/{id}/approve", handler.PermWrite, skillHandler.ApproveSkillRequest)
+	route("POST /skills/requests/{id}/reject", handler.PermWrite, skillHandler.RejectSkillRequest)
+	route("POST /skills/directory/search", handler.PermView, skillHandler.SearchSkillDirectory)
+	route("GET /skills/users/{userId}", handler.PermView, skillHandler.GetUserSkillProfile)
+	route("GET /skills/users/{userId}/history", handler.PermView, skillHandler.GetUserSkillHistory)
 
 	route("GET /team-schedule/rota-access", handler.PermView, rotaAccessHandler.GetRotaAccess)
 	route("PUT /team-schedule/rota-access/admins/{family}/{userId}", handler.PermWrite, rotaAccessHandler.PutRotaAdmin)
@@ -897,8 +977,10 @@ func main() {
 	slaEngineHandler := handler.NewSLAEngineHandler(customerEntityClient)
 	route("GET /sla-status/manage", handler.PermAdmin, slaEngineHandler.SearchActiveSLAStatusesManage)
 	route("POST /sla-engine/recalculate", handler.PermAdmin, slaEngineHandler.RequestRecalculation)
+	route("POST /cases/{id}/sla/recalculate", handler.PermAdmin, slaEngineHandler.RecalculateCasePauseTotals)
 	route("POST /configuration-items/search", handler.PermView, configurationItemHandler.SearchConfigurationItems)
 	route("POST /time-cards/search", handler.PermTimeCardsAndUpdates, timeCardHandler.SearchTimeCards)
+	route("POST /time-cards/aggregate", handler.PermViewTimeCardTotals, timeCardHandler.AggregateTimeCards)
 	route("POST /time-cards", handler.PermTimeCardsAndUpdates, timeCardHandler.CreateTimeCard)
 	route("PATCH /time-cards/{id}", handler.PermTimeCardsAndUpdates, timeCardHandler.UpdateTimeCard)
 	route("DELETE /time-cards/{id}", handler.PermTimeCardsAndUpdates, timeCardHandler.DeleteTimeCard)
@@ -950,6 +1032,18 @@ func main() {
 	route("PATCH /outages/{id}", handler.PermWrite, outageHandler.PatchOutage)
 	route("POST /outages/{id}/communications", handler.PermWrite, outageHandler.AddOutageCommunication)
 	route("POST /outages/{id}/communications/search", handler.PermViewOperations, outageHandler.SearchOutageCommunications)
+	// Alert mute rules: 1:1 proxies to entity-service. GET /alert-mute-rules/active is
+	// deliberately not exposed here; alert-core reads it via csm-integration-service.
+	route("POST /alert-mute-rules/search", handler.PermViewOperations, alertMuteRuleHandler.SearchAlertMuteRules)
+	route("GET /alert-mute-rules/{id}", handler.PermViewOperations, alertMuteRuleHandler.GetAlertMuteRule)
+	route("GET /alert-mute-rules/{id}/muted-alerts", handler.PermViewOperations, alertMuteRuleMutedAlertsHandler.ListMutedAlerts)
+	route("GET /alert-field-values", handler.PermViewOperations, alertMuteRuleMutedAlertsHandler.ListAlertFieldValues)
+	route("GET /alert-mute-rules/muted-counts", handler.PermViewOperations, alertMuteRuleMutedAlertsHandler.ListMutedCounts)
+	route("POST /alert-mute-rules", handler.PermWrite, alertMuteRuleHandler.CreateAlertMuteRule)
+	route("PATCH /alert-mute-rules/{id}", handler.PermWrite, alertMuteRuleHandler.PatchAlertMuteRule)
+	route("POST /alert-mute-rules/{id}/extend", handler.PermWrite, alertMuteRuleHandler.ExtendAlertMuteRule)
+	route("POST /alert-mute-rules/{id}/end", handler.PermWrite, alertMuteRuleHandler.EndAlertMuteRule)
+	route("DELETE /alert-mute-rules/{id}", handler.PermWrite, alertMuteRuleHandler.DeleteAlertMuteRule)
 	// Called manually today; not yet wired into real incident/case creation.
 	route("POST /notifications/google-chat/alerts", handler.PermWrite, notificationHandler.PostGoogleChatAlert)
 
@@ -966,7 +1060,7 @@ func main() {
 	// PermViewSharedEntity's own doc comment) -- unlike GET /teams/{id}/members
 	// above, which is a genuinely unconditional CS Portal route (see
 	// teamHandler's own construction) and so is registered outside this
-	// block. The account-scoped escalation list stays here only because CS
+	// rule. The account-scoped escalation list stays here only because CS
 	// Portal's own /cases/{id}/escalations is per-case, not per-account.
 	//
 	// Every route below is registered with PermViewerAccess (Viewer only),
@@ -977,13 +1071,14 @@ func main() {
 	// health/* plus the GET /products and GET /abt-teams lists its filters
 	// read), which use PermViewCustomerHealth so a cs_engineer or admin
 	// reaches them without also holding Viewer, and the project reports
-	// (GET /report-details and GET /generate-timelogs-breakdown-report),
-	// which use PermView.
+	// (GET /report-details, GET /generate-timelogs-breakdown-report and
+	// GET /generate-sla-report), which use PermView.
 	route("GET /accounts/{accountId}/escalations", handler.PermViewerAccess, viewerHandlers.accountEsc.GetAccountEscalations)
 	route("GET /products", handler.PermViewCustomerHealth, viewerHandlers.lookups.GetProducts)
 	route("GET /abt-teams", handler.PermViewCustomerHealth, viewerHandlers.lookups.GetABTTeams)
 	route("GET /report-details", handler.PermView, viewerHandlers.reports.GetReportDetails)
 	route("GET /generate-timelogs-breakdown-report", handler.PermView, viewerHandlers.reports.GenerateTimelogsBreakdownReport)
+	route("GET /generate-sla-report", handler.PermView, viewerHandlers.reports.GenerateSLAReport)
 	route("GET /user-info", handler.PermViewerAccess, viewerHandlers.userInfo.GetUserInfo)
 	route("GET /files", handler.PermViewerAccess, viewerHandlers.files.ListFiles)
 	route("GET /files/search", handler.PermViewerAccess, viewerHandlers.files.SearchFolder)
@@ -1040,13 +1135,7 @@ func main() {
 	// its own copy: it reaches the same service as the same OAuth2 application
 	// as every other upstream client above. PLG_* overrides exist but are not
 	// normally set.
-	if err := plg.Mount(os.Getenv("PLG_CONFIG_FILE"), plgconfig.EntityDefaults{
-		BaseURL:      customerEntityCfg.BaseURL,
-		TokenURL:     oauth2TokenURL,
-		ClientID:     oauth2ClientID,
-		ClientSecret: oauth2ClientSecret,
-		Scope:        os.Getenv("CUSTOMER_ENTITY_SCOPES"),
-	}, route); err != nil {
+	if err := plg.Mount(os.Getenv("PLG_CONFIG_FILE"), plgEntityDefaults, route); err != nil {
 		slog.Error("failed to mount PLG", "err", err)
 		os.Exit(1)
 	}

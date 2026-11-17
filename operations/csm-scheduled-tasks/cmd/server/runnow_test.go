@@ -27,7 +27,6 @@ import (
 
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/autoclosure"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/engine"
-	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/entitycases"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/incidentautoclose"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/ledger"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/longopenreport"
@@ -509,6 +508,7 @@ func TestReportTasksTakeRecipientFlags(t *testing.T) {
 		"open_cases_report", "stale_cases_report", "unresolved_products_digest",
 		"query_hours_usage_notifications", "query_hours_weekly_report",
 		"product_regression_report_apim", "product_regression_report_iam", "product_regression_report_integration",
+		"eol_product_usage_report",
 	}
 	got := reportTaskNames()
 	slices.Sort(got)
@@ -586,7 +586,7 @@ func TestOverrideRunsOfRealReportHandlers(t *testing.T) {
 			return stalecases.SendReport(fakeStale{}, email, 30, orRecipients(nil, rec), nil, "", true)
 		},
 		"open": func(email notify.Sender) func(context.Context) error {
-			return opencases.SendReport(fakeOpen{}, email, orRecipients(nil, rec), nil, true)
+			return opencases.SendReport(fakeOpen{}, email, orRecipients(nil, rec), nil, "", true)
 		},
 		"migration": func(email notify.Sender) func(context.Context) error {
 			return migrationscan.SendReport(fakeMigration{}, email, 180, orRecipients(nil, rec), nil, "", true)
@@ -627,8 +627,12 @@ func (fakeStale) Report(context.Context, int) (longopenreport.Report, error) {
 
 type fakeOpen struct{}
 
-func (fakeOpen) SearchCasesInStateCreatedBeforeYesterday(context.Context, string) ([]entitycases.Case, error) {
-	return nil, nil
+// fakeOpen returns one case so the report is not empty (an empty report is
+// not sent at all).
+func (fakeOpen) OpenBeforeYesterday(context.Context) (longopenreport.Report, error) {
+	return longopenreport.Report{
+		Cases: []longopenreport.Row{{Number: "CS0000001", State: "open"}}, CasesTotal: 1,
+	}, nil
 }
 
 type fakeMigration struct{}

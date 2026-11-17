@@ -29,16 +29,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
+
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-ai-integration-service/internal/catalogue"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-ai-integration-service/internal/claude"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-ai-integration-service/internal/dashboards"
+	"github.com/wso2-open-operations/cs-tools/integrations/csm-ai-integration-service/internal/emaildomains"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-ai-integration-service/internal/handler"
 	"github.com/wso2-open-operations/cs-tools/integrations/csm-ai-integration-service/internal/middleware"
 )
 
 // main reads the configuration, loads the catalogue, serves the routes and,
 // on SIGINT or SIGTERM, shuts down after in-flight requests finish (see
-// shutdownTimeout). A bad setting or an unreadable catalogue directory stops the start.
+// shutdownTimeout). A bad setting stops the start.
 func main() {
 	loadDotEnv(".env")
 	middleware.ConfigureLogger()
@@ -48,31 +51,32 @@ func main() {
 		slog.Error("invalid configuration", "err", err)
 		os.Exit(1)
 	}
-	// A catalogue directory that cannot be read fails the start, so a mistyped
-	// mount path is found here and not on the first request.
-	dashboardCatalogue, err := catalogue.NewDashboard(cfg.CatalogueDir)
-	if err != nil {
-		slog.Error("dashboard catalogue", "err", err)
-		os.Exit(1)
+	if len(cfg.IgnoredCatalogueVars) > 0 {
+		slog.Warn("dashboard catalogue: the built-in catalogue is used, these are no longer read; remove them",
+			"ignored", cfg.IgnoredCatalogueVars)
 	}
-	if cfg.OldCatalogueFile {
-		slog.Warn("dashboard catalogue: CATALOGUE_FILE is ignored, the parts in CATALOGUE_DIR are used; remove it")
-	}
-	// Never the key. The parts are listed in the order they were joined, so
-	// the order can be checked in the log.
+	dashboardCatalogue := catalogue.NewDashboard()
+	// Never the key.
 	slog.Info("model calls", "enabled", cfg.Enabled(), "model", cfg.Model, "timeout", cfg.Timeout,
-		"gateway", cfg.GatewayHost(), "catalogue", dashboardCatalogue.Origin(),
-		"catalogueParts", dashboardCatalogue.Parts())
+		"gateway", cfg.GatewayHost())
 
 	// Without a key the AI routes answer 503 not_configured.
-	var dashboardGenerator *dashboards.Generator
+	var (
+		dashboardGenerator *dashboards.Generator
+		modelClient        *anthropic.Client
+	)
 	if cfg.Enabled() {
 		client := claude.NewClient(claude.Config{APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Timeout: cfg.Timeout})
+		modelClient = &client
 		dashboardGenerator = dashboards.NewGenerator(client, cfg.Model, cfg.Timeout, dashboardCatalogue)
 	}
 	dashboardHandler := handler.NewDashboardHandler(dashboardGenerator)
 
-	mux := newMux(dashboardHandler)
+	domainLists := emaildomains.NewLists()
+	slog.Info("email domain classify", "model", cfg.EmailDomainModel, "disposableDomains", domainLists.Size())
+	classifier := emaildomains.NewClassifier(domainLists, net.DefaultResolver, mxTimeout, modelClient, cfg.EmailDomainModel, cfg.Timeout)
+
+	mux := newMux(dashboardHandler, handler.NewEmailDomainHandler(classifier))
 
 	addr := ":" + envOrDefault("PORT", "8080")
 
@@ -126,6 +130,9 @@ func main() {
 	}
 	slog.Info("AI Integration Service stopped")
 }
+
+// mxTimeout bounds one domain's mail server lookup.
+const mxTimeout = 3 * time.Second
 
 // writeTimeout is the server's write timeout: the model call's timeout plus a
 // minute for reading the request and writing the reply, and never under two

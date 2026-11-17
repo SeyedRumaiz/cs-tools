@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/auth"
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/domain"
@@ -38,8 +40,11 @@ import (
 )
 
 type caseService struct {
-	repo     repository.CaseRepository
-	userRepo repository.UserRepository
+	// csmPortalClientID is CSM_PORTAL_BACKEND_CLIENT_ID: the one caller that may
+	// ask for deleted attachments in a list (SearchAttachmentsRequest.DeletedOnly).
+	csmPortalClientID string
+	repo              repository.CaseRepository
+	userRepo          repository.UserRepository
 	// projectContactRepo backs updateCaseWatchList's project-membership
 	// validation (see that method's own doc comment) — never nil for a
 	// Postgres-backed caseService (routes.go always constructs and passes
@@ -227,6 +232,25 @@ func WithInlineImageLinker(svc CaseService, l InlineImageLinker) CaseService {
 // in routes.go) keeps working completely unchanged. slaEngine may itself be
 // nil (config.CSMSLAEngineEnabled == false, or no database configured at
 // all) -- that's the normal "engine turned off" case, not an error.
+func WithDeletedAttachmentsForCSMPortal(svc CaseService, csmPortalClientID string) CaseService {
+	if cs, ok := svc.(*caseService); ok {
+		cs.csmPortalClientID = csmPortalClientID
+	}
+	return svc
+}
+
+// mayListDeletedAttachments is whether this search may list the deleted
+// attachments (only those): the request asks AND the caller is the CSM portal
+// backend, which passes the flag on only for a portal admin who asked (decided
+// from the person's token roles there, the same trust the admin delete uses).
+// Any other caller's request for it is ignored.
+func (s *caseService) mayListDeletedAttachments(ctx context.Context, req domain.SearchAttachmentsRequest) bool {
+	if !req.DeletedOnly || s.csmPortalClientID == "" {
+		return false
+	}
+	return auth.IdentityFromContext(ctx).ClientID == s.csmPortalClientID
+}
+
 func WithSLAEngine(svc CaseService, slaEngine SLAEngineService) CaseService {
 	if cs, ok := svc.(*caseService); ok {
 		cs.slaEngine = slaEngine
@@ -450,6 +474,11 @@ var validCaseAggregateField = map[string]bool{
 	"state":    true,
 	"severity": true,
 	"type":     true,
+	"product":  true,
+	// productVersion: only with a product filter naming one product.
+	"productVersion": true,
+	"project":        true,
+	"region":         true,
 }
 
 var validCaseIssueType = map[domain.CaseIssueType]bool{
@@ -745,10 +774,22 @@ func (s *caseService) CreateCase(ctx context.Context, req domain.CreateCaseReque
 		}
 	}
 
+	// The files uploaded before this record (a security report's report) are checked
+	// the same way, and a security report must have one.
+	var linker any
+	if s.imageLinker != nil {
+		linker = s.imageLinker
+	}
+	reportEmail, err := validateReportDrafts(ctx, linker, req)
+	if err != nil {
+		return domain.CreateCaseResponse{}, err
+	}
+
 	if s.snMirror != nil {
 		resp, err := s.createCaseSNFirst(ctx, req)
 		if err == nil {
 			linkDescriptionImages(ctx, s.imageLinker, resp.Case.ID, req.ProjectID, descImageEmail, req.Description)
+			linkReportDrafts(ctx, linker, resp.Case.ID, req, reportEmail)
 		}
 		return resp, err
 	}
@@ -781,11 +822,16 @@ func (s *caseService) CreateCase(ctx context.Context, req domain.CreateCaseReque
 	if err != nil {
 		return domain.CreateCaseResponse{}, err
 	}
+	// The repository links the report files inside the create transaction (as the
+	// uploader they were checked against), so a file taken by another create in between
+	// fails this one instead of leaving a case without it.
+	req.ReportDraftOwnerEmail = reportEmail
 	c, err := s.repo.CreateCase(ctx, req)
 	if err != nil {
 		return domain.CreateCaseResponse{}, err
 	}
 	linkDescriptionImages(ctx, s.imageLinker, c.ID, req.ProjectID, descImageEmail, req.Description)
+	s.addDescriptionAsFirstComment(ctx, c, req)
 	// SLA-clock registration is scoped to slaClockEligibleCreateTypes -- the
 	// same restriction snCaseService.CreateCase applies (see its own
 	// comment and that var's own doc comment for which types are covered
@@ -1025,6 +1071,63 @@ func (s *caseService) createCaseSNFirst(ctx context.Context, req domain.CreateCa
 			State:      responseState,
 		},
 	}, nil
+}
+
+// addDescriptionAsFirstComment gives a case created on the plain PostgreSQL
+// data source the first comment ServiceNow's case-creation rules write: the
+// description itself, as a COMMENT by the creator at the case's creation time.
+// Under dual-write that comment comes from ServiceNow (mirrorInitialSNComments);
+// with no ServiceNow behind the create nothing wrote it, so the case's activity
+// started without its description.
+//
+// Written straight to the repository, like the mirror: it is the case's own
+// history, not a new reply, so it publishes no case.comment_added, counts as
+// no support engineer response, subscribes no watcher and, carrying the
+// case's own created_on, leaves updated_on alone. An announcement is skipped
+// (its description is already shown, and the mirror drops ServiceNow's
+// repeat of it), as is a blank description. Best effort: the case already
+// exists, so a failure is logged and the create still succeeds. The write
+// gets its own deadline (descriptionCommentTimeout) so a slow insert cannot
+// use up the request's and leave the steps after it (SLA clocks, case.created)
+// without time to run.
+func (s *caseService) addDescriptionAsFirstComment(ctx context.Context, c domain.Case, req domain.CreateCaseRequest) {
+	if req.Type == "announcement" || strings.TrimSpace(req.Description) == "" {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, descriptionCommentTimeout)
+	defer cancel()
+	createdOn := c.CreatedOn
+	if _, err := s.repo.CreateCaseCommentAsSystem(writeCtx, domain.CreateCaseCommentRequest{
+		CaseID:    c.ID,
+		Type:      domain.CommentTypeComment,
+		Content:   req.Description,
+		CreatedBy: c.CreatedBy,
+	}, &createdOn); err != nil {
+		slog.ErrorContext(ctx, "create case: writing the description as the first comment failed", "caseId", c.ID, "reason", dbFailureReason(err))
+	}
+}
+
+// descriptionCommentTimeout bounds addDescriptionAsFirstComment's insert, the
+// same 5s the other best-effort steps after a create get
+// (publishCaseCreatedTimeout and its siblings).
+const descriptionCommentTimeout = 5 * time.Second
+
+// dbFailureReason summarises a repository error for a log line without
+// repeating its text: a pgx connection error names the database host, user
+// and database. A PostgreSQL error is reported by its SQLSTATE, a deadline or
+// cancellation by name, anything else only as a database error.
+func dbFailureReason(err error) string {
+	var pgErr *pgconn.PgError
+	switch {
+	case errors.As(err, &pgErr):
+		return "database error, SQLSTATE " + pgErr.Code
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timed out"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "database error"
+	}
 }
 
 // mirrorInitialSNComments copies the comments ServiceNow's own case-creation
@@ -1462,7 +1565,7 @@ func (s *caseService) createCaseCommentAs(ctx context.Context, req domain.Create
 	// At most MaxInlineImagesPerContent images and the total size limit, checked
 	// before the comment is saved.
 	if s.imageLinker != nil && mayHaveInlineImages(req.Content) {
-		if err := s.imageLinker.ValidateCommentImages(ctx, req.CaseID, actorEmail, req.Content); err != nil {
+		if err := s.imageLinker.ValidateCommentImages(ctx, "", req.CaseID, actorEmail, req.Content); err != nil {
 			return domain.CreateCaseCommentResponse{}, err
 		}
 	}
@@ -1750,6 +1853,12 @@ func (s *caseService) applyCustomerAttachmentStateTransition(ctx context.Context
 		return
 	}
 	s.moveToWaitingOnWSO2OnCustomerActivity(ctx, caseID, "customer attachment")
+}
+
+// ApplyCustomerAttachmentStateTransition applies the customer-attachment rule to a case a stored attachment
+// (the work_item_attachment flow) has just been completed on. The caller has checked the attachment's kind.
+func (s *caseService) ApplyCustomerAttachmentStateTransition(ctx context.Context, caseID string) {
+	s.applyCustomerAttachmentStateTransition(ctx, domain.ReferenceTypeCase, caseID)
 }
 
 // moveToWaitingOnWSO2OnCustomerActivity is the rule shared by a customer's
@@ -3555,10 +3664,24 @@ func prepareCaseSearchFilters(ctx context.Context, req domain.SearchCasesRequest
 	return req, nil
 }
 
+// validateSearchExcludeFields rejects any excludeFields value other than the
+// supported ones, so a typo is a 400 rather than a silently full response.
+func validateSearchExcludeFields(fields []string) error {
+	for _, f := range fields {
+		if f != domain.SearchExcludeFieldDescription {
+			return &apierror.ValidationError{Msg: "excludeFields contains invalid value: " + f + " (supported: description)"}
+		}
+	}
+	return nil
+}
+
 // SearchCases implements CaseService.
 func (s *caseService) SearchCases(ctx context.Context, req domain.SearchCasesRequest) (domain.SearchCasesResponse, error) {
 	if req.CountOnly && req.SkipTotal {
 		return domain.SearchCasesResponse{}, &apierror.ValidationError{Msg: "countOnly and skipTotal cannot both be set: countOnly already skips the page query, and skipTotal would leave nothing to compute"}
+	}
+	if err := validateSearchExcludeFields(req.ExcludeFields); err != nil {
+		return domain.SearchCasesResponse{}, err
 	}
 	if err := normalizePagination(&req.Pagination); err != nil {
 		return domain.SearchCasesResponse{}, err
@@ -3672,6 +3795,11 @@ func (s *caseService) AggregateCases(ctx context.Context, req domain.AggregateCa
 	if err != nil {
 		return domain.AggregateResponse{}, err
 	}
+	// A version is shared by several products, so versions are grouped
+	// within one product only.
+	if req.GroupBy == "productVersion" && !oneProductName(search.Parsed.ProductNames) {
+		return domain.AggregateResponse{}, &apierror.ValidationError{Msg: `groupBy "productVersion" needs a product filter naming exactly one product`}
+	}
 	scope, err := s.access.ResolveScope(ctx)
 	if err != nil {
 		return domain.AggregateResponse{}, err
@@ -3699,17 +3827,33 @@ func (s *caseService) AggregateCases(ctx context.Context, req domain.AggregateCa
 }
 
 // defaultCaseVolumeTrendDays/maxCaseVolumeTrendDays bound
-// CaseVolumeTrendRequest.Days.
+// CaseVolumeTrendRequest.Days and a fixed window's day bucket;
+// maxCaseVolumeTrendWeeks/maxCaseVolumeTrendMonths bound its week and month
+// buckets (a year of weeks, two years of months). A year spans 54 week
+// starts when it is a leap year that starts on a Sunday (2012, 2040): its
+// 1 January is the last day of one week and its 31 December the first of
+// another.
 const (
 	defaultCaseVolumeTrendDays = 30
 	maxCaseVolumeTrendDays     = 90
+	maxCaseVolumeTrendWeeks    = 54
+	maxCaseVolumeTrendMonths   = 24
+)
+
+// CaseVolumeTrendRequest.Bucket's values.
+const (
+	caseVolumeTrendBucketDay   = "day"
+	caseVolumeTrendBucketWeek  = "week"
+	caseVolumeTrendBucketMonth = "month"
 )
 
 // caseVolumeTrendStableTTL is CaseVolumeTrend's cache lifetime for a day
 // that has fully elapsed (UTC) and can never change again -- comfortably
-// longer than the widest window this endpoint allows (maxCaseVolumeTrendDays)
-// rather than needing an explicit invalidation path, since it simply never
-// needs recomputing again while it stays within any request's window.
+// longer than the widest trailing window (maxCaseVolumeTrendDays) rather
+// than needing an explicit invalidation path, since it simply never needs
+// recomputing again while it stays within any request's window. A fixed
+// window can reach further back (up to maxCaseVolumeTrendMonths); a day
+// older than this TTL is just recomputed once more after it expires.
 // "Today" has no fixed constant of its own -- see ttlUntilNextUTCMidnight.
 const caseVolumeTrendStableTTL = 120 * 24 * time.Hour
 
@@ -3735,9 +3879,12 @@ func ttlUntilNextUTCMidnight(now time.Time) time.Duration {
 
 // CaseVolumeTrend implements CaseService. It returns exactly two series --
 // "Opened" (by created date) and "Closed" (by closed date) -- one point per
-// UTC calendar day over the trailing window, oldest first; see
+// UTC calendar day over the trailing window, oldest first, or over a fixed
+// StartDate/EndDate window, one point per day, week or month (Bucket); see
 // domain.CaseVolumeTrendResponse's own doc comment for why this is fixed
-// rather than an open-ended series config.
+// rather than an open-ended series config. Either way the counts are
+// computed and cached per day, so a week or month point is the sum of its
+// days and shares their cache entries.
 //
 // Caching (volumeTrendCache -- see that field's own doc comment; routes.go
 // always wires a per-pod in-memory cache, so this is never nil): a day that
@@ -3769,12 +3916,10 @@ func (s *caseService) CaseVolumeTrend(ctx context.Context, req domain.CaseVolume
 	if err := RequireInternalCaller(ctx, s.access, "case volume trend is only available to internal users"); err != nil {
 		return domain.CaseVolumeTrendResponse{}, err
 	}
-	days := req.Days
-	if days == 0 {
-		days = defaultCaseVolumeTrendDays
-	}
-	if days < 1 || days > maxCaseVolumeTrendDays {
-		return domain.CaseVolumeTrendResponse{}, &apierror.ValidationError{Msg: fmt.Sprintf("days must be between 1 and %d", maxCaseVolumeTrendDays)}
+	today := time.Now().UTC()
+	window, err := resolveCaseVolumeTrendWindow(req, today)
+	if err != nil {
+		return domain.CaseVolumeTrendResponse{}, err
 	}
 	search, err := s.prepareCaseSearch(ctx, domain.SearchCasesRequest{Filters: req.Filters})
 	if err != nil {
@@ -3785,25 +3930,34 @@ func (s *caseService) CaseVolumeTrend(ctx context.Context, req domain.CaseVolume
 		return domain.CaseVolumeTrendResponse{}, err
 	}
 
-	today := time.Now().UTC()
+	days := int(window.end.Sub(window.start).Hours()/24) + 1
 	allDays := make([]string, days)
 	for i := 0; i < days; i++ {
-		allDays[i] = today.AddDate(0, 0, -(days - 1 - i)).Format("2006-01-02")
+		allDays[i] = window.start.AddDate(0, 0, i).Format("2006-01-02")
 	}
 	todayKey := today.Format("2006-01-02")
+	// A day after today has no cases yet: it counts 0 and is neither queried
+	// nor cached, so it is never cached as 0 under the stable TTL either.
+	countedDays := allDays
+	for i, d := range allDays {
+		if d > todayKey {
+			countedDays = allDays[:i]
+			break
+		}
+	}
 
 	cacheEnabled := s.volumeTrendCache != nil
 	var filtersKey string
 	counts := make(map[string]domain.CaseVolumeDayCount, days)
 	if cacheEnabled {
 		filtersKey = caseVolumeFiltersKey(req.Filters)
-		for day, dc := range s.volumeTrendCache.GetMany(ctx, filtersKey, allDays) {
+		for day, dc := range s.volumeTrendCache.GetMany(ctx, filtersKey, countedDays) {
 			counts[day] = dc
 		}
 	}
 
-	missing := make([]string, 0, days)
-	for _, d := range allDays {
+	missing := make([]string, 0, len(countedDays))
+	for _, d := range countedDays {
 		if _, ok := counts[d]; !ok {
 			missing = append(missing, d)
 		}
@@ -3825,20 +3979,137 @@ func (s *caseService) CaseVolumeTrend(ctx context.Context, req domain.CaseVolume
 		}
 	}
 
-	opened := make([]domain.CaseVolumeTrendPoint, days)
-	closed := make([]domain.CaseVolumeTrendPoint, days)
-	for i, d := range allDays {
-		dc := counts[d]
-		opened[i] = domain.CaseVolumeTrendPoint{Date: d, Count: dc.Opened}
-		closed[i] = domain.CaseVolumeTrendPoint{Date: d, Count: dc.Closed}
-	}
-	return domain.CaseVolumeTrendResponse{
+	resp := domain.CaseVolumeTrendResponse{
 		Days: days,
 		Series: []domain.CaseVolumeTrendSeries{
-			{Label: "Opened", Points: opened},
-			{Label: "Closed", Points: closed},
+			{Label: "Opened", Points: volumeTrendPoints(allDays, window.bucket, func(d string) int { return counts[d].Opened })},
+			{Label: "Closed", Points: volumeTrendPoints(allDays, window.bucket, func(d string) int { return counts[d].Closed })},
 		},
-	}, nil
+	}
+	if window.fixed {
+		resp.StartDate = window.start.Format("2006-01-02")
+		resp.EndDate = window.end.Format("2006-01-02")
+		resp.Bucket = window.bucket
+	}
+	return resp, nil
+}
+
+// volumeTrendPoints turns days (a window's UTC days, YYYY-MM-DD, in order),
+// each counted by count, into a trend's points: a point per day, or for a
+// "week" or "month" bucket a point per bucket summing its days, from the
+// bucket's first day in the window (Date) to its last (EndDate). Shared by
+// the case trend and the PLG registration trend.
+func volumeTrendPoints(days []string, bucket string, count func(day string) int) []domain.CaseVolumeTrendPoint {
+	grouped := bucket == caseVolumeTrendBucketWeek || bucket == caseVolumeTrendBucketMonth
+	points := []domain.CaseVolumeTrendPoint{}
+	for _, d := range days {
+		if n := len(points); grouped && n > 0 && caseVolumeTrendSameBucket(points[n-1].Date, d, bucket) {
+			points[n-1].Count += count(d)
+			points[n-1].EndDate = d
+			continue
+		}
+		var endDate string
+		if grouped {
+			endDate = d
+		}
+		points = append(points, domain.CaseVolumeTrendPoint{Date: d, EndDate: endDate, Count: count(d)})
+	}
+	return points
+}
+
+// caseVolumeTrendWindow is the inclusive span of UTC days a
+// CaseVolumeTrendRequest covers and how its points are grouped. fixed is
+// false for the trailing window (Days), whose response carries no
+// startDate/endDate/bucket.
+type caseVolumeTrendWindow struct {
+	start, end time.Time
+	bucket     string
+	fixed      bool
+}
+
+// resolveCaseVolumeTrendWindow validates req's window fields against today
+// (UTC): either the trailing Days window, or StartDate/EndDate with an
+// optional Bucket, never both, and within the bucket's limit.
+func resolveCaseVolumeTrendWindow(req domain.CaseVolumeTrendRequest, today time.Time) (caseVolumeTrendWindow, error) {
+	today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+	if req.StartDate == "" && req.EndDate == "" {
+		if req.Bucket != "" {
+			return caseVolumeTrendWindow{}, &apierror.ValidationError{Msg: "bucket needs startDate and endDate"}
+		}
+		days := req.Days
+		if days == 0 {
+			days = defaultCaseVolumeTrendDays
+		}
+		if days < 1 || days > maxCaseVolumeTrendDays {
+			return caseVolumeTrendWindow{}, &apierror.ValidationError{Msg: fmt.Sprintf("days must be between 1 and %d", maxCaseVolumeTrendDays)}
+		}
+		return caseVolumeTrendWindow{start: today.AddDate(0, 0, -(days - 1)), end: today}, nil
+	}
+	if req.Days != 0 {
+		return caseVolumeTrendWindow{}, &apierror.ValidationError{Msg: "days cannot be combined with startDate and endDate"}
+	}
+	if req.StartDate == "" || req.EndDate == "" {
+		return caseVolumeTrendWindow{}, &apierror.ValidationError{Msg: "startDate and endDate are both required"}
+	}
+	start, err := parseCaseVolumeTrendDate("startDate", req.StartDate, today)
+	if err != nil {
+		return caseVolumeTrendWindow{}, err
+	}
+	end, err := parseCaseVolumeTrendDate("endDate", req.EndDate, today)
+	if err != nil {
+		return caseVolumeTrendWindow{}, err
+	}
+	if end.Before(start) {
+		return caseVolumeTrendWindow{}, &apierror.ValidationError{Msg: "endDate must not be before startDate"}
+	}
+	bucket := req.Bucket
+	if bucket == "" {
+		bucket = caseVolumeTrendBucketDay
+	}
+	switch bucket {
+	case caseVolumeTrendBucketDay:
+		if days := int(end.Sub(start).Hours()/24) + 1; days > maxCaseVolumeTrendDays {
+			return caseVolumeTrendWindow{}, &apierror.ValidationError{Msg: fmt.Sprintf("a day bucket covers at most %d days", maxCaseVolumeTrendDays)}
+		}
+	case caseVolumeTrendBucketWeek:
+		if weeks := int(startOfRelativeWeek(end, 0).Sub(startOfRelativeWeek(start, 0)).Hours()/(24*7)) + 1; weeks > maxCaseVolumeTrendWeeks {
+			return caseVolumeTrendWindow{}, &apierror.ValidationError{Msg: fmt.Sprintf("a week bucket covers at most %d weeks", maxCaseVolumeTrendWeeks)}
+		}
+	case caseVolumeTrendBucketMonth:
+		if months := (end.Year()-start.Year())*12 + int(end.Month()) - int(start.Month()) + 1; months > maxCaseVolumeTrendMonths {
+			return caseVolumeTrendWindow{}, &apierror.ValidationError{Msg: fmt.Sprintf("a month bucket covers at most %d months", maxCaseVolumeTrendMonths)}
+		}
+	default:
+		return caseVolumeTrendWindow{}, &apierror.ValidationError{Msg: fmt.Sprintf("bucket must be %q, %q or %q", caseVolumeTrendBucketDay, caseVolumeTrendBucketWeek, caseVolumeTrendBucketMonth)}
+	}
+	return caseVolumeTrendWindow{start: start, end: end, bucket: bucket, fixed: true}, nil
+}
+
+// parseCaseVolumeTrendDate parses a window bound: a relative date
+// placeholder (resolved against today, the same as a filter value's) or a
+// plain YYYY-MM-DD, as a UTC day.
+func parseCaseVolumeTrendDate(name, value string, today time.Time) (time.Time, error) {
+	if resolved, matched, err := resolveRelativeDate(value, today); err != nil {
+		return time.Time{}, err
+	} else if matched {
+		value = resolved
+	}
+	t, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return time.Time{}, &apierror.ValidationError{Msg: fmt.Sprintf("%s must be a YYYY-MM-DD date or a relative date, got %q", name, value)}
+	}
+	return t, nil
+}
+
+// caseVolumeTrendSameBucket reports whether the UTC days a and b (both
+// YYYY-MM-DD) fall in the same week (Monday to Sunday) or month.
+func caseVolumeTrendSameBucket(a, b, bucket string) bool {
+	if bucket == caseVolumeTrendBucketMonth {
+		return a[:7] == b[:7]
+	}
+	ta, errA := time.Parse("2006-01-02", a)
+	tb, errB := time.Parse("2006-01-02", b)
+	return errA == nil && errB == nil && startOfRelativeWeek(ta, 0).Equal(startOfRelativeWeek(tb, 0))
 }
 
 // caseVolumeFiltersKey encodes req.Filters into a stable string for
@@ -3955,8 +4226,7 @@ func humanizeSnakeCase(value string) string {
 // from PostgreSQL only; the files are in Azure Blob Storage and are read by the
 // portal backends.
 //
-// referenceType "case" reads case_attachment (older uploads) and the
-// work_item_attachment rows of the same case as one deduplicated list (see
+// referenceType "case" reads the case's work_item_attachment rows (see
 // caseRepo.SearchCaseAttachments). "change_request", "incident" and
 // "conversation" are work_item subtypes and read work_item_attachment through
 // CaseRepository.SearchWorkItemAttachments; "deployment" reads
@@ -4004,6 +4274,9 @@ func (s *caseService) SearchCaseAttachments(ctx context.Context, req domain.Sear
 		total       int
 		err         error
 	)
+	if s.mayListDeletedAttachments(ctx, req) {
+		ctx = repository.WithDeletedAttachmentsOnly(ctx)
+	}
 	if isCase {
 		attachments, total, err = s.repo.SearchCaseAttachments(ctx, req.ReferenceID, req.Pagination)
 	} else {
