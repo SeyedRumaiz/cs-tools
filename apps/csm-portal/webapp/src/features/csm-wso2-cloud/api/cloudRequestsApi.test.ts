@@ -24,6 +24,7 @@ import {
   getCloudRequest,
   listCloudPlans,
   listCloudRequests,
+  linkCloudRequestSalesforce,
   listCloudSubscriptions,
   resolveCloudRequest,
   toCloudRequest,
@@ -57,8 +58,8 @@ function be(overrides: Partial<BeCloudRequest> = {}): BeCloudRequest {
   };
 }
 
-function api(overrides: Partial<Record<"get" | "post" | "delete", ReturnType<typeof vi.fn>>>): BackendApi {
-  return { get: vi.fn(), post: vi.fn(), delete: vi.fn(), ...overrides } as unknown as BackendApi;
+function api(overrides: Partial<Record<"get" | "post" | "put" | "delete", ReturnType<typeof vi.fn>>>): BackendApi {
+  return { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(), ...overrides } as unknown as BackendApi;
 }
 
 describe("toCloudRequest", () => {
@@ -167,7 +168,7 @@ describe("the single-request calls", () => {
     await createCloudRequest(api({ post }), {
       type: "upgrade_organization",
       target: { kind: "organization", id: "org-1", label: "acme" },
-      upgrade: { product: "identity", subscriptionId: "sub-1", planCode: "identity-enterprise", notifyCustomer: false },
+      upgrade: { product: "identity", subscriptionId: "sub-1", planCode: "identity-enterprise", notifyCustomer: false, kind: "internal" },
     });
     expect(post).toHaveBeenCalledWith("/wso2-cloud-requests", {
       type: "upgrade_organization",
@@ -176,6 +177,7 @@ describe("the single-request calls", () => {
       product: "identity",
       subscriptionId: "sub-1",
       planCode: "identity-enterprise",
+      upgradeKind: "internal",
     });
     await createCloudRequest(api({ post }), {
       type: "upgrade_organization",
@@ -187,12 +189,49 @@ describe("the single-request calls", () => {
         previousPlanCode: "identity-payg",
         billingPeriod: "monthly",
         notifyCustomer: true,
+        kind: "customer",
+        salesforceAccountId: " 001000000000001AAA ",
+        region: "eu",
       },
     });
     expect(post).toHaveBeenLastCalledWith(
       "/wso2-cloud-requests",
-      expect.objectContaining({ previousPlanCode: "identity-payg", billingPeriod: "monthly", notifyCustomer: true }),
+      expect.objectContaining({
+        previousPlanCode: "identity-payg",
+        billingPeriod: "monthly",
+        notifyCustomer: true,
+        upgradeKind: "customer",
+        salesforceAccountId: "001000000000001AAA",
+        region: "eu",
+      }),
     );
+  });
+
+  it("maps a customer upgrade's Salesforce fields and its link", () => {
+    const got = toCloudRequest(
+      be({
+        type: "upgrade_organization",
+        subscriptionId: "sub-1",
+        planCode: "identity-enterprise",
+        upgradeKind: "customer",
+        salesforceAccountId: "001000000000001AAA",
+        region: "eu",
+        salesforceLinkStatus: "failed",
+        salesforceLinkError: "Salesforce could not be reached. Retry later.",
+      }),
+    );
+    expect(got.upgrade).toMatchObject({
+      kind: "customer",
+      salesforceAccountId: "001000000000001AAA",
+      region: "eu",
+      salesforceLink: { status: "failed", error: "Salesforce could not be reached. Retry later." },
+    });
+  });
+
+  it("links a request in Salesforce with a PUT", async () => {
+    const put = vi.fn().mockResolvedValue(be({ status: "approved" }));
+    await linkCloudRequestSalesforce(api({ put }), ID);
+    expect(put).toHaveBeenCalledWith(`/wso2-cloud-requests/${ID}/salesforce-link`, {});
   });
 
   it("resolves, sending a remark only when there is one", async () => {

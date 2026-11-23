@@ -20,7 +20,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import type { JSX } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fakeCloudBackend } from "@features/csm-wso2-cloud/test/fakeCloudRequestsBackend";
+import { fakeCloudBackend, SF_ACTIVE, SF_LAPSED } from "@features/csm-wso2-cloud/test/fakeCloudRequestsBackend";
 import { subscriptionBlockedReason } from "@features/csm-wso2-cloud/utils/subscriptions";
 import CloudOrganizationUpgradePage from "./CloudOrganizationUpgradePage";
 
@@ -45,6 +45,7 @@ function renderPage() {
         <Routes>
           <Route path="/wso2-cloud/organizations/:organizationId/upgrade" element={<CloudOrganizationUpgradePage />} />
           <Route path="/wso2-cloud/requests" element={<LocationProbe />} />
+          <Route path="/wso2-cloud/requests/:requestId" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -54,6 +55,22 @@ function renderPage() {
 async function choose(label: string, option: string | RegExp) {
   fireEvent.mouseDown(await screen.findByRole("combobox", { name: label }));
   fireEvent.click(await within(await screen.findByRole("listbox")).findByRole("option", { name: option }));
+}
+
+/** Picks a subscription and its Enterprise plan, the rest of the form left as it is. */
+async function choosePlan() {
+  await choose("Subscription", /identity: identity-payg/);
+  await choose("Enterprise plan", "Enterprise (identity-enterprise)");
+}
+
+async function chooseKind(kind: "Customer" | "Internal") {
+  fireEvent.click(await screen.findByRole("radio", { name: new RegExp(`^${kind} upgrade`) }));
+}
+
+/** Types an account id and checks it. */
+async function checkAccount(id: string) {
+  fireEvent.change(await screen.findByRole("textbox", { name: "Salesforce account ID" }), { target: { value: id } });
+  fireEvent.click(screen.getByRole("button", { name: "Check" }));
 }
 
 describe("CloudOrganizationUpgradePage", () => {
@@ -72,11 +89,21 @@ describe("CloudOrganizationUpgradePage", () => {
     await choose("Billing period", "Annual");
     fireEvent.click(screen.getByRole("checkbox", { name: "Email the customer about the plan change" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Reason" }), { target: { value: "Signed contract" } });
+    await chooseKind("Customer");
+    await checkAccount(SF_ACTIVE.id.slice(0, 15));
+    expect(await screen.findByText(/has an active subscription/)).toBeInTheDocument();
+    expect(screen.getByText(/Acme support 2027, ends 2027-06-30/)).toBeInTheDocument();
+    await choose("WSO2 Cloud region", "Europe (eu)");
 
-    fireEvent.click(screen.getByRole("button", { name: "Submit for approval" }));
+    // A customer upgrade needs no approval: it is applied at once and the page opens it.
+    fireEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
 
-    expect(await screen.findByText("at /wso2-cloud/requests?tab=mine")).toBeInTheDocument();
-    const raised = fakeCloudBackend.requests[0];
+    const raised = await waitFor(() => {
+      const r = fakeCloudBackend.requests.find((x) => x.targetId === ORG_ID);
+      if (!r) throw new Error("not raised yet");
+      return r;
+    });
+    expect(await screen.findByText(`at /wso2-cloud/requests/${raised.id}`)).toBeInTheDocument();
     expect(raised).toMatchObject({
       type: "upgrade_organization",
       targetId: ORG_ID,
@@ -88,7 +115,12 @@ describe("CloudOrganizationUpgradePage", () => {
       billingPeriod: "annual",
       notifyCustomer: true,
       reason: "Signed contract",
-      status: "pending",
+      status: "approved",
+      resolvedBy: fakeCloudBackend.me,
+      salesforceLinkStatus: "linked",
+      upgradeKind: "customer",
+      salesforceAccountId: SF_ACTIVE.id,
+      region: "eu",
     });
   });
 
@@ -121,10 +153,108 @@ describe("CloudOrganizationUpgradePage", () => {
     renderPage();
     await choose("Subscription", /identity: identity-payg/);
     await choose("Enterprise plan", "Gold (identity-gold)");
+    await chooseKind("Internal");
     fakeCloudBackend.plans = {};
     fireEvent.click(screen.getByRole("button", { name: "Submit for approval" }));
     expect(await screen.findByText("planCode is not one of the Enterprise plans configured for this product.")).toBeInTheDocument();
     await waitFor(() => expect(fakeCloudBackend.requests.every((r) => r.planCode !== "identity-gold")).toBe(true));
+  });
+});
+
+describe("CloudOrganizationUpgradePage: Salesforce", () => {
+  beforeEach(() => {
+    fakeCloudBackend.reset();
+  });
+
+  it("needs a kind before it can be submitted", async () => {
+    renderPage();
+    await choosePlan();
+    expect(screen.getByRole("button", { name: "Submit for approval" })).toBeDisabled();
+    await chooseKind("Internal");
+    expect(screen.getByRole("button", { name: "Submit for approval" })).toBeEnabled();
+  });
+
+  it("raises an internal upgrade without an account", async () => {
+    renderPage();
+    await choosePlan();
+    await chooseKind("Internal");
+    expect(screen.queryByRole("textbox", { name: "Salesforce account ID" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Submit for approval" }));
+    expect(await screen.findByText("at /wso2-cloud/requests?tab=mine")).toBeInTheDocument();
+    expect(fakeCloudBackend.requests[0]).toMatchObject({ upgradeKind: "internal" });
+    expect(fakeCloudBackend.requests[0].salesforceAccountId).toBeUndefined();
+  });
+
+  it("starts as a customer upgrade with the account the organisation is already under", async () => {
+    fakeCloudBackend.salesforceOrgs[ORG_ID] = { accountId: SF_ACTIVE.id, region: "us" };
+    renderPage();
+    expect(await screen.findByText(/In Salesforce under Acme Corp/)).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^Customer upgrade/ })).toBeChecked();
+    expect(screen.getByRole("textbox", { name: "Salesforce account ID" })).toHaveValue(SF_ACTIVE.id);
+    expect(screen.getByRole("combobox", { name: "WSO2 Cloud region" })).toHaveTextContent("United States (us)");
+    await choosePlan();
+    fireEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
+    expect(await screen.findByText(/^at \/wso2-cloud\/requests\/[0-9a-f-]+$/)).toBeInTheDocument();
+    expect(fakeCloudBackend.requests[0]).toMatchObject({
+      upgradeKind: "customer",
+      salesforceAccountId: SF_ACTIVE.id,
+      region: "us",
+      status: "approved",
+    });
+  });
+
+  it("will not raise a customer upgrade for an account with no active subscription", async () => {
+    renderPage();
+    await choosePlan();
+    await chooseKind("Customer");
+    await checkAccount(SF_LAPSED.id);
+    expect(await screen.findByText(/Initech \(001000000000002AAA\) has no active subscription/)).toBeInTheDocument();
+    await choose("WSO2 Cloud region", "Europe (eu)");
+    expect(screen.getByRole("button", { name: "Upgrade now" })).toBeDisabled();
+  });
+
+  it("keeps a customer upgrade that cannot be applied pending, and says why", async () => {
+    fakeCloudBackend.applyError = "WSO2 Cloud is not connected yet, so the change cannot be applied. The request stays pending.";
+    fakeCloudBackend.salesforceOrgs[ORG_ID] = { accountId: SF_ACTIVE.id, region: "eu" };
+    renderPage();
+    await screen.findByText(/In Salesforce under Acme Corp/);
+    await choosePlan();
+    fireEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
+    expect(await screen.findByText(/The request stays pending/)).toBeInTheDocument();
+    expect(fakeCloudBackend.requests[0]).toMatchObject({ targetId: ORG_ID, status: "pending" });
+  });
+
+  it("says when Salesforce has no such account", async () => {
+    renderPage();
+    await chooseKind("Customer");
+    await checkAccount("001999999999999AAA");
+    expect(await screen.findByText("Salesforce has no account with this ID.")).toBeInTheDocument();
+  });
+
+  it("does not check an id that is not an Account id", async () => {
+    renderPage();
+    await chooseKind("Customer");
+    fireEvent.change(await screen.findByRole("textbox", { name: "Salesforce account ID" }), { target: { value: "006000000000001" } });
+    expect(screen.getByRole("button", { name: "Check" })).toBeDisabled();
+  });
+
+  it("asks to check again once the id is changed", async () => {
+    renderPage();
+    await chooseKind("Customer");
+    await checkAccount(SF_ACTIVE.id);
+    expect(await screen.findByText(/has an active subscription/)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "Salesforce account ID" }), { target: { value: SF_LAPSED.id } });
+    expect(screen.queryByText(/has an active subscription/)).not.toBeInTheDocument();
+  });
+
+  it("offers only an internal upgrade when Salesforce is not connected", async () => {
+    fakeCloudBackend.salesforceConnected = false;
+    renderPage();
+    expect(await screen.findByText(/Salesforce is not connected yet/)).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /^Customer upgrade/ })).toBeDisabled();
+    await choosePlan();
+    await chooseKind("Internal");
+    expect(screen.getByRole("button", { name: "Submit for approval" })).toBeEnabled();
   });
 });
 

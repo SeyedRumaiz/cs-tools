@@ -20,7 +20,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { JSX } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SEEDED, fakeCloudBackend } from "@features/csm-wso2-cloud/test/fakeCloudRequestsBackend";
+import { SEEDED, SF_ACTIVE, fakeCloudBackend } from "@features/csm-wso2-cloud/test/fakeCloudRequestsBackend";
 import CloudRequestDetailPage from "./CloudRequestDetailPage";
 
 vi.mock("@api/backend/client", async () => {
@@ -153,5 +153,89 @@ describe("CloudRequestDetailPage", () => {
   it("says so when the request does not exist", async () => {
     renderPage("00000000-0000-4000-8000-000000009999");
     expect(await screen.findByText("Request not found")).toBeInTheDocument();
+  });
+});
+
+/** A pending customer upgrade raised by someone else, so the signed-in engineer can approve it. */
+function raiseCustomerUpgrade(): string {
+  return fakeCloudBackend.raise(
+    {
+      type: "upgrade_organization",
+      targetId: "org-hooli",
+      targetLabel: "hooli",
+      product: "identity",
+      subscriptionId: "sub-hooli",
+      planCode: "identity-enterprise",
+      upgradeKind: "customer",
+      salesforceAccountId: SF_ACTIVE.id,
+      region: "eu",
+    },
+    "sam.taylor@example.com",
+  ).id;
+}
+
+describe("CloudRequestDetailPage: Salesforce", () => {
+  beforeEach(() => {
+    fakeCloudBackend.reset();
+    access.isAdmin = false;
+  });
+
+  it("shows a customer upgrade's account and region, and that it is linked when approved", async () => {
+    renderPage(raiseCustomerUpgrade());
+    expect(await screen.findByRole("cell", { name: "Upgrade kind" })).toBeInTheDocument();
+    expect(within(rowFor("Upgrade kind")).getByText("Customer")).toBeInTheDocument();
+    expect(within(rowFor("Salesforce account")).getByText(SF_ACTIVE.id)).toBeInTheDocument();
+    expect(within(rowFor("WSO2 Cloud region")).getByText("Europe (eu)")).toBeInTheDocument();
+    expect(screen.getByText(/could not be applied when it was raised/)).toBeInTheDocument();
+    expect(screen.getByText("Salesforce")).toBeInTheDocument();
+  });
+
+  it("links the organisation once the upgrade is approved", async () => {
+    renderPage(raiseCustomerUpgrade());
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+    expect(await screen.findByText(/Linked in Salesforce to account 001000000000001AAA/)).toBeInTheDocument();
+  });
+
+  it("shows a failed link with its reason, and retries it", async () => {
+    fakeCloudBackend.linkError = "Salesforce could not be reached. Retry later.";
+    renderPage(raiseCustomerUpgrade());
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+    expect(await screen.findByText(/linking the organization in Salesforce failed. Salesforce could not be reached/)).toBeInTheDocument();
+    fakeCloudBackend.linkError = null;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText(/Linked in Salesforce to account/)).toBeInTheDocument();
+  });
+
+  it("refuses to approve once the account's subscription has lapsed", async () => {
+    const id = raiseCustomerUpgrade();
+    fakeCloudBackend.salesforceAccounts[SF_ACTIVE.id] = { ...SF_ACTIVE, hasActiveSubscription: false, activeOpportunities: [] };
+    renderPage(id);
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+    expect(await screen.findByText(/no longer has an active subscription/)).toBeInTheDocument();
+    expect(fakeCloudBackend.requests.find((r) => r.id === id)?.status).toBe("pending");
+  });
+
+  it("shows no Salesforce card on an internal upgrade", async () => {
+    renderPage(SEEDED.pendingUpgrade);
+    expect(await screen.findByRole("cell", { name: "Upgrade kind" })).toBeInTheDocument();
+    expect(within(rowFor("Upgrade kind")).getByText("Not recorded (treated as internal)")).toBeInTheDocument();
+    expect(screen.queryByText("Salesforce")).not.toBeInTheDocument();
+    expect(screen.queryByRole("cell", { name: "Salesforce account" })).not.toBeInTheDocument();
+  });
+});
+
+describe("CloudRequestDetailPage: a customer upgrade needs no approval", () => {
+  beforeEach(() => {
+    fakeCloudBackend.reset();
+    access.isAdmin = false;
+  });
+
+  it("shows who applied it, not who approved it", async () => {
+    const id = raiseCustomerUpgrade();
+    fakeCloudBackend.me = "sam.taylor@example.com";
+    await fakeCloudBackend.api.post(`/wso2-cloud-requests/${id}/resolve`, { status: "approved" });
+    renderPage(id);
+    expect(await screen.findByText("Applied by")).toBeInTheDocument();
+    expect(screen.queryByText("Approved by")).not.toBeInTheDocument();
   });
 });

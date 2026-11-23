@@ -22,13 +22,16 @@ import type { CloudRequest, NewCloudRequest } from "@features/csm-wso2-cloud/typ
 
 /**
  * Raises a request (upgrade, delete, lock, ...) for someone to approve. Nothing
- * changes on the organisation or user until it is approved.
+ * changes on the organisation or user until it is approved, except a customer
+ * upgrade, which needs no approval: the backend applies it at once and answers
+ * with it approved (or, if it cannot be applied, with the error, the request
+ * left pending). So every WSO2 Cloud query is refreshed, whatever the outcome.
  */
 export function usePostCloudRequest() {
   const api = useBackendApi();
   const queryClient = useQueryClient();
   return useMutation<CloudRequest, Error, NewCloudRequest>({
     mutationFn: (input) => createCloudRequest(api, input),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY, "requests"] }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: [WSO2_CLOUD_QUERY_KEY] }),
   });
 }

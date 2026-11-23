@@ -35,6 +35,7 @@ import { useIdTokenClaims } from "@hooks/useIdTokenClaims";
 import { usePortalAccess } from "@context/current-user/usePortalAccess";
 import { useGetCloudRequest } from "@features/csm-wso2-cloud/api/useGetCloudRequest";
 import { usePatchCloudRequest } from "@features/csm-wso2-cloud/api/usePatchCloudRequest";
+import { useLinkCloudRequestSalesforce } from "@features/csm-wso2-cloud/api/useLinkCloudRequestSalesforce";
 import CancelRequestDialog from "@features/csm-wso2-cloud/components/CancelRequestDialog";
 import RejectRequestDialog from "@features/csm-wso2-cloud/components/RejectRequestDialog";
 import {
@@ -49,7 +50,9 @@ import { formatDateTime } from "@features/csm-wso2-cloud/utils/format";
 import { WSO2_CLOUD_BASE } from "@features/csm-wso2-cloud/config/wso2CloudNavItems";
 import {
   CLOUD_BILLING_PERIOD_LABELS,
+  CLOUD_REGION_LABELS,
   CLOUD_REQUEST_TYPE_LABELS,
+  type CloudRegion,
   type CloudRequest,
   type CloudRequestType,
 } from "@features/csm-wso2-cloud/types/wso2Cloud";
@@ -109,6 +112,8 @@ export default function CloudRequestDetailPage(): JSX.Element {
   }
 
   const pending = request.status === "pending";
+  // A customer upgrade needs no approval: it is applied when it is raised.
+  const customerUpgrade = request.upgrade?.kind === "customer";
   const targetPath =
     request.target.kind === "organization"
       ? `${WSO2_CLOUD_BASE}/organizations/${request.target.id}`
@@ -183,10 +188,10 @@ export default function CloudRequestDetailPage(): JSX.Element {
           <MetaCell label="Requested">{formatDateTime(request.requestedOn)}</MetaCell>
           {!pending && (
             <>
-              <MetaCell label={request.status === "approved" ? "Approved by" : "Rejected by"}>
+              <MetaCell label={request.status === "approved" ? (customerUpgrade ? "Applied by" : "Approved by") : "Rejected by"}>
                 {request.resolvedBy ?? "—"}
               </MetaCell>
-              <MetaCell label={request.status === "approved" ? "Approved" : "Rejected"}>
+              <MetaCell label={request.status === "approved" ? (customerUpgrade ? "Applied" : "Approved") : "Rejected"}>
                 {formatDateTime(request.resolvedOn)}
               </MetaCell>
             </>
@@ -216,6 +221,8 @@ export default function CloudRequestDetailPage(): JSX.Element {
         )}
       </SectionCard>
 
+      {request.upgrade?.kind === "customer" && <SalesforceLinkCard request={request} />}
+
       <RejectRequestDialog request={rejecting} onClose={() => setRejecting(null)} />
       <CancelRequestDialog
         request={cancelling}
@@ -223,6 +230,64 @@ export default function CloudRequestDetailPage(): JSX.Element {
         onCancelled={() => navigate(backPath)}
       />
     </Box>
+  );
+}
+
+function regionLabel(region: string | undefined): string {
+  if (!region) return "—";
+  const label = CLOUD_REGION_LABELS[region as CloudRegion];
+  return label ? `${label} (${region})` : region;
+}
+
+/**
+ * A customer upgrade's Salesforce link: once approved, its organisation is
+ * linked to the customer's account in Salesforce. A link that failed does not
+ * undo the upgrade; it can be tried again here (the backend allows WSO2 Cloud
+ * approvers and admins).
+ */
+function SalesforceLinkCard({ request }: { request: CloudRequest }): JSX.Element {
+  const link = useLinkCloudRequestSalesforce();
+  const status = request.upgrade?.salesforceLink;
+  const retry = (label: string) => (
+    <Button variant="outlined" size="small" disabled={link.isPending} onClick={() => link.mutate(request.id)}>
+      {label}
+    </Button>
+  );
+  let body: JSX.Element;
+  if (request.status === "pending") {
+    body = (
+      <Typography variant="body2">
+        A customer upgrade needs no approval, but this one could not be applied when it was raised. When it is
+        approved, the organization is linked in Salesforce to account {request.upgrade?.salesforceAccountId}.
+      </Typography>
+    );
+  } else if (request.status === "rejected") {
+    body = <Typography variant="body2">Rejected, so Salesforce was not changed.</Typography>;
+  } else if (status?.status === "linked") {
+    body = (
+      <Alert severity="success" variant="outlined">
+        Linked in Salesforce to account {request.upgrade?.salesforceAccountId}
+        {status.linkedOn ? ` on ${formatDateTime(status.linkedOn)}` : ""}.
+      </Alert>
+    );
+  } else if (status?.status === "failed") {
+    body = (
+      <Alert severity="error" action={retry("Retry")}>
+        The upgrade was applied, but linking the organization in Salesforce failed. {status.error}
+      </Alert>
+    );
+  } else {
+    body = (
+      <Alert severity="warning" action={retry("Link now")}>
+        The upgrade was applied, but the organization is not linked in Salesforce yet.
+      </Alert>
+    );
+  }
+  return (
+    <SectionCard title="Salesforce">
+      {body}
+      {link.isError && <Alert severity="error">{link.error.message}</Alert>}
+    </SectionCard>
   );
 }
 
@@ -247,6 +312,17 @@ function UpgradeDetails({ request }: { request: CloudRequest }): JSX.Element {
       value: `Wire transfer${upgrade.billingPeriod ? `, ${CLOUD_BILLING_PERIOD_LABELS[upgrade.billingPeriod].toLowerCase()}` : ""}`,
     },
     { label: "Notify the customer", value: upgrade.notifyCustomer ? "Yes" : "No" },
+    {
+      label: "Upgrade kind",
+      value:
+        upgrade.kind === "customer" ? "Customer" : upgrade.kind === "internal" ? "Internal" : "Not recorded (treated as internal)",
+    },
+    ...(upgrade.kind === "customer"
+      ? [
+          { label: "Salesforce account", value: upgrade.salesforceAccountId ?? "—" },
+          { label: "WSO2 Cloud region", value: regionLabel(upgrade.region) },
+        ]
+      : []),
     {
       label: "Billing account",
       value: upgrade.billingAccountId ?? (request.status === "pending" ? "Created when approved" : "—"),

@@ -31,6 +31,11 @@ import { useNavTransition } from "@hooks/useNavTransition";
 import { useGetCloudOrganization } from "@features/csm-wso2-cloud/api/useGetCloudOrganization";
 import { useGetCloudPlans } from "@features/csm-wso2-cloud/api/useGetCloudPlans";
 import { useGetCloudSubscriptions } from "@features/csm-wso2-cloud/api/useGetCloudSubscriptions";
+import {
+  useGetCloudOrganizationSalesforce,
+  useGetSalesforceAccount,
+} from "@features/csm-wso2-cloud/api/useGetCloudSalesforce";
+import SalesforceUpgradeSection from "@features/csm-wso2-cloud/components/SalesforceUpgradeSection";
 import { usePostCloudRequest } from "@features/csm-wso2-cloud/api/usePostCloudRequest";
 import {
   BackButton,
@@ -42,8 +47,11 @@ import { WSO2_CLOUD_BASE } from "@features/csm-wso2-cloud/config/wso2CloudNavIte
 import { subscriptionBlockedReason } from "@features/csm-wso2-cloud/utils/subscriptions";
 import {
   CLOUD_BILLING_PERIOD_LABELS,
+  CLOUD_REGIONS,
   type CloudBillingPeriod,
   type CloudOrganization,
+  type CloudRegion,
+  type CloudUpgradeKind,
 } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
 /** The status read by a backend error, or undefined for any other error. */
@@ -54,13 +62,18 @@ function errorStatus(error: unknown): number | undefined {
 
 /**
  * Upgrade one of an organisation's subscriptions to an Enterprise plan billed
- * by wire transfer. Submitting raises a request for approval; nothing changes
- * in WSO2 Cloud until it is approved, when the backend creates the billing
- * account and changes the plan.
+ * by wire transfer. An internal upgrade is raised for someone else to approve;
+ * nothing changes in WSO2 Cloud until then. A customer upgrade needs no
+ * approval (the customer's active subscription is the proof): the backend
+ * applies it at once (creates the billing account, changes the plan, links the
+ * organisation in Salesforce), and the page then opens the request.
  *
- * The Salesforce step (checking for a valid subscription and linking the
- * organisation to the right account) belongs at the bottom of this form. It is
- * a placeholder until the Salesforce side is agreed.
+ * The Salesforce section says whether it is a customer or an internal
+ * upgrade. A customer upgrade names the customer's Salesforce account (it must
+ * have an active subscription) and the organisation's region; when the
+ * organisation is already under an account with an active subscription, that
+ * is the default. Once approved, the backend links the organisation to that
+ * account in Salesforce.
  */
 export default function CloudOrganizationUpgradePage(): JSX.Element {
   const { organizationId } = useParams<{ organizationId: string }>();
@@ -113,6 +126,27 @@ function UpgradeForm({
   const [notifyCustomer, setNotifyCustomer] = useState(false);
   const [reason, setReason] = useState("");
 
+  // Salesforce. Each choice is undefined until the user makes it, and reads
+  // what the organisation's Salesforce record says until then.
+  const salesforce = useGetCloudOrganizationSalesforce(org.id);
+  const salesforceNotConnected = errorStatus(salesforce.error) === 503;
+  const linkedAccount = salesforce.data?.account ?? null;
+  const recordRegion = CLOUD_REGIONS.find((r) => r === salesforce.data?.record?.region?.toLowerCase());
+  const [kindChoice, setKindChoice] = useState<CloudUpgradeKind>();
+  const [accountInput, setAccountInput] = useState<string>();
+  const [checkedId, setCheckedId] = useState<string>();
+  const [regionChoice, setRegionChoice] = useState<CloudRegion>();
+  const kind = kindChoice ?? (linkedAccount?.hasActiveSubscription ? "customer" : undefined);
+  const accountValue = accountInput ?? linkedAccount?.id ?? "";
+  // The prefilled account counts as checked: the organisation's status already read it.
+  const accountToCheck = checkedId ?? (accountInput === undefined ? linkedAccount?.id : undefined);
+  const usePrefilled = !!linkedAccount && accountToCheck === linkedAccount.id;
+  const accountCheck = useGetSalesforceAccount(kind === "customer" && !usePrefilled ? accountToCheck : undefined);
+  const checkedAccount = usePrefilled ? linkedAccount : accountToCheck ? accountCheck.data : undefined;
+  const region = regionChoice ?? recordRegion ?? "";
+  const salesforceReady =
+    kind === "internal" || (kind === "customer" && !!checkedAccount?.hasActiveSubscription && region !== "");
+
   const notConnected = errorStatus(subscriptions.error) === 503;
   const subs = subscriptions.data ?? [];
   const subscription = subs.find((s) => s.id === subscriptionId);
@@ -120,7 +154,8 @@ function UpgradeForm({
   const productPlans = subscription
     ? (plans.data?.[subscription.product] ?? []).filter((p) => p.code !== subscription.planCode)
     : [];
-  const canSubmit = !!subscription && !subscriptionBlockedReason(subscription) && !!planCode && !post.isPending;
+  const canSubmit =
+    !!subscription && !subscriptionBlockedReason(subscription) && !!planCode && salesforceReady && !post.isPending;
 
   const chooseSubscription = (id: string) => {
     setSubscriptionId(id);
@@ -141,9 +176,19 @@ function UpgradeForm({
           previousPlanCode: subscription.planCode || undefined,
           billingPeriod: billingPeriod || undefined,
           notifyCustomer,
+          kind: kind as CloudUpgradeKind,
+          salesforceAccountId: kind === "customer" ? checkedAccount?.id : undefined,
+          region: kind === "customer" && region ? region : undefined,
         },
       },
-      { onSuccess: () => navigate(`${WSO2_CLOUD_BASE}/requests?tab=mine`) },
+      {
+        onSuccess: (created) =>
+          navigate(
+            kind === "customer"
+              ? `${WSO2_CLOUD_BASE}/requests/${created.id}`
+              : `${WSO2_CLOUD_BASE}/requests?tab=mine`,
+          ),
+      },
     );
   };
 
@@ -164,8 +209,8 @@ function UpgradeForm({
 
       <SectionCard title="Subscription">
         <Typography variant="body2" color="text.secondary">
-          Moves one product subscription to an Enterprise plan billed by wire transfer. Nothing changes in
-          WSO2 Cloud until another person approves the request.
+          Moves one product subscription to an Enterprise plan billed by wire transfer. A customer upgrade is
+          applied straight away; an internal one waits until another person approves it.
         </Typography>
         {subscriptions.isLoading ? (
           <Skeleton variant="rounded" height={40} sx={{ maxWidth: 480 }} />
@@ -257,10 +302,25 @@ function UpgradeForm({
       </SectionCard>
 
       <SectionCard title="Salesforce">
-        <Alert severity="info" variant="outlined">
-          Coming later: check for a valid subscription in Salesforce and link this organization to
-          the customer's account, or ask for the right account when there is none.
-        </Alert>
+        <SalesforceUpgradeSection
+          status={salesforce.data}
+          statusLoading={salesforce.isLoading}
+          notConnected={salesforceNotConnected}
+          statusFailed={salesforce.isError && !salesforceNotConnected}
+          kind={kind}
+          onKindChange={setKindChoice}
+          accountInput={accountValue}
+          onAccountInputChange={(value) => {
+            setAccountInput(value);
+            setCheckedId(undefined);
+          }}
+          onCheck={() => setCheckedId(accountValue.trim())}
+          checked={checkedAccount}
+          checking={accountCheck.isFetching}
+          checkFailed={accountCheck.isError}
+          region={region}
+          onRegionChange={setRegionChoice}
+        />
       </SectionCard>
 
       {post.isError && <Alert severity="error">{post.error.message}</Alert>}
@@ -270,7 +330,7 @@ function UpgradeForm({
           Cancel
         </Button>
         <Button variant="contained" onClick={handleSubmit} disabled={!canSubmit}>
-          Submit for approval
+          {kind === "customer" ? "Upgrade now" : "Submit for approval"}
         </Button>
       </Box>
     </Box>

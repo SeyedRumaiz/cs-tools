@@ -18,10 +18,14 @@
  * An in-memory stand-in for the portal backend's `/wso2-cloud-requests`
  * routes, for page tests. It applies the backend's rules and answers with its
  * words: one pending request per type and target, a reason to lock or
- * disable, a remark to reject, nobody approves their own request, only the
+ * disable, a remark to reject, nobody approves their own request (except a
+ * customer upgrade, which needs no approval and is applied when raised), only the
  * requester or an admin cancels, and an approval WSO2 Cloud cannot apply
- * leaves the request pending. It also serves the two reads the upgrade form
- * needs (an organisation's subscriptions, the configured Enterprise plans).
+ * leaves the request pending. It also serves the reads the upgrade form needs
+ * (an organisation's subscriptions, the configured Enterprise plans, its
+ * Salesforce record and a Salesforce account) and the Salesforce side of a
+ * customer upgrade: an account with an active subscription to raise and to
+ * approve one, and the link made after approval (or retried).
  *
  * Use it by mocking the client:
  *
@@ -52,6 +56,28 @@ export const SEEDED = {
 } as const;
 
 const BASE = "/wso2-cloud-requests";
+
+/** A Salesforce account as the backend sends it. */
+export interface FakeSalesforceAccount {
+  id: string;
+  name: string | null;
+  hasActiveSubscription: boolean;
+  activeOpportunities: { id: string; name: string | null; endDate: string | null }[];
+}
+
+/** An account with an active subscription, and one without. */
+export const SF_ACTIVE: FakeSalesforceAccount = {
+  id: "001000000000001AAA",
+  name: "Acme Corp",
+  hasActiveSubscription: true,
+  activeOpportunities: [{ id: "006000000000001AAA", name: "Acme support 2027", endDate: "2027-06-30" }],
+};
+export const SF_LAPSED: FakeSalesforceAccount = {
+  id: "001000000000002AAA",
+  name: "Initech",
+  hasActiveSubscription: false,
+  activeOpportunities: [],
+};
 const REASON_REQUIRED = new Set(["lock_user", "disable_user"]);
 
 function seeded(): BeCloudRequest[] {
@@ -148,6 +174,14 @@ class FakeCloudBackend {
   /** Every organisation's subscriptions; null answers 503 (WSO2 Cloud not connected). */
   subscriptions: CloudSubscription[] | null = defaultSubscriptions();
   plans: CloudPlansByProduct = defaultPlans();
+  /** False answers 503 to every Salesforce read and refuses a customer upgrade. */
+  salesforceConnected = true;
+  /** Salesforce accounts by their 18-character id. */
+  salesforceAccounts: Record<string, FakeSalesforceAccount> = { [SF_ACTIVE.id]: SF_ACTIVE, [SF_LAPSED.id]: SF_LAPSED };
+  /** Organisations' Salesforce records: the account each is under, and its region. */
+  salesforceOrgs: Record<string, { accountId: string | null; region: string | null }> = {};
+  /** When set, linking fails with this reason. */
+  linkError: string | null = null;
   private seq = 3;
 
   reset(): void {
@@ -157,7 +191,34 @@ class FakeCloudBackend {
     this.applyError = null;
     this.subscriptions = defaultSubscriptions();
     this.plans = defaultPlans();
+    this.salesforceConnected = true;
+    this.salesforceAccounts = { [SF_ACTIVE.id]: SF_ACTIVE, [SF_LAPSED.id]: SF_LAPSED };
+    this.salesforceOrgs = {};
+    this.linkError = null;
     this.seq = 3;
+  }
+
+  /** The account with this id (15 or 18 characters), as Salesforce matches it. */
+  private salesforceAccount(id: string): FakeSalesforceAccount | null {
+    const found = Object.values(this.salesforceAccounts).find((a) => a.id === id || a.id.slice(0, 15) === id);
+    return found ?? null;
+  }
+
+  private requireSalesforce(): void {
+    if (!this.salesforceConnected) {
+      throw new FakeBackendError(503, "Salesforce is not connected to this service, so a customer upgrade cannot be checked or linked");
+    }
+  }
+
+  /** The account a customer upgrade names, which must have an active subscription. */
+  private subscribedAccount(id: string | null | undefined): FakeSalesforceAccount {
+    this.requireSalesforce();
+    const account = id ? this.salesforceAccount(id) : null;
+    if (!account) throw new FakeBackendError(400, "salesforceAccountId: Salesforce has no account with this id");
+    if (!account.hasActiveSubscription) {
+      throw new FakeBackendError(409, "this Salesforce account has no active subscription (an active opportunity), which a customer upgrade needs");
+    }
+    return account;
   }
 
   /** Raises a request as `requestedBy`, by the backend's own rules. */
@@ -167,6 +228,13 @@ class FakeCloudBackend {
     }
     if (body.type === "upgrade_organization" && body.planCode && !(this.plans[body.product ?? ""] ?? []).some((p) => p.code === body.planCode)) {
       throw new FakeBackendError(400, "planCode is not one of the Enterprise plans configured for this product.");
+    }
+    if (body.type === "upgrade_organization") {
+      if (!body.upgradeKind) throw new FakeBackendError(400, "upgradeKind is required for an upgrade_organization request (customer or internal)");
+      if (body.upgradeKind === "customer") {
+        if (!body.region) throw new FakeBackendError(400, "region is required for a customer upgrade");
+        body = { ...body, salesforceAccountId: this.subscribedAccount(body.salesforceAccountId).id };
+      }
     }
     if (this.requests.some((r) => r.status === "pending" && r.type === body.type && r.targetId === body.targetId)) {
       throw new FakeBackendError(409, `a ${body.type.replaceAll("_", " ")} request for this target is already pending`);
@@ -209,8 +277,15 @@ class FakeCloudBackend {
       throw new FakeBackendError(400, "remark is required to reject a request");
     }
     if (body.status === "approved") {
-      if (request.requestedBy.toLowerCase() === this.me.toLowerCase()) {
+      // A customer upgrade needs no approval, so its requester may apply it.
+      if (request.upgradeKind !== "customer" && request.requestedBy.toLowerCase() === this.me.toLowerCase()) {
         throw new FakeBackendError(403, "You cannot approve a request you raised.");
+      }
+      if (request.upgradeKind === "customer" && !this.salesforceAccount(request.salesforceAccountId ?? "")?.hasActiveSubscription) {
+        throw new FakeBackendError(
+          409,
+          "The customer's Salesforce account no longer has an active subscription, so this upgrade cannot be approved. The request stays pending.",
+        );
       }
       if (this.applyError) throw new FakeBackendError(503, this.applyError);
     }
@@ -222,7 +297,23 @@ class FakeCloudBackend {
       remark: body.remark ?? null,
     };
     this.requests = this.requests.map((r) => (r.id === id ? resolved : r));
-    return resolved;
+    // A customer upgrade is linked in Salesforce once approved.
+    return resolved.status === "approved" && resolved.upgradeKind === "customer" ? this.link(id) : resolved;
+  }
+
+  private link(id: string): BeCloudRequest {
+    const request = this.find(id);
+    if (request.upgradeKind !== "customer") throw new FakeBackendError(400, "only a customer upgrade has a Salesforce account");
+    if (request.status !== "approved") throw new FakeBackendError(409, `only an approved request is linked in Salesforce; this one is ${request.status}`);
+    if (request.salesforceLinkStatus === "linked") return request;
+    const linked: BeCloudRequest = this.linkError
+      ? { ...request, salesforceLinkStatus: "failed", salesforceLinkError: this.linkError }
+      : { ...request, salesforceLinkStatus: "linked", salesforceLinkError: null, salesforceLinkedOn: new Date().toISOString() };
+    if (!this.linkError) {
+      this.salesforceOrgs[request.targetId] = { accountId: request.salesforceAccountId ?? null, region: request.region ?? null };
+    }
+    this.requests = this.requests.map((r) => (r.id === id ? linked : r));
+    return linked;
   }
 
   private cancel(id: string): void {
@@ -243,12 +334,31 @@ class FakeCloudBackend {
         }
         return { subscriptions: this.subscriptions } as T;
       }
+      const orgSalesforce = path.match(/^\/wso2-cloud\/organizations\/([^/]+)\/salesforce$/);
+      if (orgSalesforce) {
+        this.requireSalesforce();
+        const rec = this.salesforceOrgs[orgSalesforce[1]];
+        if (!rec) return { record: null, account: null } as T;
+        return {
+          record: { id: `a0X-${orgSalesforce[1]}`, handle: null, region: rec.region },
+          account: rec.accountId ? this.salesforceAccount(rec.accountId) : null,
+        } as T;
+      }
+      const account = path.match(/^\/wso2-cloud\/salesforce-accounts\/([^/]+)$/);
+      if (account) {
+        this.requireSalesforce();
+        return this.salesforceAccount(decodeURIComponent(account[1])) as T | null;
+      }
       const id = path.slice(BASE.length + 1);
       return (this.requests.find((r) => r.id === id) ?? null) as T | null;
     },
     post: async <TReq, TRes>(path: string, body: TReq): Promise<TRes> => {
       if (path === BASE) {
-        return this.raise(body as Parameters<FakeCloudBackend["raise"]>[0]) as TRes;
+        const created = this.raise(body as Parameters<FakeCloudBackend["raise"]>[0]);
+        // A customer upgrade needs no approval: applied at once, as the requester. If it
+        // cannot be applied the request stays pending and the error is the answer.
+        if (created.upgradeKind === "customer") return this.resolve(created.id, { status: "approved" }) as TRes;
+        return created as TRes;
       }
       if (path === `${BASE}/search`) {
         const { pagination } = body as { pagination: { limit: number; offset: number } };
@@ -258,6 +368,11 @@ class FakeCloudBackend {
       const resolve = path.match(/^\/wso2-cloud-requests\/([^/]+)\/resolve$/);
       if (resolve) return this.resolve(resolve[1], body as { status: string; remark?: string }) as TRes;
       throw new Error(`unexpected POST ${path}`);
+    },
+    put: async <TRes>(path: string): Promise<TRes> => {
+      const link = path.match(/^\/wso2-cloud-requests\/([^/]+)\/salesforce-link$/);
+      if (link) return this.link(link[1]) as TRes;
+      throw new Error(`unexpected PUT ${path}`);
     },
     delete: async (path: string): Promise<void> => {
       this.cancel(path.slice(BASE.length + 1));

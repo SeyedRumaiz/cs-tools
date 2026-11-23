@@ -172,6 +172,24 @@ export const CLOUD_BILLING_PERIOD_LABELS: Record<CloudBillingPeriod, string> = {
   annual: "Annual",
 };
 
+/**
+ * Whether an upgrade is for a paying customer or internal. A customer upgrade
+ * names the customer's Salesforce account, which must have an active
+ * subscription (an active opportunity), and the organisation is linked to that
+ * account in Salesforce once approved. An internal upgrade never touches
+ * Salesforce.
+ */
+export type CloudUpgradeKind = "customer" | "internal";
+
+/** The WSO2 Cloud regions an organisation can be in (Salesforce's region picklist). */
+export const CLOUD_REGIONS = ["us", "eu"] as const;
+export type CloudRegion = (typeof CLOUD_REGIONS)[number];
+
+export const CLOUD_REGION_LABELS: Record<CloudRegion, string> = {
+  us: "United States",
+  eu: "Europe",
+};
+
 /** What an upgrade asks for, as it is raised. */
 export interface NewCloudUpgrade {
   product: string;
@@ -182,13 +200,30 @@ export interface NewCloudUpgrade {
   billingPeriod?: CloudBillingPeriod;
   /** Whether WSO2 Cloud emails the customer about the plan change. */
   notifyCustomer: boolean;
+  kind: CloudUpgradeKind;
+  /** A customer upgrade's Salesforce Account Id. */
+  salesforceAccountId?: string;
+  /** A customer upgrade's WSO2 Cloud region. */
+  region?: CloudRegion;
+}
+
+/** The Salesforce link of an approved customer upgrade, once it was tried. */
+export interface CloudSalesforceLink {
+  status: "linked" | "failed";
+  /** Why it failed, written for the person who will put it right. */
+  error?: string;
+  linkedOn?: string;
 }
 
 /** An upgrade as stored. */
-export interface CloudUpgrade extends Omit<NewCloudUpgrade, "product"> {
+export interface CloudUpgrade extends Omit<NewCloudUpgrade, "product" | "kind" | "region"> {
   product?: string;
   /** The wire billing account created in WSO2 Cloud while the upgrade was approved. */
   billingAccountId?: string;
+  /** Absent on an upgrade raised before the kind existed (treated as internal). */
+  kind?: CloudUpgradeKind;
+  region?: string;
+  salesforceLink?: CloudSalesforceLink;
 }
 
 /** One product subscription of an organisation in WSO2 Cloud. */
@@ -209,3 +244,26 @@ export interface CloudPlan {
 
 /** The configured Enterprise plans, per product. */
 export type CloudPlansByProduct = Record<string, CloudPlan[]>;
+
+/** An active opportunity of a customer's Salesforce account. */
+export interface CloudSalesforceOpportunity {
+  id: string;
+  name?: string;
+  /** When the support it sold ends (YYYY-MM-DD). */
+  endDate?: string;
+}
+
+/** A customer's Salesforce account and whether it has an active subscription. */
+export interface CloudSalesforceAccount {
+  /** The Account Id, 18 characters. */
+  id: string;
+  name?: string;
+  hasActiveSubscription: boolean;
+  activeOpportunities: CloudSalesforceOpportunity[];
+}
+
+/** What Salesforce knows about an organisation: its record and the account it is under, when it has one. */
+export interface CloudSalesforceStatus {
+  record: { id: string; handle?: string; region?: string } | null;
+  account: CloudSalesforceAccount | null;
+}

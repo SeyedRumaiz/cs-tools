@@ -30,6 +30,10 @@ import {
   CLOUD_REQUEST_TYPE_LABELS,
   type CloudBillingPeriod,
   type CloudPlansByProduct,
+  type CloudRegion,
+  type CloudSalesforceAccount,
+  type CloudSalesforceStatus,
+  type CloudUpgradeKind,
   type CloudRequest,
   type CloudRequestStatus,
   type CloudRequestType,
@@ -64,6 +68,15 @@ export interface BeCloudRequest {
   billingPeriod: CloudBillingPeriod | null;
   notifyCustomer: boolean;
   billingAccountId: string | null;
+  /** Upgrades only; null on one raised before it existed (treated as internal). */
+  upgradeKind?: CloudUpgradeKind | null;
+  /** A customer upgrade's Salesforce Account Id (18 characters) and region. */
+  salesforceAccountId?: string | null;
+  region?: string | null;
+  /** An approved customer upgrade's Salesforce link: null until tried. */
+  salesforceLinkStatus?: "linked" | "failed" | null;
+  salesforceLinkError?: string | null;
+  salesforceLinkedOn?: string | null;
   status: CloudRequestStatus;
   requestedBy: string;
   requestedOn: string;
@@ -94,6 +107,9 @@ interface BeCreateCloudRequestBody {
   previousPlanCode?: string;
   billingPeriod?: CloudBillingPeriod;
   notifyCustomer?: boolean;
+  upgradeKind?: CloudUpgradeKind;
+  salesforceAccountId?: string;
+  region?: CloudRegion;
 }
 
 /** One line saying what a request changes, e.g. "Upgrade identity to identity-enterprise". */
@@ -125,6 +141,16 @@ export function toCloudRequest(be: BeCloudRequest): CloudRequest {
           billingPeriod: be.billingPeriod ?? undefined,
           notifyCustomer: be.notifyCustomer,
           billingAccountId: be.billingAccountId ?? undefined,
+          kind: be.upgradeKind ?? undefined,
+          salesforceAccountId: be.salesforceAccountId ?? undefined,
+          region: be.region ?? undefined,
+          salesforceLink: be.salesforceLinkStatus
+            ? {
+                status: be.salesforceLinkStatus,
+                error: be.salesforceLinkError ?? undefined,
+                linkedOn: be.salesforceLinkedOn ?? undefined,
+              }
+            : undefined,
         }
       : undefined;
   return {
@@ -189,6 +215,11 @@ export async function createCloudRequest(api: BackendApi, input: NewCloudRequest
     if (upgrade.previousPlanCode) body.previousPlanCode = upgrade.previousPlanCode;
     if (upgrade.billingPeriod) body.billingPeriod = upgrade.billingPeriod;
     if (upgrade.notifyCustomer) body.notifyCustomer = true;
+    body.upgradeKind = upgrade.kind;
+    if (upgrade.kind === "customer") {
+      body.salesforceAccountId = upgrade.salesforceAccountId?.trim();
+      body.region = upgrade.region;
+    }
   }
   const be = await api.post<BeCreateCloudRequestBody, BeCloudRequest>(BASE, body);
   return toCloudRequest(be);
@@ -233,4 +264,61 @@ export async function listCloudSubscriptions(api: BackendApi, organizationId: st
 export async function listCloudPlans(api: BackendApi): Promise<CloudPlansByProduct> {
   const res = await api.get<{ plans: CloudPlansByProduct | null }>("/wso2-cloud/plans");
   return res?.plans ?? {};
+}
+
+/** A Salesforce Account Id: the 001 key prefix, 15 or 18 letters and digits. */
+export const SALESFORCE_ACCOUNT_ID_PATTERN = /^001[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/;
+
+interface BeSalesforceAccount {
+  id: string;
+  name: string | null;
+  hasActiveSubscription: boolean;
+  activeOpportunities: { id: string; name: string | null; endDate: string | null }[] | null;
+}
+
+function toSalesforceAccount(be: BeSalesforceAccount): CloudSalesforceAccount {
+  return {
+    id: be.id,
+    name: be.name ?? undefined,
+    hasActiveSubscription: be.hasActiveSubscription,
+    activeOpportunities: (be.activeOpportunities ?? []).map((o) => ({
+      id: o.id,
+      name: o.name ?? undefined,
+      endDate: o.endDate ?? undefined,
+    })),
+  };
+}
+
+/**
+ * What Salesforce knows about an organisation: its record and the account it
+ * is under, with that account's active subscriptions. The backend answers 503
+ * when Salesforce is not connected.
+ */
+export async function getOrganizationSalesforce(api: BackendApi, organizationId: string): Promise<CloudSalesforceStatus> {
+  const res = await api.get<{
+    record: { id: string; handle: string | null; region: string | null } | null;
+    account: BeSalesforceAccount | null;
+  }>(`/wso2-cloud/organizations/${encodeURIComponent(organizationId)}/salesforce`);
+  return {
+    record: res?.record
+      ? { id: res.record.id, handle: res.record.handle ?? undefined, region: res.record.region ?? undefined }
+      : null,
+    account: res?.account ? toSalesforceAccount(res.account) : null,
+  };
+}
+
+/** A Salesforce account and whether it has an active subscription (404 when there is none). */
+export async function getSalesforceAccount(api: BackendApi, accountId: string): Promise<CloudSalesforceAccount | null> {
+  const res = await api.get<BeSalesforceAccount>(`/wso2-cloud/salesforce-accounts/${encodeURIComponent(accountId)}`);
+  return res ? toSalesforceAccount(res) : null;
+}
+
+/**
+ * Links an approved customer upgrade's organisation to its account in
+ * Salesforce again, after the link failed. Answers with the request and the
+ * link's outcome.
+ */
+export async function linkCloudRequestSalesforce(api: BackendApi, id: string): Promise<CloudRequest> {
+  const be = await api.put<Record<string, never>, BeCloudRequest>(`${BASE}/${encodeURIComponent(id)}/salesforce-link`, {});
+  return toCloudRequest(be);
 }
