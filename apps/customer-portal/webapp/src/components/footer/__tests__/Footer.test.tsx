@@ -15,35 +15,51 @@
 // under the License.
 
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import type { ReactNode } from "react";
+import { describe, expect, it, vi } from "vitest";
 import Footer from "@components/footer/Footer";
 import {
-  COMPANY_NAME,
   PRIVACY_POLICY_URL,
   TERMS_OF_SERVICE_URL,
 } from "@features/project-hub/constants/appLayoutConstants";
 
-// Footer is a compound component (Footer.Copyright / Footer.Link), so render the
-// real Oxygen UI implementation instead of a flat mock.
+// Mock @wso2/oxygen-ui: the Footer compound component and its slots.
+vi.mock("@wso2/oxygen-ui", () => {
+  const FooterUI = ({ children }: { children: ReactNode }) => (
+    <div data-testid="footer-ui">{children}</div>
+  );
+  FooterUI.Copyright = ({ children }: { children: ReactNode }) => (
+    <span>{children}</span>
+  );
+  FooterUI.Link = ({
+    href,
+    children,
+  }: {
+    href: string;
+    children: ReactNode;
+  }) => <a href={href}>{children}</a>;
+  return { Footer: FooterUI };
+});
 
 describe("Footer", () => {
-  it("should render the company name", () => {
+  it("should render the default company name with LLC", () => {
     render(<Footer />);
-    expect(screen.getByText(new RegExp(COMPANY_NAME, "i"))).toBeDefined();
     expect(
-      screen.getByText(new RegExp(`${new Date().getFullYear()}`)),
-    ).toBeDefined();
+      screen.getByText(
+        `© ${new Date().getFullYear()} WSO2 LLC. All rights reserved.`,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("should render the terms of service link with correct URL", () => {
     render(<Footer />);
-    const termsLink = screen.getByRole("link", { name: "Terms & Conditions" });
+    const termsLink = screen.getByRole("link", { name: /terms/i });
     expect(termsLink).toHaveAttribute("href", TERMS_OF_SERVICE_URL);
   });
 
   it("should render the privacy policy link with correct URL", () => {
     render(<Footer />);
-    const privacyLink = screen.getByRole("link", { name: "Privacy Policy" });
+    const privacyLink = screen.getByRole("link", { name: /privacy/i });
     expect(privacyLink).toHaveAttribute("href", PRIVACY_POLICY_URL);
   });
 });

@@ -30,9 +30,9 @@ describe("ProjectSuspendedNoticePage", () => {
     render(<ProjectSuspendedNoticePage project={project} />);
     expect(screen.getByText("Project Suspension Notice")).toBeInTheDocument();
     expect(screen.getByText(/This project has been suspended/i)).toBeInTheDocument();
-    expect(screen.getByText("billing@wso2.com")).toHaveAttribute(
+    expect(screen.getByText("billing@choreolabs.com")).toHaveAttribute(
       "href",
-      "mailto:billing@wso2.com",
+      "mailto:billing@choreolabs.com",
     );
     // The reasons block only appears when the backend supplies reasons.
     expect(screen.queryByText(/suspended for the following reasons/i)).toBeNull();
@@ -55,5 +55,45 @@ describe("ProjectSuspendedNoticePage", () => {
       screen.getByText(/suspended for the following reasons/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/Payment overdue/)).toBeInTheDocument();
+  });
+
+  it("names WSO2 and the default billing address when nothing is configured", () => {
+    render(<ProjectSuspendedNoticePage project={{ id: "p", name: "Proj", closureState: "Suspended" } as never} />);
+    expect(screen.getByText(/contact your WSO2 Account\s+Manager/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "billing@choreolabs.com" })).toHaveAttribute("href", "mailto:billing@choreolabs.com");
+  });
+
+  it("names the configured company and billing address", () => {
+    const originalConfig = window.config;
+    window.config = {
+      ...originalConfig,
+      CUSTOMER_PORTAL_COMPANY_NAME: "Acme Corp",
+      CUSTOMER_PORTAL_BILLING_EMAIL: "billing@acme.example",
+    };
+    try {
+      render(<ProjectSuspendedNoticePage project={{ id: "p", name: "Proj", closureState: "Suspended" } as never} />);
+      expect(screen.getByText(/contact your Acme Corp Account\s+Manager/)).toBeInTheDocument();
+      expect(screen.queryByText(/WSO2 Account/)).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "billing@acme.example" })).toHaveAttribute(
+        "href",
+        "mailto:billing@acme.example",
+      );
+    } finally {
+      window.config = originalConfig;
+    }
+  });
+
+  it("encodes a # in the billing link but shows the address unchanged", () => {
+    const originalConfig = window.config;
+    window.config = { ...originalConfig, CUSTOMER_PORTAL_BILLING_EMAIL: "billing#accounts@acme.example" };
+    try {
+      render(<ProjectSuspendedNoticePage project={{ id: "p", name: "Proj", closureState: "Suspended" } as never} />);
+      expect(screen.getByRole("link", { name: "billing#accounts@acme.example" })).toHaveAttribute(
+        "href",
+        "mailto:billing%23accounts@acme.example",
+      );
+    } finally {
+      window.config = originalConfig;
+    }
   });
 });

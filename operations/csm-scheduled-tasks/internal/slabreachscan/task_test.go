@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/notify"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/slabreachreport"
 )
 
@@ -32,12 +33,14 @@ type fakeFetcher struct {
 	calls                     int
 	gotDefs, gotStage         []string
 	gotOnboarding, gotExclude []string
+	gotWeek                   time.Time
 }
 
-func (f *fakeFetcher) Report(_ context.Context, definitions, stages, onboardingStatuses, excludeOnboardingStatuses []string) (slabreachreport.Report, error) {
+func (f *fakeFetcher) Report(_ context.Context, definitions, stages, onboardingStatuses, excludeOnboardingStatuses []string, week time.Time) (slabreachreport.Report, error) {
 	f.calls++
 	f.gotDefs, f.gotStage = definitions, stages
 	f.gotOnboarding, f.gotExclude = onboardingStatuses, excludeOnboardingStatuses
+	f.gotWeek = week
 	return f.report, f.err
 }
 
@@ -59,13 +62,30 @@ func cre() Variant     { return CREVariant() }
 func someTo() []string { return []string{"recipient@example.invalid"} }
 
 // TestCREVariantFilters pins the CRE report's own filter set: the source
-// selects stages Paused and Completed and EXCLUDES onboarding statuses
+// selects "a clock no longer running" and EXCLUDES onboarding statuses
 // In-Progress and Not-Started. It must not carry an "is one of" status
 // filter -- that belongs to the other report.
+//
+// The stage list is the source's {Paused, Completed} translated into
+// this engine's vocabulary (ACHIEVED is its "Completed"; BREACHED is a
+// clock that breached and is still running) -- see CREVariant's own doc
+// comment for why a literal copy reports nothing. CANCELLED must stay
+// out: it was out of the source filter too.
 func TestCREVariantFilters(t *testing.T) {
 	v := cre()
-	if len(v.Stages) != 2 || v.Stages[0] != "PAUSED" || v.Stages[1] != "COMPLETED" {
-		t.Fatalf("stages = %#v", v.Stages)
+	wantStages := []string{"PAUSED", "COMPLETED", "ACHIEVED", "BREACHED"}
+	if len(v.Stages) != len(wantStages) {
+		t.Fatalf("stages = %#v, want %#v", v.Stages, wantStages)
+	}
+	for i, want := range wantStages {
+		if v.Stages[i] != want {
+			t.Fatalf("stages = %#v, want %#v", v.Stages, wantStages)
+		}
+	}
+	for _, s := range v.Stages {
+		if s == "CANCELLED" {
+			t.Fatalf("a cancelled clock was not in the source filter: %#v", v.Stages)
+		}
 	}
 	if len(v.ExcludeOnboardingStatuses) != 2 ||
 		v.ExcludeOnboardingStatuses[0] != "IN_PROGRESS" || v.ExcludeOnboardingStatuses[1] != "NOT_STARTED" {
@@ -86,7 +106,7 @@ func TestCREVariantFilters(t *testing.T) {
 // even reach entity-service.
 func TestSendReportSkipsWithoutRecipients(t *testing.T) {
 	fetch, send := &fakeFetcher{}, &fakeSender{}
-	if err := SendReport(fetch, send, cre(), defs(), nil, nil, "", true)(context.Background()); err != nil {
+	if err := SendReport(fetch, send, cre(), defs(), nil, nil, "", true, time.Time{})(context.Background()); err != nil {
 		t.Fatalf("SendReport: %v", err)
 	}
 	if fetch.calls != 0 || send.calls != 0 {
@@ -97,7 +117,7 @@ func TestSendReportSkipsWithoutRecipients(t *testing.T) {
 // TestSendReportSkipsWhenEmailsDisabled covers ALERTS_ENABLED=false.
 func TestSendReportSkipsWhenEmailsDisabled(t *testing.T) {
 	fetch, send := &fakeFetcher{}, &fakeSender{}
-	if err := SendReport(fetch, send, cre(), defs(), someTo(), nil, "", false)(context.Background()); err != nil {
+	if err := SendReport(fetch, send, cre(), defs(), someTo(), nil, "", false, time.Time{})(context.Background()); err != nil {
 		t.Fatalf("SendReport: %v", err)
 	}
 	if fetch.calls != 0 || send.calls != 0 {
@@ -114,7 +134,7 @@ func TestSendReportSendsAnEmptyWeek(t *testing.T) {
 		PeriodEnd:   time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC),
 	}}
 	send := &fakeSender{}
-	if err := SendReport(fetch, send, cre(), defs(), someTo(), nil, "", true)(context.Background()); err != nil {
+	if err := SendReport(fetch, send, cre(), defs(), someTo(), nil, "", true, time.Time{})(context.Background()); err != nil {
 		t.Fatalf("SendReport: %v", err)
 	}
 	if send.calls != 1 {
@@ -129,7 +149,7 @@ func TestSendReportSubjectAndAudience(t *testing.T) {
 		Rows: []slabreachreport.Row{{Team: "Atlas", CaseNumber: "CS01", Definition: "P1 - Response (Open Source)"}},
 	}}
 	send := &fakeSender{}
-	if err := SendReport(fetch, send, cre(), defs(), []string{"to@example.invalid"}, []string{"cc@example.invalid"}, "", true)(context.Background()); err != nil {
+	if err := SendReport(fetch, send, cre(), defs(), []string{"to@example.invalid"}, []string{"cc@example.invalid"}, "", true, time.Time{})(context.Background()); err != nil {
 		t.Fatalf("SendReport: %v", err)
 	}
 	if send.subject != "Weekly SLA Breach Report" {
@@ -147,13 +167,13 @@ func TestSendReportSubjectAndAudience(t *testing.T) {
 // variant's own three filters must reach entity-service unchanged.
 func TestSendReportPassesEveryFilterThrough(t *testing.T) {
 	fetch, send := &fakeFetcher{}, &fakeSender{}
-	if err := SendReport(fetch, send, cre(), defs(), someTo(), nil, "", true)(context.Background()); err != nil {
+	if err := SendReport(fetch, send, cre(), defs(), someTo(), nil, "", true, time.Time{})(context.Background()); err != nil {
 		t.Fatalf("SendReport: %v", err)
 	}
 	if len(fetch.gotDefs) != 10 {
 		t.Fatalf("definitions = %d, want the 10 the source reports name", len(fetch.gotDefs))
 	}
-	if len(fetch.gotStage) != 2 || fetch.gotStage[0] != "PAUSED" {
+	if len(fetch.gotStage) != 4 || fetch.gotStage[0] != "PAUSED" {
 		t.Fatalf("stages = %v", fetch.gotStage)
 	}
 	if len(fetch.gotExclude) != 2 {
@@ -168,7 +188,7 @@ func TestSendReportPassesEveryFilterThrough(t *testing.T) {
 // empty list, so fail here rather than 400 on every tick.
 func TestSendReportRefusesWithoutDefinitions(t *testing.T) {
 	fetch, send := &fakeFetcher{}, &fakeSender{}
-	if err := SendReport(fetch, send, cre(), nil, someTo(), nil, "", true)(context.Background()); err == nil {
+	if err := SendReport(fetch, send, cre(), nil, someTo(), nil, "", true, time.Time{})(context.Background()); err == nil {
 		t.Fatal("want an error with no definitions configured")
 	}
 	if fetch.calls != 0 || send.calls != 0 {
@@ -181,7 +201,7 @@ func TestSendReportRefusesWithoutDefinitions(t *testing.T) {
 func TestSendReportPropagatesFetchFailure(t *testing.T) {
 	fetch := &fakeFetcher{err: errors.New("boom")}
 	send := &fakeSender{}
-	if err := SendReport(fetch, send, cre(), defs(), someTo(), nil, "", true)(context.Background()); err == nil {
+	if err := SendReport(fetch, send, cre(), defs(), someTo(), nil, "", true, time.Time{})(context.Background()); err == nil {
 		t.Fatal("want the fetch error propagated")
 	}
 	if send.calls != 0 {
@@ -213,6 +233,60 @@ func TestParseList(t *testing.T) {
 	}
 }
 
+// TestRunNowWeekRequiresOneWholeWeek: the report always covers a single
+// Monday-to-Monday week, so a range spanning a boundary has no answer it
+// could give. Reporting one of the two weeks silently would be worse
+// than refusing.
+func TestRunNowWeekRequiresOneWholeWeek(t *testing.T) {
+	day := func(d int) time.Time { return time.Date(2026, 10, d, 0, 0, 0, 0, time.UTC) }
+
+	// Not given at all: the scheduled path, no error, zero week.
+	if w, err := RunNowWeek(time.Time{}, time.Time{}, time.UTC); err != nil || !w.IsZero() {
+		t.Fatalf("no dates: got (%v, %v), want (zero, nil)", w, err)
+	}
+	// Mon 12 Oct to Sun 18 Oct is one week.
+	if w, err := RunNowWeek(day(12), day(18), time.UTC); err != nil || !w.Equal(day(12)) {
+		t.Fatalf("same week: got (%v, %v)", w, err)
+	}
+	// Mid-week to mid-week, still one week.
+	if _, err := RunNowWeek(day(14), day(16), time.UTC); err != nil {
+		t.Fatalf("same week mid-range: %v", err)
+	}
+	// Sun 18 to Mon 19 crosses the boundary.
+	if _, err := RunNowWeek(day(18), day(19), time.UTC); err == nil {
+		t.Fatal("a range crossing a Monday must be refused")
+	}
+	// Reversed.
+	if _, err := RunNowWeek(day(16), day(14), time.UTC); err == nil {
+		t.Fatal("--to-date before --from-date must be refused")
+	}
+	// Only one given.
+	if _, err := RunNowWeek(day(14), time.Time{}, time.UTC); err == nil {
+		t.Fatal("--from-date without --to-date must be refused")
+	}
+}
+
+// TestSendReportPassesTheWeekThrough: a manual run's week has to reach
+// entity-service, or the run silently reports last week instead.
+func TestSendReportPassesTheWeekThrough(t *testing.T) {
+	week := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+	fetch, send := &fakeFetcher{}, &fakeSender{}
+	if err := SendReport(fetch, send, cre(), defs(), someTo(), nil, "", true, week)(context.Background()); err != nil {
+		t.Fatalf("SendReport: %v", err)
+	}
+	if !fetch.gotWeek.Equal(week) {
+		t.Fatalf("week = %v, want %v", fetch.gotWeek, week)
+	}
+	// The scheduled path must still ask for last week.
+	fetch2 := &fakeFetcher{}
+	if err := SendReport(fetch2, &fakeSender{}, cre(), defs(), someTo(), nil, "", true, time.Time{})(context.Background()); err != nil {
+		t.Fatalf("SendReport: %v", err)
+	}
+	if !fetch2.gotWeek.IsZero() {
+		t.Fatalf("scheduled run must send no week, got %v", fetch2.gotWeek)
+	}
+}
+
 func onboarding() Variant { return OnboardingVariant() }
 
 // TestOnboardingVariantFilters pins the onboarding report's own filter
@@ -220,8 +294,10 @@ func onboarding() Variant { return OnboardingVariant() }
 // two are separate tasks rather than two sections of one.
 func TestOnboardingVariantFilters(t *testing.T) {
 	v := onboarding()
-	if len(v.Stages) != 1 || v.Stages[0] != "IN_PROGRESS" {
-		t.Fatalf("stages = %#v, want [IN_PROGRESS]", v.Stages)
+	// The source's single "In progress" is two values here: a running
+	// clock reads IN_PROGRESS until it breaches and BREACHED after.
+	if len(v.Stages) != 2 || v.Stages[0] != "IN_PROGRESS" || v.Stages[1] != "BREACHED" {
+		t.Fatalf("stages = %#v, want [IN_PROGRESS BREACHED]", v.Stages)
 	}
 	if len(v.OnboardingStatuses) != 1 || v.OnboardingStatuses[0] != "IN_PROGRESS" {
 		t.Fatalf("onboarding statuses = %#v, want [IN_PROGRESS]", v.OnboardingStatuses)
@@ -266,10 +342,10 @@ func TestTheTwoVariantsAreNotComplements(t *testing.T) {
 // not the CRE report's, must reach entity-service.
 func TestOnboardingSendReportPassesItsOwnFilters(t *testing.T) {
 	fetch, send := &fakeFetcher{}, &fakeSender{}
-	if err := SendReport(fetch, send, onboarding(), defs(), someTo(), nil, "", true)(context.Background()); err != nil {
+	if err := SendReport(fetch, send, onboarding(), defs(), someTo(), nil, "", true, time.Time{})(context.Background()); err != nil {
 		t.Fatalf("SendReport: %v", err)
 	}
-	if len(fetch.gotStage) != 1 || fetch.gotStage[0] != "IN_PROGRESS" {
+	if len(fetch.gotStage) != 2 || fetch.gotStage[0] != "IN_PROGRESS" || fetch.gotStage[1] != "BREACHED" {
 		t.Fatalf("stages = %v", fetch.gotStage)
 	}
 	if len(fetch.gotOnboarding) != 1 || fetch.gotOnboarding[0] != "IN_PROGRESS" {
@@ -291,7 +367,69 @@ func TestOnboardingStageOverrideIsIndependent(t *testing.T) {
 	if got := ApplyStageOverride(onboarding()).Stages; len(got) != 1 || got[0] != "BREACHED" {
 		t.Fatalf("onboarding stages = %#v", got)
 	}
-	if got := ApplyStageOverride(cre()).Stages; len(got) != 2 || got[0] != "PAUSED" {
+	if got := ApplyStageOverride(cre()).Stages; len(got) != 4 || got[0] != "PAUSED" {
 		t.Fatalf("the CRE report must be unaffected, got %#v", got)
+	}
+}
+
+// TestSendReportStillSendsUnderDebugModeWithoutRecipients is the point of
+// debug mail mode: configure a "debug" list, get the report, involve the
+// real audience in nothing. The old guard skipped on an empty "to" before
+// consulting the sender, so the one configuration that exists to try a
+// report safely sent nothing at all and looked exactly like a quiet week.
+func TestSendReportStillSendsUnderDebugModeWithoutRecipients(t *testing.T) {
+	fetch, send := &fakeFetcher{}, &fakeSender{}
+	debug := []string{"debug@example.invalid"}
+
+	err := SendReport(fetch, notify.ForReport(send, debug), cre(), defs(), nil, nil, "", true, time.Time{})(context.Background())
+	if err != nil {
+		t.Fatalf("SendReport: %v", err)
+	}
+	if fetch.calls != 1 {
+		t.Fatalf("fetch calls = %d, want 1: the report has to be built to be diverted", fetch.calls)
+	}
+	if send.calls != 1 {
+		t.Fatalf("send calls = %d, want 1", send.calls)
+	}
+	if len(send.to) != 1 || send.to[0] != debug[0] {
+		t.Fatalf("mail went to %#v, want the debug list %#v", send.to, debug)
+	}
+	if !strings.Contains(send.subject, "[Test copy]") {
+		t.Fatalf("a diverted report is marked as a test copy, got %q", send.subject)
+	}
+}
+
+// TestSendReportRunNowOverrideAlsoSendsWithoutRecipients: the same holds
+// for a manual run that named its own recipients. A task left with no
+// configured audience must still be runnable by hand.
+func TestSendReportRunNowOverrideAlsoSendsWithoutRecipients(t *testing.T) {
+	fetch, send := &fakeFetcher{}, &fakeSender{}
+	me := []string{"me@example.invalid"}
+
+	err := SendReport(fetch, notify.ForRunNow(send, me, nil), cre(), defs(), nil, nil, "", true, time.Time{})(context.Background())
+	if err != nil {
+		t.Fatalf("SendReport: %v", err)
+	}
+	if fetch.calls != 1 || send.calls != 1 {
+		t.Fatalf("fetch=%d send=%d, want 1 and 1", fetch.calls, send.calls)
+	}
+	if len(send.to) != 1 || send.to[0] != me[0] {
+		t.Fatalf("mail went to %#v, want %#v", send.to, me)
+	}
+}
+
+// TestSendReportDebugModeDoesNotOverrideAlertsEnabled: ALERTS_ENABLED=false
+// is the global kill switch and outranks a debug list. Loosening the
+// recipients guard must not have loosened this one too.
+func TestSendReportDebugModeDoesNotOverrideAlertsEnabled(t *testing.T) {
+	fetch, send := &fakeFetcher{}, &fakeSender{}
+
+	err := SendReport(fetch, notify.ForReport(send, []string{"debug@example.invalid"}),
+		cre(), defs(), nil, nil, "", false, time.Time{})(context.Background())
+	if err != nil {
+		t.Fatalf("SendReport: %v", err)
+	}
+	if fetch.calls != 0 || send.calls != 0 {
+		t.Fatalf("fetch=%d send=%d, want 0 and 0", fetch.calls, send.calls)
 	}
 }

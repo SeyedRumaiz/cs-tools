@@ -41,11 +41,15 @@ import (
 	"github.com/adhocore/gronx"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/acp"
 	acpentity "github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/acp/entity"
+	acpnotify "github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/acp/notify"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/acp/salesentity"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/announcementpublish"
+	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/auditlog"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/autoclosure"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/availability"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/cloudstatus"
+	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/deprecatedusagereport"
+	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/deprecatedusagescan"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/engine"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/eolusagereport"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/eolusagescan"
@@ -84,6 +88,25 @@ import (
 func main() {
 	loadDotEnv(".env")
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
+	// Optional logo/company-name overrides for every email this component
+	// sends, across both notify packages (internal/notify's eight report/
+	// alert templates, internal/acp/notify's five ACP closure templates).
+	// EMAIL_LOGO_DARK_URL and EMAIL_TEMPLATE_COMPANY_NAME are the same names
+	// integrations/csm-notification-service uses, reusable verbatim across
+	// components; EMAIL_LOGO_LIGHT_URL is this component's own name for its
+	// equivalent of that service's EMAIL_LOGO_WHITE_URL. Unset keeps every
+	// built-in default. The two logo vars are deliberately separate, not
+	// shared, because each package's templates share one fixed header color
+	// that needs the opposite logo color to stay visible: internal/notify's
+	// eight templates all share an orange header (needs a light-colored
+	// logo), internal/acp/notify's five all share a light background (needs
+	// a dark-colored logo).
+	notify.SetLogoURL(os.Getenv("EMAIL_LOGO_LIGHT_URL"))
+	acpnotify.SetLogoURL(os.Getenv("EMAIL_LOGO_DARK_URL"))
+	companyName := os.Getenv("EMAIL_TEMPLATE_COMPANY_NAME")
+	notify.SetCompanyName(companyName)
+	acpnotify.SetCompanyName(companyName)
 
 	// An on-demand run (--run-now=<task>, see runnow.go) is parsed first, before
 	// anything is built: a bad argument must stop here, never fall through to the
@@ -194,6 +217,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The deprecated product usage report's own client: the same deployment
+	// and credentials, a distinct endpoint (GET
+	// /reports/deprecated-product-usage).
+	deprecatedUsageReportClient, err := deprecatedusagereport.NewClient(deprecatedusagereport.Config{
+		BaseURL:      entityServiceBaseURL,
+		TokenURL:     oauthTokenURL,
+		ClientID:     oauthClientID,
+		ClientSecret: oauthClientSecret,
+		Scopes:       entityServiceScopes,
+	})
+	if err != nil {
+		slog.Error("failed to construct entity-service deprecated-product-usage-report client", "err", err)
+		os.Exit(1)
+	}
+
 	// The query-hour client. Same deployment and credentials; its own
 	// client because a recompute walks every opportunity in service and
 	// every project linked to each, so it needs minutes rather than the
@@ -294,6 +332,27 @@ func main() {
 		})
 		if err != nil {
 			slog.Error("failed to construct entity-service availability client", "err", err)
+			os.Exit(1)
+		}
+	}
+
+	// The audit log upkeep's own client: the same deployment and credentials, one
+	// service-only endpoint. Off by default: entity-service needs
+	// CSM_AUDIT_LOG_ENABLED=true (else the endpoint answers 404), migration 0295
+	// applied and the database role granted EXECUTE on the audit functions first,
+	// or every daily run fails.
+	auditLogMaintenanceEnabled := envBool("AUDIT_LOG_MAINTENANCE_ENABLED", false)
+	var auditLogClient *auditlog.Client
+	if auditLogMaintenanceEnabled {
+		auditLogClient, err = auditlog.NewClient(auditlog.Config{
+			BaseURL:      entityServiceBaseURL,
+			TokenURL:     oauthTokenURL,
+			ClientID:     oauthClientID,
+			ClientSecret: oauthClientSecret,
+			Scopes:       entityServiceScopes,
+		})
+		if err != nil {
+			slog.Error("failed to construct entity-service audit log client", "err", err)
 			os.Exit(1)
 		}
 	}
@@ -630,6 +689,9 @@ func main() {
 	const availabilityTaskName = "availability_recalculation"
 	availabilityTo, availabilityCc := recipientsFor(recipientOverrides, availabilityTaskName)
 
+	const auditLogMaintenanceTaskName = "audit_log_maintenance"
+	auditLogMaintenanceTo, auditLogMaintenanceCc := recipientsFor(recipientOverrides, auditLogMaintenanceTaskName)
+
 	const usageRollupDailyTaskName = "usage_rollup_daily"
 	usageRollupDailyTo, usageRollupDailyCc := recipientsFor(recipientOverrides, usageRollupDailyTaskName)
 	const usageRollupMonthlyTaskName = "usage_rollup_monthly"
@@ -835,8 +897,10 @@ func main() {
 	eolUsageEmail := notify.ForReport(emailClient, debugFor(recipientOverrides, eolusagescan.TaskName))
 	eolUsageSchedule := scheduleFor(scheduleOverrides, eolusagescan.TaskName, eolusagescan.DefaultSchedule)
 	eolUsageOptions := eolusagescan.Options{PortalBaseURL: eolUsagePortalBase, EmailsEnabled: alertsEnabled}
-	// A scheduled run (and its retries) takes its date from its period; a
-	// run-now below keeps the clock.
+	// A scheduled run (and its retries) takes its date from the period the
+	// engine claimed (schedule.PeriodFromContext); Anchor is the fallback for
+	// a run outside the engine, such as a tryout. A run-now below keeps the
+	// clock.
 	eolUsageScheduled := eolUsageOptions
 	eolUsageScheduled.Anchor = periodStart(eolUsageSchedule)
 	eolUsageTask := registry.Task{
@@ -894,14 +958,15 @@ func main() {
 			Schedule: scheduleFor(scheduleOverrides, name, "30 4 * * 1"),
 			Handler: slabreachscan.SendReport(slaBreachReportClient,
 				notify.ForReport(emailClient, debugFor(recipientOverrides, name)),
-				v, slaBreachDefinitions, to, cc, slaBreachCaseLinkBase, alertsEnabled),
-			// --recipients/--cc of a manual run-now only; see reportRunNow.
-			RunNowFlags: reportRunNowFlags,
-			RunNowNarrow: reportRunNow(notify.ForReport(emailClient, debugFor(recipientOverrides, name)), emailClient,
-				func(email notify.Sender, rec []string) func(ctx context.Context) error {
+				v, slaBreachDefinitions, to, cc, slaBreachCaseLinkBase, alertsEnabled, time.Time{}),
+			// --from-date/--to-date name the week, --recipients/--cc the
+			// audience, of a manual run-now only; see slaBreachRunNow.
+			RunNowFlags: slaBreachRunNowFlags,
+			RunNowNarrow: slaBreachRunNow(notify.ForReport(emailClient, debugFor(recipientOverrides, name)), emailClient,
+				func(email notify.Sender, week time.Time, rec []string) func(ctx context.Context) error {
 					return slabreachscan.SendReport(slaBreachReportClient, email,
 						v, slaBreachDefinitions, orRecipients(to, rec), cc,
-						slaBreachCaseLinkBase, alertsEnabled)
+						slaBreachCaseLinkBase, alertsEnabled, week)
 				}),
 		})
 	}
@@ -925,6 +990,61 @@ func main() {
 
 	const publishScheduledAnnouncementsTaskName = "publish_scheduled_announcements"
 	publishScheduledAnnouncementsTo, publishScheduledAnnouncementsCc := recipientsFor(recipientOverrides, publishScheduledAnnouncementsTaskName)
+
+	// The monthly deprecated product usage report: the customers running a
+	// product version whose support status is Deprecated in an active
+	// Primary Production deployment, mailed on the first Monday of the month
+	// at 10:00 IST (04:30 UTC; the schedule fires every Monday and the handler
+	// sends only when its run's Monday is the 1st to the 7th). To is its
+	// SUB_CRON_RECIPIENTS "to" (the CS leadership group) plus every listed
+	// account's manager and technical owner; with no "to" the task skips and
+	// succeeds. A month with no deprecated usage still sends a short note to
+	// the configured to/cc.
+	//
+	// registry.Task.To/Cc are left nil DELIBERATELY, as for the regression
+	// reports: failures go to ALERT_RECIPIENTS alone, never to the account
+	// managers on every retry. That also hides its audience from the
+	// EMAIL_BASE_URL check further below, so it is checked here.
+	//
+	// DEPRECATED_USAGE_REPORT_PORTAL_BASE_URL optionally links account and
+	// project names to their CSM portal pages (<base>/customers/accounts/<id>);
+	// a non-https value refuses to start, as every URL here does.
+	deprecatedUsagePortalBase := strings.TrimRight(os.Getenv("DEPRECATED_USAGE_REPORT_PORTAL_BASE_URL"), "/")
+	if deprecatedUsagePortalBase != "" {
+		if err := httpsec.RequireSecureURL(deprecatedUsagePortalBase); err != nil {
+			slog.Error("invalid DEPRECATED_USAGE_REPORT_PORTAL_BASE_URL", "err", err)
+			os.Exit(1)
+		}
+	}
+	deprecatedUsageTo, deprecatedUsageCc := recipientsFor(recipientOverrides, deprecatedusagescan.TaskName)
+	if alertsEnabled && emailBaseURL == "" && len(deprecatedUsageTo) > 0 {
+		slog.Error("the deprecated product usage report has recipients but EMAIL_BASE_URL is not set; refusing to start since the report could never be sent",
+			"task", deprecatedusagescan.TaskName)
+		os.Exit(1)
+	}
+	deprecatedUsageEmail := notify.ForReport(emailClient, debugFor(recipientOverrides, deprecatedusagescan.TaskName))
+	deprecatedUsageSchedule := scheduleFor(scheduleOverrides, deprecatedusagescan.TaskName, deprecatedusagescan.DefaultSchedule)
+	deprecatedUsageOptions := deprecatedusagescan.Options{PortalBaseURL: deprecatedUsagePortalBase, EmailsEnabled: alertsEnabled}
+	// A scheduled run (and its retries) decides "first Monday" from the
+	// period the engine claimed (schedule.PeriodFromContext; Anchor is the
+	// fallback outside the engine, such as a tryout) and is dated the day it
+	// runs; a run-now below sends on any day.
+	deprecatedUsageScheduled := deprecatedUsageOptions
+	deprecatedUsageScheduled.Anchor = periodStart(deprecatedUsageSchedule)
+	deprecatedUsageTask := registry.Task{
+		Name:     deprecatedusagescan.TaskName,
+		Schedule: deprecatedUsageSchedule,
+		Handler:  deprecatedusagescan.SendReport(deprecatedUsageReportClient, deprecatedUsageEmail, deprecatedUsageTo, deprecatedUsageCc, deprecatedUsageScheduled),
+		// --recipients/--cc of a manual run-now only; see reportRunNow. A
+		// run-now sends whatever the date: it is asked for on purpose.
+		RunNowFlags: reportRunNowFlags,
+		RunNowNarrow: reportRunNow(deprecatedUsageEmail, emailClient,
+			func(email notify.Sender, rec []string) func(ctx context.Context) error {
+				opts := deprecatedUsageOptions
+				opts.AnyDay = true
+				return deprecatedusagescan.SendReport(deprecatedUsageReportClient, email, orRecipients(deprecatedUsageTo, rec), deprecatedUsageCc, opts)
+			}),
+	}
 
 	const autoclosureTaskName = "case_autoclosure"
 	autoclosureTo, autoclosureCc := recipientsFor(recipientOverrides, autoclosureTaskName)
@@ -1196,6 +1316,7 @@ func main() {
 					return timecardreport.SendReports(timeCardsClient, email, periodStart(timeCardSchedule), cfg, alertsEnabled)
 				}),
 		},
+		deprecatedUsageTask,
 		// The two outage emails (internal-stakeholder notification and SRE
 		// outage communication) used to be sub-crons here. They moved to
 		// entity-service's outage notice drainer and csm-notification-service,
@@ -1253,6 +1374,21 @@ func main() {
 			Handler:  availability.RecalculateAvailability(availabilityClient),
 			To:       availabilityTo,
 			Cc:       availabilityCc,
+		})
+	}
+
+	// The audit log's weekly upkeep: creates the coming monthly partitions, checks
+	// the log's health and puts back missing audit triggers, all inside entity-service.
+	// Mondays at 01:00 UTC. It is safe to repeat, so a failed run is simply tried again.
+	// It fails, and so is mailed, when it found a health problem, repaired a trigger
+	// (its history had a gap) or could not repair one.
+	if auditLogMaintenanceEnabled {
+		tasks = append(tasks, registry.Task{
+			Name:     auditLogMaintenanceTaskName,
+			Schedule: scheduleFor(scheduleOverrides, auditLogMaintenanceTaskName, "0 1 * * 1"),
+			Handler:  auditlog.Maintenance(auditLogClient),
+			To:       auditLogMaintenanceTo,
+			Cc:       auditLogMaintenanceCc,
 		})
 	}
 

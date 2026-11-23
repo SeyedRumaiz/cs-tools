@@ -927,6 +927,14 @@ Two more examples, both in this same "restrict, don't mirror" category:
   own `SearchCaseActivitiesRequest.ExcludeWorkNotes`, nil/false everywhere else — see that repo's own
   CLAUDE.md) makes `totalRecords` agree with what's actually rendered, instead of recomputing a count
   client-side after the fact (which would only ever be correct for a single page, not across pages).
+  The same response carries `createdByIsInternal` per activity, mapped from entity-service's
+  `createdBy.isInternal` (true when the author's email resolves to an INTERNAL-type user) — the
+  webapp's `CommentBubble` badges a support engineer's avatar from it. It is a plain boolean, never
+  the author's user id or type, and never derived here from a name marker or an extra user lookup;
+  entity-service is the one place that decides it. A system/automation author gets no flag.
+  `GET /cases/{id}` carries the same signal as `createdByIsInternal` on the case and `isInternal` on
+  each `watchList` entry (from entity-service's `createdBy.isInternal` / `watchList[].user.isInternal`),
+  so the details panel can badge the creator and show customers and support engineers as two groups.
 
 **Not every field worth restricting is a security decision — some are just an entity-service scoping
 convenience, and the path (not the body) is the more reliable source for it.**

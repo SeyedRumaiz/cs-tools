@@ -50,6 +50,12 @@ permission (see `apps/csm-portal/backend`'s own `CLAUDE.md`, "PATCH /projects/{i
 requires PermAdmin") — hiding the pencil icon for a `cs_engineer` just avoids offering an action that
 would 403 for them.
 
+**Escalation access** (Settings > User management > Escalation access, `CsmEscalationAccessPage`) is admin only,
+gated on `usePortalAccess().isAdmin` (the nav node's `requires: "isAdmin"` hides the tile, the page also renders the
+403 page): an admin adds or removes the people who may de-escalate any case besides each case's ABT team leads. The
+backend enforces the same (`PermAdmin`). `CsmCaseDetailPage` shows De-escalate to a named person (`deescalators`) whatever their roles, and to a team lead
+(`teamLeads`) only with an escalation role (`canEscalate`), matching the backend (`useGetCsmCaseEscalations`), and the mutation hook refreshes those histories.
+
 **Skills** (`features/csm-skills`, `/skills`) hides two tabs by explicit product decision, on top of a real backend
 gate: **Skill Directory** and **Administration** (Requests / Skills / Categories sub-tabs) render only for the
 matching capability from `GET /skills/me/capabilities` (`useSkillCapabilities`: `canViewDirectory`,
@@ -67,7 +73,7 @@ catalogue lacks is requested (`RequestSkillDialog`, with a live duplicate check)
 `ReviewSkillRequestDialog`; approving adds it to the requester's profile at the requested level. Filtering and paging
 for the catalogue, the directory and the request queue are always sent to the backend, never done in the browser.
 
-**Products** (`features/csm-products`, `/products`) is another deliberate exception, on top of a real backend
+**Product catalogue** (`features/csm-products`, Settings ▸ Product catalogue at `/admin/product-catalog`, tabs Products and Release lines; the old top-level `/products` links redirect there; the tab, its pages (`ProductCatalogRouteGuard`) and its help topic are shown only to `canManageProductCatalog`) is another deliberate exception, on top of a real backend
 gate: every edit control (Add product, Add product version and each product's Add version action, the Edit pencil,
 New release line, and the Retire action inside each edit dialog) renders only for `usePortalAccess().canManageProductCatalog` (`product_catalog_manager` or `admin`). The
 backend's `PermManageProductCatalog` refuses the catalogue write routes of the products API (`POST /products`,
@@ -76,14 +82,13 @@ reader each control would only ever 403. A save applies at once (there is no dra
 changed keys (`utils/catalogChange.ts`), and the backend applies a version's listing-wide fields to every live
 deployment-profile row of the version (the rows sharing its `publicId`, or for an unpublished version the live rows
 with the same product and version), in one transaction, which the edit dialog spells out before saving. The edit
-dialog sends one PATCH with only the support fields it shows (`buildVersionSupportPayload`), and one retire call
+dialog sends one PATCH with only the fields it changed (`buildVersionEditPayload`: support status and EOL dates up front, release date and publishing settings under a collapsed "Advanced"), and one retire call
 for the whole version; Add version creates every profile in one call. The API sends dates as RFC 3339 timestamps
 and the support status upper case; `utils/catalogWire.ts` turns them into the `YYYY-MM-DD` / lower-case shapes
 the feature works with, in the read hooks only. The Catalogue never lists cloud (SaaS)
 products or end-of-life products (every version retired or discontinued), nor retired or discontinued versions or
 retired release lines, so there is no Restore (`isListedProduct`, `listedVersions`, `utils/catalogProducts.ts`). Adding a version pre-fills
-its publishing settings from the product's latest live version (`listingFormFrom`), shown in a collapsed "Advanced
-configuration" section (on a release-date tie the "All In One" row, then the lowest `publicId`, so a profile that
+its publishing settings from the product's latest live version (`listingFormFrom`), shown openly under "Publishing" (on a release-date tie the "All In One" row, then the lowest `publicId`, so a profile that
 is its own listing is not copied), and creates one row per deployment profile in a single
 `POST /products/{id}/versions` (`useAddCatalogVersion`); if the product's versions fail to load, the dialog warns
 instead of prefilling. A refusal's message is shown inside the
@@ -339,6 +344,8 @@ Two knock-on rules:
 ## Table conventions
 
 Every paginated data table backed by a real MUI `<Table>` (`ProductVulnerabilitiesTab.tsx`, `DirectoryEntityTable.tsx`, `ChangeRequestsTab.tsx`, `IncidentsTab.tsx`, `ProblemsTab.tsx`) should match this shape — a new one should too. (`ConversationsTab.tsx` used to be listed here too, but it's actually a hand-rolled CSS Grid like `CasesList.tsx` below, not a real `<Table>` — it just has no long-text column today, so the gotcha two paragraphs down doesn't currently apply to it.)
+
+**A column picker lists every column, the default ones included.** `IncidentsTab.tsx`'s picker used to cover only the optional columns, so the seven it always showed (Number, Subject, Caller, State, Priority, Opened, Updated) could never be removed. All of them are now in `INCIDENT_COLUMNS` (`incidentListColumns.ts`), the original seven are the default visible set, and `useColumnPreferences` still keeps at least one on. Its saved choice is under its own view id (`INCIDENT_COLUMNS_VIEW_ID`) because the earlier one held only the optional ids, which read as the full list would put the defaults after them. A table that adds a picker should put every column in it, not just the extra ones. The CSV export follows the same chosen columns (`cellText`, mirroring `renderCell`), so a new column needs a case in both.
 
 - **Wrapper**: `<Box sx={{ border: 1, borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>` around `<TableContainer>`, not `<Paper variant="outlined">` (the two render visually differently; `Box` is the established one). `TablePagination` (when present) is a sibling of `TableContainer`, inside that same `Box`. `TableContainer`'s own built-in `overflow-x: auto` is what makes a wide table scroll horizontally instead of squishing its columns — don't strip or override it.
 - **`<Table size="small" sx={{ "& .MuiTableCell-root": { borderColor: "divider" } }}>`**, with the header row as `<TableRow sx={{ bgcolor: "action.hover" }}>` — a plain `<TableRow>` header with no `sx` reads inconsistently against tables that do set it.
@@ -635,6 +642,8 @@ Both lists have a checkbox column (for `canWrite` only), a selection bar (`BulkS
   - State offers what every selected incident can move to (`bulkIncidentTargetStates`, the Edit dialog's table), never
     narrowed by one closed since it was picked (it is skipped). Resolved / Closed need a resolution code and notes,
     applied to all; the two can also be set alone.
+    Cancelled (terminal) confirms first with `CancelIncidentDialog`, as on the detail page (its action bar and Edit
+    save); New can't move to Cancelled, here or in the backend's `incidentNextStates`.
   - Subcategory follows the category being set, or the category every selected incident shares (else it is disabled
     with the reason). A new category needs a subcategory (the single Edit dialog's rule): a PATCH can't clear one, so
     on the ServiceNow paths the old category's subcategory would stay. Service offering is disabled until a service is

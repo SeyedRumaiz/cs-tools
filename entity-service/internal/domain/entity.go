@@ -858,15 +858,22 @@ type SalesforceAccountUpsert struct {
 	// (primaryPartnerAccountId), nil when there is none.
 	PrimaryPartnerSfID *string
 
-	// The fields below come from the Sales Entity SE-1 change. Until it is
-	// deployed they are always nil, so the upsert writes them as
-	// COALESCE(new, stored): a nil keeps the value the ServiceNow sync loaded.
+	// The fields below are plain assignments in the upsert: nil clears the
+	// column. For the three person references, nil is written only when
+	// Salesforce sent no email; when an email was sent but no user could be
+	// resolved, the matching Keep flag is set and the stored value stays.
 	CustomerSuccessManagerID  *string
 	SecondaryTechnicalOwnerID *string
 	RenewalAccountManagerID   *string
-	AccountVertical           *string
-	LostReasonCategory        *string
-	DeactivationDate          *time.Time
+	// KeepCustomerSuccessManager, KeepSecondaryTechnicalOwner and
+	// KeepRenewalAccountManager keep the stored column instead of writing the
+	// (nil) id above.
+	KeepCustomerSuccessManager  bool
+	KeepSecondaryTechnicalOwner bool
+	KeepRenewalAccountManager   bool
+	AccountVertical             *string
+	LostReasonCategory          *string
+	DeactivationDate            *time.Time
 }
 
 // Salesforce Project_Contact__c states, as stored in Salesforce State__c and
@@ -1756,6 +1763,27 @@ type SearchProjectsRequest struct {
 	ArrTodayGte string `json:"arrTodayGte"`
 	// SubRegion filters to projects whose linked account is in this sub-region.
 	SubRegion string `json:"subRegion"`
+	// Regions keeps projects whose linked account's region is any of the
+	// given values, exact but case-insensitive. A project with no account,
+	// or an account with no region, matches none. Postgres data sources only;
+	// rejected on the legacy data source.
+	Regions []string `json:"regions,omitempty"`
+	// OnboardingOwnerIDs keeps projects whose onboarding owner
+	// (OnboardingOwner) is any of the given platform user UUIDs. A project
+	// with no owner matches none. Postgres data sources only; rejected on the
+	// legacy data source.
+	OnboardingOwnerIDs []string `json:"onboardingOwnerIds,omitempty"`
+	// OnboardingOwnerEmails keeps projects whose onboarding owner's email is
+	// any of the given addresses, case-insensitive, for a caller that knows
+	// the person but not their id. ANDed with OnboardingOwnerIDs when both are
+	// set. Postgres data sources only; rejected on the legacy data source.
+	OnboardingOwnerEmails []string `json:"onboardingOwnerEmails,omitempty"`
+	// OnboardingOwnerTeamIDs keeps projects whose onboarding owner is a
+	// current member (team_member) of any of these teams, by team id (the
+	// Team Schedule's team id, as time cards' TeamIDs). A project with no
+	// owner matches none. ANDed with the other owner filters. Postgres data
+	// sources only; rejected on the legacy data source.
+	OnboardingOwnerTeamIDs []string `json:"onboardingOwnerTeamIds,omitempty"`
 	// ExcludeClosureStates filters out projects whose closure state (see
 	// ProjectClosureFields.ClosureState — "Open"/"Suspended"/"Restricted") is
 	// any of the given values, e.g. ["Restricted", "Suspended"]. Unlike
@@ -1816,6 +1844,27 @@ type SearchProjectsRequest struct {
 	OnboardingExpiryDateTo                string `json:"onboardingExpiryDateTo"`
 	ProductionReadinessCompletionDateFrom string `json:"productionReadinessCompletionDateFrom"`
 	ProductionReadinessCompletionDateTo   string `json:"productionReadinessCompletionDateTo"`
+}
+
+// Project aggregate groupings (AggregateProjectsRequest.GroupBy).
+const (
+	ProjectGroupByOnboardingOwner  = "onboardingOwner"
+	ProjectGroupByOnboardingStatus = "onboardingStatus"
+	ProjectGroupByRegion           = "region"
+)
+
+// AggregateProjectsRequest is the input for POST /projects/aggregate: the
+// projects POST /projects/search would match for Filters, counted per
+// GroupBy value. Filters' pagination and sort are not used. A project with
+// no value for the grouping (no owner, status or region) counts in
+// AggregateResponse.OthersCount, never in a bucket. Postgres data sources only.
+type AggregateProjectsRequest struct {
+	Filters SearchProjectsRequest `json:"filters"`
+	// GroupBy is one of the ProjectGroupBy* values.
+	GroupBy string `json:"groupBy"`
+	// MaxGroups caps the buckets returned (largest first); the rest fold into
+	// OthersCount. Optional, default 10, at most 50.
+	MaxGroups int `json:"maxGroups,omitempty"`
 }
 
 // ProjectSearchAccountRef is the account reference embedded in a project
@@ -3137,6 +3186,12 @@ type UserReference struct {
 	ID    *string `json:"id"`
 	Email string  `json:"email"`
 	Name  string  `json:"name"`
+	// IsInternal is true when the person resolved to an INTERNAL-type user
+	// (WSO2 staff). Comment authors, and the creator and watch-list users of a
+	// case read from PostgreSQL, set it; the ServiceNow data source has no
+	// user_type on its case payload and omits it. Absent means "not known to be
+	// internal", never "known external".
+	IsInternal bool `json:"isInternal,omitempty"`
 }
 
 // NewUserReference builds a UserReference for an actor. Pass the user's id when
@@ -4010,6 +4065,28 @@ type UpdateCaseRequest struct {
 	// repository refuses a severity write on a service request without it, so no
 	// other path can reach that write. Never read from the request body.
 	InternalSeverityWrite bool `json:"-"`
+	// AdminReopen moves a closed case to any other state, bypassing the
+	// normal state-transition table (closed has no entry in either table in
+	// case_state_transitions.go -- it is otherwise terminal for every
+	// caller). Only honored when the case's current state is actually
+	// closed, the caller is internal (isInternalCaller in UpdateCase), AND
+	// the caller's own client id is the configured CSM portal backend's
+	// (CaseService.csmPortalClientID) -- isInternalCaller alone only
+	// distinguishes WSO2 staff from an external/customer caller, not an
+	// admin from any other internal user, so the client-id check is what
+	// actually ties this bypass to apps/csm-portal/backend's own, separate
+	// PermAdmin check, which is the only place the real "is this caller an
+	// admin" decision is made. apps/csm-portal/backend is the only intended
+	// source of this field -- it sets it itself, after its own PermAdmin
+	// check, and never forwards whatever a client sent for this key
+	// verbatim. Only true is meaningful; omit it rather than sending false.
+	AdminReopen *bool `json:"adminReopen,omitempty"`
+	// ReopenReason is an optional free-text note on why the case was
+	// reopened, stored only when AdminReopen moves it out of closed. It is
+	// write-only: never echoed in UpdateCaseResponse/UpdatedCase, never
+	// returned by any other read of the case, and never shown in any UI.
+	// Ignored unless AdminReopen is also true.
+	ReopenReason *string `json:"reopenReason,omitempty"`
 }
 
 // UpdateCaseResponse is the response for PATCH /cases/{id}.
@@ -4126,11 +4203,11 @@ type WatchListUser struct {
 	// read from a real work_item_watcher row: one of the case's project's
 	// account's five named stakeholders (technical owner, secondary
 	// technical owner, account manager, renewal account manager, and
-	// customer success manager -- a strictly larger set than
-	// AccountDefaultWatcherEmails' own four, which deliberately excludes the
-	// CSM from the default email audience; that is a decision about who
-	// gets emailed, not about who the account's stakeholders are). These
-	// five are never auto-persisted into work_item_watcher (see
+	// customer success manager -- the same five AccountDefaultWatcherEmails
+	// resolves into a case.* email's Recipients, plus, conditionally, the
+	// project's own onboarding owner during active onboarding, which is a
+	// project-level role and so is not one of this display's stakeholders).
+	// These five are never auto-persisted into work_item_watcher (see
 	// addRequestedWatchers' own doc comment) -- fetchCaseWatchers now adds
 	// them to every read, always, specifically so a caller can see every
 	// stakeholder associated with the case -- and this IS an enforcement
@@ -6395,6 +6472,10 @@ type SearchTeamsResponse struct {
 type TeamChatWebhook struct {
 	Name           string `json:"name"`
 	ChatWebhookURL string `json:"chatWebhookUrl"`
+	// Key is the team's key (team.key): csm-notification-service keys an
+	// incident's SRE team SLA space by it, the key the SRE ladder resolves an
+	// assignment group to. Additive; case routing still reads Name.
+	Key string `json:"key,omitempty"`
 }
 
 // ListTeamChatWebhooksResponse is the response for GET /teams/chat-webhooks
@@ -6403,6 +6484,25 @@ type TeamChatWebhook struct {
 // that team's Chat space.
 type ListTeamChatWebhooksResponse struct {
 	Teams []TeamChatWebhook `json:"teams"`
+}
+
+// TeamGroupEmail is one team's own configured notification mailbox
+// (team.group_email, migration 0117), keyed by team.key (migration 0152)
+// rather than name -- a caller like csm-notification-service looks this up
+// by a specific team's stable handle (e.g. "americas_cre_team"), not by its
+// possibly-changing display name.
+type TeamGroupEmail struct {
+	Key        string `json:"key"`
+	GroupEmail string `json:"groupEmail"`
+}
+
+// ListTeamGroupEmailsResponse is the response for GET /teams/group-emails --
+// internal-caller-only (see TeamService.ListGroupEmails), same posture as
+// GET /teams/chat-webhooks even though a group email is less sensitive than
+// a webhook URL: this is still routing data for an internal notification
+// feature, not something meant for general consumption.
+type ListTeamGroupEmailsResponse struct {
+	Teams []TeamGroupEmail `json:"teams"`
 }
 
 // TeamDetail is the response for GET /teams/{id} -- the same id/name/type
@@ -8687,6 +8787,11 @@ type CaseEscalationHistory struct {
 	// the account has no CRE team, the team has no lead, or the data source
 	// cannot resolve them.
 	TeamLeads []EscalationNotifiedUser `json:"teamLeads"`
+	// Deescalators are the active internal users an admin has named as
+	// allowed to de-escalate any case (role case_deescalator), besides the
+	// case's own team leads. Always present, an empty array when none is
+	// named or the data source cannot resolve them.
+	Deescalators []EscalationNotifiedUser `json:"deescalators"`
 }
 
 // --- case-grouped time cards (ServiceNow data source only) ---
@@ -9029,7 +9134,16 @@ type CreateSNWritebackFailureRequest struct {
 // same wire vocabulary integrations/csm-notification-service's own
 // clockType handling already expects.
 type SLAStatus struct {
-	CaseID                 string  `json:"caseId"`
+	CaseID string `json:"caseId"`
+	// ID is this exact "sla" row's own primary key -- added so a caller
+	// that remembers it (csm-notification-service's own Redis-held
+	// ClockMeta) can later ask GetClockState for THIS SPECIFIC row again,
+	// rather than "whichever row is most recently started" for (CaseID,
+	// ClockType), which is ambiguous whenever two policies both have a
+	// genuinely open clock on the same target at once -- see
+	// SLAStatusRepository.GetClockState's own doc comment for the full
+	// reasoning this closes.
+	ID                     string  `json:"id,omitempty"`
 	ClockType              string  `json:"clockType"`
 	BusinessElapsedPercent float64 `json:"businessElapsedPercent"`
 	// HasBreached mirrors sla.has_breached, ServiceNow's own verdict — not
@@ -9273,7 +9387,14 @@ type SLAStatusFilters struct {
 type SLAClockState struct {
 	// Found is false, with every other field at its zero value, when no
 	// "sla" row exists at all for the requested (work item, target, source).
-	Found       bool       `json:"found"`
+	Found bool `json:"found"`
+	// ID is this exact "sla" row's own primary key, the same column
+	// SLAStatus.ID exposes -- a caller that already knows which specific
+	// row it means (via GetClockState's own slaID parameter) gets it back
+	// unchanged here; a caller that let this method pick "whichever row
+	// is most recently started" gets whichever row that turned out to be,
+	// so it can remember it for next time.
+	ID          string     `json:"id,omitempty"`
 	IsActive    bool       `json:"isActive"`
 	Stage       string     `json:"stage"`
 	HasBreached bool       `json:"hasBreached"`
@@ -9369,6 +9490,17 @@ type SLAClockState struct {
 	// other, so it sends to TeamEmail and OnboardingTeamEmail together
 	// rather than this service picking one.
 	OnboardingTeamEmail string `json:"onboardingTeamEmail,omitempty"`
+	// AssignmentGroupName is an incident's assignment group as it is now
+	// (empty for every other work item type): csm-notification-service routes
+	// an incident's SLA alert by it, so a reassigned incident alerts its new
+	// group, whose group_email/manager TeamEmail/TeamLeadName already carry.
+	AssignmentGroupName string `json:"assignmentGroupName,omitempty"`
+	// AssignmentGroupTeamKey is the key of the team whose id the incident's
+	// current assignment group has (empty when none, and for every other
+	// type): a specialist handoff escalates an incident to its SME team's
+	// group, which shares that team's id (EnsureTeamGroups), so an incident
+	// escalated to an SME team names that team here.
+	AssignmentGroupTeamKey string `json:"assignmentGroupTeamKey,omitempty"`
 }
 
 // SLADurationPolicyItem is one (severity, clockType) duration row, computed

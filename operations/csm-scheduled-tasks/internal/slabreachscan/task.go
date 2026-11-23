@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/notify"
 	"github.com/wso2-open-operations/cs-tools/operations/csm-scheduled-tasks/internal/slabreachreport"
@@ -58,16 +59,35 @@ type Variant struct {
 // CREVariant is the plain "Weekly SLA Breach Report": the CRE team's
 // cases.
 //
-// Stage {PAUSED, COMPLETED} and onboarding status not one of
-// {IN_PROGRESS, NOT_STARTED}, exactly as the source report's filter is
-// configured.
+// Onboarding status not one of {IN_PROGRESS, NOT_STARTED}, exactly as
+// the source report's filter is configured.
+//
+// The stage list is the one place this variant does NOT reproduce that
+// filter literally. The source report asked for {Paused, Completed},
+// which in the previous system meant "a clock that is no longer
+// running" -- there, a case's own lifecycle moved a breached clock out
+// of "In progress", so those two stages held essentially every recorded
+// breach. The CSM SLA engine does not: it leaves a breached clock at
+// IN_PROGRESS indefinitely and only ever writes a terminal stage of
+// ACHIEVED or CANCELLED (COMPLETED exists in the enum but nothing
+// writes it). Reproduced literally, this filter therefore matches
+// almost nothing -- in production it matched zero rows in a week where
+// the portal showed ~130 breached cases.
+//
+// So the list is the previous system's intent translated into this
+// engine's vocabulary: ACHIEVED is its "Completed", and BREACHED is how
+// entity-service's sla_live reports a clock that has breached and is
+// still running. COMPLETED stays for the synced rows that still carry
+// it, and CANCELLED stays out, as it was out of the source filter.
+// SLA_BREACH_REPORT_CRE_STAGES overrides the whole list if a deployment
+// wants the literal two back.
 func CREVariant() Variant {
 	return Variant{
 		Key:                       "cre",
 		Subject:                   "Weekly SLA Breach Report",
 		Heading:                   "Weekly SLA Breach Report",
 		Intro:                     "Cases handled by the CRE team.",
-		Stages:                    []string{"PAUSED", "COMPLETED"},
+		Stages:                    []string{"PAUSED", "COMPLETED", "ACHIEVED", "BREACHED"},
 		ExcludeOnboardingStatuses: []string{"IN_PROGRESS", "NOT_STARTED"},
 	}
 }
@@ -75,9 +95,15 @@ func CREVariant() Variant {
 // OnboardingVariant is "Weekly SLA Breach Report (Onboarding)": the
 // cases the Onboarding team handles.
 //
-// Stage {IN_PROGRESS} and onboarding status IS one of {IN_PROGRESS} --
-// both differ from CREVariant's, and this is an "is one of" where the
-// CRE report uses "is not one of".
+// Stage "still running" and onboarding status IS one of {IN_PROGRESS}
+// -- both differ from CREVariant's, and this is an "is one of" where
+// the CRE report uses "is not one of".
+//
+// The source report's single stage, "In progress", is two values in
+// this engine's vocabulary: a running clock reads IN_PROGRESS until it
+// breaches and BREACHED (via sla_live) after, so both are listed for
+// the one source value. See CREVariant for why the stage lists are
+// translated rather than copied.
 //
 // The two are NOT complements. The CRE report also excludes
 // NOT_STARTED, which this one does not include, so a NOT_STARTED case
@@ -92,7 +118,7 @@ func OnboardingVariant() Variant {
 		Subject:            "Weekly SLA Breach Report (Onboarding)",
 		Heading:            "Weekly SLA Breach Report (Onboarding)",
 		Intro:              "Cases handled by the Onboarding team.",
-		Stages:             []string{"IN_PROGRESS"},
+		Stages:             []string{"IN_PROGRESS", "BREACHED"},
 		OnboardingStatuses: []string{"IN_PROGRESS"},
 	}
 }
@@ -110,7 +136,7 @@ func TaskName(v Variant) string {
 // ReportFetcher is the subset of *slabreachreport.Client this package
 // depends on.
 type ReportFetcher interface {
-	Report(ctx context.Context, definitions, stages, onboardingStatuses, excludeOnboardingStatuses []string) (slabreachreport.Report, error)
+	Report(ctx context.Context, definitions, stages, onboardingStatuses, excludeOnboardingStatuses []string, week time.Time) (slabreachreport.Report, error)
 }
 
 // EmailSender is the subset of *notify.Client this package depends on.
@@ -176,6 +202,41 @@ func ParseList(raw string) []string {
 	return out
 }
 
+// RunNowWeek turns a manual run's --from-date/--to-date into the single
+// week the report covers.
+//
+// The report is always a whole Monday-to-Monday week, so the two dates
+// have to name the same one; a range spanning a boundary has no answer
+// this report could give, and silently reporting one of the two weeks
+// would be worse than refusing. Both zero means "not given", and the
+// caller reports last week as usual.
+func RunNowWeek(from, to time.Time, loc *time.Location) (time.Time, error) {
+	if from.IsZero() && to.IsZero() {
+		return time.Time{}, nil
+	}
+	if from.IsZero() || to.IsZero() {
+		return time.Time{}, fmt.Errorf("--from-date and --to-date must be given together")
+	}
+	if to.Before(from) {
+		return time.Time{}, fmt.Errorf("--to-date %s is before --from-date %s",
+			to.Format("2006-01-02"), from.Format("2006-01-02"))
+	}
+	if mondayOf(from, loc) != mondayOf(to, loc) {
+		return time.Time{}, fmt.Errorf(
+			"--from-date %s and --to-date %s are in different weeks; this report always covers one whole Monday-to-Monday week",
+			from.Format("2006-01-02"), to.Format("2006-01-02"))
+	}
+	return from, nil
+}
+
+// mondayOf is the date of the Monday starting the week that t falls in,
+// as a plain YYYY-MM-DD string for comparison.
+func mondayOf(t time.Time, loc *time.Location) string {
+	local := t.In(loc)
+	offset := (int(local.Weekday()) + 6) % 7
+	return local.AddDate(0, 0, -offset).Format("2006-01-02")
+}
+
 // SendReport returns a registry.Task.Handler that fetches last week's SLA
 // breaches for one variant and mails them to to/cc.
 //
@@ -189,14 +250,26 @@ func ParseList(raw string) []string {
 // would be indistinguishable from the task being broken -- the exact
 // confusion the regression reports' own "expect silence" caveat causes.
 //
+// A zero week is the scheduled behaviour: entity-service resolves last
+// week itself. A non-zero week reports the week containing that date,
+// which is how a manual run covers a week that was missed -- or, on an
+// environment whose data has stopped, a week that actually has rows.
+//
 // emailsEnabled is cmd/server/main.go's ALERTS_ENABLED. When false the
 // handler succeeds without contacting entity-service.
-func SendReport(reports ReportFetcher, email EmailSender, v Variant, definitions, to, cc []string, caseLinkBase string, emailsEnabled bool) func(ctx context.Context) error {
+func SendReport(reports ReportFetcher, email EmailSender, v Variant, definitions, to, cc []string, caseLinkBase string, emailsEnabled bool, week time.Time) func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		if !emailsEnabled {
 			return nil
 		}
-		if len(to) == 0 {
+		// An empty audience means "switched off" only when the mail
+		// actually goes to that audience. Under debug mail mode, or a
+		// run-now that named its own recipients, the sender delivers
+		// somewhere else entirely and the configured "to" is just the
+		// name printed in the test-copy notice -- so skipping here would
+		// make the one configuration that exists to exercise this report
+		// without involving its real recipients send nothing at all.
+		if len(to) == 0 && !notify.Redirects(email) {
 			slog.Info("sla breach report has no recipients; skipping", "report", v.Key)
 			return nil
 		}
@@ -207,7 +280,7 @@ func SendReport(reports ReportFetcher, email EmailSender, v Variant, definitions
 			return fmt.Errorf("slabreachscan %s: no SLA definitions configured", v.Key)
 		}
 
-		report, err := reports.Report(ctx, definitions, v.Stages, v.OnboardingStatuses, v.ExcludeOnboardingStatuses)
+		report, err := reports.Report(ctx, definitions, v.Stages, v.OnboardingStatuses, v.ExcludeOnboardingStatuses, week)
 		if err != nil {
 			return fmt.Errorf("slabreachscan %s: fetch report: %w", v.Key, err)
 		}
