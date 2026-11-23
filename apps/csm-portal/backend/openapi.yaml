@@ -16882,6 +16882,14 @@ paths:
         (planCode), with an optional billingPeriod (monthly or annual),
         notifyCustomer and previousPlanCode; a planCode that is not one of the
         plans GET /wso2-cloud/plans lists for the product is refused here (400).
+        It also names upgradeKind (customer or internal); a customer upgrade
+        names salesforceAccountId and region (us, eu), and the entity service
+        refuses one whose account has no active subscription (409, errorCode
+        wso2_cloud_no_subscription). A customer upgrade needs no approval: it is
+        applied at once, as an approval would apply it, and the answer is the
+        approved request (201). If it cannot be applied the answer is that
+        error (409, 502 or 503, as for an approval) and the request stays
+        pending for an approver. Every other request waits for an approver.
       requestBody:
         required: true
         content:
@@ -17124,7 +17132,14 @@ paths:
         and WSO2 Cloud's own reason when it refused the change (a suspended
         subscription, usage over the plan's limits, ...); 502 when the CSM portal
         was not authorized or the change could not be applied for another reason.
-        403 for the request's own requester, 409 when it is no longer pending.
+        403 for the request's own requester, except on a customer upgrade (it
+        needs no approval, so its requester may apply it), 409 when it is no
+        longer pending. A customer upgrade is checked first: when its Salesforce account no
+        longer has an active subscription the answer is 409 with errorCode
+        wso2_cloud_no_subscription and nothing is applied. Once approved, its
+        organization is linked to the account in Salesforce; a failed link does
+        not undo the upgrade (the answer is still 200, and the request shows
+        salesforceLinkStatus failed with the reason).
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
       requestBody:
@@ -17186,6 +17201,177 @@ paths:
                 $ref: '#/components/schemas/ErrorPayload'
         "502":
           description: The change could not be applied in WSO2 Cloud; the request stays pending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "503":
+          description: Service unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+  /wso2-cloud-requests/{id}/salesforce-link:
+    put:
+      summary: Link an approved customer upgrade's organization in Salesforce again (wso2_cloud_approver or admin).
+      operationId: linkWso2CloudRequestSalesforce
+      description: >
+        For a customer upgrade whose Salesforce link failed when it was approved.
+        The entity service creates or updates the organization's Salesforce
+        record under the request's account and answers with the request:
+        salesforceLinkStatus linked, or failed with salesforceLinkError. Safe to
+        repeat. 400 when the request is not a customer upgrade, 409 when it is
+        not approved.
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: The request with the link's outcome.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: Not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "409":
+          description: Conflict.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "503":
+          description: Service unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+  /wso2-cloud/organizations/{orgId}/salesforce:
+    get:
+      summary: What Salesforce knows about a WSO2 Cloud organization.
+      operationId: getWso2CloudOrganizationSalesforce
+      description: >
+        From the entity service: {record, account}, the organization's
+        Organization__c record (id, handle, region, projectId) and the account
+        it is under ({id, name, hasActiveSubscription, activeOpportunities}),
+        both null when it has no record yet. 503 when Salesforce is not
+        connected.
+      parameters:
+        - {name: orgId, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Ok.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: The organization id is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "503":
+          description: Service unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+  /wso2-cloud/salesforce-accounts/{accountId}:
+    get:
+      summary: Check a Salesforce account for a customer upgrade.
+      operationId: getWso2CloudSalesforceAccount
+      description: >
+        From the entity service: {id, name, hasActiveSubscription,
+        activeOpportunities: [{id, name, endDate}]}, so the person raising a
+        customer upgrade can check the account id first. 404 when Salesforce has
+        no account with this id.
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: {type: string, pattern: '^001[A-Za-z0-9]{12}([A-Za-z0-9]{3})?$'}
+      responses:
+        "200":
+          description: Ok.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Not a Salesforce Account Id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "404":
+          description: Not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: Internal server error.
           content:
             application/json:
               schema:

@@ -956,10 +956,13 @@ func main() {
 	route("GET /wso2-cloud-requests/{id}", handler.PermViewOperations, wso2CloudRequestHandler.GetRequest)
 	route("POST /wso2-cloud-requests/{id}/resolve", handler.PermApproveWso2CloudRequest, wso2CloudRequestHandler.ResolveRequest)
 	route("DELETE /wso2-cloud-requests/{id}", handler.PermWrite, wso2CloudRequestHandler.CancelRequest)
+	route("PUT /wso2-cloud-requests/{id}/salesforce-link", handler.PermApproveWso2CloudRequest, wso2CloudRequestHandler.LinkSalesforce)
 	// What an upgrade request can name: the organization's subscriptions (read
 	// from WSO2 Cloud) and the configured Enterprise plans.
 	route("GET /wso2-cloud/organizations/{orgId}/subscriptions", handler.PermViewOperations, wso2CloudRequestHandler.ListSubscriptions)
 	route("GET /wso2-cloud/plans", handler.PermViewOperations, wso2CloudRequestHandler.ListPlans)
+	route("GET /wso2-cloud/organizations/{orgId}/salesforce", handler.PermViewOperations, wso2CloudRequestHandler.GetOrganizationSalesforce)
+	route("GET /wso2-cloud/salesforce-accounts/{accountId}", handler.PermViewOperations, wso2CloudRequestHandler.GetSalesforceAccount)
 
 	// Operations > Runbooks: the alert-name to runbook catalog new incidents are matched against.
 	runbookHandler := handler.NewRunbookHandler(customerEntityClient)

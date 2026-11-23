@@ -40,10 +40,20 @@ type fakeWso2CloudRequestClient struct {
 	stored string
 	errs   map[string]error
 	calls  []wcrCall
+	// byPath answers a call to that path (before stored / result), and
+	// pathErrs fails it.
+	byPath   map[string]string
+	pathErrs map[string]error
 }
 
 func (f *fakeWso2CloudRequestClient) Wso2CloudRequestCall(_ context.Context, method, path string, body []byte) ([]byte, error) {
 	f.calls = append(f.calls, wcrCall{method, path, string(body)})
+	if err := f.pathErrs[path]; err != nil {
+		return nil, err
+	}
+	if out, ok := f.byPath[path]; ok {
+		return []byte(out), nil
+	}
 	if err := f.errs[method]; err != nil {
 		return nil, err
 	}
@@ -427,4 +437,236 @@ func TestWso2CloudRequestHandler_ListPlans(t *testing.T) {
 	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != `{"plans":{"identity":[{"code":"identity-enterprise","label":"Enterprise"}]}}` {
 		t.Fatalf("status %d, body %q", w.Code, w.Body)
 	}
+}
+
+func customerUpgradeWcr(requestedBy string) string {
+	return `{"id":"` + wcrID + `","number":"WCR0000002","type":"upgrade_organization","targetId":"org-1","targetLabel":"acme",` +
+		`"subscriptionId":"sub-1","planCode":"enterprise","upgradeKind":"customer","status":"pending","requestedBy":"` + requestedBy + `"}`
+}
+
+func (f *fakeWso2CloudRequestClient) calledPath(method, path string) bool {
+	for _, c := range f.calls {
+		if c.method == method && c.path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func TestWso2CloudRequestHandler_ResolveCustomerUpgrade(t *testing.T) {
+	base := "/wso2-cloud-requests/" + wcrID
+	active := map[string]string{
+		base + "/salesforce-account": `{"id":"001000000000001AAA","hasActiveSubscription":true}`,
+		base + "/salesforce-link":    `{"id":"` + wcrID + `","salesforceLinkStatus":"linked"}`,
+	}
+
+	t.Run("checked, applied, recorded, then linked", func(t *testing.T) {
+		fake := &fakeWso2CloudRequestClient{stored: customerUpgradeWcr("engineer@wso2.com"), byPath: active}
+		applier := &fakeApplier{}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, applier).ResolveRequest(w, wcrRequest(http.MethodPost, `{"status":"approved"}`, wcrApprover))
+		if w.Code != http.StatusOK || len(applier.applied) != 1 {
+			t.Fatalf("status %d, applied %d: %s", w.Code, len(applier.applied), w.Body)
+		}
+		var order []string
+		for _, c := range fake.calls {
+			order = append(order, c.method+" "+strings.TrimPrefix(c.path, base))
+		}
+		want := []string{"GET ", "GET /salesforce-account", "POST /resolve", "PUT /salesforce-link"}
+		if fmt.Sprint(order) != fmt.Sprint(want) {
+			t.Fatalf("calls %v, want %v", order, want)
+		}
+		if !strings.Contains(w.Body.String(), `"salesforceLinkStatus":"linked"`) {
+			t.Errorf("body = %s, want the linked request", w.Body)
+		}
+	})
+
+	t.Run("a lapsed subscription is refused before anything is applied", func(t *testing.T) {
+		fake := &fakeWso2CloudRequestClient{stored: customerUpgradeWcr("engineer@wso2.com"), byPath: map[string]string{
+			base + "/salesforce-account": `{"id":"001000000000001AAA","hasActiveSubscription":false}`,
+		}}
+		applier := &fakeApplier{}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, applier).ResolveRequest(w, wcrRequest(http.MethodPost, `{"status":"approved"}`, wcrApprover))
+		if w.Code != http.StatusConflict || len(applier.applied) != 0 || fake.called(http.MethodPost) {
+			t.Fatalf("status %d, applied %d, calls %+v", w.Code, len(applier.applied), fake.calls)
+		}
+		if !strings.Contains(w.Body.String(), errorCodeWso2CloudNoSubscription) {
+			t.Errorf("body = %s, want the errorCode", w.Body)
+		}
+	})
+
+	t.Run("a failed check refuses, nothing applied", func(t *testing.T) {
+		fake := &fakeWso2CloudRequestClient{stored: customerUpgradeWcr("engineer@wso2.com"),
+			pathErrs: map[string]error{base + "/salesforce-account": &apierror.Error{StatusCode: http.StatusServiceUnavailable}}}
+		applier := &fakeApplier{}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, applier).ResolveRequest(w, wcrRequest(http.MethodPost, `{"status":"approved"}`, wcrApprover))
+		if w.Code < 500 || len(applier.applied) != 0 || fake.called(http.MethodPost) {
+			t.Fatalf("status %d, applied %d, calls %+v", w.Code, len(applier.applied), fake.calls)
+		}
+	})
+
+	t.Run("a failed link call still answers 200 with the approval", func(t *testing.T) {
+		fake := &fakeWso2CloudRequestClient{stored: customerUpgradeWcr("engineer@wso2.com"), byPath: map[string]string{
+			base + "/salesforce-account": `{"hasActiveSubscription":true}`,
+		}, pathErrs: map[string]error{base + "/salesforce-link": errors.New("timeout")}}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, &fakeApplier{}).ResolveRequest(w, wcrRequest(http.MethodPost, `{"status":"approved"}`, wcrApprover))
+		if w.Code != http.StatusOK || w.Body.String() != `{"ok":true}` {
+			t.Fatalf("status %d body %s; want 200 with the resolve answer", w.Code, w.Body)
+		}
+	})
+
+	t.Run("an internal upgrade never touches Salesforce", func(t *testing.T) {
+		stored := strings.Replace(customerUpgradeWcr("engineer@wso2.com"), `"upgradeKind":"customer"`, `"upgradeKind":"internal"`, 1)
+		fake := &fakeWso2CloudRequestClient{stored: stored}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, &fakeApplier{}).ResolveRequest(w, wcrRequest(http.MethodPost, `{"status":"approved"}`, wcrApprover))
+		if w.Code != http.StatusOK || fake.calledPath(http.MethodGet, base+"/salesforce-account") || fake.called(http.MethodPut) {
+			t.Fatalf("status %d, calls %+v", w.Code, fake.calls)
+		}
+	})
+}
+
+func TestWso2CloudRequestHandler_SalesforceRoutes(t *testing.T) {
+	t.Run("retry link forwards a PUT", func(t *testing.T) {
+		fake := &fakeWso2CloudRequestClient{}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, nil).LinkSalesforce(w, wcrRequest(http.MethodPut, "", wcrApprover))
+		if w.Code != http.StatusOK || !fake.calledPath(http.MethodPut, "/wso2-cloud-requests/"+wcrID+"/salesforce-link") {
+			t.Fatalf("status %d, calls %+v", w.Code, fake.calls)
+		}
+	})
+	t.Run("organization status, lower-cased", func(t *testing.T) {
+		fake := &fakeWso2CloudRequestClient{stored: `{"record":null,"account":null}`}
+		r := wcrRequest(http.MethodGet, "", testCsEngineerUser)
+		r.SetPathValue("orgId", "6B1F0C2E-8F6B-4F0A-9D5C-5B1F2A3C4D5E")
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, nil).GetOrganizationSalesforce(w, r)
+		if w.Code != http.StatusOK || !fake.calledPath(http.MethodGet, "/wso2-cloud/organizations/6b1f0c2e-8f6b-4f0a-9d5c-5b1f2a3c4d5e/salesforce") {
+			t.Fatalf("status %d, calls %+v", w.Code, fake.calls)
+		}
+		r.SetPathValue("orgId", "acme")
+		w = httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, nil).GetOrganizationSalesforce(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("not a UUID: status %d", w.Code)
+		}
+	})
+	t.Run("account check validates the id before any call", func(t *testing.T) {
+		for id, want := range map[string]int{"001000000000001": http.StatusOK, "001000000000001AAA": http.StatusOK, "006000000000001": http.StatusBadRequest, "001%2F..": http.StatusBadRequest} {
+			fake := &fakeWso2CloudRequestClient{stored: `{"hasActiveSubscription":true}`}
+			r := wcrRequest(http.MethodGet, "", testCsEngineerUser)
+			r.SetPathValue("accountId", id)
+			w := httptest.NewRecorder()
+			NewWso2CloudRequestHandler(fake, nil).GetSalesforceAccount(w, r)
+			if w.Code != want {
+				t.Errorf("%s: status %d, want %d", id, w.Code, want)
+			}
+			if want == http.StatusBadRequest && len(fake.calls) != 0 {
+				t.Errorf("%s: called upstream", id)
+			}
+		}
+	})
+	t.Run("the subscription refusal from entity-service keeps its message and code", func(t *testing.T) {
+		fake := &fakeWso2CloudRequestClient{errs: map[string]error{http.MethodPost: &apierror.Error{StatusCode: http.StatusConflict,
+			Body: `{"message":"this Salesforce account has no active subscription","errorCode":"wso2_cloud_no_subscription"}`}}}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, nil).CreateRequest(w, wcrRequest(http.MethodPost, `{"type":"upgrade_organization","upgradeKind":"customer"}`, testCsEngineerUser))
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "wso2_cloud_no_subscription") || !strings.Contains(w.Body.String(), "no active subscription") {
+			t.Fatalf("status %d body %s", w.Code, w.Body)
+		}
+	})
+}
+
+func TestWso2CloudRequestHandler_CustomerUpgradeNeedsNoApproval(t *testing.T) {
+	base := "/wso2-cloud-requests/" + wcrID
+	const raise = `{"type":"upgrade_organization","upgradeKind":"customer"}`
+	created := func(extra map[string]string) *fakeWso2CloudRequestClient {
+		byPath := map[string]string{
+			"/wso2-cloud-requests":       customerUpgradeWcr("engineer@wso2.com"),
+			base + "/salesforce-account": `{"hasActiveSubscription":true}`,
+			base + "/salesforce-link":    `{"id":"` + wcrID + `","status":"approved","salesforceLinkStatus":"linked"}`,
+		}
+		for k, v := range extra {
+			byPath[k] = v
+		}
+		return &fakeWso2CloudRequestClient{byPath: byPath}
+	}
+	order := func(f *fakeWso2CloudRequestClient) string {
+		var out []string
+		for _, c := range f.calls {
+			out = append(out, c.method+" "+strings.TrimPrefix(c.path, base))
+		}
+		return fmt.Sprint(out)
+	}
+
+	t.Run("raised, applied and linked at once, as the requester", func(t *testing.T) {
+		fake := created(nil)
+		applier := &fakeApplier{}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, applier).CreateRequest(w, wcrRequest(http.MethodPost, raise, testCsEngineerUser))
+		if w.Code != http.StatusCreated || len(applier.applied) != 1 {
+			t.Fatalf("status %d, applied %d: %s", w.Code, len(applier.applied), w.Body)
+		}
+		want := "[POST /wso2-cloud-requests GET /salesforce-account POST /resolve PUT /salesforce-link]"
+		if got := order(fake); got != want {
+			t.Fatalf("calls %s, want %s", got, want)
+		}
+		if !strings.Contains(w.Body.String(), `"salesforceLinkStatus":"linked"`) {
+			t.Errorf("body = %s", w.Body)
+		}
+	})
+
+	t.Run("a subscription that lapsed in between: stays pending, nothing applied", func(t *testing.T) {
+		fake := created(map[string]string{base + "/salesforce-account": `{"hasActiveSubscription":false}`})
+		applier := &fakeApplier{}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, applier).CreateRequest(w, wcrRequest(http.MethodPost, raise, testCsEngineerUser))
+		if w.Code != http.StatusConflict || len(applier.applied) != 0 || fake.calledPath(http.MethodPost, base+"/resolve") {
+			t.Fatalf("status %d, applied %d, calls %s", w.Code, len(applier.applied), order(fake))
+		}
+	})
+
+	t.Run("cannot be applied: stays pending with the reason", func(t *testing.T) {
+		fake := created(nil)
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, nil).CreateRequest(w, wcrRequest(http.MethodPost, raise, testCsEngineerUser))
+		if w.Code != http.StatusServiceUnavailable || fake.calledPath(http.MethodPost, base+"/resolve") {
+			t.Fatalf("status %d, calls %s", w.Code, order(fake))
+		}
+		if !strings.Contains(w.Body.String(), "stays pending") {
+			t.Errorf("body = %s", w.Body)
+		}
+	})
+
+	t.Run("an internal upgrade waits for an approver", func(t *testing.T) {
+		stored := strings.Replace(customerUpgradeWcr("engineer@wso2.com"), `"upgradeKind":"customer"`, `"upgradeKind":"internal"`, 1)
+		fake := created(map[string]string{"/wso2-cloud-requests": stored})
+		applier := &fakeApplier{}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, applier).CreateRequest(w, wcrRequest(http.MethodPost, `{"type":"upgrade_organization","upgradeKind":"internal"}`, testCsEngineerUser))
+		if w.Code != http.StatusCreated || len(applier.applied) != 0 || len(fake.calls) != 1 {
+			t.Fatalf("status %d, applied %d, calls %s", w.Code, len(applier.applied), order(fake))
+		}
+	})
+
+	t.Run("the requester may approve their own pending customer upgrade, not an internal one", func(t *testing.T) {
+		fake := &fakeWso2CloudRequestClient{stored: customerUpgradeWcr(wcrApprover.Email), byPath: map[string]string{
+			base + "/salesforce-account": `{"hasActiveSubscription":true}`,
+		}}
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, &fakeApplier{}).ResolveRequest(w, wcrRequest(http.MethodPost, `{"status":"approved"}`, wcrApprover))
+		if w.Code != http.StatusOK {
+			t.Fatalf("customer: status %d: %s", w.Code, w.Body)
+		}
+		internal := strings.Replace(customerUpgradeWcr(wcrApprover.Email), `"upgradeKind":"customer"`, `"upgradeKind":"internal"`, 1)
+		fake = &fakeWso2CloudRequestClient{stored: internal}
+		w = httptest.NewRecorder()
+		NewWso2CloudRequestHandler(fake, &fakeApplier{}).ResolveRequest(w, wcrRequest(http.MethodPost, `{"status":"approved"}`, wcrApprover))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("internal: status %d", w.Code)
+		}
+	})
 }

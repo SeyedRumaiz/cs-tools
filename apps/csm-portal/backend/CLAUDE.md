@@ -565,6 +565,9 @@ delete a user), stored by entity-service (`/wso2-cloud-requests`, migration 0287
 | `DELETE /wso2-cloud-requests/{id}` | `PermWrite` | the requester or an admin (`PermAdmin`), checked in the handler; a nil guard lets only the requester |
 | `GET /wso2-cloud/organizations/{orgId}/subscriptions` | `PermViewOperations` | the org's product subscriptions, from WSO2 Cloud; 503 when not connected |
 | `GET /wso2-cloud/plans` | `PermViewOperations` | `WSO2_CLOUD_ENTERPRISE_PLANS`, product to `[{code, label}]` |
+| `GET /wso2-cloud/organizations/{orgId}/salesforce` | `PermViewOperations` | the org's Salesforce record and account, from entity-service |
+| `GET /wso2-cloud/salesforce-accounts/{accountId}` | `PermViewOperations` | check an Account id before raising a customer upgrade; the id is validated here |
+| `PUT /wso2-cloud-requests/{id}/salesforce-link` | `PermApproveWso2CloudRequest` | retry a failed Salesforce link |
 
 - **An upgrade follows WSO2 Cloud's billing admin API** (base path `/admin/api/v1`): it moves one
   subscription to an Enterprise plan billed by wire transfer. The request names `subscriptionId`,
@@ -580,6 +583,15 @@ delete a user), stored by entity-service (`/wso2-cloud-requests`, migration 0287
   the apply is logged at ERROR ("change applied but the approval was not recorded") for a person to put
   right. Two approvers racing can both apply; the second resolve is a 409. A rejection is forwarded
   straight away.
+- **Customer and internal upgrades.** An upgrade names `upgradeKind`. A customer upgrade names a Salesforce
+  account with an active subscription (entity-service checks it on create; see its `CLAUDE.md`, "WSO2 Cloud requests:
+  the Salesforce side of an upgrade") and **needs no approval**: the subscription is the proof. `CreateRequest`
+  stores it, then approves it at once as the requester through the same `approve` steps an approver's Approve runs:
+  re-read the account (`GET .../salesforce-account`; no active subscription is a 409 `wso2_cloud_no_subscription`
+  and nothing is applied), apply, `/resolve`, then `PUT .../salesforce-link` (a link failure never undoes the upgrade;
+  the request shows the failed link). It answers 201 with the approved request, or the apply error with the request
+  left pending, which an approver can then approve (the requester may too: the own-request rule does not apply to a
+  customer upgrade). An internal upgrade waits for someone else's approval and never touches Salesforce.
 - **A failed apply leaves the request pending** (`writeApplyError`): 503 when WSO2 Cloud is not
   connected or has no API for the type (only upgrades have one: `ErrNotAvailable`); 409 with
   `errorCode: wso2_cloud_refused` and WSO2 Cloud's own reason when it refused (a suspended subscription,
