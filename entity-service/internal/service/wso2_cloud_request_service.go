@@ -72,11 +72,14 @@ const wso2CloudRequestForbiddenMsg = "WSO2 Cloud requests are available to inter
 type wso2CloudRequestService struct {
 	repo   repository.WSO2CloudRequestRepository
 	access AccessService
+	// salesforce is nil when Sales Entity is not configured: then a customer upgrade cannot be raised or linked.
+	salesforce WSO2CloudSalesforce
 }
 
-// NewWSO2CloudRequestService constructs a WSO2CloudRequestService.
-func NewWSO2CloudRequestService(repo repository.WSO2CloudRequestRepository, access AccessService) WSO2CloudRequestService {
-	return &wso2CloudRequestService{repo: repo, access: access}
+// NewWSO2CloudRequestService constructs a WSO2CloudRequestService. salesforce may be nil (Sales Entity not
+// configured); every call that needs it is then a ServiceUnavailableError, and internal upgrades still work.
+func NewWSO2CloudRequestService(repo repository.WSO2CloudRequestRepository, access AccessService, salesforce WSO2CloudSalesforce) WSO2CloudRequestService {
+	return &wso2CloudRequestService{repo: repo, access: access, salesforce: salesforce}
 }
 
 // wso2CloudCallerEmail is the person acting: requests are raised and resolved by people, so a call with no user token
@@ -100,6 +103,14 @@ func (s *wso2CloudRequestService) Create(ctx context.Context, req domain.CreateW
 	clean, err := normalizeWSO2CloudRequest(req)
 	if err != nil {
 		return domain.WSO2CloudRequest{}, err
+	}
+	if clean.UpgradeKind != nil && *clean.UpgradeKind == domain.WSO2CloudUpgradeCustomer {
+		account, err := s.customerAccount(ctx, *clean.SalesforceAccountID)
+		if err != nil {
+			return domain.WSO2CloudRequest{}, err
+		}
+		// Store the Id as Salesforce spells it (18 characters), whatever form was typed.
+		clean.SalesforceAccountID = &account.ID
 	}
 	return s.repo.Create(ctx, requestedBy, clean)
 }
@@ -184,8 +195,11 @@ func (s *wso2CloudRequestService) Resolve(ctx context.Context, id string, req do
 	if current.Status != domain.WSO2CloudRequestPending {
 		return domain.WSO2CloudRequest{}, &apierror.ConflictError{Msg: "this request has already been " + string(current.Status)}
 	}
-	// requested_by never changes, so this check needs no lock.
-	if strings.EqualFold(current.RequestedBy, resolvedBy) {
+	// requested_by never changes, so this check needs no lock. A customer upgrade needs no approval (its active
+	// subscription, checked when it was raised, is the proof), so its requester may approve it: the CSM backend does
+	// that as soon as it is raised. They still may not reject it (that is a cancel).
+	if strings.EqualFold(current.RequestedBy, resolvedBy) &&
+		(req.Status != domain.WSO2CloudRequestApproved || !isCustomerUpgrade(*current)) {
 		return domain.WSO2CloudRequest{}, &apierror.ForbiddenError{Msg: "a requester cannot approve or reject their own request"}
 	}
 
@@ -198,6 +212,10 @@ func (s *wso2CloudRequestService) Resolve(ctx context.Context, id string, req do
 		return domain.WSO2CloudRequest{}, &apierror.ConflictError{Msg: "this request is no longer pending"}
 	}
 	return *resolved, nil
+}
+
+func isCustomerUpgrade(r domain.WSO2CloudRequest) bool {
+	return r.Type == domain.WSO2CloudRequestUpgradeOrganization && r.UpgradeKind != nil && *r.UpgradeKind == domain.WSO2CloudUpgradeCustomer
 }
 
 func (s *wso2CloudRequestService) Delete(ctx context.Context, id string) error {
@@ -311,11 +329,17 @@ func normalizeWSO2CloudRequest(req domain.CreateWSO2CloudRequestRequest) (domain
 	subscriptionID := trimmedOrNil(req.SubscriptionID)
 	planCode := trimmedOrNil(req.PlanCode)
 	previousPlanCode := trimmedOrNil(req.PreviousPlanCode)
+	sfAccountID := trimmedOrNil(req.SalesforceAccountID)
+	region := trimmedOrNil(req.Region)
 	if req.Type != domain.WSO2CloudRequestUpgradeOrganization {
-		if product != nil || subscriptionID != nil || planCode != nil || previousPlanCode != nil || req.BillingPeriod != nil || req.NotifyCustomer {
-			return req, &apierror.ValidationError{Msg: "product, subscriptionId, planCode, previousPlanCode, billingPeriod and notifyCustomer are only accepted on an upgrade_organization request"}
+		if product != nil || subscriptionID != nil || planCode != nil || previousPlanCode != nil || req.BillingPeriod != nil || req.NotifyCustomer ||
+			req.UpgradeKind != nil || sfAccountID != nil || region != nil {
+			return req, &apierror.ValidationError{Msg: "product, subscriptionId, planCode, previousPlanCode, billingPeriod, notifyCustomer, upgradeKind, salesforceAccountId and region are only accepted on an upgrade_organization request"}
 		}
 		return out, nil
+	}
+	if err := normalizeWSO2CloudUpgradeKind(req.UpgradeKind, sfAccountID, region, &out); err != nil {
+		return req, err
 	}
 	if subscriptionID == nil {
 		return req, &apierror.ValidationError{Msg: "subscriptionId is required for an upgrade_organization request"}

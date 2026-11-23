@@ -15454,9 +15454,13 @@ paths:
       description: >
         Stores a pending request raised from the CSM portal's WSO2 Cloud tab. The requester
         is the caller, read from the x-user-id-token (required). A reason is required for
-        lock_user and disable_user. subscriptionId and planCode are required for
-        upgrade_organization, and the upgrade fields are refused for every other type. 409 when a request of the same type for the same target is
-        already pending. This only records the request: nothing changes in WSO2 Cloud.
+        lock_user and disable_user. subscriptionId, planCode and upgradeKind are required for
+        upgrade_organization, and the upgrade fields are refused for every other type. A customer
+        upgrade also needs salesforceAccountId and region: the Account is read from Salesforce and
+        must have an active opportunity (409 wso2_cloud_no_subscription otherwise), and it is stored
+        in its 18-character form. 409 when a request of the same type for the same target is
+        already pending. 503 for a customer upgrade when Salesforce (Sales Entity) is not connected.
+        This only records the request: nothing changes in WSO2 Cloud.
         Internal callers only.
       operationId: createWSO2CloudRequest
       requestBody:
@@ -15485,7 +15489,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         "409":
-          description: A request of this type for this target is already pending.
+          description: >
+            A request of this type for this target is already pending, or a customer upgrade's
+            account has no active subscription (errorCode wso2_cloud_no_subscription).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: A customer upgrade, and Salesforce is not connected or not reachable.
           content:
             application/json:
               schema:
@@ -15663,7 +15675,8 @@ paths:
       description: >
         Records the decision; the approver is the caller, read from the x-user-id-token
         (required). A remark is required to reject. The requester cannot resolve their own
-        request (403). A request is resolved once: 409 when it is no longer pending. The
+        request (403), except that they may approve their own customer upgrade, which needs
+        no approval. A request is resolved once: 409 when it is no longer pending. The
         caller applies an approved change in WSO2 Cloud before recording it here.
         Internal callers only.
       operationId: resolveWSO2CloudRequest
@@ -15778,6 +15791,242 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /wso2-cloud-requests/{id}/salesforce-account:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Read a customer upgrade's Salesforce account again.
+      description: >
+        The Account a customer upgrade names, read again from Salesforce with its active
+        opportunities, so the CSM backend can refuse to approve one whose subscription has
+        lapsed since it was raised. Only a customer upgrade has one. Internal callers only.
+      operationId: getWSO2CloudRequestSalesforceAccount
+      responses:
+        "200":
+          description: The account and whether it has an active subscription.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WSO2CloudSalesforceAccount'
+        "400":
+          description: Invalid id, or not a customer upgrade.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such request, or Salesforce no longer has its account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Salesforce is not connected or not reachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /wso2-cloud-requests/{id}/salesforce-link:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    put:
+      summary: Link an approved customer upgrade's org in Salesforce.
+      description: >
+        Creates or updates the org's Organization__c record under the request's account, with
+        the org's handle and region (Sales Entity's POST /organizations/link; a record under
+        another account is never moved). The outcome is stored on the request and returned with
+        it: salesforceLinkStatus linked, or failed with salesforceLinkError, a reason written for
+        the person who will put it right. A refusal or an unreachable Salesforce is a failed
+        link, not an error, so the same call can be retried. A linked request is returned as it
+        is. Needs a user token. Internal callers only.
+      operationId: putWSO2CloudRequestSalesforceLink
+      responses:
+        "200":
+          description: The request with the link's outcome.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WSO2CloudRequest'
+        "400":
+          description: Invalid id, or not a customer upgrade.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid token, or no user token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: No such request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: The request is not approved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Salesforce is not connected.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /wso2-cloud/organizations/{orgId}/salesforce:
+    parameters:
+      - name: orgId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: What Salesforce knows about a WSO2 Cloud org.
+      description: >
+        The org's Organization__c record and the Account it is under, with that account's
+        active opportunities; record and account are null when the org has no record yet.
+        Internal callers only.
+      operationId: getWSO2CloudOrganizationSalesforce
+      responses:
+        "200":
+          description: The org's Salesforce record and account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WSO2CloudSalesforceStatus'
+        "400":
+          description: orgId is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Salesforce is not connected or not reachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /wso2-cloud/salesforce-accounts/{accountId}:
+    parameters:
+      - name: accountId
+        in: path
+        required: true
+        description: A Salesforce Account Id, 15 or 18 characters, starting with 001.
+        schema:
+          type: string
+          pattern: '^001[A-Za-z0-9]{12}([A-Za-z0-9]{3})?$'
+    get:
+      summary: Check a Salesforce account for a customer upgrade.
+      description: >
+        The Account's name and active opportunities, so the person raising a customer upgrade
+        can check the id before submitting it. Internal callers only.
+      operationId: getWSO2CloudSalesforceAccount
+      responses:
+        "200":
+          description: The account and whether it has an active subscription.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WSO2CloudSalesforceAccount'
+        "400":
+          description: Not an Account Id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: No valid token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Not an internal caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Salesforce has no account with this id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Salesforce is not connected or not reachable.
           content:
             application/json:
               schema:
@@ -37602,7 +37851,7 @@ components:
       enum: [monthly, annual]
     WSO2CloudRequest:
       type: object
-      required: [id, number, type, targetId, targetLabel, reason, customerConsent, product, subscriptionId, planCode, previousPlanCode, billingPeriod, notifyCustomer, billingAccountId, status, requestedBy, requestedOn, resolvedBy, resolvedOn, remark]
+      required: [id, number, type, targetId, targetLabel, reason, customerConsent, product, subscriptionId, planCode, previousPlanCode, billingPeriod, notifyCustomer, billingAccountId, upgradeKind, salesforceAccountId, region, salesforceLinkStatus, salesforceLinkError, salesforceLinkedOn, status, requestedBy, requestedOn, resolvedBy, resolvedOn, remark]
       properties:
         id:
           type: string
@@ -37653,6 +37902,32 @@ components:
           type: string
           nullable: true
           description: The wire billing account created in WSO2 Cloud while the upgrade was approved.
+        upgradeKind:
+          allOf:
+            - $ref: '#/components/schemas/WSO2CloudUpgradeKind'
+          nullable: true
+          description: Upgrades only; null on an upgrade raised before it existed (treated as internal).
+        salesforceAccountId:
+          type: string
+          nullable: true
+          description: A customer upgrade's Salesforce Account Id, 18 characters.
+        region:
+          type: string
+          nullable: true
+          description: A customer upgrade's WSO2 Cloud region (us, eu).
+        salesforceLinkStatus:
+          type: string
+          enum: [linked, failed]
+          nullable: true
+          description: An approved customer upgrade's Salesforce link; null until it is tried.
+        salesforceLinkError:
+          type: string
+          nullable: true
+          description: Why the link failed, written for the person who will put it right.
+        salesforceLinkedOn:
+          type: string
+          format: date-time
+          nullable: true
         status:
           $ref: '#/components/schemas/WSO2CloudRequestStatus'
         requestedBy:
@@ -37708,6 +37983,76 @@ components:
           $ref: '#/components/schemas/WSO2CloudBillingPeriod'
         notifyCustomer:
           type: boolean
+        upgradeKind:
+          allOf:
+            - $ref: '#/components/schemas/WSO2CloudUpgradeKind'
+          description: Required for upgrade_organization.
+        salesforceAccountId:
+          type: string
+          description: Required for a customer upgrade; an Account with an active opportunity.
+        region:
+          type: string
+          enum: [us, eu]
+          description: Required for a customer upgrade; matched without regard to case.
+    WSO2CloudUpgradeKind:
+      type: string
+      enum: [customer, internal]
+    WSO2CloudSalesforceOpportunity:
+      type: object
+      required: [id, name, endDate]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          nullable: true
+        endDate:
+          type: string
+          nullable: true
+          description: When the support it sold ends (YYYY-MM-DD).
+    WSO2CloudSalesforceAccount:
+      type: object
+      required: [id, name, hasActiveSubscription, activeOpportunities]
+      properties:
+        id:
+          type: string
+          description: The Account Id, 18 characters.
+        name:
+          type: string
+          nullable: true
+        hasActiveSubscription:
+          type: boolean
+        activeOpportunities:
+          type: array
+          items:
+            $ref: '#/components/schemas/WSO2CloudSalesforceOpportunity'
+    WSO2CloudSalesforceRecord:
+      type: object
+      required: [id, handle, region, projectId]
+      properties:
+        id:
+          type: string
+        handle:
+          type: string
+          nullable: true
+        region:
+          type: string
+          nullable: true
+        projectId:
+          type: string
+          nullable: true
+    WSO2CloudSalesforceStatus:
+      type: object
+      required: [record, account]
+      properties:
+        record:
+          allOf:
+            - $ref: '#/components/schemas/WSO2CloudSalesforceRecord'
+          nullable: true
+        account:
+          allOf:
+            - $ref: '#/components/schemas/WSO2CloudSalesforceAccount'
+          nullable: true
     SetWSO2CloudBillingAccountRequest:
       type: object
       additionalProperties: false

@@ -183,3 +183,9 @@ const (
 // that was deleted or removed after its work item closed. A client shows
 // "removed" for it and a plain "not available" for a 404.
 const CodeAttachmentRemoved = "attachment_removed"
+
+// CodeWSO2CloudNoSubscription is the 409 for a WSO2 Cloud customer upgrade
+// whose Salesforce account has no active opportunity: raising it (POST
+// /wso2-cloud-requests) is refused, and the CSM portal refuses to approve one
+// whose subscription has lapsed since.
+const CodeWSO2CloudNoSubscription = "wso2_cloud_no_subscription"

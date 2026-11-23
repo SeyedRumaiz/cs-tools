@@ -14,7 +14,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// This is an integration test: it applies migration 0287 (with 0180's number series) in a private schema and runs
+// This is an integration test: it applies migrations 0287 and 0306 (with 0180's number series) in a private schema and runs
 // WSO2CloudRequestRepository against it. Skipped without a DSN:
 //
 //	WSO2_CLOUD_REQUEST_TEST_DSN=postgres://... go test ./internal/repository/ -run WSO2CloudRequest
@@ -87,14 +87,16 @@ func wso2CloudRequestTestPool(t *testing.T) *pgxpool.Pool {
 			t.Fatalf("apply 0180 part %q: %v", part.from, err)
 		}
 	}
-	migration, err := os.ReadFile("../../migrations/0287_wso2_cloud_request.sql")
-	if err != nil {
-		t.Fatalf("read 0287: %v", err)
-	}
-	// Twice: the migration must be safe to re-run.
-	for i := 0; i < 2; i++ {
-		if _, err := pool.Exec(ctx, string(migration)); err != nil {
-			t.Fatalf("apply 0287 (run %d): %v", i+1, err)
+	for _, name := range []string{"0287_wso2_cloud_request.sql", "0306_wso2_cloud_request_salesforce.sql"} {
+		migration, err := os.ReadFile("../../migrations/" + name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		// Twice: each migration must be safe to re-run.
+		for i := 0; i < 2; i++ {
+			if _, err := pool.Exec(ctx, string(migration)); err != nil {
+				t.Fatalf("apply %s (run %d): %v", name, i+1, err)
+			}
 		}
 	}
 	return pool
@@ -230,5 +232,74 @@ func TestWSO2CloudRequestIntegration_Lifecycle(t *testing.T) {
 	})
 	if err != nil || next.Number <= lock.Number {
 		t.Fatalf("next number %q after %q: %v", next.Number, lock.Number, err)
+	}
+}
+
+func TestWSO2CloudRequestIntegration_SalesforceLink(t *testing.T) {
+	pool := wso2CloudRequestTestPool(t)
+	repo := repository.NewWSO2CloudRequestRepository(pool)
+	ctx := context.Background()
+
+	product, sub, plan := "identity", "sub-1", "enterprise-identity"
+	customer, internal := domain.WSO2CloudUpgradeCustomer, domain.WSO2CloudUpgradeInternal
+	account, region := "001000000000001AAA", "eu"
+	req := domain.CreateWSO2CloudRequestRequest{
+		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "org-1", TargetLabel: "acme",
+		Product: &product, SubscriptionID: &sub, PlanCode: &plan,
+		UpgradeKind: &customer, SalesforceAccountID: &account, Region: &region,
+	}
+	up, err := repo.Create(ctx, "engineer@wso2.com", req)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if *up.UpgradeKind != customer || *up.SalesforceAccountID != account || *up.Region != region || up.SalesforceLinkStatus != nil {
+		t.Fatalf("created %+v", up)
+	}
+
+	// A pending request is never linked.
+	if got, err := repo.SetSalesforceLink(ctx, up.ID, domain.WSO2CloudSalesforceLinked, nil); err != nil || got != nil {
+		t.Fatalf("link while pending: %v / %v", got, err)
+	}
+	if _, err := repo.Resolve(ctx, up.ID, domain.WSO2CloudRequestApproved, "approver@wso2.com", nil); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	reason := "Salesforce could not be reached. Retry later."
+	failed, err := repo.SetSalesforceLink(ctx, up.ID, domain.WSO2CloudSalesforceFailed, &reason)
+	if err != nil || failed == nil || *failed.SalesforceLinkStatus != domain.WSO2CloudSalesforceFailed ||
+		*failed.SalesforceLinkError != reason || failed.SalesforceLinkedOn != nil {
+		t.Fatalf("failed link: %+v / %v", failed, err)
+	}
+	linked, err := repo.SetSalesforceLink(ctx, up.ID, domain.WSO2CloudSalesforceLinked, nil)
+	if err != nil || linked == nil || *linked.SalesforceLinkStatus != domain.WSO2CloudSalesforceLinked ||
+		linked.SalesforceLinkError != nil || linked.SalesforceLinkedOn == nil {
+		t.Fatalf("linked: %+v / %v", linked, err)
+	}
+
+	// An internal upgrade has no account and is never linked.
+	internalReq := req
+	internalReq.TargetID, internalReq.UpgradeKind, internalReq.SalesforceAccountID, internalReq.Region = "org-2", &internal, nil, nil
+	in, err := repo.Create(ctx, "engineer@wso2.com", internalReq)
+	if err != nil {
+		t.Fatalf("create internal: %v", err)
+	}
+	if _, err := repo.Resolve(ctx, in.ID, domain.WSO2CloudRequestApproved, "approver@wso2.com", nil); err != nil {
+		t.Fatalf("approve internal: %v", err)
+	}
+	if got, err := repo.SetSalesforceLink(ctx, in.ID, domain.WSO2CloudSalesforceLinked, nil); err != nil || got != nil {
+		t.Fatalf("link internal: %v / %v", got, err)
+	}
+
+	// The table refuses a customer upgrade without an account, and an account on an internal one.
+	for name, sql := range map[string]string{
+		"customer without an account": `INSERT INTO wso2_cloud_request (type, target_id, target_label, subscription_id, plan_code, requested_by, upgrade_kind, region)
+			VALUES ('upgrade_organization', 'org-3', 'x', 's', 'p', 'e@wso2.com', 'customer', 'eu')`,
+		"internal with an account": `INSERT INTO wso2_cloud_request (type, target_id, target_label, subscription_id, plan_code, requested_by, upgrade_kind, sf_account_id)
+			VALUES ('upgrade_organization', 'org-4', 'x', 's', 'p', 'e@wso2.com', 'internal', '001000000000001AAA')`,
+		"kind on a lock": `INSERT INTO wso2_cloud_request (type, target_id, target_label, reason, requested_by, upgrade_kind)
+			VALUES ('lock_user', 'u-1', 'x', 'r', 'e@wso2.com', 'internal')`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

@@ -46,6 +46,9 @@ type WSO2CloudRequestRepository interface {
 	// SetBillingAccount records the billing account of a pending upgrade that has none yet; nil when nothing was
 	// written (no such request, not an upgrade, not pending, or it already has one).
 	SetBillingAccount(ctx context.Context, id, billingAccountID string) (*domain.WSO2CloudRequest, error)
+	// SetSalesforceLink records the outcome of linking an approved customer upgrade's org in Salesforce (linkError is
+	// nil when linked); nil when nothing was written (no such request, or not an approved customer upgrade).
+	SetSalesforceLink(ctx context.Context, id string, status domain.WSO2CloudSalesforceLinkStatus, linkError *string) (*domain.WSO2CloudRequest, error)
 	// Delete removes a pending request; false when there is no pending request with that id.
 	Delete(ctx context.Context, id string) (bool, error)
 }
@@ -61,16 +64,26 @@ func NewWSO2CloudRequestRepository(db *pgxpool.Pool) WSO2CloudRequestRepository 
 
 const wso2CloudRequestColumns = `id::text, number, type, target_id, target_label, reason, customer_consent,
 	product, subscription_id, plan_code, previous_plan_code, billing_period, notify_customer, billing_account_id,
+	upgrade_kind, sf_account_id, region, sf_link_status, sf_link_error, sf_linked_on,
 	status, requested_by, requested_on, resolved_by, resolved_on, remark`
 
 func scanWSO2CloudRequest(row pgx.Row) (domain.WSO2CloudRequest, error) {
 	var r domain.WSO2CloudRequest
-	var billingPeriod *string
+	var billingPeriod, upgradeKind, linkStatus *string
 	err := row.Scan(&r.ID, &r.Number, &r.Type, &r.TargetID, &r.TargetLabel, &r.Reason, &r.CustomerConsent,
 		&r.Product, &r.SubscriptionID, &r.PlanCode, &r.PreviousPlanCode, &billingPeriod, &r.NotifyCustomer,
-		&r.BillingAccountID, &r.Status, &r.RequestedBy, &r.RequestedOn, &r.ResolvedBy, &r.ResolvedOn, &r.Remark)
+		&r.BillingAccountID, &upgradeKind, &r.SalesforceAccountID, &r.Region, &linkStatus, &r.SalesforceLinkError,
+		&r.SalesforceLinkedOn, &r.Status, &r.RequestedBy, &r.RequestedOn, &r.ResolvedBy, &r.ResolvedOn, &r.Remark)
 	if err != nil {
 		return r, err
+	}
+	if upgradeKind != nil {
+		k := domain.WSO2CloudUpgradeKind(*upgradeKind)
+		r.UpgradeKind = &k
+	}
+	if linkStatus != nil {
+		st := domain.WSO2CloudSalesforceLinkStatus(*linkStatus)
+		r.SalesforceLinkStatus = &st
 	}
 	if billingPeriod != nil {
 		p := domain.WSO2CloudBillingPeriod(*billingPeriod)
@@ -86,15 +99,23 @@ func billingPeriodParam(p *domain.WSO2CloudBillingPeriod) any {
 	return string(*p)
 }
 
+func upgradeKindParam(k *domain.WSO2CloudUpgradeKind) any {
+	if k == nil {
+		return nil
+	}
+	return string(*k)
+}
+
 func (r *wso2CloudRequestRepo) Create(ctx context.Context, requestedBy string, req domain.CreateWSO2CloudRequestRequest) (domain.WSO2CloudRequest, error) {
 	out, err := scanWSO2CloudRequest(r.db.QueryRow(ctx,
 		`INSERT INTO wso2_cloud_request
 		   (type, target_id, target_label, reason, customer_consent, product, subscription_id, plan_code,
-		    previous_plan_code, billing_period, notify_customer, requested_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		    previous_plan_code, billing_period, notify_customer, requested_by, upgrade_kind, sf_account_id, region)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		 RETURNING `+wso2CloudRequestColumns,
 		string(req.Type), req.TargetID, req.TargetLabel, req.Reason, req.CustomerConsent, req.Product, req.SubscriptionID,
-		req.PlanCode, req.PreviousPlanCode, billingPeriodParam(req.BillingPeriod), req.NotifyCustomer, requestedBy))
+		req.PlanCode, req.PreviousPlanCode, billingPeriodParam(req.BillingPeriod), req.NotifyCustomer, requestedBy,
+		upgradeKindParam(req.UpgradeKind), req.SalesforceAccountID, req.Region))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "wso2_cloud_request_one_pending_key" {
@@ -216,6 +237,23 @@ func (r *wso2CloudRequestRepo) SetBillingAccount(ctx context.Context, id, billin
 	}
 	if err != nil {
 		return nil, fmt.Errorf("set wso2 cloud request billing account: %w", err)
+	}
+	return &out, nil
+}
+
+func (r *wso2CloudRequestRepo) SetSalesforceLink(ctx context.Context, id string, status domain.WSO2CloudSalesforceLinkStatus, linkError *string) (*domain.WSO2CloudRequest, error) {
+	out, err := scanWSO2CloudRequest(r.db.QueryRow(ctx,
+		`UPDATE wso2_cloud_request
+		    SET sf_link_status = $2::text, sf_link_error = $3,
+		        sf_linked_on = CASE WHEN $2::text = 'linked' THEN NOW() ELSE sf_linked_on END
+		  WHERE id = $1::uuid AND status = 'approved' AND upgrade_kind = 'customer'
+		  RETURNING `+wso2CloudRequestColumns,
+		id, string(status), linkError))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("set wso2 cloud request salesforce link: %w", err)
 	}
 	return &out, nil
 }

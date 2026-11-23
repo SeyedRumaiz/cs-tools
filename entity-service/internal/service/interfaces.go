@@ -231,6 +231,11 @@ type WSO2CloudRequestService interface {
 	Resolve(ctx context.Context, id string, req domain.ResolveWSO2CloudRequestRequest) (domain.WSO2CloudRequest, error)
 	SetBillingAccount(ctx context.Context, id string, req domain.SetWSO2CloudBillingAccountRequest) (domain.WSO2CloudRequest, error)
 	Delete(ctx context.Context, id string) error
+	// The Salesforce side of an organization upgrade (wso2_cloud_request_salesforce.go).
+	SalesforceOrganization(ctx context.Context, orgID string) (domain.WSO2CloudSalesforceStatus, error)
+	SalesforceAccount(ctx context.Context, accountID string) (domain.WSO2CloudSalesforceAccount, error)
+	RequestSalesforceAccount(ctx context.Context, id string) (domain.WSO2CloudSalesforceAccount, error)
+	LinkSalesforce(ctx context.Context, id string) (domain.WSO2CloudRequest, error)
 }
 
 // AlertMuteRuleService manages alert mute rules (Operations > Alert mute rules): one-time windows during which SRE alerts matching every

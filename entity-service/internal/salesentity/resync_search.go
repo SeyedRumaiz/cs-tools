@@ -40,6 +40,8 @@ type SearchFilter struct {
 	OpportunityID string `json:"opportunityId,omitempty"`
 	// IDs is the batch lookup by record Id.
 	IDs []string `json:"ids,omitempty"`
+	// IsOnlyActiveOpportunities keeps only active opportunities (opportunities only).
+	IsOnlyActiveOpportunities *bool `json:"isOnlyActiveOpportunities,omitempty"`
 	// Limit is the page size; Sales Entity caps it at 1000.
 	Limit               int    `json:"limit,omitempty"`
 	MinLastModifiedDate string `json:"minLastModifiedDate,omitempty"`

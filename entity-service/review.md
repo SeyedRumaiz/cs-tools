@@ -18,6 +18,9 @@ failure class turns up during review that isn't on this list, add it here in the
       caller — it can leak schema internals or an upstream's internal message.
 - [ ] Every SQL value is parameterized — never string-interpolated, even for a value that "can't"
       contain user input.
+- [ ] A bind parameter used twice in one statement in two type contexts (`SET col = $2` and
+      `CASE WHEN $2 = 'x'`) carries an explicit cast (`$2::text`) — Postgres refuses it at run time
+      ("inconsistent types deduced for parameter"), and only a real-database test catches it.
 - [ ] New/changed endpoint has an access-control check — route-level permission, or an in-handler
       check if the route is shared across audiences. Don't assume the route floor alone is enough.
 - [ ] New behavior has a test exercising it, not just a happy-path smoke test.

@@ -114,3 +114,47 @@ func (h *WSO2CloudRequestHandler) DeleteWSO2CloudRequest(w http.ResponseWriter, 
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// GetWSO2CloudOrganizationSalesforce handles GET /wso2-cloud/organizations/{orgId}/salesforce: the org's
+// Organization__c record and the account it is under, if any.
+func (h *WSO2CloudRequestHandler) GetWSO2CloudOrganizationSalesforce(w http.ResponseWriter, r *http.Request) {
+	out, err := h.svc.SalesforceOrganization(r.Context(), r.PathValue("orgId"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeWSO2CloudRequestJSON(w, http.StatusOK, out)
+}
+
+// GetWSO2CloudSalesforceAccount handles GET /wso2-cloud/salesforce-accounts/{accountId}: an Account and whether it
+// has an active subscription.
+func (h *WSO2CloudRequestHandler) GetWSO2CloudSalesforceAccount(w http.ResponseWriter, r *http.Request) {
+	out, err := h.svc.SalesforceAccount(r.Context(), r.PathValue("accountId"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeWSO2CloudRequestJSON(w, http.StatusOK, out)
+}
+
+// GetWSO2CloudRequestSalesforceAccount handles GET /wso2-cloud-requests/{id}/salesforce-account: the account a
+// customer upgrade names, read again from Salesforce.
+func (h *WSO2CloudRequestHandler) GetWSO2CloudRequestSalesforceAccount(w http.ResponseWriter, r *http.Request) {
+	out, err := h.svc.RequestSalesforceAccount(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeWSO2CloudRequestJSON(w, http.StatusOK, out)
+}
+
+// PutWSO2CloudRequestSalesforceLink handles PUT /wso2-cloud-requests/{id}/salesforce-link: links an approved
+// customer upgrade's org to its account in Salesforce and answers the request with the outcome. Safe to repeat.
+func (h *WSO2CloudRequestHandler) PutWSO2CloudRequestSalesforceLink(w http.ResponseWriter, r *http.Request) {
+	out, err := h.svc.LinkSalesforce(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeWSO2CloudRequestJSON(w, http.StatusOK, out)
+}

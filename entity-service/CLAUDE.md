@@ -13183,3 +13183,28 @@ and the ServiceNow-backed `SearchCases` call. Default (field absent) is byte-for
 `NULL::text` in the page query, so the column is never read, with the scan shape unchanged; the WHERE
 clause is untouched. The ServiceNow service cannot ask upstream to omit it, so it drops the value in Go.
 `/cases/search` only: aggregate, announcement-registry and every other search ignore it.
+
+## WSO2 Cloud requests: the Salesforce side of an upgrade (migration 0306)
+
+`wso2_cloud_request` (migration 0287) stores the CSM portal's WSO2 Cloud tab requests; the CSM backend applies an
+approved change in WSO2 Cloud. An `upgrade_organization` request now carries `upgradeKind` (required on create):
+
+- **`internal`** never touches Salesforce: no account, no check, no link.
+- **`customer`** names `salesforceAccountId` and `region` (`us`/`eu`, the Organization__c picklist). `Create` reads
+  the Account through Sales Entity and refuses one with no active opportunity (409 `wso2_cloud_no_subscription`;
+  "active" is Sales Entity's `isOnlyActiveOpportunities`), and stores the Id as Salesforce spells it (18 characters).
+- Upgrades raised before 0306 have a NULL kind and are treated as internal.
+- A customer upgrade needs no approval, so `Resolve` lets its requester **approve** it (the CSM backend does so as
+  soon as it is raised); rejecting your own request, and approving your own internal upgrade or any other request,
+  stay refused.
+
+`internal/service/wso2_cloud_request_salesforce.go` holds the rest, all `internalOnly`:
+`GET /wso2-cloud/organizations/{orgId}/salesforce` (the org's record and account), `GET
+/wso2-cloud/salesforce-accounts/{accountId}` (check an id before raising), `GET
+/wso2-cloud-requests/{id}/salesforce-account` (the CSM backend re-checks the subscription before applying an approval)
+and `PUT /wso2-cloud-requests/{id}/salesforce-link` (after approval: Sales Entity's `POST /organizations/link` with the
+org's UUID, handle, region and the account; `allowMove` is never sent). The link's outcome is stored
+(`sf_link_status` linked/failed, `sf_link_error`), and a refusal or an unreachable Salesforce is a failed link with a
+reason, not an error, so the same PUT retries it. The Sales Entity client is optional (`SALES_ENTITY_*`): without it
+customer upgrades are a 503 and internal ones still work. The link path is one constant
+(`salesentity.organizationLinkPath`).

@@ -51,6 +51,24 @@ const (
 	WSO2CloudBillingAnnual  WSO2CloudBillingPeriod = "annual"
 )
 
+// WSO2CloudUpgradeKind says whether an upgrade is for a paying customer or internal. A customer upgrade names the
+// customer's Salesforce Account, which must have an active opportunity; an internal one never touches Salesforce.
+type WSO2CloudUpgradeKind string
+
+const (
+	WSO2CloudUpgradeCustomer WSO2CloudUpgradeKind = "customer"
+	WSO2CloudUpgradeInternal WSO2CloudUpgradeKind = "internal"
+)
+
+// WSO2CloudSalesforceLinkStatus is the outcome of linking an approved customer upgrade's org to its Salesforce
+// account. A request whose link has not been tried has none.
+type WSO2CloudSalesforceLinkStatus string
+
+const (
+	WSO2CloudSalesforceLinked WSO2CloudSalesforceLinkStatus = "linked"
+	WSO2CloudSalesforceFailed WSO2CloudSalesforceLinkStatus = "failed"
+)
+
 // WSO2CloudRequest is one request raised from the CSM portal's WSO2 Cloud tab (migration 0287).
 type WSO2CloudRequest struct {
 	ID string `json:"id"`
@@ -75,10 +93,20 @@ type WSO2CloudRequest struct {
 	BillingPeriod    *WSO2CloudBillingPeriod `json:"billingPeriod"`
 	NotifyCustomer   bool                    `json:"notifyCustomer"`
 	// BillingAccountID is the wire billing account created in WSO2 Cloud while the upgrade was being approved.
-	BillingAccountID *string                `json:"billingAccountId"`
-	Status           WSO2CloudRequestStatus `json:"status"`
-	RequestedBy      string                 `json:"requestedBy"`
-	RequestedOn      time.Time              `json:"requestedOn"`
+	BillingAccountID *string `json:"billingAccountId"`
+	// UpgradeKind is set on upgrades only; nil on an upgrade raised before it existed (treated as internal).
+	UpgradeKind *WSO2CloudUpgradeKind `json:"upgradeKind"`
+	// SalesforceAccountID and Region are set on a customer upgrade only: the customer's Account (18 characters) and
+	// the WSO2 Cloud region the org is in.
+	SalesforceAccountID *string `json:"salesforceAccountId"`
+	Region              *string `json:"region"`
+	// The Salesforce link of an approved customer upgrade: nil until tried, then linked or failed (with the reason).
+	SalesforceLinkStatus *WSO2CloudSalesforceLinkStatus `json:"salesforceLinkStatus"`
+	SalesforceLinkError  *string                        `json:"salesforceLinkError"`
+	SalesforceLinkedOn   *time.Time                     `json:"salesforceLinkedOn"`
+	Status               WSO2CloudRequestStatus         `json:"status"`
+	RequestedBy          string                         `json:"requestedBy"`
+	RequestedOn          time.Time                      `json:"requestedOn"`
 	// ResolvedBy and ResolvedOn are nil while the request is pending.
 	ResolvedBy *string    `json:"resolvedBy"`
 	ResolvedOn *time.Time `json:"resolvedOn"`
@@ -101,6 +129,11 @@ type CreateWSO2CloudRequestRequest struct {
 	PreviousPlanCode *string                 `json:"previousPlanCode,omitempty"`
 	BillingPeriod    *WSO2CloudBillingPeriod `json:"billingPeriod,omitempty"`
 	NotifyCustomer   bool                    `json:"notifyCustomer,omitempty"`
+	// Upgrade only, required: customer or internal. A customer upgrade also needs salesforceAccountId (an Account with
+	// an active opportunity) and region; an internal one takes neither.
+	UpgradeKind         *WSO2CloudUpgradeKind `json:"upgradeKind,omitempty"`
+	SalesforceAccountID *string               `json:"salesforceAccountId,omitempty"`
+	Region              *string               `json:"region,omitempty"`
 }
 
 // SetWSO2CloudBillingAccountRequest is the body of POST /wso2-cloud-requests/{id}/billing-account: the wire billing
@@ -138,4 +171,38 @@ type SearchWSO2CloudRequestsResponse struct {
 	Total    int                `json:"total"`
 	Limit    int                `json:"limit"`
 	Offset   int                `json:"offset"`
+}
+
+// WSO2CloudSalesforceOpportunity is one active opportunity of a customer's Salesforce Account.
+type WSO2CloudSalesforceOpportunity struct {
+	ID   string  `json:"id"`
+	Name *string `json:"name"`
+	// EndDate is when the support it sold ends (YYYY-MM-DD), when Salesforce has one.
+	EndDate *string `json:"endDate"`
+}
+
+// WSO2CloudSalesforceAccount is a customer's Salesforce Account and whether it has an active subscription (an active
+// opportunity), which a customer upgrade needs.
+type WSO2CloudSalesforceAccount struct {
+	// ID is the Account Id, 18 characters.
+	ID                    string                           `json:"id"`
+	Name                  *string                          `json:"name"`
+	HasActiveSubscription bool                             `json:"hasActiveSubscription"`
+	ActiveOpportunities   []WSO2CloudSalesforceOpportunity `json:"activeOpportunities"`
+}
+
+// WSO2CloudSalesforceRecord is the Organization__c record of a WSO2 Cloud org.
+type WSO2CloudSalesforceRecord struct {
+	ID        string  `json:"id"`
+	Handle    *string `json:"handle"`
+	Region    *string `json:"region"`
+	ProjectID *string `json:"projectId"`
+}
+
+// WSO2CloudSalesforceStatus is what Salesforce knows about a WSO2 Cloud org (GET
+// /wso2-cloud/organizations/{orgId}/salesforce): its Organization__c record and the account it is under, both nil
+// when the org has no record yet.
+type WSO2CloudSalesforceStatus struct {
+	Record  *WSO2CloudSalesforceRecord  `json:"record"`
+	Account *WSO2CloudSalesforceAccount `json:"account"`
 }

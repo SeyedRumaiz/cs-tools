@@ -1773,8 +1773,14 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		runbookRepo = repository.NewRunbookRepository(db)
 		runbookHandler = handler.NewRunbookHandler(service.NewRunbookService(runbookRepo))
 		// WSO2 Cloud tab requests: internal callers only (migration 0287).
+		// A customer upgrade is checked and linked in Salesforce through Sales Entity; without it only internal
+		// upgrades can be raised.
+		var wso2CloudSalesforce service.WSO2CloudSalesforce
+		if salesEntityClient != nil {
+			wso2CloudSalesforce = salesEntityClient
+		}
 		wso2CloudRequestHandler = handler.NewWSO2CloudRequestHandler(
-			service.NewWSO2CloudRequestService(repository.NewWSO2CloudRequestRepository(db), accessSvc))
+			service.NewWSO2CloudRequestService(repository.NewWSO2CloudRequestRepository(db), accessSvc, wso2CloudSalesforce))
 		// Standard change templates and the proposals that create, modify or
 		// retire them: internal callers only.
 		standardChangeRepo = repository.NewStandardChangeRepository(repository.NewScoped(db))
@@ -2388,6 +2394,10 @@ func NewRouter(db *pgxpool.Pool, cfg *config.Config) (http.Handler, func()) {
 		mux.HandleFunc("POST /wso2-cloud-requests/{id}/resolve", internalOnly(accessSvc, wso2CloudRequestHandler.ResolveWSO2CloudRequest))
 		mux.HandleFunc("POST /wso2-cloud-requests/{id}/billing-account", internalOnly(accessSvc, wso2CloudRequestHandler.SetWSO2CloudRequestBillingAccount))
 		mux.HandleFunc("DELETE /wso2-cloud-requests/{id}", internalOnly(accessSvc, wso2CloudRequestHandler.DeleteWSO2CloudRequest))
+		mux.HandleFunc("GET /wso2-cloud-requests/{id}/salesforce-account", internalOnly(accessSvc, wso2CloudRequestHandler.GetWSO2CloudRequestSalesforceAccount))
+		mux.HandleFunc("PUT /wso2-cloud-requests/{id}/salesforce-link", internalOnly(accessSvc, wso2CloudRequestHandler.PutWSO2CloudRequestSalesforceLink))
+		mux.HandleFunc("GET /wso2-cloud/organizations/{orgId}/salesforce", internalOnly(accessSvc, wso2CloudRequestHandler.GetWSO2CloudOrganizationSalesforce))
+		mux.HandleFunc("GET /wso2-cloud/salesforce-accounts/{accountId}", internalOnly(accessSvc, wso2CloudRequestHandler.GetWSO2CloudSalesforceAccount))
 	}
 	if eolProductUsageReportHandler != nil {
 		// internalOnly: the report names customers and their deployments.

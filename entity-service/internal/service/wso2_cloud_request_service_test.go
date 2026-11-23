@@ -41,6 +41,9 @@ type fakeWCRRepo struct {
 	// setAccount is what SetBillingAccount returns; setArgs what it was called with.
 	setAccount *domain.WSO2CloudRequest
 	setArgs    []string
+	// linkArgs records SetSalesforceLink calls; linkNil makes it write nothing.
+	linkArgs []linkCall
+	linkNil  bool
 }
 
 func (f *fakeWCRRepo) Create(_ context.Context, by string, req domain.CreateWSO2CloudRequestRequest) (domain.WSO2CloudRequest, error) {
@@ -76,6 +79,23 @@ func (f *fakeWCRRepo) SetBillingAccount(_ context.Context, id, accountID string)
 	return f.setAccount, nil
 }
 
+func (f *fakeWCRRepo) SetSalesforceLink(_ context.Context, id string, status domain.WSO2CloudSalesforceLinkStatus, linkError *string) (*domain.WSO2CloudRequest, error) {
+	f.linkArgs = append(f.linkArgs, linkCall{id: id, status: status, linkError: linkError})
+	if f.stored == nil || f.linkNil {
+		return nil, nil
+	}
+	out := *f.stored
+	out.SalesforceLinkStatus = &status
+	out.SalesforceLinkError = linkError
+	return &out, nil
+}
+
+type linkCall struct {
+	id        string
+	status    domain.WSO2CloudSalesforceLinkStatus
+	linkError *string
+}
+
 func wcrUserCtx(email string) context.Context {
 	return auth.WithIdentity(context.Background(), auth.Identity{Validated: true, UserEmail: email})
 }
@@ -87,8 +107,11 @@ func wcrUpgrade() domain.CreateWSO2CloudRequestRequest {
 	return domain.CreateWSO2CloudRequestRequest{
 		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "o1", TargetLabel: "acme",
 		Product: strp("identity"), SubscriptionID: strp("sub-1"), PlanCode: strp("enterprise-identity"),
+		UpgradeKind: kindp(domain.WSO2CloudUpgradeInternal),
 	}
 }
+
+func kindp(k domain.WSO2CloudUpgradeKind) *domain.WSO2CloudUpgradeKind { return &k }
 
 func withUpgrade(change func(*domain.CreateWSO2CloudRequestRequest)) domain.CreateWSO2CloudRequestRequest {
 	r := wcrUpgrade()
@@ -119,7 +142,7 @@ func TestWSO2CloudRequestService_CreateValidation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &fakeWCRRepo{}
-			svc := NewWSO2CloudRequestService(repo, internalAccess{})
+			svc := NewWSO2CloudRequestService(repo, internalAccess{}, nil)
 			_, err := svc.Create(wcrUserCtx("engineer@wso2.com"), tc.req)
 			var ve *apierror.ValidationError
 			if !errors.As(err, &ve) || !strings.Contains(ve.Msg, tc.wantErr) {
@@ -134,11 +157,12 @@ func TestWSO2CloudRequestService_CreateValidation(t *testing.T) {
 
 func TestWSO2CloudRequestService_CreateNormalisesAndUsesTheToken(t *testing.T) {
 	repo := &fakeWCRRepo{}
-	svc := NewWSO2CloudRequestService(repo, internalAccess{})
+	svc := NewWSO2CloudRequestService(repo, internalAccess{}, nil)
 	_, err := svc.Create(wcrUserCtx("engineer@wso2.com"), domain.CreateWSO2CloudRequestRequest{
 		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: " o1 ", TargetLabel: " acme ",
 		Reason: strp("  "), Product: strp(" identity "), SubscriptionID: strp(" sub-1 "), PlanCode: strp(" enterprise-identity "),
 		PreviousPlanCode: strp(""), BillingPeriod: periodp(domain.WSO2CloudBillingAnnual), NotifyCustomer: true,
+		UpgradeKind: kindp(domain.WSO2CloudUpgradeInternal),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +184,7 @@ func TestWSO2CloudRequestService_CreateNormalisesAndUsesTheToken(t *testing.T) {
 
 func TestWSO2CloudRequestService_InternalCallersOnly(t *testing.T) {
 	repo := &fakeWCRRepo{}
-	svc := NewWSO2CloudRequestService(repo, customerAccess{})
+	svc := NewWSO2CloudRequestService(repo, customerAccess{}, nil)
 	_, err := svc.Create(wcrUserCtx("customer@example.com"), domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestUnlockUser, TargetID: "u1", TargetLabel: "a@b.c"})
 	var fe *apierror.ForbiddenError
 	if !errors.As(err, &fe) {
@@ -169,7 +193,7 @@ func TestWSO2CloudRequestService_InternalCallersOnly(t *testing.T) {
 }
 
 func TestWSO2CloudRequestService_CreateNeedsAPerson(t *testing.T) {
-	svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{})
+	svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{}, nil)
 	ctx := auth.WithIdentity(context.Background(), auth.Identity{Validated: true, ClientID: "m2m"})
 	_, err := svc.Create(ctx, domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestUnlockUser, TargetID: "u1", TargetLabel: "a@b.c"})
 	var ue *apierror.UnauthorizedError
@@ -183,7 +207,7 @@ func TestWSO2CloudRequestService_Resolve(t *testing.T) {
 		return &domain.WSO2CloudRequest{ID: testWCRID, RequestedBy: "Requester@wso2.com", Status: domain.WSO2CloudRequestPending}
 	}
 	t.Run("reject needs a remark", func(t *testing.T) {
-		svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: pending()}, internalAccess{})
+		svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: pending()}, internalAccess{}, nil)
 		_, err := svc.Resolve(wcrUserCtx("approver@wso2.com"), testWCRID, domain.ResolveWSO2CloudRequestRequest{Status: domain.WSO2CloudRequestRejected, Remark: strp(" ")})
 		var ve *apierror.ValidationError
 		if !errors.As(err, &ve) || !strings.Contains(ve.Msg, "remark is required") {
@@ -191,7 +215,7 @@ func TestWSO2CloudRequestService_Resolve(t *testing.T) {
 		}
 	})
 	t.Run("status must be a decision", func(t *testing.T) {
-		svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: pending()}, internalAccess{})
+		svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: pending()}, internalAccess{}, nil)
 		_, err := svc.Resolve(wcrUserCtx("approver@wso2.com"), testWCRID, domain.ResolveWSO2CloudRequestRequest{Status: domain.WSO2CloudRequestPending})
 		var ve *apierror.ValidationError
 		if !errors.As(err, &ve) {
@@ -200,7 +224,7 @@ func TestWSO2CloudRequestService_Resolve(t *testing.T) {
 	})
 	t.Run("the requester cannot resolve their own request", func(t *testing.T) {
 		repo := &fakeWCRRepo{stored: pending()}
-		svc := NewWSO2CloudRequestService(repo, internalAccess{})
+		svc := NewWSO2CloudRequestService(repo, internalAccess{}, nil)
 		_, err := svc.Resolve(wcrUserCtx("requester@wso2.com"), testWCRID, domain.ResolveWSO2CloudRequestRequest{Status: domain.WSO2CloudRequestApproved})
 		var fe *apierror.ForbiddenError
 		if !errors.As(err, &fe) {
@@ -213,7 +237,7 @@ func TestWSO2CloudRequestService_Resolve(t *testing.T) {
 	t.Run("already resolved", func(t *testing.T) {
 		stored := pending()
 		stored.Status = domain.WSO2CloudRequestApproved
-		svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: stored}, internalAccess{})
+		svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: stored}, internalAccess{}, nil)
 		_, err := svc.Resolve(wcrUserCtx("approver@wso2.com"), testWCRID, domain.ResolveWSO2CloudRequestRequest{Status: domain.WSO2CloudRequestApproved})
 		var ce *apierror.ConflictError
 		if !errors.As(err, &ce) {
@@ -221,7 +245,7 @@ func TestWSO2CloudRequestService_Resolve(t *testing.T) {
 		}
 	})
 	t.Run("resolved by someone else in between", func(t *testing.T) {
-		svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: pending(), resolveNil: true}, internalAccess{})
+		svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: pending(), resolveNil: true}, internalAccess{}, nil)
 		_, err := svc.Resolve(wcrUserCtx("approver@wso2.com"), testWCRID, domain.ResolveWSO2CloudRequestRequest{Status: domain.WSO2CloudRequestApproved})
 		var ce *apierror.ConflictError
 		if !errors.As(err, &ce) {
@@ -230,7 +254,7 @@ func TestWSO2CloudRequestService_Resolve(t *testing.T) {
 	})
 	t.Run("approve", func(t *testing.T) {
 		repo := &fakeWCRRepo{stored: pending()}
-		svc := NewWSO2CloudRequestService(repo, internalAccess{})
+		svc := NewWSO2CloudRequestService(repo, internalAccess{}, nil)
 		out, err := svc.Resolve(wcrUserCtx("approver@wso2.com"), testWCRID, domain.ResolveWSO2CloudRequestRequest{Status: domain.WSO2CloudRequestApproved})
 		if err != nil {
 			t.Fatal(err)
@@ -240,7 +264,7 @@ func TestWSO2CloudRequestService_Resolve(t *testing.T) {
 		}
 	})
 	t.Run("unknown request", func(t *testing.T) {
-		svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{})
+		svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{}, nil)
 		_, err := svc.Resolve(wcrUserCtx("approver@wso2.com"), testWCRID, domain.ResolveWSO2CloudRequestRequest{Status: domain.WSO2CloudRequestApproved})
 		var ne *apierror.NotFoundError
 		if !errors.As(err, &ne) {
@@ -252,7 +276,7 @@ func TestWSO2CloudRequestService_Resolve(t *testing.T) {
 func TestWSO2CloudRequestService_Delete(t *testing.T) {
 	t.Run("only a pending request", func(t *testing.T) {
 		stored := &domain.WSO2CloudRequest{ID: testWCRID, Status: domain.WSO2CloudRequestRejected}
-		svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: stored}, internalAccess{})
+		svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: stored}, internalAccess{}, nil)
 		err := svc.Delete(wcrUserCtx("a@wso2.com"), testWCRID)
 		var ce *apierror.ConflictError
 		if !errors.As(err, &ce) {
@@ -260,14 +284,14 @@ func TestWSO2CloudRequestService_Delete(t *testing.T) {
 		}
 	})
 	t.Run("unknown", func(t *testing.T) {
-		svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{})
+		svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{}, nil)
 		var ne *apierror.NotFoundError
 		if err := svc.Delete(wcrUserCtx("a@wso2.com"), testWCRID); !errors.As(err, &ne) {
 			t.Fatalf("got %v, want NotFoundError", err)
 		}
 	})
 	t.Run("bad id", func(t *testing.T) {
-		svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{})
+		svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{}, nil)
 		var ve *apierror.ValidationError
 		if err := svc.Delete(wcrUserCtx("a@wso2.com"), "nope"); !errors.As(err, &ve) {
 			t.Fatalf("got %v, want ValidationError", err)
@@ -277,7 +301,7 @@ func TestWSO2CloudRequestService_Delete(t *testing.T) {
 
 func TestWSO2CloudRequestService_SearchValidatesFilters(t *testing.T) {
 	repo := &fakeWCRRepo{}
-	svc := NewWSO2CloudRequestService(repo, internalAccess{})
+	svc := NewWSO2CloudRequestService(repo, internalAccess{}, nil)
 	_, err := svc.Search(wcrUserCtx("a@wso2.com"), domain.SearchWSO2CloudRequestsRequest{
 		Filters: domain.SearchWSO2CloudRequestsFilters{Statuses: []domain.WSO2CloudRequestStatus{"cancelled"}},
 	})
@@ -303,7 +327,7 @@ func TestWSO2CloudRequestService_SetBillingAccount(t *testing.T) {
 	}
 	t.Run("records a trimmed id", func(t *testing.T) {
 		repo := &fakeWCRRepo{setAccount: pendingUpgrade(strp("ba-1"))}
-		svc := NewWSO2CloudRequestService(repo, internalAccess{})
+		svc := NewWSO2CloudRequestService(repo, internalAccess{}, nil)
 		got, err := svc.SetBillingAccount(wcrUserCtx("approver@wso2.com"), testWCRID, domain.SetWSO2CloudBillingAccountRequest{BillingAccountID: " ba-1 "})
 		if err != nil || *got.BillingAccountID != "ba-1" {
 			t.Fatalf("got %+v, %v", got, err)
@@ -314,7 +338,7 @@ func TestWSO2CloudRequestService_SetBillingAccount(t *testing.T) {
 	})
 	t.Run("the same id again is accepted", func(t *testing.T) {
 		repo := &fakeWCRRepo{stored: pendingUpgrade(strp("ba-1"))}
-		svc := NewWSO2CloudRequestService(repo, internalAccess{})
+		svc := NewWSO2CloudRequestService(repo, internalAccess{}, nil)
 		if _, err := svc.SetBillingAccount(wcrUserCtx("approver@wso2.com"), testWCRID, domain.SetWSO2CloudBillingAccountRequest{BillingAccountID: "ba-1"}); err != nil {
 			t.Fatal(err)
 		}
@@ -335,7 +359,7 @@ func TestWSO2CloudRequestService_SetBillingAccount(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: tc.stored}, internalAccess{})
+			svc := NewWSO2CloudRequestService(&fakeWCRRepo{stored: tc.stored}, internalAccess{}, nil)
 			_, err := svc.SetBillingAccount(wcrUserCtx("approver@wso2.com"), testWCRID, domain.SetWSO2CloudBillingAccountRequest{BillingAccountID: tc.body})
 			if !tc.check(err) {
 				t.Fatalf("unexpected error %v", err)
@@ -343,7 +367,7 @@ func TestWSO2CloudRequestService_SetBillingAccount(t *testing.T) {
 		})
 	}
 	t.Run("needs a user token", func(t *testing.T) {
-		svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{})
+		svc := NewWSO2CloudRequestService(&fakeWCRRepo{}, internalAccess{}, nil)
 		_, err := svc.SetBillingAccount(context.Background(), testWCRID, domain.SetWSO2CloudBillingAccountRequest{BillingAccountID: "ba-1"})
 		var ue *apierror.UnauthorizedError
 		if !errors.As(err, &ue) {
