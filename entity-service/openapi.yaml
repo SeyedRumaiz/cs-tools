@@ -16214,7 +16214,7 @@ paths:
       summary: Link an approved customer upgrade's org in Salesforce.
       description: >
         Creates or updates the org's Organization__c record under the request's account, with
-        the org's handle and region (Sales Entity's POST /organizations/link; a record under
+        the org's handle and region (Sales Entity's PUT /organizations/{organizationId}/link; a record under
         another account is never moved). The outcome is stored on the request and returned with
         it: salesforceLinkStatus linked, or failed with salesforceLinkError, a reason written for
         the person who will put it right. A refusal or an unreachable Salesforce is a failed

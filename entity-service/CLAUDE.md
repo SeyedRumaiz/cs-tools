@@ -13572,9 +13572,9 @@ approved change in WSO2 Cloud. An `upgrade_organization` request now carries `up
 `GET /wso2-cloud/organizations/{orgId}/salesforce` (the org's record and account), `GET
 /wso2-cloud/salesforce-accounts/{accountId}` (check an id before raising), `GET
 /wso2-cloud-requests/{id}/salesforce-account` (the CSM backend re-checks the subscription before applying an approval)
-and `PUT /wso2-cloud-requests/{id}/salesforce-link` (after approval: Sales Entity's `POST /organizations/link` with the
+and `PUT /wso2-cloud-requests/{id}/salesforce-link` (after approval: Sales Entity's `PUT /organizations/{organizationId}/link` with the
 org's UUID, handle, region and the account; `allowMove` is never sent). The link's outcome is stored
 (`sf_link_status` linked/failed, `sf_link_error`), and a refusal or an unreachable Salesforce is a failed link with a
 reason, not an error, so the same PUT retries it. The Sales Entity client is optional (`SALES_ENTITY_*`): without it
-customer upgrades are a 503 and internal ones still work. The link path is one constant
+customer upgrades are a 503 and internal ones still work. The link path is built in one function
 (`salesentity.organizationLinkPath`).

@@ -25,6 +25,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/wso2-open-operations/cs-tools/entity-service/internal/apierror"
@@ -32,10 +33,6 @@ import (
 
 const (
 	organizationSearchPath = "/organizations/search"
-	// organizationLinkPath creates or updates the Organization__c record of a
-	// WSO2 Cloud org and links it to an account. A rename of this route is a
-	// change to this one constant.
-	organizationLinkPath = "/organizations/link"
 	// correlationIDHeader names, on a link, the CSM request that asked for it,
 	// so Sales Entity's audit log can say which approved request it was.
 	correlationIDHeader = "correlationId"
@@ -72,10 +69,11 @@ type organizationSearchRequest struct {
 	Limit          int    `json:"limit"`
 }
 
-// LinkOrganizationInput is the body of POST /organizations/link. AllowMove is
-// never sent: a record under another account is refused, not moved.
+// LinkOrganizationInput is a PUT /organizations/{organizationId}/link: the org
+// UUID goes in the path, the rest in the body. AllowMove is never sent: a
+// record under another account is refused, not moved.
 type LinkOrganizationInput struct {
-	OrganizationID string `json:"organizationId"`
+	OrganizationID string `json:"-"`
 	Handle         string `json:"handle"`
 	Region         string `json:"region"`
 	CustomerID     string `json:"customerId"`
@@ -131,7 +129,7 @@ func (c *Client) ActiveOpportunities(ctx context.Context, accountID string, limi
 }
 
 // LinkOrganization creates or updates the org's Organization__c record under
-// the account (POST /organizations/link). It is safe to repeat. correlationID
+// the account (PUT /organizations/{organizationId}/link). It is safe to repeat. correlationID
 // names the CSM request that asked for it. A 4xx is a *LinkRefusedError
 // carrying Sales Entity's code; the token is refreshed once on a 401.
 func (c *Client) LinkOrganization(ctx context.Context, in LinkOrganizationInput, correlationID string) (Organization, error) {
@@ -140,7 +138,7 @@ func (c *Client) LinkOrganization(ctx context.Context, in LinkOrganizationInput,
 		c.invalidateToken()
 		out, err = c.linkOrganization(ctx, in, correlationID)
 		if errors.Is(err, errCustomerUnauthorized) {
-			return Organization{}, &apierror.UnauthorizedError{Msg: "salesentity: " + organizationLinkPath + " unauthorized"}
+			return Organization{}, &apierror.UnauthorizedError{Msg: "salesentity: organization link unauthorized"}
 		}
 	}
 	return out, err
@@ -155,7 +153,7 @@ func (c *Client) linkOrganization(ctx context.Context, in LinkOrganizationInput,
 	if err != nil {
 		return Organization{}, fmt.Errorf("salesentity: marshal organization link request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+organizationLinkPath, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+organizationLinkPath(in.OrganizationID), bytes.NewReader(payload))
 	if err != nil {
 		return Organization{}, fmt.Errorf("salesentity: build organization link request: %w", err)
 	}
@@ -198,4 +196,11 @@ func (c *Client) linkOrganization(ctx context.Context, in LinkOrganizationInput,
 		slog.Warn("salesentity refused the organization link", "status", resp.StatusCode, "code", body.Code)
 		return Organization{}, &LinkRefusedError{Status: resp.StatusCode, Code: body.Code}
 	}
+}
+
+// organizationLinkPath is the route that creates or updates the Organization__c
+// record of a WSO2 Cloud org and links it to an account. UUIDs are stored
+// lower-case, so the path carries the lower-cased one.
+func organizationLinkPath(organizationID string) string {
+	return "/organizations/" + url.PathEscape(strings.ToLower(organizationID)) + "/link"
 }

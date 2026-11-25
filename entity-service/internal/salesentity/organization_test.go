@@ -105,18 +105,21 @@ func TestActiveOpportunities_AsksForActiveOnly(t *testing.T) {
 }
 
 func TestLinkOrganization(t *testing.T) {
-	in := LinkOrganizationInput{OrganizationID: "o1", Handle: "acme", Region: "eu", CustomerID: "001A"}
+	in := LinkOrganizationInput{OrganizationID: "O1", Handle: "acme", Region: "eu", CustomerID: "001A"}
 	t.Run("sends the body and the correlation id", func(t *testing.T) {
-		c := orgTestClient(t, "/organizations/link", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
+		c := orgTestClient(t, "/organizations/o1/link", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPut {
 				t.Errorf("method = %s", r.Method)
 			}
 			if got := r.Header.Get("correlationId"); got != "WCR0000007" {
 				t.Errorf("correlationId = %q", got)
 			}
 			body := decodeBody(t, r)
-			if body["organizationId"] != "o1" || body["handle"] != "acme" || body["region"] != "eu" || body["customerId"] != "001A" {
+			if body["handle"] != "acme" || body["region"] != "eu" || body["customerId"] != "001A" {
 				t.Errorf("body = %v", body)
+			}
+			if _, ok := body["organizationId"]; ok {
+				t.Errorf("organizationId belongs in the path, not the body")
 			}
 			if _, ok := body["allowMove"]; ok {
 				t.Errorf("allowMove must never be sent")
@@ -130,7 +133,7 @@ func TestLinkOrganization(t *testing.T) {
 		}
 	})
 	t.Run("a refusal carries its code", func(t *testing.T) {
-		c := orgTestClient(t, "/organizations/link", func(w http.ResponseWriter, _ *http.Request) {
+		c := orgTestClient(t, "/organizations/o1/link", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"message":"under another account","code":"ORG_OTHER_ACCOUNT"}`))
 		})
@@ -141,7 +144,7 @@ func TestLinkOrganization(t *testing.T) {
 		}
 	})
 	t.Run("a 5xx is unavailable", func(t *testing.T) {
-		c := orgTestClient(t, "/organizations/link", func(w http.ResponseWriter, _ *http.Request) {
+		c := orgTestClient(t, "/organizations/o1/link", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusBadGateway)
 		})
 		_, err := c.LinkOrganization(context.Background(), in, "")
