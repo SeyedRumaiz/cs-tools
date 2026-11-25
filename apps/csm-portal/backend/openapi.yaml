@@ -17157,9 +17157,12 @@ paths:
         (planCode), with an optional billingPeriod (monthly or annual),
         notifyCustomer and previousPlanCode; a planCode that is not one of the
         plans GET /wso2-cloud/plans lists for the product is refused here (400).
-        It also names upgradeKind (customer or internal); a customer upgrade
-        names salesforceAccountId and region (us, eu), and the entity service
-        refuses one whose account has no active subscription (409, errorCode
+        It also names upgradeKind (customer or internal) and region, the WSO2
+        Cloud region the organization is in: its billing API is the one the
+        upgrade is applied through, so a region this deployment cannot reach
+        (GET /wso2-cloud/regions) is refused here (400). A customer upgrade
+        also names salesforceAccountId, and the entity service refuses one
+        whose account has no active subscription (409, errorCode
         wso2_cloud_no_subscription). A customer upgrade needs no approval: it is
         applied at once, as an approval would apply it, and the answer is the
         approved request (201). If it cannot be applied the answer is that
@@ -17570,7 +17573,7 @@ paths:
                 type: object
                 additionalProperties: true
         "400":
-          description: The organization id is not a UUID.
+          description: The organization id is not a UUID, or the region is missing or not available here.
           content:
             application/json:
               schema:
@@ -17662,11 +17665,20 @@ paths:
       summary: An organization's product subscriptions in WSO2 Cloud.
       operationId: listWso2CloudSubscriptions
       description: >
-        Read from WSO2 Cloud's billing admin API, so an upgrade request can name
-        the subscription it moves. In dry_run mode every organization gets the
-        same sample subscriptions. 503 when WSO2 Cloud is not connected.
+        Read from WSO2 Cloud's billing admin API of the organization's region,
+        so an upgrade request can name the subscription it moves. In dry_run
+        mode every organization gets the same sample subscriptions. 503 when
+        WSO2 Cloud is not connected.
       parameters:
         - {name: orgId, in: path, required: true, schema: {type: string, format: uuid}}
+        - name: region
+          in: query
+          required: false
+          description: >
+            The WSO2 Cloud region the organization is in (one of
+            GET /wso2-cloud/regions). May be left out only when this deployment
+            has a single region.
+          schema: {type: string, enum: [us, eu]}
       responses:
         "200":
           description: Ok.
@@ -17706,7 +17718,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorPayload'
         "404":
-          description: WSO2 Cloud has no such organization.
+          description: WSO2 Cloud has no such organization in that region (most likely the wrong region was chosen).
           content:
             application/json:
               schema:
@@ -17725,6 +17737,45 @@ paths:
                 $ref: '#/components/schemas/ErrorPayload'
         "503":
           description: WSO2 Cloud is not connected.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+  /wso2-cloud/regions:
+    get:
+      summary: The WSO2 Cloud regions this deployment can reach.
+      operationId: listWso2CloudRegions
+      description: >
+        Each region has its own billing admin API and client (WSO2_CLOUD_REGIONS).
+        Dev and Stage have one region, production has us and eu; dry_run offers
+        both; empty when WSO2 Cloud is not connected. The upgrade form offers
+        only these.
+      responses:
+        "200":
+          description: Ok.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [regions]
+                properties:
+                  regions:
+                    type: array
+                    items: {type: string, enum: [us, eu]}
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "403":
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorPayload'
+        "500":
+          description: Internal server error.
           content:
             application/json:
               schema:

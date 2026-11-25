@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -47,6 +48,8 @@ const (
 	errMsgWso2CloudNoSubscription   = "The customer's Salesforce account no longer has an active subscription, so this upgrade cannot be approved. The request stays pending."
 	errMsgWso2CloudSalesforceCheck  = "Failed to check the customer's Salesforce subscription. The request stays pending."
 	errMsgWso2CloudBadAccountID     = "Enter a Salesforce Account Id: 15 or 18 letters and digits, starting with 001."
+	errMsgWso2CloudRegionRequired   = "Choose the WSO2 Cloud region the organization is in."
+	errMsgWso2CloudRegionNoRequest  = "This request names no WSO2 Cloud region this environment can reach, so it cannot be applied. Cancel it and raise it again with the right region."
 )
 
 // errorCodeWso2CloudRefused names a refusal by WSO2 Cloud itself (its reason is
@@ -79,8 +82,10 @@ type Wso2CloudRequestHandler struct {
 	entity        entityWso2CloudRequestClient
 	applier       wso2cloud.Applier
 	subscriptions wso2cloud.SubscriptionLister
-	plans         wso2cloud.Plans
-	access        *AccessGuard
+	// regions are the WSO2 Cloud regions this deployment can reach.
+	regions []string
+	plans   wso2cloud.Plans
+	access  *AccessGuard
 }
 
 // NewWso2CloudRequestHandler creates a Wso2CloudRequestHandler. A nil applier
@@ -93,10 +98,22 @@ func NewWso2CloudRequestHandler(entity entityWso2CloudRequestClient, applier wso
 }
 
 // WithSubscriptions lets ListSubscriptions read an organization's
-// subscriptions. Without it the route answers that WSO2 Cloud is not connected.
-func (h *Wso2CloudRequestHandler) WithSubscriptions(l wso2cloud.SubscriptionLister) *Wso2CloudRequestHandler {
+// subscriptions in the given WSO2 Cloud regions. Without it the route answers
+// that WSO2 Cloud is not connected.
+func (h *Wso2CloudRequestHandler) WithSubscriptions(l wso2cloud.SubscriptionLister, regions []string) *Wso2CloudRequestHandler {
 	h.subscriptions = l
+	h.regions = regions
 	return h
+}
+
+// regionMessage is what a caller is told when a region cannot be used here.
+func regionMessage(err error, regions []string) string {
+	var unknown *wso2cloud.RegionError
+	if errors.As(err, &unknown) {
+		return fmt.Sprintf("The %s region is not available in this environment. Choose one of: %s.",
+			strings.ToUpper(unknown.Region), strings.ToUpper(strings.Join(regions, ", ")))
+	}
+	return errMsgWso2CloudRegionRequired
 }
 
 // WithPlans sets the Enterprise plans an upgrade may ask for
@@ -156,6 +173,7 @@ func (h *Wso2CloudRequestHandler) CreateRequest(w http.ResponseWriter, r *http.R
 		Type     string  `json:"type"`
 		Product  *string `json:"product"`
 		PlanCode *string `json:"planCode"`
+		Region   *string `json:"region"`
 	}
 	if err := json.Unmarshal(body, &upgrade); err != nil {
 		writeError(w, http.StatusBadRequest, ErrMsgBadRequest)
@@ -165,6 +183,17 @@ func (h *Wso2CloudRequestHandler) CreateRequest(w http.ResponseWriter, r *http.R
 		(upgrade.Product == nil || !h.plans.Has(*upgrade.Product, *upgrade.PlanCode)) {
 		writeError(w, http.StatusBadRequest, errMsgWso2CloudUnknownPlan)
 		return
+	}
+	// The upgrade is applied through its region's billing API, so the region
+	// must be one this deployment reaches (once WSO2 Cloud is connected at all).
+	if strings.TrimSpace(upgrade.Type) == "upgrade_organization" && len(h.regions) > 0 {
+		if _, err := wso2cloud.PickRegion(derefStr(upgrade.Region), h.regions); err != nil || upgrade.Region == nil {
+			if err == nil {
+				err = wso2cloud.ErrRegionRequired
+			}
+			writeError(w, http.StatusBadRequest, regionMessage(err, h.regions))
+			return
+		}
 	}
 	const fallback = "Failed to raise the request."
 	created, err := h.entity.Wso2CloudRequestCall(r.Context(), http.MethodPost, "/wso2-cloud-requests", body)
@@ -376,6 +405,8 @@ func writeApplyError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, errMsgWso2CloudNotConnected)
 	case errors.Is(err, wso2cloud.ErrNotAvailable):
 		writeError(w, http.StatusServiceUnavailable, errMsgWso2CloudNotAvailable)
+	case errors.Is(err, wso2cloud.ErrRegionRequired), errors.As(err, new(*wso2cloud.RegionError)):
+		writeError(w, http.StatusConflict, errMsgWso2CloudRegionNoRequest)
 	case errors.Is(err, wso2cloud.ErrNotAuthorized):
 		// The CSM backend's client lacks a scope, or its token was refused:
 		// a configuration problem, not the approver's.
@@ -425,15 +456,26 @@ func (h *Wso2CloudRequestHandler) ListSubscriptions(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusServiceUnavailable, errMsgWso2CloudSubsNotConnected)
 		return
 	}
-	subs, err := lister.ListSubscriptions(r.Context(), strings.ToLower(orgID))
+	region := ""
+	if len(h.regions) > 0 {
+		picked, err := wso2cloud.PickRegion(r.URL.Query().Get("region"), h.regions)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, regionMessage(err, h.regions))
+			return
+		}
+		region = picked
+	}
+	subs, err := lister.ListSubscriptions(r.Context(), region, strings.ToLower(orgID))
 	if err != nil {
-		slog.ErrorContext(r.Context(), "wso2 cloud: list subscriptions failed", "userID", user.UserID, "orgId", orgID, "err", err)
+		slog.ErrorContext(r.Context(), "wso2 cloud: list subscriptions failed", "userID", user.UserID, "orgId", orgID, "region", region, "err", err)
 		var refused *wso2cloud.APIError
 		switch {
 		case errors.Is(err, wso2cloud.ErrNotConnected):
 			writeError(w, http.StatusServiceUnavailable, errMsgWso2CloudSubsNotConnected)
-		case errors.As(err, &refused) && refused.Status == http.StatusNotFound:
-			writeError(w, http.StatusNotFound, ErrMsgNotFound)
+		case errors.As(err, &refused) && (refused.Status == http.StatusNotFound || refused.Status == http.StatusBadRequest):
+			// The organization is not in this region's WSO2 Cloud: most likely
+			// the wrong region was chosen.
+			writeError(w, http.StatusNotFound, fmt.Sprintf("This organization was not found in the %s region. Check the region.", strings.ToUpper(region)))
 		default:
 			writeError(w, http.StatusBadGateway, errMsgWso2CloudSubscriptions)
 		}
@@ -443,6 +485,20 @@ func (h *Wso2CloudRequestHandler) ListSubscriptions(w http.ResponseWriter, r *ht
 		subs = []wso2cloud.Subscription{}
 	}
 	writeJSONValue(w, http.StatusOK, map[string]any{"subscriptions": subs})
+}
+
+// ListRegions handles GET /wso2-cloud/regions: the WSO2 Cloud regions this
+// deployment can reach, so the upgrade form offers only those.
+func (h *Wso2CloudRequestHandler) ListRegions(w http.ResponseWriter, r *http.Request) {
+	if middleware.UserInfoFromContext(r.Context()) == nil {
+		writeError(w, http.StatusUnauthorized, ErrMsgUnauthorized)
+		return
+	}
+	regions := h.regions
+	if regions == nil {
+		regions = []string{}
+	}
+	writeJSONValue(w, http.StatusOK, map[string]any{"regions": regions})
 }
 
 // ListPlans handles GET /wso2-cloud/plans: the Enterprise plans an upgrade may

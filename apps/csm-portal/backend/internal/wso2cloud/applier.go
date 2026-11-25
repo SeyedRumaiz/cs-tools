@@ -20,7 +20,9 @@
 // DryRun (records the approval without changing anything, for local and test
 // stacks) and BillingApplier, which upgrades an organization through WSO2
 // Cloud's billing admin API. The other request types have no WSO2 Cloud API
-// yet, so BillingApplier refuses them with ErrNotAvailable.
+// yet, so BillingApplier refuses them with ErrNotAvailable. WSO2 Cloud runs a
+// billing admin API per region (KnownRegions), each with its own client, and
+// an upgrade goes to the one its request names.
 package wso2cloud
 
 import (
@@ -28,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 )
 
@@ -55,6 +58,10 @@ type Request struct {
 	// BillingAccountID is set once an approval has created the wire billing
 	// account, so a retried approval reuses it.
 	BillingAccountID *string `json:"billingAccountId"`
+	// Region is the WSO2 Cloud region the organization is in (us, eu): its
+	// billing API is the one an upgrade is applied through. Nil on requests
+	// raised before regions were recorded.
+	Region *string `json:"region"`
 }
 
 // Recorder stores what an Applier creates in WSO2 Cloud part-way through,
@@ -90,15 +97,19 @@ type DryRun struct{}
 
 // Apply logs the change it would have made and returns nil.
 func (DryRun) Apply(ctx context.Context, req Request, _ Recorder) error {
-	slog.WarnContext(ctx, "wso2 cloud: dry run, change not applied", "requestId", req.ID, "number", req.Number, "type", req.Type)
+	slog.WarnContext(ctx, "wso2 cloud: dry run, change not applied", "requestId", req.ID, "number", req.Number, "type", req.Type, "region", deref(req.Region))
 	return nil
 }
 
 // Connection is how this deployment reaches WSO2 Cloud: what applies an
-// approved request and what lists an organization's subscriptions.
+// approved request, what lists an organization's subscriptions, and in which
+// regions.
 type Connection struct {
 	Applier       Applier
 	Subscriptions SubscriptionLister
+	// Regions are the WSO2 Cloud regions this deployment can reach; none when
+	// it is not connected.
+	Regions []string
 	// Mode is the WSO2_CLOUD_APPLY_MODE value in effect ("" for not connected).
 	Mode string
 }
@@ -111,32 +122,40 @@ const (
 )
 
 // FromEnv builds the Connection WSO2_CLOUD_APPLY_MODE names: empty for not
-// connected, "dry_run" for DryRun (with sample subscriptions), "billing_api"
-// for WSO2 Cloud's billing admin API, which needs WSO2_CLOUD_BILLING_BASE_URL,
-// WSO2_CLOUD_TOKEN_URL, WSO2_CLOUD_CLIENT_ID and WSO2_CLOUD_CLIENT_SECRET
-// (WSO2_CLOUD_SCOPES and WSO2_CLOUD_TOKEN_AUDIENCE are optional). Any other
-// mode, or billing_api without its settings, is an error, so a typo fails
-// startup instead of quietly refusing (or allowing) approvals.
+// connected, "dry_run" for DryRun (with sample subscriptions, in every known
+// region), "billing_api" for WSO2 Cloud's billing admin API.
+//
+// billing_api needs WSO2_CLOUD_REGIONS, the regions this deployment has (us
+// on Dev and Stage, us,eu in production), and for each region
+// WSO2_CLOUD_<REGION>_BILLING_BASE_URL, _TOKEN_URL, _CLIENT_ID and
+// _CLIENT_SECRET (_SCOPES and _TOKEN_AUDIENCE are optional), since every
+// region has its own client. Any other mode, or billing_api with a setting
+// missing, is an error, so a typo fails startup instead of quietly refusing
+// (or allowing) approvals.
 func FromEnv(getenv func(string) string) (Connection, error) {
 	switch mode := strings.TrimSpace(getenv("WSO2_CLOUD_APPLY_MODE")); mode {
 	case ModeNotConnected:
 		return Connection{Applier: NotConnected{}, Subscriptions: notConnectedSubscriptions{}, Mode: mode}, nil
 	case ModeDryRun:
-		return Connection{Applier: DryRun{}, Subscriptions: dryRunSubscriptions{}, Mode: mode}, nil
+		return Connection{Applier: DryRun{}, Subscriptions: dryRunSubscriptions{}, Regions: slices.Clone(KnownRegions), Mode: mode}, nil
 	case ModeBillingAPI:
-		cfg := BillingConfig{
-			BaseURL:      strings.TrimSpace(getenv("WSO2_CLOUD_BILLING_BASE_URL")),
-			TokenURL:     strings.TrimSpace(getenv("WSO2_CLOUD_TOKEN_URL")),
-			ClientID:     strings.TrimSpace(getenv("WSO2_CLOUD_CLIENT_ID")),
-			ClientSecret: strings.TrimSpace(getenv("WSO2_CLOUD_CLIENT_SECRET")),
-			Scopes:       strings.Fields(strings.ReplaceAll(getenv("WSO2_CLOUD_SCOPES"), ",", " ")),
-			Audience:     strings.TrimSpace(getenv("WSO2_CLOUD_TOKEN_AUDIENCE")),
-		}
-		client, err := NewBillingClient(cfg)
+		regions, err := parseRegions(getenv("WSO2_CLOUD_REGIONS"))
 		if err != nil {
 			return Connection{}, err
 		}
-		return Connection{Applier: BillingApplier{Client: client}, Subscriptions: client, Mode: mode}, nil
+		billing := regionalBilling{regions: regions, clients: map[string]*BillingClient{}}
+		for _, region := range regions {
+			cfg, err := regionBillingConfig(getenv, region)
+			if err != nil {
+				return Connection{}, err
+			}
+			client, err := NewBillingClient(cfg)
+			if err != nil {
+				return Connection{}, fmt.Errorf("WSO2_CLOUD_%s_*: %w", strings.ToUpper(region), err)
+			}
+			billing.clients[region] = client
+		}
+		return Connection{Applier: billing, Subscriptions: billing, Regions: regions, Mode: mode}, nil
 	default:
 		return Connection{}, fmt.Errorf("unknown WSO2_CLOUD_APPLY_MODE %q: leave it empty, or set it to %s or %s", mode, ModeDryRun, ModeBillingAPI)
 	}

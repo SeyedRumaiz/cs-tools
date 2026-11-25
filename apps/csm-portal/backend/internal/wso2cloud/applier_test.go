@@ -39,7 +39,7 @@ func TestFromEnv(t *testing.T) {
 		if err := c.Applier.Apply(context.Background(), Request{}, nil); !errors.Is(err, ErrNotConnected) {
 			t.Errorf("FromEnv(%q).Apply = %v, want ErrNotConnected", raw, err)
 		}
-		if _, err := c.Subscriptions.ListSubscriptions(context.Background(), "o1"); !errors.Is(err, ErrNotConnected) {
+		if _, err := c.Subscriptions.ListSubscriptions(context.Background(), "", "o1"); !errors.Is(err, ErrNotConnected) {
 			t.Errorf("FromEnv(%q).ListSubscriptions = %v, want ErrNotConnected", raw, err)
 		}
 	}
@@ -50,7 +50,7 @@ func TestFromEnv(t *testing.T) {
 	if err := c.Applier.Apply(context.Background(), Request{ID: "x"}, nil); err != nil {
 		t.Errorf("dry run Apply = %v, want nil", err)
 	}
-	if subs, err := c.Subscriptions.ListSubscriptions(context.Background(), "o1"); err != nil || len(subs) == 0 {
+	if subs, err := c.Subscriptions.ListSubscriptions(context.Background(), "", "o1"); err != nil || len(subs) == 0 {
 		t.Errorf("dry run subscriptions = %v, %v", subs, err)
 	}
 	for _, raw := range []string{"dry-run", "DRY_RUN", "live", "true"} {
@@ -58,19 +58,35 @@ func TestFromEnv(t *testing.T) {
 			t.Errorf("FromEnv(%q) accepted, want an error", raw)
 		}
 	}
-	if _, err := FromEnv(envOf(map[string]string{"WSO2_CLOUD_APPLY_MODE": "billing_api", "WSO2_CLOUD_BILLING_BASE_URL": "https://x/admin/api/v1"})); err == nil ||
-		!strings.Contains(err.Error(), "WSO2_CLOUD_CLIENT_ID") {
-		t.Errorf("billing_api without its settings: %v", err)
+	if len(c.Regions) != 2 {
+		t.Errorf("dry run regions = %v, want us and eu", c.Regions)
+	}
+	if _, err := FromEnv(envOf(map[string]string{"WSO2_CLOUD_APPLY_MODE": "billing_api"})); err == nil ||
+		!strings.Contains(err.Error(), "WSO2_CLOUD_REGIONS") {
+		t.Errorf("billing_api without regions: %v", err)
+	}
+	if _, err := FromEnv(envOf(map[string]string{"WSO2_CLOUD_APPLY_MODE": "billing_api", "WSO2_CLOUD_REGIONS": "us,apac"})); err == nil ||
+		!strings.Contains(err.Error(), `"apac"`) {
+		t.Errorf("billing_api with an unknown region: %v", err)
+	}
+	if _, err := FromEnv(envOf(map[string]string{
+		"WSO2_CLOUD_APPLY_MODE": "billing_api", "WSO2_CLOUD_REGIONS": "us,eu",
+		"WSO2_CLOUD_US_BILLING_BASE_URL": "https://x/admin/api/v1", "WSO2_CLOUD_US_TOKEN_URL": "https://x/token",
+		"WSO2_CLOUD_US_CLIENT_ID": "id", "WSO2_CLOUD_US_CLIENT_SECRET": "secret",
+		"WSO2_CLOUD_EU_BILLING_BASE_URL": "https://y/admin/api/v1",
+	})); err == nil || !strings.Contains(err.Error(), "WSO2_CLOUD_EU_CLIENT_ID") || strings.Contains(err.Error(), "WSO2_CLOUD_US_") {
+		t.Errorf("billing_api with eu settings missing: %v", err)
 	}
 	c, err = FromEnv(envOf(map[string]string{
-		"WSO2_CLOUD_APPLY_MODE": "billing_api", "WSO2_CLOUD_BILLING_BASE_URL": "https://x/admin/api/v1",
-		"WSO2_CLOUD_TOKEN_URL": "https://x/token", "WSO2_CLOUD_CLIENT_ID": "id", "WSO2_CLOUD_CLIENT_SECRET": "secret",
+		"WSO2_CLOUD_APPLY_MODE": "billing_api", "WSO2_CLOUD_REGIONS": " US ",
+		"WSO2_CLOUD_US_BILLING_BASE_URL": "https://x/admin/api/v1", "WSO2_CLOUD_US_TOKEN_URL": "https://x/token",
+		"WSO2_CLOUD_US_CLIENT_ID": "id", "WSO2_CLOUD_US_CLIENT_SECRET": "secret",
 	}))
 	if err != nil {
 		t.Fatalf("billing_api: %v", err)
 	}
-	if _, ok := c.Applier.(BillingApplier); !ok || c.Mode != ModeBillingAPI {
-		t.Errorf("billing_api applier %T, mode %q", c.Applier, c.Mode)
+	if _, ok := c.Applier.(regionalBilling); !ok || c.Mode != ModeBillingAPI || len(c.Regions) != 1 || c.Regions[0] != "us" {
+		t.Errorf("billing_api applier %T, mode %q, regions %v", c.Applier, c.Mode, c.Regions)
 	}
 }
 

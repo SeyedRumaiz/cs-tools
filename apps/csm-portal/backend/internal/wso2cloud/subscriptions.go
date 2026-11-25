@@ -24,16 +24,17 @@ import (
 	"log/slog"
 )
 
-// SubscriptionLister lists an organization's product subscriptions, so an
-// upgrade can name the one it moves.
+// SubscriptionLister lists an organization's product subscriptions in a WSO2
+// Cloud region, so an upgrade can name the one it moves. An empty region means
+// this deployment's only region.
 type SubscriptionLister interface {
-	ListSubscriptions(ctx context.Context, orgID string) ([]Subscription, error)
+	ListSubscriptions(ctx context.Context, region, orgID string) ([]Subscription, error)
 }
 
 // notConnectedSubscriptions answers every lookup with ErrNotConnected.
 type notConnectedSubscriptions struct{}
 
-func (notConnectedSubscriptions) ListSubscriptions(context.Context, string) ([]Subscription, error) {
+func (notConnectedSubscriptions) ListSubscriptions(context.Context, string, string) ([]Subscription, error) {
 	return nil, ErrNotConnected
 }
 
@@ -42,8 +43,8 @@ func (notConnectedSubscriptions) ListSubscriptions(context.Context, string) ([]S
 // real deployment: these subscriptions do not exist.
 type dryRunSubscriptions struct{}
 
-func (dryRunSubscriptions) ListSubscriptions(ctx context.Context, orgID string) ([]Subscription, error) {
-	slog.WarnContext(ctx, "wso2 cloud: dry run, sample subscriptions returned", "orgId", orgID)
+func (dryRunSubscriptions) ListSubscriptions(ctx context.Context, region, orgID string) ([]Subscription, error) {
+	slog.WarnContext(ctx, "wso2 cloud: dry run, sample subscriptions returned", "orgId", orgID, "region", region)
 	return []Subscription{
 		{ID: "dry-run-" + orgID + "-identity", Product: "identity", PlanCode: "identity-payg", Status: "active"},
 		{ID: "dry-run-" + orgID + "-integration", Product: "integration", PlanCode: "integration-free", Status: "trial", TrialEnd: "2027-01-31T00:00:00Z"},

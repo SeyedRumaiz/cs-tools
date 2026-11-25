@@ -74,19 +74,18 @@ type BillingClient struct {
 func NewBillingClient(cfg BillingConfig) (*BillingClient, error) {
 	var missing []string
 	for name, v := range map[string]string{
-		"WSO2_CLOUD_BILLING_BASE_URL": cfg.BaseURL, "WSO2_CLOUD_TOKEN_URL": cfg.TokenURL,
-		"WSO2_CLOUD_CLIENT_ID": cfg.ClientID, "WSO2_CLOUD_CLIENT_SECRET": cfg.ClientSecret,
+		"base URL": cfg.BaseURL, "token URL": cfg.TokenURL, "client ID": cfg.ClientID, "client secret": cfg.ClientSecret,
 	} {
 		if strings.TrimSpace(v) == "" {
 			missing = append(missing, name)
 		}
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("WSO2_CLOUD_APPLY_MODE=%s needs %s", ModeBillingAPI, strings.Join(sortedStrings(missing), ", "))
+		return nil, fmt.Errorf("the billing API client needs a %s", strings.Join(sortedStrings(missing), ", "))
 	}
 	base, err := url.Parse(strings.TrimRight(cfg.BaseURL, "/"))
 	if err != nil || (base.Scheme != "https" && base.Scheme != "http") || base.Host == "" {
-		return nil, fmt.Errorf("WSO2_CLOUD_BILLING_BASE_URL must be an http(s) URL")
+		return nil, fmt.Errorf("the billing API base URL must be an http(s) URL")
 	}
 	audience := cfg.Audience
 	if audience == "" {

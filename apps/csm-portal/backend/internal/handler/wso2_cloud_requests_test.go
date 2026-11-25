@@ -91,13 +91,16 @@ func (a *fakeApplier) Apply(ctx context.Context, req wso2cloud.Request, rec wso2
 
 // fakeSubscriptions answers ListSubscriptions with subs or err.
 type fakeSubscriptions struct {
-	subs  []wso2cloud.Subscription
-	err   error
-	orgID string
+	subs   []wso2cloud.Subscription
+	err    error
+	orgID  string
+	region string
+	calls  int
 }
 
-func (f *fakeSubscriptions) ListSubscriptions(_ context.Context, orgID string) ([]wso2cloud.Subscription, error) {
-	f.orgID = orgID
+func (f *fakeSubscriptions) ListSubscriptions(_ context.Context, region, orgID string) ([]wso2cloud.Subscription, error) {
+	f.orgID, f.region = orgID, region
+	f.calls++
 	return f.subs, f.err
 }
 
@@ -221,6 +224,8 @@ func TestWso2CloudRequestHandler_Resolve(t *testing.T) {
 		code     string
 	}{
 		{"not available", wso2cloud.ErrNotAvailable, http.StatusServiceUnavailable, "does not offer this kind of change", ""},
+		{"no region", wso2cloud.ErrRegionRequired, http.StatusConflict, "names no WSO2 Cloud region", ""},
+		{"a region not configured here", &wso2cloud.RegionError{Region: "eu", Regions: []string{"us"}}, http.StatusConflict, "names no WSO2 Cloud region", ""},
 		{"not authorized", fmt.Errorf("create billing account: %w", wso2cloud.ErrNotAuthorized), http.StatusBadGateway, "did not allow", ""},
 		{"refused by WSO2 Cloud", fmt.Errorf("change plan: %w", &wso2cloud.APIError{Status: http.StatusConflict, Message: "the subscription is suspended"}),
 			http.StatusConflict, "WSO2 Cloud refused the change: the subscription is suspended The request stays pending.", errorCodeWso2CloudRefused},
@@ -397,7 +402,7 @@ func TestWso2CloudRequestHandler_ListSubscriptions(t *testing.T) {
 	t.Run("lists them", func(t *testing.T) {
 		subs := &fakeSubscriptions{subs: []wso2cloud.Subscription{{ID: "sub-1", Product: "identity", PlanCode: "identity-payg", Status: "active"}}}
 		w := httptest.NewRecorder()
-		NewWso2CloudRequestHandler(&fakeWso2CloudRequestClient{}, nil).WithSubscriptions(subs).ListSubscriptions(w, req(orgID))
+		NewWso2CloudRequestHandler(&fakeWso2CloudRequestClient{}, nil).WithSubscriptions(subs, nil).ListSubscriptions(w, req(orgID))
 		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"planCode":"identity-payg"`) || subs.orgID != strings.ToLower(orgID) {
 			t.Fatalf("status %d, body %s, org %q", w.Code, w.Body, subs.orgID)
 		}
@@ -417,12 +422,100 @@ func TestWso2CloudRequestHandler_ListSubscriptions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := NewWso2CloudRequestHandler(&fakeWso2CloudRequestClient{}, nil)
 			if tc.subs != nil {
-				h.WithSubscriptions(tc.subs)
+				h.WithSubscriptions(tc.subs, nil)
 			}
 			w := httptest.NewRecorder()
 			h.ListSubscriptions(w, req(tc.id))
 			if w.Code != tc.status {
 				t.Fatalf("status %d, want %d: %s", w.Code, tc.status, w.Body)
+			}
+		})
+	}
+}
+
+func TestWso2CloudRequestHandler_ListSubscriptionsByRegion(t *testing.T) {
+	const orgID = "0f6c1a52-5b1e-4c39-9a51-2d7e1f3b8a01"
+	both := []string{"us", "eu"}
+	cases := []struct {
+		name       string
+		regions    []string
+		query      string
+		err        error
+		status     int
+		wantRegion string
+		contains   string
+	}{
+		{"the region asked for", both, "?region=EU", nil, http.StatusOK, "eu", ""},
+		{"the only region when none is named", []string{"us"}, "", nil, http.StatusOK, "us", ""},
+		{"no region with two", both, "", nil, http.StatusBadRequest, "", "Choose the WSO2 Cloud region"},
+		{"a region this environment lacks", []string{"us"}, "?region=eu", nil, http.StatusBadRequest, "", "EU region is not available in this environment. Choose one of: US."},
+		{"an unknown region", both, "?region=apac", nil, http.StatusBadRequest, "", "APAC region is not available"},
+		{"not in that region (404)", both, "?region=eu", &wso2cloud.APIError{Status: http.StatusNotFound, Message: "x"}, http.StatusNotFound, "eu", "not found in the EU region"},
+		{"not in that region (400)", both, "?region=eu", &wso2cloud.APIError{Status: http.StatusBadRequest, Message: "x"}, http.StatusNotFound, "eu", "not found in the EU region"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			subs := &fakeSubscriptions{err: tc.err}
+			r := httptest.NewRequest(http.MethodGet, "/x"+tc.query, nil)
+			r = r.WithContext(middleware.WithUserInfo(r.Context(), testCsEngineerUser))
+			r.SetPathValue("orgId", orgID)
+			w := httptest.NewRecorder()
+			NewWso2CloudRequestHandler(&fakeWso2CloudRequestClient{}, nil).WithSubscriptions(subs, tc.regions).ListSubscriptions(w, r)
+			if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.contains) {
+				t.Fatalf("status %d, body %s; want %d containing %q", w.Code, w.Body, tc.status, tc.contains)
+			}
+			if tc.wantRegion == "" && subs.calls != 0 {
+				t.Fatal("WSO2 Cloud was called although the region was refused")
+			}
+			if tc.wantRegion != "" && subs.region != tc.wantRegion {
+				t.Fatalf("listed in %q, want %q", subs.region, tc.wantRegion)
+			}
+		})
+	}
+}
+
+func TestWso2CloudRequestHandler_ListRegions(t *testing.T) {
+	for _, tc := range []struct {
+		regions []string
+		want    string
+	}{{[]string{"us", "eu"}, `{"regions":["us","eu"]}`}, {nil, `{"regions":[]}`}} {
+		r := httptest.NewRequest(http.MethodGet, "/x", nil)
+		r = r.WithContext(middleware.WithUserInfo(r.Context(), testCsEngineerUser))
+		w := httptest.NewRecorder()
+		NewWso2CloudRequestHandler(&fakeWso2CloudRequestClient{}, nil).WithSubscriptions(&fakeSubscriptions{}, tc.regions).ListRegions(w, r)
+		if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != tc.want {
+			t.Fatalf("status %d, body %s; want %s", w.Code, w.Body, tc.want)
+		}
+	}
+}
+
+func TestWso2CloudRequestHandler_CreateChecksTheRegion(t *testing.T) {
+	const upgrade = `{"type":"upgrade_organization","product":"identity","planCode":"identity-enterprise","subscriptionId":"s1","upgradeKind":"internal"`
+	plans, _ := wso2cloud.ParsePlans(`{"identity":[{"code":"identity-enterprise","label":"Enterprise"}]}`)
+	cases := []struct {
+		name    string
+		regions []string
+		body    string
+		wantFwd bool
+	}{
+		{"a region this environment has", []string{"us", "eu"}, upgrade + `,"region":"eu"}`, true},
+		{"no region", []string{"us", "eu"}, upgrade + `}`, false},
+		{"no region with one region", []string{"us"}, upgrade + `}`, false},
+		{"a region this environment lacks", []string{"us"}, upgrade + `,"region":"eu"}`, false},
+		{"not connected: entity-service decides", nil, upgrade + `}`, true},
+		{"not an upgrade", []string{"us"}, `{"type":"lock_user","reason":"x"}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeWso2CloudRequestClient{}
+			w := httptest.NewRecorder()
+			NewWso2CloudRequestHandler(fake, nil).WithPlans(plans).WithSubscriptions(&fakeSubscriptions{}, tc.regions).
+				CreateRequest(w, wcrRequest(http.MethodPost, tc.body, testCsEngineerUser))
+			if forwarded := len(fake.calls) == 1; forwarded != tc.wantFwd {
+				t.Fatalf("forwarded %v (status %d, %s), want %v", forwarded, w.Code, w.Body, tc.wantFwd)
+			}
+			if !tc.wantFwd && w.Code != http.StatusBadRequest {
+				t.Fatalf("status %d, want 400", w.Code)
 			}
 		})
 	}

@@ -971,7 +971,7 @@ func main() {
 	// the wso2_cloud_approver role or admin. entity-service checks again that a
 	// request is pending and that nobody approves their own.
 	wso2CloudRequestHandler := handler.NewWso2CloudRequestHandler(customerEntityClient, wso2Cloud.Applier).
-		WithAccessGuard(accessGuard).WithSubscriptions(wso2Cloud.Subscriptions).WithPlans(wso2CloudPlans)
+		WithAccessGuard(accessGuard).WithSubscriptions(wso2Cloud.Subscriptions, wso2Cloud.Regions).WithPlans(wso2CloudPlans)
 	route("POST /wso2-cloud-requests", handler.PermWrite, wso2CloudRequestHandler.CreateRequest)
 	route("POST /wso2-cloud-requests/search", handler.PermViewOperations, wso2CloudRequestHandler.SearchRequests)
 	route("GET /wso2-cloud-requests/{id}", handler.PermViewOperations, wso2CloudRequestHandler.GetRequest)
@@ -982,6 +982,7 @@ func main() {
 	// from WSO2 Cloud) and the configured Enterprise plans.
 	route("GET /wso2-cloud/organizations/{orgId}/subscriptions", handler.PermViewOperations, wso2CloudRequestHandler.ListSubscriptions)
 	route("GET /wso2-cloud/plans", handler.PermViewOperations, wso2CloudRequestHandler.ListPlans)
+	route("GET /wso2-cloud/regions", handler.PermViewOperations, wso2CloudRequestHandler.ListRegions)
 	route("GET /wso2-cloud/organizations/{orgId}/salesforce", handler.PermViewOperations, wso2CloudRequestHandler.GetOrganizationSalesforce)
 	route("GET /wso2-cloud/salesforce-accounts/{accountId}", handler.PermViewOperations, wso2CloudRequestHandler.GetSalesforceAccount)
 

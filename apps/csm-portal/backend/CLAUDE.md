@@ -588,11 +588,12 @@ delete a user), stored by entity-service (`/wso2-cloud-requests`, migration 0287
 
 | Route | Permission | Notes |
 |---|---|---|
-| `POST /wso2-cloud-requests` | `PermWrite` | requester taken from the token by entity-service; an upgrade's `planCode` must be a configured plan of its `product` (400 here) |
+| `POST /wso2-cloud-requests` | `PermWrite` | requester taken from the token by entity-service; an upgrade's `planCode` must be a configured plan of its `product`, and its `region` one this deployment reaches (400 here) |
 | `POST /wso2-cloud-requests/search`, `GET /wso2-cloud-requests/{id}` | `PermViewOperations` | |
 | `POST /wso2-cloud-requests/{id}/resolve` | `PermApproveWso2CloudRequest` | `wso2_cloud_approver` (`AUTH_WSO2_CLOUD_APPROVER_ROLES`) or admin; not cs_engineer |
 | `DELETE /wso2-cloud-requests/{id}` | `PermWrite` | the requester or an admin (`PermAdmin`), checked in the handler; a nil guard lets only the requester |
-| `GET /wso2-cloud/organizations/{orgId}/subscriptions` | `PermViewOperations` | the org's product subscriptions, from WSO2 Cloud; 503 when not connected |
+| `GET /wso2-cloud/organizations/{orgId}/subscriptions` | `PermViewOperations` | the org's product subscriptions, from its region's WSO2 Cloud (`?region=`, optional with one region); 503 when not connected; 404 "not found in the <REGION> region" when that region answers 404 or 400 |
+| `GET /wso2-cloud/regions` | `PermViewOperations` | the regions this deployment reaches (`WSO2_CLOUD_REGIONS`; dry_run: us and eu; not connected: none) |
 | `GET /wso2-cloud/plans` | `PermViewOperations` | `WSO2_CLOUD_ENTERPRISE_PLANS`, product to `[{code, label}]` |
 | `GET /wso2-cloud/organizations/{orgId}/salesforce` | `PermViewOperations` | the org's Salesforce record and account, from entity-service |
 | `GET /wso2-cloud/salesforce-accounts/{accountId}` | `PermViewOperations` | check an Account id before raising a customer upgrade; the id is validated here |
@@ -628,11 +629,19 @@ delete a user), stored by entity-service (`/wso2-cloud-requests`, migration 0287
   backend (`ErrNotAuthorized`: a missing scope, a configuration problem) or for anything else.
 - **`WSO2_CLOUD_APPLY_MODE`** (`wso2cloud.FromEnv`): empty (default) is `NotConnected`, which refuses every
   approval and every subscription lookup; `dry_run` records approvals without changing anything and gives
-  every organization two sample subscriptions (local and test stacks only, warned at startup);
-  `billing_api` uses `BillingClient` and needs `WSO2_CLOUD_BILLING_BASE_URL`, `WSO2_CLOUD_TOKEN_URL`,
-  `WSO2_CLOUD_CLIENT_ID`, `WSO2_CLOUD_CLIENT_SECRET` (`WSO2_CLOUD_SCOPES`, `WSO2_CLOUD_TOKEN_AUDIENCE`,
-  default `urn:wso2:cloud:billing`, optional); anything else, or `billing_api` without its settings,
-  fails startup. **WSO2 Cloud is still changing how this API is authorized**: everything about the token is
+  every organization two sample subscriptions, in both regions (local and test stacks only, warned at startup);
+  `billing_api` uses one `BillingClient` per region; anything else, or `billing_api` with a setting missing,
+  fails startup.
+- **One billing admin API per region.** WSO2 Cloud runs one per region, each with its own client (Dev and
+  Stage have one region, production has us and eu), and there is no API that says which region an org is in.
+  `WSO2_CLOUD_REGIONS` lists this deployment's regions (`us`, `eu`); each region needs
+  `WSO2_CLOUD_<REGION>_BILLING_BASE_URL`, `_TOKEN_URL`, `_CLIENT_ID`, `_CLIENT_SECRET` (`_SCOPES`,
+  `_TOKEN_AUDIENCE`, default `urn:wso2:cloud:billing`, optional). Every upgrade names its `region` (picked in
+  the form, prefilled from the org's Salesforce record); `CreateRequest` refuses one this deployment does not
+  reach, and the applier (`regionalBilling`) sends the upgrade to that region's client. A request with no
+  region (raised before regions were recorded) is applied only when there is a single region; otherwise the
+  approval is a 409 and the request stays pending. Keep the real URLs out of the repo (`.env.example` has
+  placeholders). **WSO2 Cloud is still changing how this API is authorized**: everything about the token is
   in `NewBillingClient` (a `client_credentials` token with the audience as an endpoint param), so that
   change stays there. The client never logs the token or secret.
 - **The subscription shape is provisional.** The guide names `subscription_id`, `plan_code` and
