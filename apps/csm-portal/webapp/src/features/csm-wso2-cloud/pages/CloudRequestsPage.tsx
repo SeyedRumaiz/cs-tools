@@ -18,6 +18,7 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   Link,
   Skeleton,
   Tab,
@@ -81,6 +82,12 @@ export default function CloudRequestsPage(): JSX.Element {
   const rows = all.filter((r) =>
     tab === "mine" ? r.requestedBy === me : tab === "pending" ? r.status === "pending" : r.status !== "pending",
   );
+  // The number beside a tab: what is still waiting. "My requests" counts the
+  // caller's own requests that are pending, not everything they ever raised.
+  const tabCounts: Partial<Record<RequestsTab, number>> = {
+    mine: all.filter((r) => r.requestedBy === me && r.status === "pending").length,
+    pending: all.filter((r) => r.status === "pending").length,
+  };
   const columns = [
     "Request",
     "Type",
@@ -104,9 +111,23 @@ export default function CloudRequestsPage(): JSX.Element {
       <SampleDataNotice />
 
       <Tabs value={tab} onChange={(_, value: RequestsTab) => setSearchParams({ tab: value })}>
-        {TABS.map((t) => (
-          <Tab key={t.key} value={t.key} label={t.label} />
-        ))}
+        {TABS.map((t) => {
+          const count = tabCounts[t.key] ?? 0;
+          return (
+            <Tab
+              key={t.key}
+              value={t.key}
+              label={
+                <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                  {t.label}
+                  {count > 0 && (
+                    <Chip size="small" color="warning" label={count} aria-label={`${count} pending`} />
+                  )}
+                </Box>
+              }
+            />
+          );
+        })}
       </Tabs>
 
       {resolve.isError && (

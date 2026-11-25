@@ -17,12 +17,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { useBackendApi } from "@api/backend/client";
 import { getCloudRequest } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
-import { WSO2_CLOUD_QUERY_KEY } from "@features/csm-wso2-cloud/api/queryKeys";
+import { WSO2_CLOUD_QUERY_KEY, WSO2_CLOUD_REQUESTS_REFRESH_MS } from "@features/csm-wso2-cloud/api/queryKeys";
 import type { CloudRequest } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
 /**
  * One request, or `null` when there is none with that id (it may have been
  * cancelled). Keyed under the request lists, so every request write refreshes it.
+ * While it is pending it is read again, so a decision made by someone else
+ * shows without a reload; once decided it no longer changes.
  */
 export function useGetCloudRequest(id: string | undefined) {
   const api = useBackendApi();
@@ -30,5 +32,7 @@ export function useGetCloudRequest(id: string | undefined) {
     queryKey: [WSO2_CLOUD_QUERY_KEY, "requests", id],
     queryFn: () => getCloudRequest(api, id as string),
     enabled: !!id,
+    refetchInterval: (query) => (query.state.data?.status === "pending" ? WSO2_CLOUD_REQUESTS_REFRESH_MS : false),
+    refetchOnWindowFocus: true,
   });
 }

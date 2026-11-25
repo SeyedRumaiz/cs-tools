@@ -16,3 +16,11 @@
 
 /** Root of every WSO2 Cloud query key, so a request write can refresh them all. */
 export const WSO2_CLOUD_QUERY_KEY = "wso2-cloud";
+
+/**
+ * How often an open request list, or an open request that is still pending,
+ * is read again. A request is approved or rejected by someone else, in another
+ * browser, so the requester's page would otherwise show "Pending" until it is
+ * reloaded. Polling stops while the tab is in the background.
+ */
+export const WSO2_CLOUD_REQUESTS_REFRESH_MS = 15_000;

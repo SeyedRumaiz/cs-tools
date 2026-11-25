@@ -16,11 +16,12 @@
 
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { JSX } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SEEDED, SF_ACTIVE, fakeCloudBackend } from "@features/csm-wso2-cloud/test/fakeCloudRequestsBackend";
+import { WSO2_CLOUD_REQUESTS_REFRESH_MS } from "@features/csm-wso2-cloud/api/queryKeys";
 import CloudRequestDetailPage from "./CloudRequestDetailPage";
 
 vi.mock("@api/backend/client", async () => {
@@ -86,6 +87,23 @@ describe("CloudRequestDetailPage", () => {
     expect(within(rowFor("Notify the customer")).getByText("Yes")).toBeInTheDocument();
     // The account is created by the approval.
     expect(within(rowFor("Billing account")).getByText("Created when approved")).toBeInTheDocument();
+  });
+
+  it("shows a decision made by someone else without a reload", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderPage(SEEDED.pendingUpgrade);
+      expect(await screen.findByRole("button", { name: "Approve" })).toBeInTheDocument();
+
+      // Approved in another browser: this page made no request of its own.
+      await fakeCloudBackend.api.post(`/wso2-cloud-requests/${SEEDED.pendingUpgrade}/resolve`, { status: "approved" });
+      await vi.advanceTimersByTimeAsync(WSO2_CLOUD_REQUESTS_REFRESH_MS);
+
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument());
+      expect(screen.getByText("Approved by")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows the billing account an approved upgrade created", async () => {

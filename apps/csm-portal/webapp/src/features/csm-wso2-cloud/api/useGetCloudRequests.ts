@@ -17,14 +17,20 @@
 import { useQuery } from "@tanstack/react-query";
 import { useBackendApi } from "@api/backend/client";
 import { listCloudRequests } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
-import { WSO2_CLOUD_QUERY_KEY } from "@features/csm-wso2-cloud/api/queryKeys";
+import { WSO2_CLOUD_QUERY_KEY, WSO2_CLOUD_REQUESTS_REFRESH_MS } from "@features/csm-wso2-cloud/api/queryKeys";
 import type { CloudRequest } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
-/** Every request, newest first. The Requests page splits them into its three tabs. */
+/**
+ * Every request, newest first. The Requests page splits them into its three
+ * tabs. Read again while the page is open, and on returning to it, so requests
+ * raised or decided by others show up without a reload.
+ */
 export function useGetCloudRequests() {
   const api = useBackendApi();
   return useQuery<CloudRequest[], Error>({
     queryKey: [WSO2_CLOUD_QUERY_KEY, "requests"],
     queryFn: () => listCloudRequests(api),
+    refetchInterval: WSO2_CLOUD_REQUESTS_REFRESH_MS,
+    refetchOnWindowFocus: true,
   });
 }

@@ -18,9 +18,16 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeCloudBackend } from "@features/csm-wso2-cloud/test/fakeCloudRequestsBackend";
+import { WSO2_CLOUD_REQUESTS_REFRESH_MS } from "@features/csm-wso2-cloud/api/queryKeys";
 import CloudRequestsPage from "./CloudRequestsPage";
+
+/** The number shown beside a tab's label, or null when it shows none. */
+function tabCount(label: string): string | null {
+  const tab = screen.getByRole("tab", { name: new RegExp(`^${label}`) });
+  return within(tab).queryByLabelText(/pending$/)?.textContent ?? null;
+}
 
 vi.mock("@api/backend/client", async () => {
   const { fakeCloudBackend } = await import("@features/csm-wso2-cloud/test/fakeCloudRequestsBackend");
@@ -45,6 +52,39 @@ function renderPage(tab: string) {
 
 describe("CloudRequestsPage", () => {
   beforeEach(() => fakeCloudBackend.reset());
+  afterEach(() => vi.useRealTimers());
+
+  it("shows how many requests are pending next to My requests and Pending approvals", async () => {
+    // One pending request is seeded (someone else's); add one of yours.
+    fakeCloudBackend.raise({ type: "disable_user", targetId: "u-1003", targetLabel: "alex.lee@example.org", reason: "Customer asked us to." });
+    renderPage("pending");
+
+    await waitFor(() => expect(tabCount("My requests")).toBe("1"));
+    expect(tabCount("Pending approvals")).toBe("2");
+    expect(tabCount("Resolved")).toBeNull();
+  });
+
+  it("shows no number on a tab with nothing pending", async () => {
+    renderPage("mine");
+
+    await waitFor(() => expect(tabCount("Pending approvals")).toBe("1"));
+    expect(tabCount("My requests")).toBeNull();
+  });
+
+  it("picks up a request raised by someone else without a reload", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    renderPage("pending");
+    await waitFor(() => expect(tabCount("Pending approvals")).toBe("1"));
+
+    const request = fakeCloudBackend.raise(
+      { type: "lock_user", targetId: "u-1001", targetLabel: "jane.doe@example.com", reason: "Suspicious sign-ins." },
+      "someone@example.com",
+    );
+    await vi.advanceTimersByTimeAsync(WSO2_CLOUD_REQUESTS_REFRESH_MS);
+
+    expect(await screen.findByText(request.number)).toBeInTheDocument();
+    expect(tabCount("Pending approvals")).toBe("2");
+  });
 
   it("cancels one of your own pending requests from My requests", async () => {
     const request = fakeCloudBackend.raise({
