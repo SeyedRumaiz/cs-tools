@@ -18,15 +18,20 @@ import { useQuery } from "@tanstack/react-query";
 import { useBackendApi } from "@api/backend/client";
 import { listCloudSubscriptions } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
 import { WSO2_CLOUD_QUERY_KEY } from "@features/csm-wso2-cloud/api/queryKeys";
-import type { CloudSubscription } from "@features/csm-wso2-cloud/types/wso2Cloud";
+import type { CloudRegion, CloudSubscription } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
-/** An organisation's product subscriptions in WSO2 Cloud. Not retried: a 503 means WSO2 Cloud is not connected. */
-export function useGetCloudSubscriptions(organizationId: string | undefined) {
+/**
+ * An organisation's product subscriptions in a WSO2 Cloud region (each region has its own
+ * billing API). Waits until `enabled`: the page holds it back until a region is chosen,
+ * where this environment has any. Not retried: a 503 means WSO2 Cloud is not connected,
+ * a 404 that the organisation is not in that region.
+ */
+export function useGetCloudSubscriptions(organizationId: string | undefined, region?: CloudRegion, enabled = true) {
   const api = useBackendApi();
   return useQuery<CloudSubscription[], Error>({
-    queryKey: [WSO2_CLOUD_QUERY_KEY, "subscriptions", organizationId],
-    queryFn: () => listCloudSubscriptions(api, organizationId as string),
-    enabled: !!organizationId,
+    queryKey: [WSO2_CLOUD_QUERY_KEY, "subscriptions", organizationId, region ?? null],
+    queryFn: () => listCloudSubscriptions(api, organizationId as string, region),
+    enabled: !!organizationId && enabled,
     retry: false,
   });
 }

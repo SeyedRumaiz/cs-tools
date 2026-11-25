@@ -79,7 +79,9 @@ describe("CloudOrganizationUpgradePage", () => {
   });
 
   it("raises an upgrade of one subscription to an Enterprise plan", async () => {
+    fakeCloudBackend.regions = ["us", "eu"];
     renderPage();
+    await choose("Region", "Europe (eu)");
     await choose("Subscription", /identity: identity-payg/);
     // Only the product's own plans, without the one it is already on.
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "Enterprise plan" }));
@@ -93,7 +95,6 @@ describe("CloudOrganizationUpgradePage", () => {
     await checkAccount(SF_ACTIVE.id.slice(0, 15));
     expect(await screen.findByText(/has an active subscription/)).toBeInTheDocument();
     expect(screen.getByText(/Acme support 2027, ends 2027-06-30/)).toBeInTheDocument();
-    await choose("WSO2 Cloud region", "Europe (eu)");
 
     // A customer upgrade needs no approval: it is applied at once and the page opens it.
     fireEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
@@ -181,24 +182,27 @@ describe("CloudOrganizationUpgradePage: Salesforce", () => {
     expect(screen.queryByRole("textbox", { name: "Salesforce account ID" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Submit for approval" }));
     expect(await screen.findByText("at /wso2-cloud/requests?tab=mine")).toBeInTheDocument();
-    expect(fakeCloudBackend.requests[0]).toMatchObject({ upgradeKind: "internal" });
+    // An internal upgrade names its region too: the billing API of that region applies it.
+    expect(fakeCloudBackend.requests[0]).toMatchObject({ upgradeKind: "internal", region: "us" });
     expect(fakeCloudBackend.requests[0].salesforceAccountId).toBeUndefined();
   });
 
-  it("starts as a customer upgrade with the account the organisation is already under", async () => {
-    fakeCloudBackend.salesforceOrgs[ORG_ID] = { accountId: SF_ACTIVE.id, region: "us" };
+  it("starts as a customer upgrade with the account and region the organisation is already under", async () => {
+    fakeCloudBackend.regions = ["us", "eu"];
+    fakeCloudBackend.salesforceOrgs[ORG_ID] = { accountId: SF_ACTIVE.id, region: "eu" };
     renderPage();
     expect(await screen.findByText(/In Salesforce under Acme Corp/)).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /^Customer upgrade/ })).toBeChecked();
     expect(screen.getByRole("textbox", { name: "Salesforce account ID" })).toHaveValue(SF_ACTIVE.id);
-    expect(screen.getByRole("combobox", { name: "WSO2 Cloud region" })).toHaveTextContent("United States (us)");
+    expect(screen.getByRole("combobox", { name: "Region" })).toHaveTextContent("Europe (eu)");
+    expect(screen.getByText(/From the organization's Salesforce record/)).toBeInTheDocument();
     await choosePlan();
     fireEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
     expect(await screen.findByText(/^at \/wso2-cloud\/requests\/[0-9a-f-]+$/)).toBeInTheDocument();
     expect(fakeCloudBackend.requests[0]).toMatchObject({
       upgradeKind: "customer",
       salesforceAccountId: SF_ACTIVE.id,
-      region: "us",
+      region: "eu",
       status: "approved",
     });
   });
@@ -209,7 +213,6 @@ describe("CloudOrganizationUpgradePage: Salesforce", () => {
     await chooseKind("Customer");
     await checkAccount(SF_LAPSED.id);
     expect(await screen.findByText(/Initech \(001000000000002AAA\) has no active subscription/)).toBeInTheDocument();
-    await choose("WSO2 Cloud region", "Europe (eu)");
     expect(screen.getByRole("button", { name: "Upgrade now" })).toBeDisabled();
   });
 
@@ -222,6 +225,46 @@ describe("CloudOrganizationUpgradePage: Salesforce", () => {
     fireEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
     expect(await screen.findByText(/The request stays pending/)).toBeInTheDocument();
     expect(fakeCloudBackend.requests[0]).toMatchObject({ targetId: ORG_ID, status: "pending" });
+  });
+
+  it("preselects the only region this environment has", async () => {
+    renderPage();
+    const region = await screen.findByRole("combobox", { name: "Region" });
+    expect(region).toHaveTextContent("United States (us)");
+    expect(region).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText("This environment has one WSO2 Cloud region.")).toBeInTheDocument();
+    expect(await screen.findByRole("combobox", { name: "Subscription" })).toBeInTheDocument();
+  });
+
+  it("asks for the region before loading subscriptions when there is more than one", async () => {
+    fakeCloudBackend.regions = ["us", "eu"];
+    renderPage();
+    expect(await screen.findByText(/Choose the organization's WSO2 Cloud region to load its subscriptions/)).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Subscription" })).not.toBeInTheDocument();
+    await choose("Region", "United States (us)");
+    expect(await screen.findByRole("combobox", { name: "Subscription" })).toBeInTheDocument();
+  });
+
+  it("says when the organisation is not in the chosen region", async () => {
+    fakeCloudBackend.regions = ["us", "eu"];
+    fakeCloudBackend.orgRegions[ORG_ID] = "us";
+    renderPage();
+    await choose("Region", "Europe (eu)");
+    expect(await screen.findByText("This organization was not found in the EU region. Check the region.")).toBeInTheDocument();
+    await choose("Region", "United States (us)");
+    expect(await screen.findByRole("combobox", { name: "Subscription" })).toBeInTheDocument();
+  });
+
+  it("starts the subscription again when the region changes", async () => {
+    fakeCloudBackend.regions = ["us", "eu"];
+    renderPage();
+    await choose("Region", "United States (us)");
+    await choosePlan();
+    await chooseKind("Internal");
+    expect(screen.getByRole("button", { name: "Submit for approval" })).toBeEnabled();
+    await choose("Region", "Europe (eu)");
+    expect(await screen.findByRole("combobox", { name: "Subscription" })).not.toHaveTextContent(/identity/);
+    expect(screen.getByRole("button", { name: "Submit for approval" })).toBeDisabled();
   });
 
   it("says when Salesforce has no such account", async () => {

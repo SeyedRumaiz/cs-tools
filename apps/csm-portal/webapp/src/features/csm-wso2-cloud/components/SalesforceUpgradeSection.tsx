@@ -20,7 +20,6 @@ import {
   FormControl,
   FormControlLabel,
   FormLabel,
-  MenuItem,
   Radio,
   RadioGroup,
   Skeleton,
@@ -30,9 +29,6 @@ import {
 import type { JSX } from "react";
 import { SALESFORCE_ACCOUNT_ID_PATTERN } from "@features/csm-wso2-cloud/api/cloudRequestsApi";
 import {
-  CLOUD_REGIONS,
-  CLOUD_REGION_LABELS,
-  type CloudRegion,
   type CloudSalesforceAccount,
   type CloudSalesforceStatus,
   type CloudUpgradeKind,
@@ -54,8 +50,6 @@ export interface SalesforceUpgradeSectionProps {
   checked: CloudSalesforceAccount | null | undefined;
   checking: boolean;
   checkFailed: boolean;
-  region: CloudRegion | "";
-  onRegionChange: (region: CloudRegion) => void;
 }
 
 function accountName(account: CloudSalesforceAccount): string {
@@ -113,9 +107,9 @@ function CheckResult({ checked }: { checked: CloudSalesforceAccount | null }): J
 
 /**
  * The Salesforce half of an upgrade. A customer upgrade names the customer's
- * Salesforce account, which must have an active subscription, and the
- * organisation's region; once approved, the organisation is linked to that
- * account in Salesforce. An internal upgrade never touches Salesforce. The
+ * Salesforce account, which must have an active subscription; once approved,
+ * the organisation is linked to that account in Salesforce, with the region
+ * chosen at the top of the page. An internal upgrade never touches Salesforce. The
  * backend checks the account again when the request is raised and when it is
  * approved, so this is guidance, not the gate.
  */
@@ -185,22 +179,6 @@ export default function SalesforceUpgradeSection(props: SalesforceUpgradeSection
           ) : checked !== undefined ? (
             <CheckResult checked={checked} />
           ) : null}
-          <TextField
-            select
-            required
-            size="small"
-            label="WSO2 Cloud region"
-            value={props.region}
-            onChange={(e) => props.onRegionChange(e.target.value as CloudRegion)}
-            helperText="Where the organization runs. Saved on its Salesforce record."
-            sx={{ maxWidth: 320 }}
-          >
-            {CLOUD_REGIONS.map((r) => (
-              <MenuItem key={r} value={r}>
-                {CLOUD_REGION_LABELS[r]} ({r})
-              </MenuItem>
-            ))}
-          </TextField>
         </>
       )}
     </>

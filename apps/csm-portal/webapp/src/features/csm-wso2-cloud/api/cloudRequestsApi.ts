@@ -27,6 +27,7 @@
  */
 import type { BackendApi } from "@api/backend/client";
 import {
+  CLOUD_REGIONS,
   CLOUD_REQUEST_TYPE_LABELS,
   type CloudBillingPeriod,
   type CloudPlansByProduct,
@@ -216,9 +217,9 @@ export async function createCloudRequest(api: BackendApi, input: NewCloudRequest
     if (upgrade.billingPeriod) body.billingPeriod = upgrade.billingPeriod;
     if (upgrade.notifyCustomer) body.notifyCustomer = true;
     body.upgradeKind = upgrade.kind;
+    body.region = upgrade.region;
     if (upgrade.kind === "customer") {
       body.salesforceAccountId = upgrade.salesforceAccountId?.trim();
-      body.region = upgrade.region;
     }
   }
   const be = await api.post<BeCreateCloudRequestBody, BeCloudRequest>(BASE, body);
@@ -253,11 +254,26 @@ export async function cancelCloudRequest(api: BackendApi, id: string): Promise<v
  * An organisation's product subscriptions in WSO2 Cloud, so an upgrade can name
  * the one it moves. The backend answers 503 when WSO2 Cloud is not connected.
  */
-export async function listCloudSubscriptions(api: BackendApi, organizationId: string): Promise<CloudSubscription[]> {
+export async function listCloudSubscriptions(
+  api: BackendApi,
+  organizationId: string,
+  region?: CloudRegion,
+): Promise<CloudSubscription[]> {
+  const query = region ? `?region=${encodeURIComponent(region)}` : "";
   const res = await api.get<{ subscriptions: CloudSubscription[] | null }>(
-    `/wso2-cloud/organizations/${encodeURIComponent(organizationId)}/subscriptions`,
+    `/wso2-cloud/organizations/${encodeURIComponent(organizationId)}/subscriptions${query}`,
   );
   return res?.subscriptions ?? [];
+}
+
+/**
+ * The WSO2 Cloud regions this environment can reach (one billing API each): one on
+ * Dev and Stage, us and eu in production, none when WSO2 Cloud is not connected.
+ * Codes the portal does not know are left out.
+ */
+export async function listCloudRegions(api: BackendApi): Promise<CloudRegion[]> {
+  const res = await api.get<{ regions: string[] | null }>("/wso2-cloud/regions");
+  return (res?.regions ?? []).filter((r): r is CloudRegion => (CLOUD_REGIONS as readonly string[]).includes(r));
 }
 
 /** The Enterprise plans an upgrade can ask for, per product (configured on the backend). */

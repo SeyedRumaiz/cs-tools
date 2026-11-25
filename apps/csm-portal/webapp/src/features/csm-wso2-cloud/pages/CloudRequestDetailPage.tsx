@@ -317,12 +317,8 @@ function UpgradeDetails({ request }: { request: CloudRequest }): JSX.Element {
       value:
         upgrade.kind === "customer" ? "Customer" : upgrade.kind === "internal" ? "Internal" : "Not recorded (treated as internal)",
     },
-    ...(upgrade.kind === "customer"
-      ? [
-          { label: "Salesforce account", value: upgrade.salesforceAccountId ?? "—" },
-          { label: "WSO2 Cloud region", value: regionLabel(upgrade.region) },
-        ]
-      : []),
+    ...(upgrade.kind === "customer" ? [{ label: "Salesforce account", value: upgrade.salesforceAccountId ?? "—" }] : []),
+    { label: "WSO2 Cloud region", value: regionLabel(upgrade.region) },
     {
       label: "Billing account",
       value: upgrade.billingAccountId ?? (request.status === "pending" ? "Created when approved" : "—"),

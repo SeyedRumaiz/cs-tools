@@ -25,6 +25,7 @@ import {
   listCloudPlans,
   listCloudRequests,
   linkCloudRequestSalesforce,
+  listCloudRegions,
   listCloudSubscriptions,
   resolveCloudRequest,
   toCloudRequest,
@@ -168,7 +169,7 @@ describe("the single-request calls", () => {
     await createCloudRequest(api({ post }), {
       type: "upgrade_organization",
       target: { kind: "organization", id: "org-1", label: "acme" },
-      upgrade: { product: "identity", subscriptionId: "sub-1", planCode: "identity-enterprise", notifyCustomer: false, kind: "internal" },
+      upgrade: { product: "identity", subscriptionId: "sub-1", planCode: "identity-enterprise", notifyCustomer: false, kind: "internal", region: "us" },
     });
     expect(post).toHaveBeenCalledWith("/wso2-cloud-requests", {
       type: "upgrade_organization",
@@ -178,6 +179,7 @@ describe("the single-request calls", () => {
       subscriptionId: "sub-1",
       planCode: "identity-enterprise",
       upgradeKind: "internal",
+      region: "us",
     });
     await createCloudRequest(api({ post }), {
       type: "upgrade_organization",
@@ -256,6 +258,19 @@ describe("the upgrade form's reads", () => {
     expect(await listCloudSubscriptions(api({ get }), "org 1")).toEqual(subs);
     expect(get).toHaveBeenCalledWith("/wso2-cloud/organizations/org%201/subscriptions");
     expect(await listCloudSubscriptions(api({ get }), "org-1")).toEqual([]);
+  });
+
+  it("lists them in a region when one is named", async () => {
+    const get = vi.fn().mockResolvedValue({ subscriptions: [] });
+    await listCloudSubscriptions(api({ get }), "org-1", "eu");
+    expect(get).toHaveBeenCalledWith("/wso2-cloud/organizations/org-1/subscriptions?region=eu");
+  });
+
+  it("lists this environment's regions, leaving out codes it does not know", async () => {
+    const get = vi.fn().mockResolvedValueOnce({ regions: ["us", "apac", "eu"] }).mockResolvedValueOnce(null);
+    expect(await listCloudRegions(api({ get }))).toEqual(["us", "eu"]);
+    expect(get).toHaveBeenCalledWith("/wso2-cloud/regions");
+    expect(await listCloudRegions(api({ get }))).toEqual([]);
   });
 
   it("lists the configured plans", async () => {

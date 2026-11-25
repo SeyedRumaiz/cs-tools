@@ -173,6 +173,10 @@ class FakeCloudBackend {
   applyError: string | null = null;
   /** Every organisation's subscriptions; null answers 503 (WSO2 Cloud not connected). */
   subscriptions: CloudSubscription[] | null = defaultSubscriptions();
+  /** The WSO2 Cloud regions this environment reaches (one, like Dev and Stage, unless a test sets more). */
+  regions: string[] = ["us"];
+  /** The region an organisation is in, where a test says; elsewhere it is found in any region. */
+  orgRegions: Record<string, string> = {};
   plans: CloudPlansByProduct = defaultPlans();
   /** False answers 503 to every Salesforce read and refuses a customer upgrade. */
   salesforceConnected = true;
@@ -190,6 +194,8 @@ class FakeCloudBackend {
     this.isAdmin = false;
     this.applyError = null;
     this.subscriptions = defaultSubscriptions();
+    this.regions = ["us"];
+    this.orgRegions = {};
     this.plans = defaultPlans();
     this.salesforceConnected = true;
     this.salesforceAccounts = { [SF_ACTIVE.id]: SF_ACTIVE, [SF_LAPSED.id]: SF_LAPSED };
@@ -231,8 +237,8 @@ class FakeCloudBackend {
     }
     if (body.type === "upgrade_organization") {
       if (!body.upgradeKind) throw new FakeBackendError(400, "upgradeKind is required for an upgrade_organization request (customer or internal)");
+      if (!body.region) throw new FakeBackendError(400, "Choose the WSO2 Cloud region the organization is in.");
       if (body.upgradeKind === "customer") {
-        if (!body.region) throw new FakeBackendError(400, "region is required for a customer upgrade");
         body = { ...body, salesforceAccountId: this.subscribedAccount(body.salesforceAccountId).id };
       }
     }
@@ -328,9 +334,17 @@ class FakeCloudBackend {
   readonly api = {
     get: async <T>(path: string): Promise<T | null> => {
       if (path === "/wso2-cloud/plans") return { plans: this.plans } as T;
-      if (/^\/wso2-cloud\/organizations\/[^/]+\/subscriptions$/.test(path)) {
+      if (path === "/wso2-cloud/regions") return { regions: this.subscriptions === null ? [] : this.regions } as T;
+      const subs = path.match(/^\/wso2-cloud\/organizations\/([^/?]+)\/subscriptions(?:\?region=([a-z]+))?$/);
+      if (subs) {
         if (this.subscriptions === null) {
           throw new FakeBackendError(503, "WSO2 Cloud is not connected yet, so the organization's subscriptions cannot be loaded.");
+        }
+        const region = subs[2] ?? (this.regions.length === 1 ? this.regions[0] : undefined);
+        if (!region) throw new FakeBackendError(400, "Choose the WSO2 Cloud region the organization is in.");
+        const orgRegion = this.orgRegions[decodeURIComponent(subs[1])];
+        if (orgRegion && orgRegion !== region) {
+          throw new FakeBackendError(404, `This organization was not found in the ${region.toUpperCase()} region. Check the region.`);
         }
         return { subscriptions: this.subscriptions } as T;
       }
@@ -354,6 +368,11 @@ class FakeCloudBackend {
     },
     post: async <TReq, TRes>(path: string, body: TReq): Promise<TRes> => {
       if (path === BASE) {
+        // The portal backend's own check: an upgrade's region must be one this environment reaches.
+        const region = (body as { type?: string; region?: string }).region;
+        if ((body as { type?: string }).type === "upgrade_organization" && region && !this.regions.includes(region)) {
+          throw new FakeBackendError(400, `The ${region.toUpperCase()} region is not available in this environment.`);
+        }
         const created = this.raise(body as Parameters<FakeCloudBackend["raise"]>[0]);
         // A customer upgrade needs no approval: applied at once, as the requester. If it
         // cannot be applied the request stays pending and the error is the answer.

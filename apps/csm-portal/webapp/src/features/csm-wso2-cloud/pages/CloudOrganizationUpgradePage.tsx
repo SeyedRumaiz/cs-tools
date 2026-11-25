@@ -30,6 +30,7 @@ import { useLocation, useParams } from "react-router";
 import { useNavTransition } from "@hooks/useNavTransition";
 import { useGetCloudOrganization } from "@features/csm-wso2-cloud/api/useGetCloudOrganization";
 import { useGetCloudPlans } from "@features/csm-wso2-cloud/api/useGetCloudPlans";
+import { useGetCloudRegions } from "@features/csm-wso2-cloud/api/useGetCloudRegions";
 import { useGetCloudSubscriptions } from "@features/csm-wso2-cloud/api/useGetCloudSubscriptions";
 import {
   useGetCloudOrganizationSalesforce,
@@ -47,6 +48,7 @@ import { WSO2_CLOUD_BASE } from "@features/csm-wso2-cloud/config/wso2CloudNavIte
 import { subscriptionBlockedReason } from "@features/csm-wso2-cloud/utils/subscriptions";
 import {
   CLOUD_BILLING_PERIOD_LABELS,
+  CLOUD_REGION_LABELS,
   CLOUD_REGIONS,
   type CloudBillingPeriod,
   type CloudOrganization,
@@ -68,12 +70,16 @@ function errorStatus(error: unknown): number | undefined {
  * applies it at once (creates the billing account, changes the plan, links the
  * organisation in Salesforce), and the page then opens the request.
  *
+ * The region comes first: WSO2 Cloud runs a billing API per region, so the
+ * subscriptions are read from, and the upgrade applied through, the region the
+ * organisation is in. It is prefilled from the organisation's Salesforce record
+ * when it has one, and preselected when this environment has a single region.
+ *
  * The Salesforce section says whether it is a customer or an internal
  * upgrade. A customer upgrade names the customer's Salesforce account (it must
- * have an active subscription) and the organisation's region; when the
- * organisation is already under an account with an active subscription, that
- * is the default. Once approved, the backend links the organisation to that
- * account in Salesforce.
+ * have an active subscription); when the organisation is already under an
+ * account with an active subscription, that is the default. Once approved, the
+ * backend links the organisation to that account in Salesforce.
  */
 export default function CloudOrganizationUpgradePage(): JSX.Element {
   const { organizationId } = useParams<{ organizationId: string }>();
@@ -118,7 +124,7 @@ function UpgradeForm({
 }): JSX.Element {
   const navigate = useNavTransition();
   const post = usePostCloudRequest();
-  const subscriptions = useGetCloudSubscriptions(org.id);
+  const regions = useGetCloudRegions();
   const plans = useGetCloudPlans();
   const [subscriptionId, setSubscriptionId] = useState("");
   const [planCode, setPlanCode] = useState("");
@@ -136,6 +142,19 @@ function UpgradeForm({
   const [accountInput, setAccountInput] = useState<string>();
   const [checkedId, setCheckedId] = useState<string>();
   const [regionChoice, setRegionChoice] = useState<CloudRegion>();
+  // The region the organisation is in: chosen, else its Salesforce record's (when this
+  // environment has it), else the only region there is.
+  const availableRegions = regions.data ?? [];
+  const recordRegionHere = recordRegion && availableRegions.includes(recordRegion) ? recordRegion : undefined;
+  const region =
+    regionChoice ?? recordRegionHere ?? (availableRegions.length === 1 ? availableRegions[0] : undefined);
+  const regionFromRecord = !regionChoice && !!recordRegionHere;
+  // With no regions WSO2 Cloud is not connected: the subscriptions call says so.
+  const subscriptions = useGetCloudSubscriptions(
+    org.id,
+    region,
+    regions.isSuccess && (availableRegions.length === 0 || !!region),
+  );
   const kind = kindChoice ?? (linkedAccount?.hasActiveSubscription ? "customer" : undefined);
   const accountValue = accountInput ?? linkedAccount?.id ?? "";
   // The prefilled account counts as checked: the organisation's status already read it.
@@ -143,11 +162,10 @@ function UpgradeForm({
   const usePrefilled = !!linkedAccount && accountToCheck === linkedAccount.id;
   const accountCheck = useGetSalesforceAccount(kind === "customer" && !usePrefilled ? accountToCheck : undefined);
   const checkedAccount = usePrefilled ? linkedAccount : accountToCheck ? accountCheck.data : undefined;
-  const region = regionChoice ?? recordRegion ?? "";
-  const salesforceReady =
-    kind === "internal" || (kind === "customer" && !!checkedAccount?.hasActiveSubscription && region !== "");
+  const salesforceReady = kind === "internal" || (kind === "customer" && !!checkedAccount?.hasActiveSubscription);
 
   const notConnected = errorStatus(subscriptions.error) === 503;
+  const notInRegion = errorStatus(subscriptions.error) === 404;
   const subs = subscriptions.data ?? [];
   const subscription = subs.find((s) => s.id === subscriptionId);
   // The plans of the chosen subscription's product, without the one it is already on.
@@ -155,15 +173,26 @@ function UpgradeForm({
     ? (plans.data?.[subscription.product] ?? []).filter((p) => p.code !== subscription.planCode)
     : [];
   const canSubmit =
-    !!subscription && !subscriptionBlockedReason(subscription) && !!planCode && salesforceReady && !post.isPending;
+    !!region &&
+    !!subscription &&
+    !subscriptionBlockedReason(subscription) &&
+    !!planCode &&
+    salesforceReady &&
+    !post.isPending;
 
   const chooseSubscription = (id: string) => {
     setSubscriptionId(id);
     setPlanCode("");
   };
 
+  // Another region is another billing API: the subscriptions start again.
+  const chooseRegion = (r: CloudRegion) => {
+    setRegionChoice(r);
+    chooseSubscription("");
+  };
+
   const handleSubmit = () => {
-    if (!subscription) return;
+    if (!subscription || !region) return;
     post.mutate(
       {
         type: "upgrade_organization",
@@ -178,7 +207,7 @@ function UpgradeForm({
           notifyCustomer,
           kind: kind as CloudUpgradeKind,
           salesforceAccountId: kind === "customer" ? checkedAccount?.id : undefined,
-          region: kind === "customer" && region ? region : undefined,
+          region,
         },
       },
       {
@@ -207,13 +236,51 @@ function UpgradeForm({
         </Box>
       </Box>
 
+      {regions.isLoading ? (
+        <Skeleton variant="rounded" height={96} />
+      ) : regions.isError ? (
+        <Alert severity="error">Could not load this environment's WSO2 Cloud regions. Try again later.</Alert>
+      ) : availableRegions.length > 0 ? (
+        <SectionCard title="WSO2 Cloud region">
+          <TextField
+            select
+            required
+            size="small"
+            label="Region"
+            value={region ?? ""}
+            onChange={(e) => chooseRegion(e.target.value as CloudRegion)}
+            disabled={availableRegions.length === 1}
+            helperText={
+              availableRegions.length === 1
+                ? "This environment has one WSO2 Cloud region."
+                : regionFromRecord
+                  ? "From the organization's Salesforce record. Change it if that is wrong."
+                  : "Where the organization runs. The upgrade goes through this region's WSO2 Cloud, and the region is saved on its Salesforce record."
+            }
+            sx={{ maxWidth: 480 }}
+          >
+            {availableRegions.map((r) => (
+              <MenuItem key={r} value={r}>
+                {CLOUD_REGION_LABELS[r]} ({r})
+              </MenuItem>
+            ))}
+          </TextField>
+        </SectionCard>
+      ) : null}
+
       <SectionCard title="Subscription">
         <Typography variant="body2" color="text.secondary">
           Moves one product subscription to an Enterprise plan billed by wire transfer. A customer upgrade is
           applied straight away; an internal one waits until another person approves it.
         </Typography>
-        {subscriptions.isLoading ? (
+        {regions.isLoading || subscriptions.isLoading ? (
           <Skeleton variant="rounded" height={40} sx={{ maxWidth: 480 }} />
+        ) : availableRegions.length > 0 && !region ? (
+          <Alert severity="info" variant="outlined">
+            Choose the organization&apos;s WSO2 Cloud region to load its subscriptions.
+          </Alert>
+        ) : notInRegion ? (
+          <Alert severity="warning">{subscriptions.error?.message}</Alert>
         ) : notConnected ? (
           <Alert severity="info" variant="outlined">
             WSO2 Cloud is not connected yet, so this organization's subscriptions cannot be loaded and no
@@ -318,8 +385,6 @@ function UpgradeForm({
           checked={checkedAccount}
           checking={accountCheck.isFetching}
           checkFailed={accountCheck.isError}
-          region={region}
-          onRegionChange={setRegionChoice}
         />
       </SectionCard>
 

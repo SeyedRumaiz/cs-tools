@@ -203,8 +203,8 @@ export interface NewCloudUpgrade {
   kind: CloudUpgradeKind;
   /** A customer upgrade's Salesforce Account Id. */
   salesforceAccountId?: string;
-  /** A customer upgrade's WSO2 Cloud region. */
-  region?: CloudRegion;
+  /** The WSO2 Cloud region the organisation is in: its billing API applies the upgrade. Every upgrade names one. */
+  region: CloudRegion;
 }
 
 /** The Salesforce link of an approved customer upgrade, once it was tried. */
