@@ -15802,9 +15802,10 @@ paths:
       description: >
         Stores a pending request raised from the CSM portal's WSO2 Cloud tab. The requester
         is the caller, read from the x-user-id-token (required). A reason is required for
-        lock_user and disable_user. subscriptionId, planCode and upgradeKind are required for
+        lock_user and disable_user. subscriptionId, planCode, upgradeKind and region (us, eu: the
+        WSO2 Cloud region the org is in, whose billing API applies it) are required for
         upgrade_organization, and the upgrade fields are refused for every other type. A customer
-        upgrade also needs salesforceAccountId and region: the Account is read from Salesforce and
+        upgrade also needs salesforceAccountId: the Account is read from Salesforce and
         must have an active opportunity (409 wso2_cloud_no_subscription otherwise), and it is stored
         in its 18-character form. 409 when a request of the same type for the same target is
         already pending. 503 for a customer upgrade when Salesforce (Sales Entity) is not connected.
@@ -38558,7 +38559,7 @@ components:
         region:
           type: string
           nullable: true
-          description: A customer upgrade's WSO2 Cloud region (us, eu).
+          description: An upgrade's WSO2 Cloud region (us, eu); null on upgrades raised before regions were recorded.
         salesforceLinkStatus:
           type: string
           enum: [linked, failed]
@@ -38637,7 +38638,7 @@ components:
         region:
           type: string
           enum: [us, eu]
-          description: Required for a customer upgrade; matched without regard to case.
+          description: Required for upgrade_organization (both kinds); matched without regard to case.
     WSO2CloudUpgradeKind:
       type: string
       enum: [customer, internal]

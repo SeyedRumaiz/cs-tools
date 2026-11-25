@@ -13557,8 +13557,10 @@ clause is untouched. The ServiceNow service cannot ask upstream to omit it, so i
 `wso2_cloud_request` (migration 0287) stores the CSM portal's WSO2 Cloud tab requests; the CSM backend applies an
 approved change in WSO2 Cloud. An `upgrade_organization` request now carries `upgradeKind` (required on create):
 
+- Both kinds name `region` (`us`/`eu`, the Organization__c picklist): WSO2 Cloud runs a billing API per region and
+  the CSM backend applies the upgrade through that one. The database check only forbids it outside upgrades.
 - **`internal`** never touches Salesforce: no account, no check, no link.
-- **`customer`** names `salesforceAccountId` and `region` (`us`/`eu`, the Organization__c picklist). `Create` reads
+- **`customer`** names `salesforceAccountId` too. `Create` reads
   the Account through Sales Entity and refuses one with no active opportunity (409 `wso2_cloud_no_subscription`;
   "active" is Sales Entity's `isOnlyActiveOpportunities`), and stores the Id as Salesforce spells it (18 characters).
 - Upgrades raised before 0306 have a NULL kind and are treated as internal.

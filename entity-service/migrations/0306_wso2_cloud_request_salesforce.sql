@@ -23,6 +23,11 @@
 -- Entity's POST /organizations/link), and the outcome is recorded here. An
 -- internal upgrade never touches Salesforce.
 --
+-- Every upgrade names the WSO2 Cloud region the org is in: WSO2 Cloud runs a
+-- billing API per region, and the upgrade is applied through that one. The
+-- entity service requires it on new upgrades; the check below only forbids it
+-- where it means nothing (other request types, older upgrades).
+--
 -- upgrade_kind is NULL for every other type, and for upgrades raised before
 -- this migration (they are treated as internal: no check, no link).
 --
@@ -47,10 +52,14 @@ BEGIN
         ALTER TABLE wso2_cloud_request ADD CONSTRAINT wso2_cloud_request_upgrade_kind_check
             CHECK (upgrade_kind IS NULL OR (type = 'upgrade_organization' AND upgrade_kind IN ('customer', 'internal')));
     END IF;
-    -- A customer upgrade names an account and a region; nothing else does.
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'wso2_cloud_request_customer_has_account') THEN
-        ALTER TABLE wso2_cloud_request ADD CONSTRAINT wso2_cloud_request_customer_has_account
+    -- A customer upgrade names an account and a region; an internal upgrade a
+    -- region and no account; nothing else names either. An earlier draft of
+    -- this file allowed a region on customer upgrades only, under another name.
+    ALTER TABLE wso2_cloud_request DROP CONSTRAINT IF EXISTS wso2_cloud_request_customer_has_account;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'wso2_cloud_request_upgrade_salesforce_fields') THEN
+        ALTER TABLE wso2_cloud_request ADD CONSTRAINT wso2_cloud_request_upgrade_salesforce_fields
             CHECK (CASE WHEN upgrade_kind = 'customer' THEN sf_account_id IS NOT NULL AND region IS NOT NULL
+                        WHEN upgrade_kind = 'internal' THEN sf_account_id IS NULL
                         ELSE sf_account_id IS NULL AND region IS NULL END);
     END IF;
     -- Only an approved customer upgrade is linked.

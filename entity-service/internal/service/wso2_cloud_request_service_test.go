@@ -107,7 +107,7 @@ func wcrUpgrade() domain.CreateWSO2CloudRequestRequest {
 	return domain.CreateWSO2CloudRequestRequest{
 		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: "o1", TargetLabel: "acme",
 		Product: strp("identity"), SubscriptionID: strp("sub-1"), PlanCode: strp("enterprise-identity"),
-		UpgradeKind: kindp(domain.WSO2CloudUpgradeInternal),
+		UpgradeKind: kindp(domain.WSO2CloudUpgradeInternal), Region: strp("us"),
 	}
 }
 
@@ -162,7 +162,7 @@ func TestWSO2CloudRequestService_CreateNormalisesAndUsesTheToken(t *testing.T) {
 		Type: domain.WSO2CloudRequestUpgradeOrganization, TargetID: " o1 ", TargetLabel: " acme ",
 		Reason: strp("  "), Product: strp(" identity "), SubscriptionID: strp(" sub-1 "), PlanCode: strp(" enterprise-identity "),
 		PreviousPlanCode: strp(""), BillingPeriod: periodp(domain.WSO2CloudBillingAnnual), NotifyCustomer: true,
-		UpgradeKind: kindp(domain.WSO2CloudUpgradeInternal),
+		UpgradeKind: kindp(domain.WSO2CloudUpgradeInternal), Region: strp(" EU "),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -170,6 +170,9 @@ func TestWSO2CloudRequestService_CreateNormalisesAndUsesTheToken(t *testing.T) {
 	got := repo.created[0]
 	if got.TargetID != "o1" || got.TargetLabel != "acme" || got.Reason != nil {
 		t.Fatalf("not normalised: %+v", got)
+	}
+	if got.Region == nil || *got.Region != "eu" {
+		t.Fatalf("an internal upgrade keeps its region, lower-cased: %v", got.Region)
 	}
 	if *got.Product != "identity" || *got.SubscriptionID != "sub-1" || *got.PlanCode != "enterprise-identity" || got.PreviousPlanCode != nil {
 		t.Fatalf("plan fields: %+v", got)

@@ -275,12 +275,16 @@ func TestWSO2CloudRequestIntegration_SalesforceLink(t *testing.T) {
 		t.Fatalf("linked: %+v / %v", linked, err)
 	}
 
-	// An internal upgrade has no account and is never linked.
+	// An internal upgrade has a region, no account, and is never linked.
+	usRegion := "us"
 	internalReq := req
-	internalReq.TargetID, internalReq.UpgradeKind, internalReq.SalesforceAccountID, internalReq.Region = "org-2", &internal, nil, nil
+	internalReq.TargetID, internalReq.UpgradeKind, internalReq.SalesforceAccountID, internalReq.Region = "org-2", &internal, nil, &usRegion
 	in, err := repo.Create(ctx, "engineer@wso2.com", internalReq)
 	if err != nil {
 		t.Fatalf("create internal: %v", err)
+	}
+	if in.Region == nil || *in.Region != "us" {
+		t.Fatalf("internal upgrade region: %v", in.Region)
 	}
 	if _, err := repo.Resolve(ctx, in.ID, domain.WSO2CloudRequestApproved, "approver@wso2.com", nil); err != nil {
 		t.Fatalf("approve internal: %v", err)
@@ -297,6 +301,10 @@ func TestWSO2CloudRequestIntegration_SalesforceLink(t *testing.T) {
 			VALUES ('upgrade_organization', 'org-4', 'x', 's', 'p', 'e@wso2.com', 'internal', '001000000000001AAA')`,
 		"kind on a lock": `INSERT INTO wso2_cloud_request (type, target_id, target_label, reason, requested_by, upgrade_kind)
 			VALUES ('lock_user', 'u-1', 'x', 'r', 'e@wso2.com', 'internal')`,
+		"customer without a region": `INSERT INTO wso2_cloud_request (type, target_id, target_label, subscription_id, plan_code, requested_by, upgrade_kind, sf_account_id)
+			VALUES ('upgrade_organization', 'org-5', 'x', 's', 'p', 'e@wso2.com', 'customer', '001000000000001AAA')`,
+		"region on an upgrade with no kind": `INSERT INTO wso2_cloud_request (type, target_id, target_label, subscription_id, plan_code, requested_by, region)
+			VALUES ('upgrade_organization', 'org-6', 'x', 's', 'p', 'e@wso2.com', 'eu')`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err == nil {
 			t.Errorf("%s: accepted", name)

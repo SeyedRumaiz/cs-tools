@@ -58,8 +58,8 @@ func normalizeWSO2CloudUpgradeKind(kind *domain.WSO2CloudUpgradeKind, sfAccountI
 	}
 	switch *kind {
 	case domain.WSO2CloudUpgradeInternal:
-		if sfAccountID != nil || region != nil {
-			return &apierror.ValidationError{Msg: "salesforceAccountId and region are only accepted on a customer upgrade"}
+		if sfAccountID != nil {
+			return &apierror.ValidationError{Msg: "salesforceAccountId is only accepted on a customer upgrade"}
 		}
 	case domain.WSO2CloudUpgradeCustomer:
 		if sfAccountID == nil {
@@ -68,19 +68,20 @@ func normalizeWSO2CloudUpgradeKind(kind *domain.WSO2CloudUpgradeKind, sfAccountI
 		if !salesforceAccountIDRe.MatchString(*sfAccountID) {
 			return &apierror.ValidationError{Msg: "salesforceAccountId must be a Salesforce Account Id (15 or 18 characters, starting with 001)"}
 		}
-		if region == nil {
-			return &apierror.ValidationError{Msg: "region is required for a customer upgrade"}
-		}
-		r := strings.ToLower(*region)
-		if !slices.Contains(wso2CloudRegions, r) {
-			return apierror.InvalidValue("region", *region, "WSO2 Cloud region", wso2CloudRegions)
-		}
-		region = &r
 	default:
 		return apierror.InvalidValue("upgradeKind", string(*kind), "upgrade kind",
 			[]string{string(domain.WSO2CloudUpgradeCustomer), string(domain.WSO2CloudUpgradeInternal)})
 	}
-	out.UpgradeKind, out.SalesforceAccountID, out.Region = kind, sfAccountID, region
+	// Every upgrade is applied through its region's billing API, so both kinds
+	// name the region.
+	if region == nil {
+		return &apierror.ValidationError{Msg: "region is required for an upgrade_organization request"}
+	}
+	r := strings.ToLower(*region)
+	if !slices.Contains(wso2CloudRegions, r) {
+		return apierror.InvalidValue("region", *region, "WSO2 Cloud region", wso2CloudRegions)
+	}
+	out.UpgradeKind, out.SalesforceAccountID, out.Region = kind, sfAccountID, &r
 	return nil
 }
 

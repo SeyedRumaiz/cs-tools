@@ -97,9 +97,10 @@ func TestWSO2CloudRequestService_UpgradeKindValidation(t *testing.T) {
 		{"customer without an account", customerUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.SalesforceAccountID = strp(" ") }), "salesforceAccountId is required"},
 		{"not an Account id", customerUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.SalesforceAccountID = strp("006000000000001") }), "must be a Salesforce Account Id"},
 		{"customer without a region", customerUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.Region = nil }), "region is required"},
+		{"internal without a region", withUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.Region = nil }), "region is required"},
+		{"internal with an unknown region", withUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.Region = strp("apac") }), "not a valid WSO2 Cloud region"},
 		{"unknown region", customerUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.Region = strp("apac") }), "not a valid WSO2 Cloud region"},
 		{"internal with an account", withUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.SalesforceAccountID = strp(testSFAccount15) }), "only accepted on a customer upgrade"},
-		{"internal with a region", withUpgrade(func(r *domain.CreateWSO2CloudRequestRequest) { r.Region = strp("us") }), "only accepted on a customer upgrade"},
 		{"kind on another type", domain.CreateWSO2CloudRequestRequest{Type: domain.WSO2CloudRequestDeleteOrganization, TargetID: "o1", TargetLabel: "acme", UpgradeKind: kindp(domain.WSO2CloudUpgradeInternal)}, "only accepted on an upgrade_organization request"},
 	}
 	for _, tc := range cases {
