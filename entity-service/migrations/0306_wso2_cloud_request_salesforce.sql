@@ -20,8 +20,8 @@
 -- the customer's Salesforce Account, which must have an active opportunity when
 -- the request is raised and again when it is approved. Once approved, the org's
 -- Organization__c record is created or updated under that account (Sales
--- Entity's POST /organizations/link), and the outcome is recorded here. An
--- internal upgrade never touches Salesforce.
+-- Entity's PUT /organizations/{organizationId}/link), and the outcome is
+-- recorded here. An internal upgrade never touches Salesforce.
 --
 -- Every upgrade names the WSO2 Cloud region the org is in: WSO2 Cloud runs a
 -- billing API per region, and the upgrade is applied through that one. The

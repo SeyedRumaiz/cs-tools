@@ -105,10 +105,10 @@ func main() {
 	// Empty: not connected, every approval is refused and the request stays
 	// pending. dry_run: approvals are recorded without changing anything in
 	// WSO2 Cloud, with sample subscriptions (local and test stacks only).
-	// billing_api: upgrades go through WSO2 Cloud's billing admin API
-	// (WSO2_CLOUD_BILLING_BASE_URL, WSO2_CLOUD_TOKEN_URL, WSO2_CLOUD_CLIENT_ID,
-	// WSO2_CLOUD_CLIENT_SECRET; WSO2_CLOUD_SCOPES and WSO2_CLOUD_TOKEN_AUDIENCE
-	// optional).
+	// billing_api: upgrades go through the billing admin API of the request's
+	// region (WSO2_CLOUD_REGIONS, then WSO2_CLOUD_<REGION>_BILLING_BASE_URL,
+	// _TOKEN_URL, _CLIENT_ID and _CLIENT_SECRET per region; _SCOPES and
+	// _TOKEN_AUDIENCE optional).
 	wso2Cloud, err := wso2cloud.FromEnv(os.Getenv)
 	if err != nil {
 		slog.Error("invalid WSO2 Cloud configuration", "err", err)
