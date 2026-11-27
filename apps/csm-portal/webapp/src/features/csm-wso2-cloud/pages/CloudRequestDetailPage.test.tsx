@@ -22,6 +22,10 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SEEDED, SF_ACTIVE, fakeCloudBackend } from "@features/csm-wso2-cloud/test/fakeCloudRequestsBackend";
 import { WSO2_CLOUD_REQUESTS_REFRESH_MS } from "@features/csm-wso2-cloud/api/queryKeys";
+import {
+  NOT_CARRIED_OUT_APPROVED,
+  NOT_CARRIED_OUT_PENDING,
+} from "@features/csm-wso2-cloud/components/Wso2CloudCommon";
 import CloudRequestDetailPage from "./CloudRequestDetailPage";
 
 vi.mock("@api/backend/client", async () => {
@@ -121,6 +125,30 @@ describe("CloudRequestDetailPage", () => {
     expect(screen.getByText("pat.morgan@example.com")).toBeInTheDocument();
     expect(screen.getByText(/clears on its own after the lockout period/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    // Nothing was decided to carry out, so nothing is said about carrying it out.
+    expect(screen.queryByText(NOT_CARRIED_OUT_APPROVED)).not.toBeInTheDocument();
+    expect(screen.queryByText(NOT_CARRIED_OUT_PENDING)).not.toBeInTheDocument();
+  });
+
+  it("says a user change is recorded but not carried out, before and after approval", async () => {
+    const unlock = fakeCloudBackend.raise(
+      { type: "unlock_user", targetId: "u-1002", targetLabel: "john.smith@example.com" },
+      "sam.taylor@example.com",
+    );
+    const { unmount } = renderPage(unlock.id);
+    expect(await screen.findByText(NOT_CARRIED_OUT_PENDING)).toBeInTheDocument();
+    unmount();
+
+    await fakeCloudBackend.api.post(`/wso2-cloud-requests/${unlock.id}/resolve`, { status: "approved" });
+    renderPage(unlock.id);
+    expect(await screen.findByText(NOT_CARRIED_OUT_APPROVED)).toBeInTheDocument();
+    expect(screen.queryByText(NOT_CARRIED_OUT_PENDING)).not.toBeInTheDocument();
+  });
+
+  it("says nothing about carrying out on an upgrade, which is applied", async () => {
+    renderPage(SEEDED.approvedUpgrade);
+    expect(await screen.findByText("What it changed")).toBeInTheDocument();
+    expect(screen.queryByText(NOT_CARRIED_OUT_APPROVED)).not.toBeInTheDocument();
   });
 
   it("lets the requester cancel it, then goes back", async () => {

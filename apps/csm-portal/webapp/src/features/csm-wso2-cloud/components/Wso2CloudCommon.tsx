@@ -24,17 +24,31 @@ import {
 } from "@features/csm-wso2-cloud/types/wso2Cloud";
 
 /**
- * Shown at the top of every WSO2 Cloud page while its hooks serve sample data
- * (`api/sampleData.ts`). Remove it together with that file.
+ * Shown at the top of every WSO2 Cloud page while the organisation and user
+ * hooks serve sample data (`api/sampleData.ts`). Requests are real, but only
+ * an Enterprise upgrade is carried out. Remove it together with that file.
  */
 export function SampleDataNotice(): JSX.Element {
   return (
     <Alert severity="info" variant="outlined">
-      Sample data. This section is not connected to WSO2 Cloud yet, and requests raised here are
-      not sent anywhere.
+      Organizations and users are sample data until WSO2 Cloud&apos;s API is connected, so they
+      don&apos;t change after an approval. Requests are saved; only Enterprise upgrades are sent to
+      WSO2 Cloud&apos;s billing API, and lock, disable, delete and their undo can&apos;t be carried out
+      yet.
     </Alert>
   );
 }
+
+/**
+ * Said on a request that is not an Enterprise upgrade. Nothing can carry it
+ * out until WSO2 Cloud's user and organisation management is connected: the
+ * backend refuses its approval (it stays pending), except in dry-run mode,
+ * where the approval is recorded and nothing changes.
+ */
+export const NOT_CARRIED_OUT_PENDING =
+  "This can't be carried out yet: WSO2 Cloud's user and organization management isn't connected.";
+export const NOT_CARRIED_OUT_APPROVED =
+  "Approved, but not carried out: WSO2 Cloud's user and organization management isn't connected yet.";
 
 export function BackButton({ onClick }: { onClick: () => void }): JSX.Element {
   return (

@@ -105,7 +105,7 @@ export default function CloudRequestsPage(): JSX.Element {
       <Box>
         <Typography variant="h5">Requests</Typography>
         <Typography variant="body2" color="text.secondary">
-          Upgrades, deletions and user changes take effect only once approved.
+          Changes take effect only once approved. Only Enterprise upgrades are applied for now.
         </Typography>
       </Box>
       <SampleDataNotice />

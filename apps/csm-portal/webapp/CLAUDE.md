@@ -1051,6 +1051,20 @@ sharing by link"); the webapp only shows them.
   <owner>" (`sharedViaLink`); a team share's wording wins when both are set. A dashboard whose owner was
   deleted names them "a former user"; it stays while somebody can still see it, its link included.
 
+## WSO2 Cloud tab: what is real and what is sample data
+
+`features/csm-wso2-cloud`. The backend half is in `apps/csm-portal/backend/CLAUDE.md`, "WSO2 Cloud requests".
+
+- **Organizations and users are sample data** (`api/sampleData.ts`) until WSO2 Cloud shares its org and
+  user API. Only their hooks' `queryFn` read it, so connecting the real API means changing those hooks and
+  deleting the file. `SampleDataNotice` sits on every page of the tab and goes with that file.
+- **Requests are real** (`api/cloudRequestsApi.ts`, stored by entity-service), but only an Enterprise upgrade
+  is carried out (through the billing API of the org's region). Lock, unlock, disable, enable and delete
+  have nothing to carry them out yet: the backend refuses their approval (the request stays pending), and
+  in `dry_run` it records the approval and changes nothing, so a sample user stays as it was. The request
+  page says so (`NOT_CARRIED_OUT_PENDING` / `NOT_CARRIED_OUT_APPROVED`). Drop those lines once a type gets
+  an API.
+
 ## Testing
 
 - Runner: Vitest (`jsdom` environment), configured inline in `vite.config.ts` — no separate `vitest.config.ts`.

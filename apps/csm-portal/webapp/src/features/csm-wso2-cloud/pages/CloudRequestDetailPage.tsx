@@ -42,6 +42,8 @@ import {
   BackButton,
   MetaCell,
   MetaGrid,
+  NOT_CARRIED_OUT_APPROVED,
+  NOT_CARRIED_OUT_PENDING,
   RequestStatusChip,
   SampleDataNotice,
   SectionCard,
@@ -217,7 +219,14 @@ export default function CloudRequestDetailPage(): JSX.Element {
         {request.type === "upgrade_organization" ? (
           <UpgradeDetails request={request} />
         ) : (
-          <Typography variant="body2">{REQUEST_EFFECTS[request.type]}</Typography>
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
+            <Typography variant="body2">{REQUEST_EFFECTS[request.type]}</Typography>
+            {request.status !== "rejected" && (
+              <Alert severity="info" variant="outlined">
+                {pending ? NOT_CARRIED_OUT_PENDING : NOT_CARRIED_OUT_APPROVED}
+              </Alert>
+            )}
+          </Box>
         )}
       </SectionCard>
 
